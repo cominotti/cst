@@ -104,7 +104,7 @@ MemoryLow=48G
 """
 
 
-def _installer() -> InstallService:
+def swap_installer() -> InstallService:
     """The installer's use case on real files (the tests' folders), with a record port: swap writes its
     files through it, and lists them in env.install_record when a test sets one."""
     return InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
@@ -355,9 +355,9 @@ class StatusMathTest(unittest.TestCase):
         return SwapApplicationService(
             env,
             LocalFileSystemAdapter(),
-            _FakeSystemd(os.path.join(proc, "swaps"), "/dev/dm-0"),
-            _FakeSwapSystem(proc, size_bytes=TEST_SPEC.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(proc, "swaps"), "/dev/dm-0"),
+            FakeSwapSystem(proc, size_bytes=TEST_SPEC.expected_size_bytes),
+            installer=swap_installer(),
         )
 
     def settings_output(self, wsf: str, exp_on: bool) -> tuple[list[list[str]], str]:
@@ -500,22 +500,22 @@ class MarkerTest(unittest.TestCase):
     """The service's marked-line and managed-file steps (the code apply runs) on scratch files."""
 
     tmp: str
-    fs: _FakeTempFileSystem
+    fs: SwapTempFileSystem
     spec: SwapHardwareSpec
     svc: SwapApplicationService
 
     @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-test-")
-        self.fs = _FakeTempFileSystem({})
+        self.fs = SwapTempFileSystem({})
         self.spec = TEST_SPEC
         swaps = os.path.join(self.tmp, "swaps")
         self.svc = SwapApplicationService(
             SwapEnvironment(src_dir=SWAP, etc_dir=self.tmp),
             self.fs,
-            _FakeSystemd(swaps, "/dev/dm-0"),
-            _FakeSwapSystem(self.tmp, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(swaps, "/dev/dm-0"),
+            FakeSwapSystem(self.tmp, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
 
     @override
@@ -655,7 +655,7 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(self.file_state(src, old_five_key), "adopt")
 
 
-class _FakeTempFileSystem(LocalFileSystemAdapter):
+class SwapTempFileSystem(LocalFileSystemAdapter):
     """LocalFileSystemAdapter in temp dirs with virtualized /dev block devices and unreadables."""
 
     def __init__(self, block_links: Mapping[str, str], unreadable_paths: set[str] | None = None) -> None:
@@ -686,7 +686,7 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
         return super().is_readable(path)
 
 
-class _ClosedFolder(_FakeTempFileSystem):
+class _ClosedFolder(SwapTempFileSystem):
     """A folder this user may not search (mode 0700 of another owner): nothing in it can be seen."""
 
     def __init__(self, block_links: Mapping[str, str], *, closed: str) -> None:
@@ -755,7 +755,7 @@ class _UnbufferedToPipe(io.StringIO):
         return super().write(s)
 
 
-class _TextUnreadable(_FakeTempFileSystem):
+class _TextUnreadable(SwapTempFileSystem):
     """read_text gives its default for the paths in unread, as for a file the process may not open."""
 
     def __init__(
@@ -769,7 +769,7 @@ class _TextUnreadable(_FakeTempFileSystem):
         return default if path in self._unread else super().read_text(path, default)
 
 
-class _FakeSystemd(NoUnitQueries):
+class SwapFakeSystemd(NoUnitQueries):
     """In-memory SystemdPort updating simulated /proc/swaps on start/stop."""
 
     def __init__(
@@ -777,7 +777,7 @@ class _FakeSystemd(NoUnitQueries):
         swaps_path: str,
         mapper_real: str,
         *,
-        fs: _FakeTempFileSystem | None = None,
+        fs: SwapTempFileSystem | None = None,
         mapper_link: str = "/dev/mapper/swap0",
         fail_unit: str | None = None,
         fail_result: CommandResult | None = None,
@@ -866,7 +866,7 @@ class _FakeSystemd(NoUnitQueries):
         return UnitName(f"{cleaned}.{suffix}")
 
 
-class _FakeSwapSystem:
+class FakeSwapSystem:
     """In-memory SwapSystemPort simulating blockdev/blkid/modprobe/sysctl/zramctl/swapon."""
 
     def __init__(
@@ -967,6 +967,81 @@ class _FakeRunner:
         return CommandResult(0, "", "")
 
 
+def swap_scratch(tmp: str, spec: SwapHardwareSpec) -> SwapEnvironment:
+    """A scratch /etc (with TEST_SETTINGS in /etc/cst/swap.conf), /proc, /sys and cgroup tree in the folder
+    tmp (which the caller removes), for spec's partition; the application service's environment over it."""
+    etc = os.path.join(tmp, "etc")
+    proc = os.path.join(tmp, "proc")
+    sys_dir = os.path.join(tmp, "sys")
+    cg = os.path.join(tmp, "cgroup")
+    zparams = os.path.join(sys_dir, "module", "zswap", "parameters")
+    zdebug = os.path.join(sys_dir, "kernel", "debug", "zswap")
+    run_dir = os.path.join(tmp, "run", "cpu-setup")
+    for d in (
+        etc,
+        os.path.join(proc, "sys", "vm"),
+        os.path.join(proc, "pressure"),
+        os.path.join(sys_dir, "class", "block", "nvme0n1p5"),
+        os.path.join(sys_dir, "class", "block", "dm-0", "dm"),
+        os.path.join(cg, "machine.slice"),
+        zparams,
+        zdebug,
+        run_dir,
+    ):
+        os.makedirs(d, exist_ok=True)
+    with open(os.path.join(proc, "crypto"), "w", encoding="utf-8") as f:
+        f.write("name         : zstd\ndriver       : zstd-generic\n")
+    with open(os.path.join(proc, "meminfo"), "w", encoding="utf-8") as f:
+        f.write(
+            "MemTotal:       97000000 kB\nMemAvailable:   64000000 kB\nZswap:           10240 kB\nZswapped:        30720 kB\n"
+        )
+    with open(os.path.join(proc, "vmstat"), "w", encoding="utf-8") as f:
+        f.write("zswpout 100\nzswpin 10\nzswpwb 5\npswpout 5\npswpin 1\n")
+    with open(os.path.join(proc, "swaps"), "w", encoding="utf-8") as f:
+        f.write("Filename\tType\tSize\tUsed\tPriority\n/dev/zram0 partition 8388604 102400 100\n")
+    with open(os.path.join(proc, "pressure", "memory"), "w", encoding="utf-8") as f:
+        f.write("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+    with open(os.path.join(sys_dir, "class", "block", "nvme0n1p5", "size"), "w", encoding="utf-8") as f:
+        f.write(f"{spec.expected_size_bytes // 512}\n")
+    with open(os.path.join(sys_dir, "class", "block", "dm-0", "dm", "name"), "w", encoding="utf-8") as f:
+        f.write("swap0\n")
+    with open(os.path.join(cg, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
+        f.write(f"{48 * 2**30}\n")
+    for param, init in (
+        ("compressor", "lz4"),
+        ("max_pool_percent", "10"),
+        ("shrinker_enabled", "N"),
+        ("enabled", "N"),
+    ):
+        with open(os.path.join(zparams, param), "w", encoding="utf-8") as f:
+            f.write(init + "\n")
+    with open(os.path.join(SWAP, "sysctl", "99-swap-tuning.conf"), encoding="utf-8") as fh:
+        sysctl_text = fh.read()
+    for key, _ in parse_sysctl(sysctl_text):
+        with open(os.path.join(proc, "sys", key.replace(".", "/")), "w", encoding="utf-8") as f:
+            f.write("0\n")
+
+    env = SwapEnvironment(
+        src_dir=SWAP,
+        etc_dir=etc,
+        proc_dir=proc,
+        sys_dir=sys_dir,
+        cgroup_dir=cg,
+        zswap_params_dir=zparams,
+        zswap_debug_dir=zdebug,
+        cpu_run_dir=run_dir,
+        seats_dir=os.path.join(tmp, "run", "systemd", "seats"),
+    )
+    # A desktop: seat0 has a session in the foreground (uresourced gives it its floor).
+    os.makedirs(env.seats_dir)
+    with open(os.path.join(env.seats_dir, "seat0"), "w", encoding="utf-8") as f:
+        f.write("# This is private data. Do not parse.\nIS_SEAT0=1\nACTIVE=3\nACTIVE_UID=1000\nSESSIONS=3 c1\n")
+    os.makedirs(os.path.join(etc, "cst"))
+    with open(env.settings_path, "w", encoding="utf-8") as f:
+        f.write(TEST_SETTINGS)
+    return env
+
+
 class _SwapScratch(unittest.TestCase):
     """A scratch /etc, /proc, /sys and cgroup tree for the application service."""
 
@@ -978,91 +1053,23 @@ class _SwapScratch(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-app-test-")
         self.spec = TEST_SPEC
-        etc = os.path.join(self.tmp, "etc")
-        proc = os.path.join(self.tmp, "proc")
-        sys_dir = os.path.join(self.tmp, "sys")
-        cg = os.path.join(self.tmp, "cgroup")
-        zparams = os.path.join(sys_dir, "module", "zswap", "parameters")
-        zdebug = os.path.join(sys_dir, "kernel", "debug", "zswap")
-        run_dir = os.path.join(self.tmp, "run", "cpu-setup")
-        for d in (
-            etc,
-            os.path.join(proc, "sys", "vm"),
-            os.path.join(proc, "pressure"),
-            os.path.join(sys_dir, "class", "block", "nvme0n1p5"),
-            os.path.join(sys_dir, "class", "block", "dm-0", "dm"),
-            os.path.join(cg, "machine.slice"),
-            zparams,
-            zdebug,
-            run_dir,
-        ):
-            os.makedirs(d, exist_ok=True)
-        with open(os.path.join(proc, "crypto"), "w", encoding="utf-8") as f:
-            f.write("name         : zstd\ndriver       : zstd-generic\n")
-        with open(os.path.join(proc, "meminfo"), "w", encoding="utf-8") as f:
-            f.write(
-                "MemTotal:       97000000 kB\nMemAvailable:   64000000 kB\nZswap:           10240 kB\nZswapped:        30720 kB\n"
-            )
-        with open(os.path.join(proc, "vmstat"), "w", encoding="utf-8") as f:
-            f.write("zswpout 100\nzswpin 10\nzswpwb 5\npswpout 5\npswpin 1\n")
-        with open(os.path.join(proc, "swaps"), "w", encoding="utf-8") as f:
-            f.write("Filename\tType\tSize\tUsed\tPriority\n/dev/zram0 partition 8388604 102400 100\n")
-        with open(os.path.join(proc, "pressure", "memory"), "w", encoding="utf-8") as f:
-            f.write("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
-        with open(os.path.join(sys_dir, "class", "block", "nvme0n1p5", "size"), "w", encoding="utf-8") as f:
-            f.write(f"{self.spec.expected_size_bytes // 512}\n")
-        with open(os.path.join(sys_dir, "class", "block", "dm-0", "dm", "name"), "w", encoding="utf-8") as f:
-            f.write("swap0\n")
-        with open(os.path.join(cg, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
-            f.write(f"{48 * 2**30}\n")
-        for param, init in (
-            ("compressor", "lz4"),
-            ("max_pool_percent", "10"),
-            ("shrinker_enabled", "N"),
-            ("enabled", "N"),
-        ):
-            with open(os.path.join(zparams, param), "w", encoding="utf-8") as f:
-                f.write(init + "\n")
-        with open(os.path.join(SWAP, "sysctl", "99-swap-tuning.conf"), encoding="utf-8") as fh:
-            sysctl_text = fh.read()
-        for key, _ in parse_sysctl(sysctl_text):
-            with open(os.path.join(proc, "sys", key.replace(".", "/")), "w", encoding="utf-8") as f:
-                f.write("0\n")
-
-        self.env = SwapEnvironment(
-            src_dir=SWAP,
-            etc_dir=etc,
-            proc_dir=proc,
-            sys_dir=sys_dir,
-            cgroup_dir=cg,
-            zswap_params_dir=zparams,
-            zswap_debug_dir=zdebug,
-            cpu_run_dir=run_dir,
-            seats_dir=os.path.join(self.tmp, "run", "systemd", "seats"),
-        )
-        # A desktop: seat0 has a session in the foreground (uresourced gives it its floor).
-        os.makedirs(self.env.seats_dir)
-        with open(os.path.join(self.env.seats_dir, "seat0"), "w", encoding="utf-8") as f:
-            f.write("# This is private data. Do not parse.\nIS_SEAT0=1\nACTIVE=3\nACTIVE_UID=1000\nSESSIONS=3 c1\n")
-        os.makedirs(os.path.join(etc, "cst"))
-        with open(self.env.settings_path, "w", encoding="utf-8") as f:
-            f.write(TEST_SETTINGS)
+        self.env = swap_scratch(self.tmp, self.spec)
 
     @override
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 
-    def _fs(self, *, mapper_present: bool = False, unreadable: set[str] | None = None) -> _FakeTempFileSystem:
+    def _fs(self, *, mapper_present: bool = False, unreadable: set[str] | None = None) -> SwapTempFileSystem:
         links = {self.spec.device_path: "/dev/nvme0n1p5"}
         if mapper_present:
             links[self.spec.mapper_path] = "/dev/dm-0"
-        return _FakeTempFileSystem(links, unreadable)
+        return SwapTempFileSystem(links, unreadable)
 
-    def _apply_once(self, env: SwapEnvironment, *, mapper_present: bool) -> tuple[int, str, str, _FakeSystemd]:
+    def _apply_once(self, env: SwapEnvironment, *, mapper_present: bool) -> tuple[int, str, str, SwapFakeSystemd]:
         fs = self._fs(mapper_present=mapper_present)
-        systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
-        system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
+        systemd = SwapFakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(env, fs, systemd, system, installer=swap_installer())
         out, err = io.StringIO(), io.StringIO()
         rc = render_apply(service.apply_changes(), out=out, err=err)
         return rc, out.getvalue(), err.getvalue(), systemd
@@ -1072,9 +1079,9 @@ class _SwapScratch(unittest.TestCase):
         service = SwapApplicationService(
             env,
             fs,
-            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
-            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
         out = io.StringIO()
         render_plan(service.plan_report(), out=out)
@@ -1090,9 +1097,9 @@ class SwapApplicationTest(_SwapScratch):
         first = b""
         for n in (1, 2):
             fs = self._fs(mapper_present=n == 2)
-            systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
-            system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-            service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
+            systemd = SwapFakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+            system = FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+            service = SwapApplicationService(env, fs, systemd, system, installer=swap_installer())
             err = io.StringIO()
             self.assertEqual(render_apply(service.apply_changes(), out=io.StringIO(), err=err), 0, err.getvalue())
             with open(record, "rb") as f:
@@ -1126,9 +1133,9 @@ class SwapApplicationTest(_SwapScratch):
             f.write('{"format": 99, "files": {}}')
         env = dataclasses.replace(self.env, install_record=record)
         fs = self._fs(mapper_present=False)
-        systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
-        system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
+        systemd = SwapFakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(env, fs, systemd, system, installer=swap_installer())
         out, err = io.StringIO(), io.StringIO()
         self.assertEqual(run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err), 1)
         self.assertIn("cst swap: ERROR: ", err.getvalue())
@@ -1150,7 +1157,7 @@ class SwapApplicationTest(_SwapScratch):
             owner=Owner.ROOT,
             mode=0o644,
         )
-        _installer().put(place, text.encode(), as_root=False)
+        swap_installer().put(place, text.encode(), as_root=False)
         return old
 
     def test_apply_moves_the_drop_in_to_its_10_name_and_forgets_the_old_one(self) -> None:
@@ -1238,9 +1245,9 @@ class SwapApplicationTest(_SwapScratch):
         with open(self.env.old_sysctl_conf, "w", encoding="utf-8") as f:
             f.write("vm.swappiness = 60\n")
         fs = self._fs(mapper_present=False)
-        systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
-        system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(self.env, fs, systemd, system, installer=_installer())
+        systemd = SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(self.env, fs, systemd, system, installer=swap_installer())
 
         # 1. plan changes nothing.
         plan_out = io.StringIO()
@@ -1270,9 +1277,9 @@ class SwapApplicationTest(_SwapScratch):
 
         # 3. switch fs to include /dev/mapper/swap0 -> /dev/dm-0 as active, then re-apply: idempotent!
         fs2 = self._fs(mapper_present=True)
-        systemd2 = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs2)
-        system2 = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service2 = SwapApplicationService(self.env, fs2, systemd2, system2, installer=_installer())
+        systemd2 = SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs2)
+        system2 = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service2 = SwapApplicationService(self.env, fs2, systemd2, system2, installer=swap_installer())
 
         again_out, again_err = io.StringIO(), io.StringIO()
         self.assertEqual(render_apply(service2.apply_changes(), out=again_out, err=again_err), 0, again_err.getvalue())
@@ -1292,14 +1299,14 @@ class SwapApplicationTest(_SwapScratch):
 
     def test_apply_refuses_conflict_wrong_size_and_unsafe_fs(self) -> None:
         fs = self._fs()
-        systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0")
+        systemd = SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0")
 
         # Wrong blockdev size refuses before touching files.
-        bad_size_sys = _FakeSwapSystem(self.env.proc_dir, size_bytes=12345)
+        bad_size_sys = FakeSwapSystem(self.env.proc_dir, size_bytes=12345)
         err = io.StringIO()
         self.assertEqual(
             render_apply(
-                SwapApplicationService(self.env, fs, systemd, bad_size_sys, installer=_installer()).apply_changes(),
+                SwapApplicationService(self.env, fs, systemd, bad_size_sys, installer=swap_installer()).apply_changes(),
                 out=io.StringIO(),
                 err=err,
             ),
@@ -1308,11 +1315,11 @@ class SwapApplicationTest(_SwapScratch):
         self.assertIn("expected", err.getvalue())
 
         # Unexpected filesystem signature refuses.
-        bad_fs_sys = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, part_type="ext4")
+        bad_fs_sys = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, part_type="ext4")
         err = io.StringIO()
         self.assertEqual(
             render_apply(
-                SwapApplicationService(self.env, fs, systemd, bad_fs_sys, installer=_installer()).apply_changes(),
+                SwapApplicationService(self.env, fs, systemd, bad_fs_sys, installer=swap_installer()).apply_changes(),
                 out=io.StringIO(),
                 err=err,
             ),
@@ -1323,11 +1330,11 @@ class SwapApplicationTest(_SwapScratch):
         # Unmarked swap0 conflict in fstab refuses without writing crypttab/fstab.
         with open(self.env.fstab, "w", encoding="utf-8") as f:
             f.write("/dev/mapper/swap0 none swap defaults 0 0\n")
-        good_sys = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        good_sys = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
         err = io.StringIO()
         self.assertEqual(
             render_apply(
-                SwapApplicationService(self.env, fs, systemd, good_sys, installer=_installer()).apply_changes(),
+                SwapApplicationService(self.env, fs, systemd, good_sys, installer=swap_installer()).apply_changes(),
                 out=io.StringIO(),
                 err=err,
             ),
@@ -1345,9 +1352,9 @@ class SwapApplicationTest(_SwapScratch):
             f.write("300\n")
 
         fs = self._fs()
-        systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
-        system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(self.env, fs, systemd, system, installer=_installer())
+        systemd = SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(self.env, fs, systemd, system, installer=swap_installer())
 
         out, err = io.StringIO(), io.StringIO()
         self.assertEqual(render_apply(service.apply_changes(), out=out, err=err), 0, err.getvalue())
@@ -1361,9 +1368,9 @@ class SwapApplicationTest(_SwapScratch):
         service = SwapApplicationService(
             empty_env,
             self._fs(),
-            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0"),
-            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0"),
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
         with self.assertRaises(MissingDesiredFileError):
             service.plan_report()
@@ -1461,7 +1468,7 @@ class SwapApplicationTest(_SwapScratch):
         self.assertEqual(HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000).etc_dir(), "/etc")
 
 
-def _tree(root: str) -> dict[str, bytes]:
+def file_tree(root: str) -> dict[str, bytes]:
     """Every file under root (links: their target), to prove a run changed nothing."""
     out: dict[str, bytes] = {}
     for d, _dirs, files in os.walk(root):
@@ -1557,9 +1564,9 @@ class SwapSettingsTest(_SwapScratch):
         service = SwapApplicationService(
             self.env,
             fs,
-            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
-            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
         out = io.StringIO()
         render_status(service.status_report(), out=out)
@@ -1570,7 +1577,7 @@ class SwapSettingsTest(_SwapScratch):
             f.write(text)
 
     def test_not_configured_plan_says_so_and_apply_refuses_changing_nothing(self) -> None:
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         plan = self._plan_text(self.env)
         self.assertIn(
             "  REFUSE    cst/swap.conf                          no swap partition configured: set SWAP_PARTUUID", plan
@@ -1588,17 +1595,17 @@ class SwapSettingsTest(_SwapScratch):
             " SWAP_SIZE_BYTES (swap/README.md, 2.3); apply stops.\n",
         )
         self.assertEqual(systemd.calls, [])
-        self.assertEqual(_tree(self.tmp), before)
+        self.assertEqual(file_tree(self.tmp), before)
 
     def test_a_settings_file_with_a_problem_refuses_and_is_kept(self) -> None:
         self._write(self.env.settings_path, "SWAP_PARTUUID=0a1b2c3d-02\n")
         self._write(self.env.crypttab, TEST_SPEC.crypttab_line + "\n")  # no migration over a file of the user's
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         self.assertIn("  REFUSE    cst/swap.conf                          SWAP_SIZE_BYTES=", self._plan_text(self.env))
         rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)
         self.assertEqual(rc, 1)
         self.assertIn(f"cst swap: ERROR: {self.env.settings_path}: SWAP_SIZE_BYTES=: ", err)
-        self.assertEqual(_tree(self.tmp), before)
+        self.assertEqual(file_tree(self.tmp), before)
 
     def test_a_settings_file_without_a_partition_is_not_overwritten(self) -> None:
         self._write(self.env.settings_path, "# to do\n")
@@ -1613,7 +1620,7 @@ class SwapSettingsTest(_SwapScratch):
         # What an older CST's apply left: its marked lines, no /etc/cst/swap.conf (the partition was in code).
         self._write(self.env.crypttab, "other /dev/sda2 none luks\n" + OLD_CRYPTTAB + "\n")
         self._write(self.env.fstab, OLD_FSTAB + "\n")
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         plan = self._plan_text(self.env)
         self.assertIn(
             "  write     cst/swap.conf                          from the swap0 line an older CST wrote in crypttab:"
@@ -1622,7 +1629,7 @@ class SwapSettingsTest(_SwapScratch):
         )
         self.assertIn("  adopt     crypttab: swap0 line", plan)
         self.assertIn("  ok        partition 612551b1...", plan)
-        self.assertEqual(_tree(self.tmp), before, "plan wrote something")
+        self.assertEqual(file_tree(self.tmp), before, "plan wrote something")
 
         rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
         self.assertEqual(rc, 0, err)
@@ -1656,13 +1663,13 @@ class SwapSettingsTest(_SwapScratch):
                 self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
                 self._write(self.env.fstab, OLD_FSTAB + "\n")
                 self._write(path, (OLD_CRYPTTAB + "\n" if path == self.env.crypttab else "") + line)
-                before = _tree(self.tmp)
+                before = file_tree(self.tmp)
                 rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
                 self.assertEqual(rc, 1)
                 self.assertIn(f"cst swap: ERROR: {path} has an unmarked entry for ", err)
                 self.assertEqual(out, "")
                 self.assertFalse(os.path.exists(self.env.settings_path))
-                self.assertEqual(_tree(self.tmp), before)
+                self.assertEqual(file_tree(self.tmp), before)
 
     def test_the_size_comes_from_the_partition_and_apply_still_checks_it(self) -> None:
         self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
@@ -1679,13 +1686,13 @@ class SwapSettingsTest(_SwapScratch):
     def test_upgrade_with_the_partition_gone_refuses(self) -> None:
         self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
         env = self.env
-        fs = _FakeTempFileSystem({})  # no /dev/disk/by-partuuid link
+        fs = SwapTempFileSystem({})  # no /dev/disk/by-partuuid link
         service = SwapApplicationService(
             env,
             fs,
-            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
-            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
         out = io.StringIO()
         render_plan(service.plan_report(), out=out)
@@ -1698,12 +1705,12 @@ class SwapSettingsTest(_SwapScratch):
         self.assertEqual(render_apply(service.apply_changes(), out=io.StringIO(), err=err), 1)
         self.assertFalse(os.path.exists(env.settings_path))
 
-    def _on(self, fs: _FakeTempFileSystem) -> tuple[SwapApplicationService, _FakeSystemd]:
-        systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
-        system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        return SwapApplicationService(self.env, fs, systemd, system, installer=_installer()), systemd
+    def _on(self, fs: SwapTempFileSystem) -> tuple[SwapApplicationService, SwapFakeSystemd]:
+        systemd = SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        return SwapApplicationService(self.env, fs, systemd, system, installer=swap_installer()), systemd
 
-    def _run_on(self, cmd: RunCommand, fs: _FakeTempFileSystem) -> tuple[int, str, str, _FakeSystemd]:
+    def _run_on(self, cmd: RunCommand, fs: SwapTempFileSystem) -> tuple[int, str, str, SwapFakeSystemd]:
         service, systemd = self._on(fs)
         out, err = io.StringIO(), io.StringIO()
         rc = run_command(cmd, service, hint="", out=out, err=err)
@@ -1718,7 +1725,7 @@ class SwapSettingsTest(_SwapScratch):
         self._older_install()
         self._write(self.env.settings_path, TEST_SETTINGS)
         path = self.env.settings_path
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
             with self.subTest(cmd=cmd):
                 fs = _TextUnreadable(self._fs(unreadable={path}).block_links, unreadable_paths={path}, unread={path})
@@ -1731,12 +1738,12 @@ class SwapSettingsTest(_SwapScratch):
                 )
                 self.assertNotIn("  write     cst/swap.conf", out)
                 self.assertNotIn("REFUSE    cst/swap.conf", out)
-        self.assertEqual(_tree(self.tmp), before)
+        self.assertEqual(file_tree(self.tmp), before)
 
     def test_a_settings_path_that_is_not_a_regular_file_refuses_and_apply_writes_nothing(self) -> None:
         self._older_install()  # with the partition there: the migration's write case
         os.makedirs(self.env.settings_path)
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, self._fs())
         self.assertEqual(rc, 0, err)
         self.assertIn("  REFUSE    cst/swap.conf                          not a regular file: apply stops\n", out)
@@ -1745,7 +1752,7 @@ class SwapSettingsTest(_SwapScratch):
         self.assertEqual(err, f"cst swap: ERROR: {self.env.settings_path}: not a regular file: apply stops.\n")
         self.assertNotIn("written:", out)
         self.assertEqual((systemd.daemon_reloads, systemd.calls), (0, []))
-        self.assertEqual(_tree(self.tmp), before)
+        self.assertEqual(file_tree(self.tmp), before)
         self.assertTrue(os.path.isdir(self.env.settings_path))
 
     def test_a_settings_file_that_cannot_be_read_although_access_allows_it_refuses(self) -> None:
@@ -1753,7 +1760,7 @@ class SwapSettingsTest(_SwapScratch):
         self._older_install()
         self._write(self.env.settings_path, TEST_SETTINGS)
         path = self.env.settings_path
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         fs = _TextUnreadable(self._fs().block_links, unread={path})
         rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
         self.assertEqual(rc, 0, err)
@@ -1762,14 +1769,14 @@ class SwapSettingsTest(_SwapScratch):
         rc, out, err, _ = self._run_on(D.SwapCommand.APPLY, fs)
         self.assertEqual((rc, out), (1, ""))
         self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
-        self.assertEqual(_tree(self.tmp), before)
+        self.assertEqual(file_tree(self.tmp), before)
 
     def test_a_settings_file_in_a_folder_this_user_may_not_search_is_not_taken_as_missing(self) -> None:
         # /etc/cst at 0700 of root: lexists cannot see swap.conf there, and the migration must not run.
         self._older_install()
         self._write(self.env.settings_path, TEST_SETTINGS)
         closed = os.path.dirname(self.env.settings_path)
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
             with self.subTest(cmd=cmd):
                 rc, out, err, _ = self._run_on(cmd, _ClosedFolder(self._fs().block_links, closed=closed))
@@ -1780,14 +1787,14 @@ class SwapSettingsTest(_SwapScratch):
                     out,
                 )
                 self.assertNotIn("  write     cst/swap.conf", out)
-        self.assertEqual(_tree(self.tmp), before)
+        self.assertEqual(file_tree(self.tmp), before)
 
     def test_a_settings_file_missing_from_a_folder_this_user_may_search_is_migrated(self) -> None:
         # The folder is searchable (not readable: 0711): lexists is right, and the migration runs.
         self._older_install()
         folder = os.path.dirname(self.env.settings_path)
         os.makedirs(folder, exist_ok=True)
-        fs = _FakeTempFileSystem(self._fs().block_links, unreadable_paths={folder})
+        fs = SwapTempFileSystem(self._fs().block_links, unreadable_paths={folder})
         rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
         self.assertEqual(rc, 0, err)
         self.assertIn("  write     cst/swap.conf", out)
@@ -1798,7 +1805,7 @@ class SwapSettingsTest(_SwapScratch):
         self._write(self.env.settings_path, TEST_SETTINGS)
         path = self.env.settings_path
         self.env = dataclasses.replace(self.env, as_root=True)
-        before = _tree(self.tmp)
+        before = file_tree(self.tmp)
         for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
             with self.subTest(cmd=cmd):
                 fs = _TextUnreadable(self._fs().block_links, unreadable_paths={path}, unread={path})
@@ -1810,7 +1817,7 @@ class SwapSettingsTest(_SwapScratch):
         rc, out, err, _ = self._run_on(D.SwapCommand.APPLY, fs)
         self.assertEqual((rc, out), (1, ""))
         self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
-        self.assertEqual(_tree(self.tmp), before)
+        self.assertEqual(file_tree(self.tmp), before)
 
     def test_as_a_user_the_fstab_line_says_an_older_cst_set_it_up(self) -> None:
         self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
@@ -1855,9 +1862,9 @@ class MemoryLowOverrideTest(_SwapScratch):
         service = SwapApplicationService(
             self.env,
             fs,
-            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs, shown=shown),
-            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs, shown=shown),
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
         out, err = io.StringIO(), io.StringIO()
         rc = run_command(cmd, service, hint="", out=out, err=err)
@@ -2069,13 +2076,13 @@ class _ScriptedRunner:
         return res
 
 
-class _ZswapWriteFails(_FakeTempFileSystem):
+class _ZswapWriteFails(SwapTempFileSystem):
     @override
     def write_text_direct(self, path: str, content: str) -> None:
         raise PermissionError(13, "Permission denied", path)
 
 
-class _SysfsNoCreate(_FakeTempFileSystem):
+class _SysfsNoCreate(SwapTempFileSystem):
     """sysfs (kernfs) has no create: opening a name that is not there for writing fails, root or not."""
 
     @override
@@ -2085,7 +2092,7 @@ class _SysfsNoCreate(_FakeTempFileSystem):
         super().write_text_direct(path, content)
 
 
-class _SwapNeverActive(_FakeSystemd):
+class _SwapNeverActive(SwapFakeSystemd):
     """systemctl start succeeds, and the swap device still does not show up in /proc/swaps."""
 
     @override
@@ -2102,14 +2109,18 @@ class SwapApplyOutputTest(_SwapScratch):
     def _service(
         self,
         *,
-        systemd: _FakeSystemd | None = None,
-        system: _FakeSwapSystem | LinuxSwapSystemAdapter | None = None,
-        fs: _FakeTempFileSystem | None = None,
-    ) -> tuple[SwapApplicationService, _FakeSystemd]:
+        systemd: SwapFakeSystemd | None = None,
+        system: FakeSwapSystem | LinuxSwapSystemAdapter | None = None,
+        fs: SwapTempFileSystem | None = None,
+    ) -> tuple[SwapApplicationService, SwapFakeSystemd]:
         fs = self._fs() if fs is None else fs
-        sd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs) if systemd is None else systemd
-        sw = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes) if system is None else system
-        return SwapApplicationService(self.env, fs, sd, sw, installer=_installer()), sd
+        sd = (
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+            if systemd is None
+            else systemd
+        )
+        sw = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes) if system is None else system
+        return SwapApplicationService(self.env, fs, sd, sw, installer=swap_installer()), sd
 
     def _apply(self, service: SwapApplicationService) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -2120,7 +2131,7 @@ class SwapApplyOutputTest(_SwapScratch):
         out, err = io.StringIO(), io.StringIO()
         seen: dict[str, str] = {}
         fs = self._fs()
-        systemd = _FakeSystemd(
+        systemd = SwapFakeSystemd(
             os.path.join(self.env.proc_dir, "swaps"),
             "/dev/dm-0",
             fs=fs,
@@ -2174,7 +2185,7 @@ class SwapApplyOutputTest(_SwapScratch):
     def test_a_failing_systemctl_start_shows_its_message_and_exit_status(self) -> None:
         job = "Job for systemd-cryptsetup@swap0.service failed because the control process exited with error code.\n"
         fs = self._fs()
-        systemd = _FakeSystemd(
+        systemd = SwapFakeSystemd(
             os.path.join(self.env.proc_dir, "swaps"),
             "/dev/dm-0",
             fs=fs,
@@ -2189,7 +2200,7 @@ class SwapApplyOutputTest(_SwapScratch):
 
     def test_a_failing_zram_swapoff_shows_systemctl_before_the_warning(self) -> None:
         fs = self._fs()
-        systemd = _FakeSystemd(
+        systemd = SwapFakeSystemd(
             os.path.join(self.env.proc_dir, "swaps"),
             "/dev/dm-0",
             fs=fs,
@@ -2202,7 +2213,7 @@ class SwapApplyOutputTest(_SwapScratch):
 
     def test_a_failing_sysctl_shows_its_message_and_exit_status(self) -> None:
         msg = "sysctl: cannot stat /proc/sys/vm/nope: No such file or directory\n"
-        system = _FakeSwapSystem(
+        system = FakeSwapSystem(
             self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, sysctl_result=CommandResult(255, "", msg)
         )
         rc, out, err = self._apply(self._service(system=system)[0])
@@ -2213,7 +2224,7 @@ class SwapApplyOutputTest(_SwapScratch):
         self.assertNotIn("== machine.slice", out)
 
     def test_a_failing_daemon_reload_shows_its_message_and_exit_status(self) -> None:
-        class _ReloadFails(_FakeSystemd):
+        class _ReloadFails(SwapFakeSystemd):
             @override
             def daemon_reload(self) -> None:
                 raise CommandFailed(["systemctl", "daemon-reload"], 4, "", "Failed to reload daemon: Access denied\n")
@@ -2230,7 +2241,7 @@ class SwapApplyOutputTest(_SwapScratch):
     def test_a_command_killed_by_a_signal_gives_128_plus_n(self) -> None:
         # bash under set -e exited with 128+N for a command killed by signal N, never with 256-N.
         fs = self._fs()
-        systemd = _FakeSystemd(
+        systemd = SwapFakeSystemd(
             os.path.join(self.env.proc_dir, "swaps"),
             "/dev/dm-0",
             fs=fs,
@@ -2239,7 +2250,7 @@ class SwapApplyOutputTest(_SwapScratch):
         )
         self.assertEqual(self._apply(self._service(systemd=systemd, fs=fs)[0])[0], 128 + signal.SIGTERM)
 
-        class _ReloadKilled(_FakeSystemd):
+        class _ReloadKilled(SwapFakeSystemd):
             @override
             def daemon_reload(self) -> None:
                 raise CommandFailed(["systemctl", "daemon-reload"], -signal.SIGKILL)
@@ -2332,7 +2343,7 @@ class SwapApplyOutputTest(_SwapScratch):
         self.assertIn(f"/dev/disk/by-partuuid/{self.spec.partuuid} is 12345 bytes, expected", err)
 
     def test_swapon_show_output_is_shown_even_when_it_fails(self) -> None:
-        system = _FakeSwapSystem(
+        system = FakeSwapSystem(
             self.env.proc_dir,
             size_bytes=self.spec.expected_size_bytes,
             swapon_result=CommandResult(4, "", "swapon: /proc/swaps: open failed\n"),
@@ -2376,17 +2387,17 @@ class SwapApplyBranchesTest(_SwapScratch):
 
     def _run(
         self, *, mapper_present: bool, unreadable: set[str] | None = None, fail_unit: str | None = None
-    ) -> tuple[int, str, str, _FakeSystemd]:
+    ) -> tuple[int, str, str, SwapFakeSystemd]:
         fs = self._fs(mapper_present=mapper_present, unreadable=unreadable)
-        systemd = _FakeSystemd(
+        systemd = SwapFakeSystemd(
             os.path.join(self.env.proc_dir, "swaps"),
             "/dev/dm-0",
             fs=fs,
             fail_unit=fail_unit,
             fail_result=CommandResult(3, "", "Job failed.\n"),
         )
-        system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(self.env, fs, systemd, system, installer=_installer())
+        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(self.env, fs, systemd, system, installer=swap_installer())
         out, err = io.StringIO(), io.StringIO()
         rc = run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err)
         return rc, out.getvalue(), err.getvalue(), systemd
@@ -2471,9 +2482,9 @@ class SwapApplyBranchesTest(_SwapScratch):
         service = SwapApplicationService(
             self.env,
             fs,
-            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
-            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
         report = service.status_report(include_config=False)
         rows = {r.label: r for r in report.cgroups}
@@ -2494,9 +2505,9 @@ class SwapApplyBranchesTest(_SwapScratch):
         service = SwapApplicationService(
             self.env,
             fs,
-            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
-            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
         rows = {r.label: r for r in service.status_report(include_config=False).cgroups}
         self.assertEqual(rows["(whole system)"].row["swap"], 3072 * 1024, "SwapTotal - SwapFree, in bytes")
@@ -2767,9 +2778,9 @@ class SwapStatusDiagnosisTest(_SwapScratch):
         return SwapApplicationService(
             self.env,
             fs,
-            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
-            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
         )
 
     def test_diagnosis_reports_zswap_and_headroom_and_skips_settings_only(self) -> None:
@@ -2815,10 +2826,10 @@ class Phase1MemoryTuningTest(_SwapScratch):
         unit_shown: Mapping[str, Mapping[str, str]] | None = None,
         mapper_present: bool = False,
         on_call: Callable[[str, str], object] | None = None,
-        system: _FakeSwapSystem | None = None,
-    ) -> tuple[SwapApplicationService, _FakeSystemd]:
+        system: FakeSwapSystem | None = None,
+    ) -> tuple[SwapApplicationService, SwapFakeSystemd]:
         fs = self._fs(mapper_present=mapper_present)
-        systemd = _FakeSystemd(
+        systemd = SwapFakeSystemd(
             os.path.join(self.env.proc_dir, "swaps"),
             "/dev/dm-0",
             fs=fs,
@@ -2826,9 +2837,9 @@ class Phase1MemoryTuningTest(_SwapScratch):
             on_call=on_call,
         )
         swap_system = (
-            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes) if system is None else system
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes) if system is None else system
         )
-        return SwapApplicationService(self.env, fs, systemd, swap_system, installer=_installer()), systemd
+        return SwapApplicationService(self.env, fs, systemd, swap_system, installer=swap_installer()), systemd
 
     def test_plan_apply_backup_restart_and_idempotency(self) -> None:
         self._populate_mm_nodes()
@@ -2947,7 +2958,7 @@ class Phase1MemoryTuningTest(_SwapScratch):
                 with open(user_min_path, "w", encoding="utf-8") as fh:
                     fh.write(f"{1024**3}\n")
 
-        system = _FakeSwapSystem(
+        system = FakeSwapSystem(
             self.env.proc_dir,
             size_bytes=self.spec.expected_size_bytes,
             on_sleep=_delayed_uresourced_update,
@@ -2974,7 +2985,7 @@ class Phase1MemoryTuningTest(_SwapScratch):
 
     def _apply_with_uresourced(
         self, on_call: Callable[[str, str], object] | None = None
-    ) -> tuple[int, str, _FakeSystemd]:
+    ) -> tuple[int, str, SwapFakeSystemd]:
         svc, sd = self._service_with(
             unit_shown={"uresourced.service": {"ActiveState": "active"}}, mapper_present=True, on_call=on_call
         )
