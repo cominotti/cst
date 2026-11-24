@@ -14,9 +14,9 @@ host_closure() finds that set of files from the code: the entries
 (HOST_ENTRIES), every repository module they import, by an absolute or a
 relative import (and its packages' __init__.py), and the files run.py loads
 by path (the load rules in _path_loads). A load the gate cannot follow is a
-problem, so it cannot slip out of the set: a load by path of another form,
-and an import by a name or text given at run time (importlib.import_module,
-__import__, exec, runpy.run_module, found by what the call names through the
+problem, so it cannot slip out of the set: a load by path of another form
+(runpy.run_path, SourceFileLoader, loads_code_by_path's list), and an import by a name or text given at run time (importlib.import_module,
+__import__, exec, eval, runpy.run_module, found by what the call names through the
 file's imports, not by the method's name: obj.exec() is none; a call through a
 name bound other than by an import, or through getattr, is not seen).
 problems() checks:
@@ -150,7 +150,14 @@ _SAME_PATH: Final = frozenset({"resolve", "absolute"})
 # Calls that import or run code the import closure cannot see, by the dotted name the call resolves to through
 # the file's imports (_dotted: a name no import binds is builtins.NAME).
 _RUN_TIME_IMPORTS: Final = frozenset(
-    {"builtins.exec", "builtins.__import__", "importlib.import_module", "importlib.__import__", "runpy.run_module"}
+    {
+        "builtins.eval",
+        "builtins.exec",
+        "builtins.__import__",
+        "importlib.import_module",
+        "importlib.__import__",
+        "runpy.run_module",
+    }
 )
 
 

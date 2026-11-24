@@ -241,6 +241,8 @@ class PlantedTest(unittest.TestCase):
             ("import importlib\n", 'importlib.import_module("tests.e2e.helper")'),
             ("", '__import__("tests.e2e.helper")'),
             ("", 'exec(open("tests/e2e/helper.py").read())'),
+            ("", 'eval(open("tests/e2e/helper.txt").read())'),
+            ("import builtins\n", 'builtins.eval("__import__(name)")'),
             ("import runpy\n", 'runpy.run_module("tests.e2e.helper")'),
             ("import importlib as il\n", 'il.import_module("tests.e2e.helper")'),
             ("from importlib import import_module\n", 'import_module("tests.e2e.helper")'),
