@@ -32,7 +32,7 @@ from cst_core.domain.install import ArtifactKind, Owner
 from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
 from tests.probes import NoUnitQueries
 from swap.application.apply import SwapApplicationService
-from swap.application.memory_tuning import effective_uresourced_memory_min
+from swap.application.memory_tuning import MM_TMPFILES_ENTRY, URESOURCED_ENTRY, effective_uresourced_memory_min
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
@@ -1893,6 +1893,35 @@ class SwapSettingsTest(_SwapScratch):
                                 line.split(row, 1)[1].strip(), f"needs root to read: on the host, cst swap {cmd} --root"
                             )
                         self.assertTrue(line.startswith("  ?  "), line)
+
+    def test_as_root_a_file_apply_writes_whole_that_it_cannot_read_does_not_ask_for_root(self) -> None:
+        # Root on the host, and access refuses (a security policy, a root-squashed mount): the row asked for
+        # --root, which cannot help. As a user (root in a toolbox too) it still does.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        env = self.env
+        dests = (env.tmpfiles_conf, env.etc_path(MM_TMPFILES_ENTRY), env.sysctl_conf, env.etc_path(URESOURCED_ENTRY))
+        dests += (env.slice_dropin,)
+        for dest in dests:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            self._write(dest, "# edited by hand\n")
+        for as_root, in_container in ((True, False), (False, False), (True, True)):
+            reader = dataclasses.replace(env, as_root=as_root, in_container=in_container)
+            for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+                self.env = reader
+                rc, out, err, _ = self._run_on(cmd, self._fs(mapper_present=True, unreadable=set(dests)))
+                self.assertEqual(rc, 0, err)
+                for dest in dests:
+                    with self.subTest(as_root=as_root, in_container=in_container, cmd=cmd, dest=dest):
+                        short = dest.removeprefix(env.etc_dir.rstrip("/") + "/").removeprefix("systemd/system/")
+                        line = next(x for x in out.splitlines() if f" {short} " in x)
+                        self.assertTrue(line.startswith("  ?  "), line)
+                        want = (
+                            "cannot be read, even as root"
+                            if as_root and not in_container
+                            else f"needs root to read: on the host, cst swap {cmd} --root"
+                        )
+                        self.assertEqual(line.split(short, 1)[1].strip(), want)
 
     def test_root_in_a_toolbox_is_still_sent_to_the_host_s_root(self) -> None:
         # sudo cst swap plan in a toolbox: its root is root of the user namespace only, and the host's
