@@ -8610,9 +8610,13 @@ rm -rf /var/tmp/cst-e2e-bulk-home "$s"
 systemctl daemon-reload
 """
 
-    def bulk_boot(self, script: str) -> str:
-        """script after BULK_BOOT_SETUP, as root in the systemd container; its output."""
+    def bulk_boot(self, script: str, *, cleanup: str = "") -> str:
+        """script after BULK_BOOT_SETUP, as root in the systemd container; its output. cleanup, a test's
+        own, runs before BULK_BOOT_CLEANUP (registered after it), so the folders that one removes are
+        empty by then."""
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, self.BULK_BOOT_CLEANUP, check=False)
+        if cleanup:
+            self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, cleanup, check=False)
         return exec_bash(self.SYSTEMD_CONTAINER, self.BULK_BOOT_SETUP + script).stdout
 
     @e2e_tags(E2ETag.BTRFS)
@@ -9254,12 +9258,6 @@ echo E2E-OK
         apply cannot read) and unkeep deleted it. With the line fixed, keep apps exits 0 (cannot bite
         otherwise). A fake cannot show the installed reader on the real bytes under a root shell's locale."""
         keep = "/etc/btrfs-setup/bulk-keep"
-        self.addCleanup(
-            exec_bash,
-            self.SYSTEMD_CONTAINER,
-            f"rm -f {keep}; if [ -e /var/tmp/e2e-bulk-keep.bak ]; then mv /var/tmp/e2e-bulk-keep.bak {keep}; fi",
-            check=False,
-        )
         out = self.bulk_boot(
             rf"""
 set -E
@@ -9290,6 +9288,8 @@ bulk keep apps >"$s/out"
 grep -qF "apps: kept in /home by choice" "$s/out"
 echo E2E-OK
 """,
+            # Before BULK_BOOT_CLEANUP, whose rmdir of an /etc/btrfs-setup it made needs the folder empty.
+            cleanup=f"rm -f {keep}; if [ -e /var/tmp/e2e-bulk-keep.bak ]; then mv /var/tmp/e2e-bulk-keep.bak {keep}; fi",
         )
         self.assertIn("E2E-OK", out)
 
