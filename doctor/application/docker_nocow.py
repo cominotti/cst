@@ -105,8 +105,8 @@ def check_docker_nocow_outcome(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(
             WARN,
             f"Docker volumes NOCOW: {read.record['volumes']} keeps copy-on-write data and no boot will migrate it "
-            f"(an older install stopped before it scheduled the migration, or a container wrote during the "
-            f"install), and the install at {when} failed: {read.record['reason']}; fix that, then run the install",
+            f"(the folder has +C already, and a boot asks only for one without it), and the install at {when} "
+            f"failed: {read.record['reason']}; fix that, then run the install",
             "cst btrfs install",
         )
         return

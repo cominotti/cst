@@ -828,8 +828,9 @@ docker volume rm <name>         # or one volume by name
   cannot bring an old count back beside the new flag. When it cannot write
   either, the folder keeps no `+C`, the journal says why, and the next boot
   asks again. That holds only for a folder without `+C`: a boot asks only
-  for such a folder. When the folder has `+C` already (an older install
-  stopped between its `+C` and its flag, below), no flag of an earlier
+  for such a folder. When the folder has `+C` already (a give-up removed
+  the flag and kept `+C`, or an older install stopped between its `+C` and
+  its flag, below), no flag of an earlier
   request is there and the request fails, no boot asks again: `mark` exits 2 with `... has +C already, so no boot asks
   again: fix that, then run cst btrfs install`, and records it in
   `/var/lib/docker-volumes-nocow/outcome` (`not-scheduled`), which `status`

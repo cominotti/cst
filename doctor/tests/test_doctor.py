@@ -2382,6 +2382,8 @@ class DockerNocowOutcomeTest(Scratch):
         return [ln for ln in out.splitlines() if "Docker volumes NOCOW" in ln]
 
     def test_an_install_that_could_not_schedule_warns(self) -> None:
+        # The line names no cause doctor cannot know: +C without a flag also follows a give-up (the
+        # flag removed, +C kept), not only an older install stopped half-way or a container's write.
         self.record("not-scheduled")
         r = self.run_tool()
         self.assertEqual(r.returncode, 1)
@@ -2390,9 +2392,9 @@ class DockerNocowOutcomeTest(Scratch):
             [
                 (
                     "  WARN   Docker volumes NOCOW: /var/lib/docker/volumes keeps copy-on-write data and no boot will "
-                    "migrate it (an older install stopped before it scheduled the migration, or a container wrote "
-                    "during the install), and the install at 2026-11-05 17:33 failed: cannot schedule the migration: "
-                    "boom; fix that, then run the install"
+                    "migrate it (the folder has +C already, and a boot asks only for one without it), and the "
+                    "install at 2026-11-05 17:33 failed: cannot schedule the migration: boom; fix that, then run the "
+                    "install"
                 )
             ],
         )

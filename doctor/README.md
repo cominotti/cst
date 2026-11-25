@@ -361,9 +361,9 @@ and what to do are in
 ### 6.3 Docker volumes: NOCOW migration that no boot will schedule
 
 A boot asks for the migration only when the volumes folder has no `+C`.
-When `install` finds the folder with `+C` already (an older install stopped
-between its `+C` and its flag) and cannot write the request, no boot asks
-again; `install` then records it in `/var/lib/docker-volumes-nocow/outcome`
+When `install` finds the folder with `+C` already (a give-up removed the
+flag and kept `+C`, or an older install stopped between its `+C` and its
+flag) and cannot write the request, no boot asks again; `install` then records it in `/var/lib/docker-volumes-nocow/outcome`
 (`not-scheduled`, with its time and reason). A count of boots left in
 `/var/lib/docker-volumes-nocow/attempts` with no flag means an install or a
 boot could not reset it, and the next request may give up at once
@@ -385,7 +385,7 @@ stopped half-way and left no record is shown by `cst btrfs status` only
 
 ```
 == btrfs
-  WARN   Docker volumes NOCOW: /var/lib/docker/volumes keeps copy-on-write data and no boot will migrate it (an older install stopped before it scheduled the migration, or a container wrote during the install), and the install at 2026-11-24 10:15 failed: cannot schedule the migration: [Errno 30] Read-only file system: '/etc/btrfs-setup/docker-nocow-pending'; fix that, then run the install
+  WARN   Docker volumes NOCOW: /var/lib/docker/volumes keeps copy-on-write data and no boot will migrate it (the folder has +C already, and a boot asks only for one without it), and the install at 2026-11-24 10:15 failed: cannot schedule the migration: [Errno 30] Read-only file system: '/etc/btrfs-setup/docker-nocow-pending'; fix that, then run the install
          fix: cst btrfs install
 ```
 
