@@ -829,6 +829,24 @@ print("E2E-OK")
 """
 )
 
+# test_264 (on GC_UNIT_SETUP): DOCKER_GC_PROTECT in a real unit's Environment= with an item that is no
+# registry ("registry.example.com;ghcr.io": a list written with ";"): the dry run exits 78 naming it, and
+# docker is asked to remove nothing. Before, the environment's value got only the blank-edge check: the
+# item matched no image and protected nothing.
+GC_PROTECT_NOT_REGISTRY = (
+    GC_UNIT_SETUP
+    + r"""
+bad = "registry.example.com;ghcr.io"
+write_conf(reg)
+status, log = unit(bad)
+if status != "78" or f"DOCKER_GC_PROTECT in the environment: not a registry: {bad}" not in log:
+    sys.exit("test_264: the unit's environment: expected exit 78 naming the item that is no registry")
+if removing():
+    sys.exit(f"test_264: docker was asked to remove {removing()}")
+print("E2E-OK")
+"""
+)
+
 # test_145: the program at argv[1] with its settings file at argv[2] against the same fake docker and
 # scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
 # run --dry-run and status (which plan as the weekly run does), twice each, stop with "no Image;
@@ -10429,6 +10447,26 @@ echo test_263-ok
 """,
         ).stdout
         self.assertIn("test_263-ok", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_264_docker_gc_refuses_an_environment_protection_that_is_no_registry(self) -> None:
+        """This checkout's docker-gc as a real systemd unit (systemd-run) whose Environment= has
+        DOCKER_GC_PROTECT=other.example.org,registry.example.com;ghcr.io, against test_103's fake docker and
+        scenario: the dry run exits 78 naming "not a registry: registry.example.com;ghcr.io" in its journal,
+        and docker is asked to remove nothing. Before, it exited 0 and the item protected nothing. A fake
+        cannot show how systemd hands Environment= to the program."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            "systemctl reset-failed e2e-264-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-264-*",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_NOT_REGISTRY)} /opt/cst-rw/btrfs/docker-gc 264",
+        ).stdout
+        self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:

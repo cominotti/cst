@@ -2453,7 +2453,9 @@ as written it would match no image and leave its registry unprotected. The
 recorder does not read it. `DOCKER_GC_PROTECT` in docker-gc's
 environment (a drop-in of the unit) wins over the file's list (the file is
 still read: a line it cannot read stops it the same way); an item there with
-such a blank beside it stops it the same way too (exit 78, nothing removed).
+such a blank beside it, or one that is not a registry (`a.io;b.io`, a list
+written with `;`), stops it the same way too (exit 78, one line naming it,
+nothing removed).
 
 **Upgrade from an older CST.** Older versions had one registry built into the
 program and no file. While the file is missing, docker-gc reads the
