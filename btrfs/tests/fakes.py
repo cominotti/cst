@@ -18,8 +18,14 @@
   FakeQosControl, FakeManagedDevices, FakeIocostSysfs, FakeUdev, FakeIocostSystemd,
   FakeIocostInstaller, FakeIocostUninstall and FakeIocostLock over it, the in-memory fakes of
   btrfs/iocost/ports.py; IOCOST_ENTRIES, btrfs:iocost's manifest entries;
-- cache (test_cache): FakeMountRunner, findmnt, mount and umount over a list of mounts;
-  CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry.
+- cache (test_cache, its fault tests, test_cache_ports and tests/mbt/mbt_cache_rollback): MountTable, the
+  mounts and the kernel's rules for them (a bind's device and FSROOT, umount of the top mount, findmnt's
+  JSON); FstabSystemdView, what systemd has loaded of /etc/fstab, and mount_units_listing, its answer to
+  `systemctl show '*.mount'`; FakeMountRunner, findmnt, mount, umount and systemctl over them and a test
+  root's /etc/fstab; CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry;
+  CacheWorld and FakeFstab, FakeCacheMountTable, FakeCacheSystemd, FakeCacheFolders, FakeCacheHostView and
+  FakeCacheAccounts over it, the in-memory fakes of btrfs/cache/ports.py (over the same MountTable and
+  FstabSystemdView).
 
 Not collected as a test module (unittest finds test*.py).
 """
@@ -40,7 +46,17 @@ import subprocess
 import sys
 from typing import Final, override
 
-from btrfs.cache.domain import FINDMNT_COLUMNS
+from btrfs.cache.application import CacheMounts
+from btrfs.cache.domain import (
+    FINDMNT_COLUMNS,
+    MIN_HUMAN_UID,
+    CacheMountBinding,
+    CacheMountUser,
+    LiveMount,
+    parse_findmnt_mounts,
+)
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
+from btrfs.cache.ports import BindingPaths
 from btrfs.iocost.application import Iocost
 from btrfs.iocost.domain import (
     IOCOST_COMPONENT_LOCK_NAME,
@@ -54,6 +70,7 @@ from btrfs.iocost.domain import (
 )
 from btrfs.scrub_limit.application import ScrubLimit
 from btrfs.scrub_limit.domain import SCRUB_CONF_PATH, SCRUB_DROPIN_PATH
+from btrfs.snapshot.domain import CACHE_TAG
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
@@ -67,6 +84,7 @@ from cst_core.domain.install import (
     select_entries,
 )
 from cst_core.domain.record import ComponentState
+from cst_core.domain.units import parse_show_units
 from cst_core.installer import NAME as INSTALLER_NAME
 from cst_core.ports import CommandFault, CommandResult, WriteFailed
 from tests.fault_injection import FaultPlan
@@ -1243,32 +1261,17 @@ class CacheTestCtx:
         return f"/run/host/{subpath}" if self._container else f"/run/{subpath}"
 
 
-class FakeMountRunner:
-    """findmnt, mount and umount over a list of mounts. findmnt answers `-J -l -o FINDMNT_COLUMNS` as the
-    real one does: a bind mount's source is "DEVICE[FSROOT]", its fsroot the folder it shows."""
+class MountTable:
+    """A list of mounts by the paths the user sees, and the kernel's rules for them: a bind mount takes the
+    device of the mount holding its source and shows the folder it binds as its FSROOT ("DEVICE[FSROOT]" in
+    findmnt's source), an umount takes the top mount of its target off, and findmnt answers `-J -l -o FINDMNT_COLUMNS`.
+    The root and /var/home of the root filesystem are mounted from the start."""
 
-    def __init__(self, root: str, *, same_uuid: bool = False) -> None:
-        self.root = root
-        self.same_uuid = same_uuid
-        self.findmnt_fails = False
-        self.reload_fails = False
-        self.on_failed_reload: Callable[[], None] | None = None  # runs when a reload fails, before the answer
-        self.mount_fails: set[str] = set()
-        self.umount_fails: set[str] = set()  # targets whose umount answers "target is busy" (exit 32)
-        self.fstab_at_mount: list[str | None] = []
-        self.fstab_at_umount: list[str | None] = []
-        self.calls: list[list[str]] = []
+    def __init__(self, *, same_uuid: bool = False) -> None:
+        self.same_uuid = same_uuid  # findmnt shows every btrfs mount with the root's UUID
         self.mounts: list[dict[str, str | None]] = []
         self.add_mount("/dev/dm-0", "/", fsroot="/root", uuid=UUID_ROOT)
         self.add_mount("/dev/dm-0", "/var/home", fsroot="/home", uuid=UUID_ROOT)
-        # systemd's view of the test root's /etc/fstab: the file (its inode and mtime: a rewrite of the same
-        # bytes counts, as NeedDaemonReload goes by the file's time) and its text as the last daemon-reload
-        # loaded them; taken at the first command, as a systemd that booted with what is there then.
-        self.loaded_fstab: tuple[tuple[int, int] | None, str | None] | None = None
-        self.reloads = 0  # the daemon-reloads that worked
-        self.show_fails = False  # systemctl show answers exit 1: no answer
-        self.units_visible = True  # False: systemctl show lists no unit (test_160's systemd, which sees none)
-        self.before_reload: Callable[[], None] | None = None  # runs before a reload that works (a kill there)
 
     def add_mount(
         self,
@@ -1291,7 +1294,8 @@ class FakeMountRunner:
             }
         )
 
-    def _holding(self, path: str) -> dict[str, str | None]:
+    def holding(self, path: str) -> dict[str, str | None]:
+        """The mount whose target is the longest leading folder of path (the last one of equal length)."""
         best = self.mounts[0]
         for m in self.mounts:
             tgt = str(m["target"]).rstrip("/") or "/"
@@ -1299,12 +1303,160 @@ class FakeMountRunner:
                 best = m
         return best
 
-    def _findmnt_json(self) -> str:
+    def bind(self, src: str, tgt: str) -> None:
+        """mount --bind src tgt: a mount of src's device at tgt, its FSROOT the folder src is on it."""
+        held = self.holding(src)
+        rel = src.removeprefix(str(held["target"]).rstrip("/"))
+        dev = str(held["source"]).split("[", 1)[0]
+        fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
+        self.add_mount(dev, tgt, fsroot=fsroot, uuid=held["uuid"], bind=True)
+
+    def unbind(self, tgt: str) -> None:
+        """umount tgt: its top mount taken off (nothing when nothing is mounted there)."""
+        for i in range(len(self.mounts) - 1, -1, -1):
+            if self.mounts[i]["target"] == tgt:
+                del self.mounts[i]
+                break
+
+    def targets(self) -> list[str]:
+        """Every mount's target, in the order they were mounted."""
+        return [str(m["target"]) for m in self.mounts]
+
+    def findmnt_json(self) -> str:
         fss = []
         for m in self.mounts:
             uuid = UUID_ROOT if self.same_uuid and m["uuid"] is not None else m["uuid"]
             fss.append({**m, "uuid": uuid})
         return json.dumps({"filesystems": fss}, indent=3)
+
+
+class FstabSystemdView:
+    """What systemd has loaded of /etc/fstab: the file's identity and its text at the last daemon-reload that
+    worked, taken at the first look (boot) as a systemd that booted with what was there then. The identity
+    is whatever tells one write of the file from another (a real file's inode and mtime, a fake's write
+    number; None for no file): NeedDaemonReload goes by the file, not its text, so a rewrite of the same
+    bytes counts."""
+
+    def __init__(self) -> None:
+        self.loaded: tuple[object, str | None] | None = None  # (identity, text); None before the first look
+
+    def boot(self, identity: object, text: str | None) -> None:
+        """The first look: systemd has the file as it is now (nothing when it has looked already)."""
+        if self.loaded is None:
+            self.loaded = (identity, text)
+
+    def current(self, identity: object) -> bool:
+        """Whether systemd has loaded the file whose identity is now identity."""
+        return self.loaded is None or self.loaded[0] == identity
+
+    def reloaded(self, identity: object, text: str | None) -> None:
+        """A daemon-reload that worked: systemd has the file as it is now."""
+        self.loaded = (identity, text)
+
+    def text(self) -> str | None:
+        """The text systemd loaded (None: no file, or no look yet)."""
+        return None if self.loaded is None else self.loaded[1]
+
+
+def mount_units_listing(loaded: str | None, *, need_reload: bool, mounted: Sequence[str], every_loaded: bool) -> str:
+    """`systemctl show [--state=loaded] -p ... '*.mount'`'s answer: a block per loaded unit. A unit of each
+    line of the loaded /etc/fstab (SourcePath=/etc/fstab, NeedDaemonReload=yes once the file changed since),
+    mounted or not, and of each other mount (SourcePath=/proc/self/mountinfo, as systemd loads a mount it did
+    not start). As the real systemctl: only with every_loaded (--state=loaded or --all) does a glob list the
+    inactive units too; without it systemctl hides the inactive units that have no job queued (a failed or
+    activating one is still listed). These fakes have no job and no failed or activating unit: their inactive
+    units are those whose Where is not mounted, so without it only the units whose Where is mounted are listed."""
+    need = "yes" if need_reload else "no"
+    units: dict[str, tuple[str, str]] = {}
+    for line in (loaded or "").splitlines():
+        fields = line.split()
+        if fields and not fields[0].startswith("#") and len(fields) > 1:
+            units[fields[1]] = ("/etc/fstab", need)
+    for tgt in mounted:
+        units.setdefault(tgt, ("/proc/self/mountinfo", "no"))
+    blocks = [
+        f"Id={t.strip('/').replace('/', '-') or '-'}.mount\nLoadState=loaded\nSourcePath={src}\n"
+        f"NeedDaemonReload={nd}\nWhere={t}\n"
+        for t, (src, nd) in units.items()
+        if every_loaded or t in mounted
+    ]
+    return "\n".join(blocks)
+
+
+# What FakeMountRunner answers for a refused mount --bind, a busy umount and a failed daemon-reload, and the
+# same answers as the errors a CacheWorld point fails with (the cache fakes word "WHAT failed: REASON" from the
+# error's text): the contract, the fault matrix and the machine expect the same ERROR lines.
+MOUNT_DENIED_TEXT: Final = "mount: permission denied"
+UMOUNT_BUSY_TEXT: Final = "umount: target is busy"
+RELOAD_FAILED_TEXT: Final = "Failed to reload daemon"
+MOUNT_DENIED: Final = OSError(errno.EPERM, MOUNT_DENIED_TEXT)
+UMOUNT_BUSY: Final = OSError(errno.EBUSY, UMOUNT_BUSY_TEXT)
+RELOAD_FAILED: Final = OSError(errno.EIO, RELOAD_FAILED_TEXT)
+
+
+class FakeMountRunner:
+    """findmnt, mount and umount over a MountTable, and systemctl over an FstabSystemdView of the test root's
+    /etc/fstab. findmnt answers `-J -l -o FINDMNT_COLUMNS` as the real one does: a bind mount's source is
+    "DEVICE[FSROOT]", its fsroot the folder it shows."""
+
+    def __init__(self, root: str, *, same_uuid: bool = False) -> None:
+        self.root = root
+        self.table = MountTable(same_uuid=same_uuid)
+        self.findmnt_fails = False
+        self.reload_fails = False
+        self.on_failed_reload: Callable[[], None] | None = None  # runs when a reload fails, before the answer
+        self.mount_fails: set[str] = set()
+        self.umount_fails: set[str] = set()  # targets whose umount answers "target is busy" (exit 32)
+        self.fstab_at_mount: list[str | None] = []
+        self.fstab_at_umount: list[str | None] = []
+        self.calls: list[list[str]] = []
+        # systemd's view of the test root's /etc/fstab: the file (its inode and mtime: a rewrite of the same
+        # bytes counts, as NeedDaemonReload goes by the file's time) and its text as the last daemon-reload
+        # loaded them; taken at the first command, as a systemd that booted with what is there then.
+        self.systemd = FstabSystemdView()
+        self.reloads = 0  # the daemon-reloads that worked
+        self.show_fails = False  # systemctl show answers exit 1: no answer
+        self.units_visible = True  # False: systemctl show lists no unit (test_160's systemd, which sees none)
+        self.before_reload: Callable[[], None] | None = None  # runs before a reload that works (a kill there)
+
+    @property
+    def mounts(self) -> list[dict[str, str | None]]:
+        """The mounts, in the order they were mounted."""
+        return self.table.mounts
+
+    @mounts.setter
+    def mounts(self, mounts: list[dict[str, str | None]]) -> None:
+        self.table.mounts = mounts
+
+    @property
+    def same_uuid(self) -> bool:
+        return self.table.same_uuid
+
+    @same_uuid.setter
+    def same_uuid(self, same: bool) -> None:
+        self.table.same_uuid = same
+
+    @property
+    def loaded_fstab(self) -> tuple[object, str | None] | None:
+        """(the identity, the text) of /etc/fstab at the last daemon-reload that worked; None before the first
+        command."""
+        return self.systemd.loaded
+
+    @loaded_fstab.setter
+    def loaded_fstab(self, loaded: tuple[object, str | None] | None) -> None:
+        self.systemd.loaded = loaded
+
+    def add_mount(
+        self,
+        dev: str,
+        tgt: str,
+        *,
+        fsroot: str,
+        uuid: str | None = UUID_CACHE_DRIVE,
+        bind: bool = False,
+    ) -> None:
+        """One mount: on btrfs with its UUID, or a tmpfs (no UUID); a bind shows its FSROOT in its source."""
+        self.table.add_mount(dev, tgt, fsroot=fsroot, uuid=uuid, bind=bind)
 
     def _fstab_now(self) -> str | None:
         fstab = os.path.join(self.root, "etc", "fstab")
@@ -1313,24 +1465,16 @@ class FakeMountRunner:
     def _bind(self, src_path: str, tgt_path: str) -> CommandResult:
         self.fstab_at_mount.append(self._fstab_now())
         if tgt_path.removeprefix(self.root) in self.mount_fails:
-            return CommandResult(32, "", "mount: permission denied")
-        src = src_path.removeprefix(self.root)
-        held = self._holding(src)
-        rel = src.removeprefix(str(held["target"]).rstrip("/"))
-        dev = str(held["source"]).split("[", 1)[0]
-        fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
-        self.add_mount(dev, tgt_path.removeprefix(self.root), fsroot=fsroot, uuid=held["uuid"], bind=True)
+            return CommandResult(32, "", MOUNT_DENIED_TEXT)
+        self.table.bind(src_path.removeprefix(self.root), tgt_path.removeprefix(self.root))
         return CommandResult(0, "", "")
 
     def _unbind(self, tgt_path: str) -> CommandResult:
         self.fstab_at_umount.append(self._fstab_now())
         logical_tgt = tgt_path.removeprefix(self.root)
         if logical_tgt in self.umount_fails:
-            return CommandResult(32, "", "umount: target is busy")
-        for i in range(len(self.mounts) - 1, -1, -1):
-            if self.mounts[i]["target"] == logical_tgt:
-                del self.mounts[i]
-                break
+            return CommandResult(32, "", UMOUNT_BUSY_TEXT)
+        self.table.unbind(logical_tgt)
         return CommandResult(0, "", "")
 
     def _fstab_file(self) -> tuple[tuple[int, int] | None, str | None]:
@@ -1344,43 +1488,26 @@ class FakeMountRunner:
 
     def view_current(self) -> bool:
         """Whether systemd has loaded the test root's /etc/fstab as it is on disk."""
-        return self.loaded_fstab is None or self.loaded_fstab[0] == self._fstab_file()[0]
+        return self.systemd.current(self._fstab_file()[0])
 
     def _mount_units(self, *, every_loaded: bool) -> CommandResult:
-        """`systemctl show [--state=loaded] -p ... '*.mount'`: a block per loaded unit. A unit of each line
-        of the loaded /etc/fstab (SourcePath=/etc/fstab, NeedDaemonReload=yes once the file changed since),
-        mounted or not, and of each other mount (SourcePath=/proc/self/mountinfo, as systemd loads a mount
-        it did not start). As the real systemctl: only with every_loaded (--state=loaded or --all) does a
-        glob list the inactive units too; without it systemctl hides the inactive units that have no job
-        queued (a failed or activating one is still listed). This fake has no job and no failed or
-        activating unit: its inactive units are those whose Where is not mounted, so without it the fake
-        lists only the units whose Where is mounted."""
+        """`systemctl show [--state=loaded] -p ... '*.mount'` (mount_units_listing)."""
         if self.show_fails:
             return CommandResult(1, "", "Failed to connect to bus")
         if not self.units_visible:
             return CommandResult(0, "", "")
-        text = self.loaded_fstab[1] if self.loaded_fstab is not None else None
-        need = "no" if self.view_current() else "yes"
-        mounted = {str(m["target"]) for m in self.mounts}
-        units: dict[str, tuple[str, str]] = {}
-        for line in (text or "").splitlines():
-            fields = line.split()
-            if fields and not fields[0].startswith("#") and len(fields) > 1:
-                units[fields[1]] = ("/etc/fstab", need)
-        for m in self.mounts:
-            units.setdefault(str(m["target"]), ("/proc/self/mountinfo", "no"))
-        blocks = [
-            f"Id={t.strip('/').replace('/', '-') or '-'}.mount\nLoadState=loaded\nSourcePath={src}\n"
-            f"NeedDaemonReload={nd}\nWhere={t}\n"
-            for t, (src, nd) in units.items()
-            if every_loaded or t in mounted
-        ]
-        return CommandResult(0, "\n".join(blocks), "")
+        listing = mount_units_listing(
+            self.systemd.text(),
+            need_reload=not self.view_current(),
+            mounted=self.table.targets(),
+            every_loaded=every_loaded,
+        )
+        return CommandResult(0, listing, "")
 
     def _findmnt(self) -> CommandResult:
         if self.findmnt_fails:
             return CommandResult(1, "", "findmnt: cannot read the mount table")
-        return CommandResult(0, self._findmnt_json(), "")
+        return CommandResult(0, self.table.findmnt_json(), "")
 
     def _daemon_reload(self) -> CommandResult:
         """A reload that fails (reload_fails, after on_failed_reload), or one that works: before_reload runs
@@ -1388,18 +1515,18 @@ class FakeMountRunner:
         if self.reload_fails:
             if self.on_failed_reload is not None:
                 self.on_failed_reload()
-            return CommandResult(1, "", "Failed to reload daemon")
+            return CommandResult(1, "", RELOAD_FAILED_TEXT)
         if self.before_reload is not None:
             self.before_reload()
-        self.loaded_fstab = self._fstab_file()
+        self.systemd.reloaded(*self._fstab_file())
         self.reloads += 1
         return CommandResult(0, "", "")
 
     def run(self, argv: Sequence[str], **_kwargs: object) -> CommandResult:
         cmd = list(argv)
         self.calls.append(cmd)
-        if self.loaded_fstab is None:
-            self.loaded_fstab = self._fstab_file()
+        if self.systemd.loaded is None:
+            self.systemd.boot(*self._fstab_file())
         if cmd == ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS]:
             return self._findmnt()
         if cmd[:2] == ["systemctl", "show"] and cmd[-1:] == ["*.mount"]:
@@ -1411,3 +1538,401 @@ class FakeMountRunner:
         if cmd[:1] == ["umount"]:
             return self._unbind(cmd[1])
         return CommandResult(0, "", "")
+
+
+def _os_error(code: int, path: str) -> OSError:
+    return OSError(code, os.strerror(code), path)
+
+
+def _fresh(text: str | None) -> str | None:
+    """A copy of text that is not the same object (a read never hands out the text the world holds)."""
+    return None if text is None else text.encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+
+
+class CacheWorld(FaultPoints):
+    """What cache's ports see, in memory, for the use cases of btrfs/cache/application.py: /etc/fstab (its
+    text, None for no file, or a folder at its path, which every read, write and removal fails on with
+    EISDIR), /etc/crypttab, the accounts (passwd entries by name and the caller's name, and the folder links
+    the home is resolved through, as /home -> /var/home on Silverblue), the file system as paths (folders,
+    files and links, each named by where it is: entry_path follows the links among its folders, as the
+    kernel walks a path, for every store and every check; the folders ensure_private made with their
+    owner, the tags ensure_tag wrote), the
+    mounts (a MountTable, shared with FakeMountRunner) and what systemd has loaded of /etc/fstab (an
+    FstabSystemdView, shared with FakeMountRunner, fed a new identity per write and None after a removal,
+    taken at the first call of any fake as a systemd that booted with what was there).
+
+    Every mutating call is one point (FaultPoints), named as main's fault matrix named its call:
+    "folder PATH" (each ensure_private), "tag SOURCE" (a CACHEDIR.TAG written: none when one is there),
+    "mount --bind SOURCE TARGET", "umount TARGET", "fstab write" (the write and the put-back),
+    "fstab remove" (the put-back when there was no file) and "systemctl daemon-reload". A failed command
+    answers "WHAT failed: REASON" (the error's text); a failed folder, tag or /etc/fstab call raises it.
+    Every error the fakes model (a link at a private folder: ENOTDIR, as O_NOFOLLOW with O_DIRECTORY gives;
+    a file or a dangling link in its way: EEXIST; a file at or above a tag's folder: EEXIST, as write_atomic's
+    ensure_dir gives; /etc/fstab a folder: EISDIR) raises inside the call, before a
+    kill armed there fires. before_reload runs before a reload takes effect (a kill there leaves systemd
+    behind); a KILL of the plan at the reload point is one after it took effect. Reads are not points;
+    each read gives a new object, never the one the world holds."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fstab: str | None = None
+        self.fstab_folder = False  # a folder where /etc/fstab belongs
+        self.fstab_writes = 0  # the identity of the file now: a new number per write (NeedDaemonReload)
+        self.fstab_id: int | None = None  # None: no file
+        self.crypttab: str | None = None
+        self.users: dict[str, CacheMountUser] = {}
+        self.caller = ""
+        # The paths below are each entry's own place (entry_path: the links among its folders followed), so
+        # an entry put or asked for through a linked folder is the one at the end of the link.
+        self.links: dict[str, str] = {}  # path -> the path it points to
+        self.dirs: set[str] = {"/"}
+        self.files: dict[str, int] = {}  # path -> its write's number (a new one per write, as a new inode)
+        self.file_writes = 0
+        self.made: dict[str, tuple[int, int]] = {}  # the folders ensure_private made private: path -> (uid, gid)
+        self.tags: dict[str, tuple[int, int]] = {}  # the folders ensure_tag wrote a CACHEDIR.TAG in -> its owner
+        self.table = MountTable()
+        self.systemd = FstabSystemdView()
+        self.reloads = 0  # the daemon-reloads that took effect
+        self.findmnt_fails = False
+        self.findmnt_bad_json = False
+        self.show_fails = False  # systemctl show gives no answer
+        self.units_visible = True  # False: systemctl show lists no unit
+        self.before_reload: Callable[[], None] | None = None  # runs before a reload takes effect (a kill there)
+        self.failing_at: dict[str, tuple[int, OSError]] = {}  # point -> (the n-th call from now, its error)
+        self.seen: dict[str, int] = {}
+
+    def fail_at(self, point: str, n: int, err: OSError) -> None:
+        """The n-th call of point from now fails with err (once); a failure fail() armed there answers the
+        other calls, before and after it, as it would have without this one (the n-th call, when it runs,
+        uses up one call of a counted one, as a call that failure answered would)."""
+        self.failing_at[point] = (n, err)
+        self.seen[point] = 0
+
+    @override
+    def step[T](self, point: str, effect: Callable[[], T], failed: Callable[[OSError], T] | None = None) -> T:
+        at = self.failing_at.get(point)
+        if at is not None:
+            self.seen[point] += 1
+            if self.seen[point] == at[0]:
+                del self.failing_at[point]
+                kept = self.failing.get(point)
+                self.fail(point, at[1], times=1)
+                try:
+                    return super().step(point, effect, failed)
+                finally:
+                    ran = self.failing[point][1] == 0  # the call ran (not a plan's FAIL there, nor a dead run)
+                    if kept is None:
+                        del self.failing[point]
+                    else:
+                        err, left = kept
+                        self.failing[point] = (err, left - 1 if ran and left is not None and left > 0 else left)
+        return super().step(point, effect, failed)
+
+    # ---- the start state ---------------------------------------------------------------------------
+    def put_fstab(self, text: str | None) -> None:
+        """/etc/fstab as a test's start state (None: no file), as systemd booted with it."""
+        self.fstab = text
+        self.fstab_writes += 1
+        self.fstab_id = None if text is None else self.fstab_writes
+
+    def add_user(self, name: str, uid: int, home: str) -> None:
+        """An account (its gid its uid), and its home folder."""
+        self.users[name] = CacheMountUser(name, uid, uid, home)
+        self.mkdirs(home)
+
+    def real_path(self, path: str, *, follow_last: bool = True) -> str:
+        """path with each link among its folders followed, and its last part's too when follow_last, as the
+        kernel walks a path: /home/carol is /var/home/carol where /home is a link to /var/home."""
+        parts = [part for part in posixpath.normpath(path).split("/") if part]
+        out = "/"
+        for i, part in enumerate(parts):
+            out = posixpath.join(out, part)
+            hops = 0
+            while (follow_last or i < len(parts) - 1) and out in self.links and hops <= len(self.links):
+                out, hops = posixpath.normpath(self.links[out]), hops + 1
+        return out
+
+    def entry_path(self, path: str) -> str:
+        """Where the entry named path is: the links among its folders followed, its last part not (what
+        os.lstat looks at). Every store and every check of the world names an entry by it."""
+        return self.real_path(path, follow_last=False)
+
+    def mkdirs(self, path: str) -> None:
+        """The folder path and its parents, made where its links lead (os.makedirs)."""
+        p = self.real_path(path)
+        while p not in self.dirs:
+            self.dirs.add(p)
+            p = posixpath.dirname(p)
+
+    def put_file(self, path: str) -> None:
+        """A file written at path (a new one, as a new inode, where one was), its folders made."""
+        self.mkdirs(posixpath.dirname(path))
+        self.file_writes += 1
+        self.files[self.entry_path(path)] = self.file_writes
+
+    def put_link(self, path: str, to: str) -> None:
+        self.mkdirs(posixpath.dirname(path))
+        self.links[self.entry_path(path)] = to
+
+    def mount_bind(self, source: str, target: str) -> None:
+        """A bind of source at target in place (its target folder made), recorded as no call."""
+        self.mkdirs(target)
+        self.table.bind(source, target)
+
+    # ---- what the state is -------------------------------------------------------------------------
+    def view_current(self) -> bool:
+        """Whether systemd has loaded /etc/fstab as it is now."""
+        return self.systemd.current(self.fstab_id)
+
+    def commands(self) -> list[str]:
+        """The points that ran a command (mount, umount, daemon-reload), in order."""
+        return [c for c in self.calls if c.startswith(("mount ", "umount ", "systemctl "))]
+
+    def exists(self, path: str) -> bool:
+        """Anything at path, a dangling link too (os.path.lexists), through the links among its folders."""
+        p = self.entry_path(path)
+        return p in self.dirs or p in self.files or p in self.links
+
+    def is_link(self, path: str) -> bool:
+        """A link at path, through the links among its folders (os.path.islink)."""
+        return self.entry_path(path) in self.links
+
+    def is_dir(self, path: str) -> bool:
+        """A folder at path, through its links (os.path.isdir)."""
+        return self.real_path(path) in self.dirs
+
+    def nonempty(self, path: str) -> bool:
+        """_dir_is_nonempty's answer: not there or a link is False (asked only for a non-link), a file
+        is True, a folder whether anything is in it (os.lstat, then os.scandir)."""
+        p = self.entry_path(path)
+        if p in self.files:
+            return True
+        if p not in self.dirs:
+            return False
+        inside = f"{p.rstrip('/')}/"
+        return any(p.startswith(inside) for p in (*self.dirs, *self.files, *self.links))
+
+    def look(self) -> None:
+        """Any call of a fake: systemd has booted with /etc/fstab as it is at the first one."""
+        if self.systemd.loaded is None:
+            self.systemd.boot(self.fstab_id, self.fstab)
+
+    def service(self) -> CacheMounts:
+        """The use cases over this world's ports."""
+        return CacheMounts(
+            fstab=FakeFstab(self),
+            mounts=FakeCacheMountTable(self),
+            systemd=FakeCacheSystemd(self),
+            folders=FakeCacheFolders(self),
+            host=FakeCacheHostView(self),
+            accounts=FakeCacheAccounts(self),
+        )
+
+
+class FakeFstab:
+    """FstabPort over a CacheWorld."""
+
+    def __init__(self, world: CacheWorld) -> None:
+        self.world = world
+
+    def read(self) -> str | None:
+        w = self.world
+        w.look()
+        if w.fstab_folder:
+            raise _os_error(errno.EISDIR, "/etc/fstab")
+        return _fresh(w.fstab)
+
+    def write(self, text: str) -> None:
+        w = self.world
+        w.look()
+        copy = _fresh(text)
+
+        def write() -> None:
+            if w.fstab_folder:
+                raise _os_error(errno.EISDIR, "/etc/fstab")
+            w.fstab_writes += 1
+            w.fstab, w.fstab_id = copy, w.fstab_writes
+
+        w.step("fstab write", write)
+
+    def remove(self) -> None:
+        w = self.world
+        w.look()
+
+        def remove() -> None:
+            if w.fstab_folder:
+                raise _os_error(errno.EISDIR, "/etc/fstab")
+            w.fstab, w.fstab_id = None, None
+
+        w.step("fstab remove", remove)
+
+
+class FakeCacheMountTable:
+    """MountTablePort over a CacheWorld's MountTable."""
+
+    def __init__(self, world: CacheWorld) -> None:
+        self.world = world
+
+    def read(self) -> tuple[tuple[LiveMount, ...], str | None]:
+        w = self.world
+        w.look()
+        if w.findmnt_fails:
+            return (), "findmnt failed: findmnt: cannot read the mount table"
+        mounts = parse_findmnt_mounts('{"filesystems": 3}' if w.findmnt_bad_json else w.table.findmnt_json())
+        if mounts is None:
+            return (), "findmnt's answer is not the JSON it should be"
+        return mounts, None
+
+    def bind(self, binding: CacheMountBinding) -> str | None:
+        w = self.world
+        w.look()
+        what = f"mount --bind {binding.source} {binding.target}"
+
+        def bind() -> str | None:
+            w.table.bind(binding.source, binding.target)
+            return None
+
+        return w.step(what, bind, lambda err: f"{what} failed: {err.strerror}")
+
+    def unbind(self, binding: CacheMountBinding) -> str | None:
+        w = self.world
+        w.look()
+        what = f"umount {binding.target}"
+
+        def unbind() -> str | None:
+            w.table.unbind(binding.target)
+            return None
+
+        return w.step(what, unbind, lambda err: f"{what} failed: {err.strerror}")
+
+
+class FakeCacheSystemd:
+    """CacheSystemdPort over a CacheWorld's FstabSystemdView."""
+
+    def __init__(self, world: CacheWorld) -> None:
+        self.world = world
+
+    def daemon_reload(self) -> str | None:
+        w = self.world
+        w.look()
+        what = "systemctl daemon-reload"
+
+        def reload() -> str | None:
+            if w.before_reload is not None:
+                w.before_reload()
+            w.systemd.reloaded(w.fstab_id, _fresh(w.fstab))
+            w.reloads += 1
+            return None
+
+        return w.step(what, reload, lambda err: f"{what} failed: {err.strerror}")
+
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """The units mount_units_listing gives with --state=loaded, as SystemctlAdapter.show_units parses them."""
+        w = self.world
+        w.look()
+        if w.show_fails:
+            return None
+        if not w.units_visible:
+            return []
+        listing = mount_units_listing(
+            w.systemd.text(), need_reload=not w.view_current(), mounted=w.table.targets(), every_loaded=True
+        )
+        return [{p: unit[p] for p in MOUNT_UNIT_PROPS if p in unit} for unit in parse_show_units(listing)]
+
+
+class FakeCacheFolders:
+    """CacheFoldersPort over a CacheWorld's paths."""
+
+    def __init__(self, world: CacheWorld) -> None:
+        self.world = world
+
+    def ensure_private(self, path: str, user: CacheMountUser) -> None:
+        w = self.world
+        w.look()
+
+        def ensure() -> None:
+            p = posixpath.normpath(path)
+            in_the_way = [
+                q for q in _self_and_parents(p) if w.entry_path(q) in w.files or (w.is_link(q) and not w.is_dir(q))
+            ]
+            if in_the_way:
+                raise _os_error(errno.EEXIST, in_the_way[-1])
+            if w.is_link(p):
+                raise _os_error(errno.ENOTDIR, p)  # O_NOFOLLOW with O_DIRECTORY on a link
+            w.mkdirs(p)
+            w.made[w.real_path(p)] = (user.uid, user.gid)
+
+        w.step(f"folder {path}", ensure)
+
+    def ensure_tag(self, source: str, user: CacheMountUser) -> None:
+        w = self.world
+        w.look()
+        tag = posixpath.join(source, CACHE_TAG)
+        if w.exists(tag):
+            return
+
+        def write() -> None:
+            in_the_way = [q for q in _self_and_parents(source) if w.entry_path(q) in w.files]
+            if in_the_way:
+                raise _os_error(errno.EEXIST, in_the_way[-1])  # ensure_dir's mkdir of a file's path
+            w.mkdirs(source)  # write_atomic makes the folder it writes in
+            w.put_file(tag)
+            w.tags[w.real_path(source)] = (user.uid, user.gid)
+
+        w.step(f"tag {source}", write)
+
+
+def _self_and_parents(path: str) -> list[str]:
+    """path and each folder above it, the root last."""
+    out = [path]
+    while out[-1] != posixpath.dirname(out[-1]):
+        out.append(posixpath.dirname(out[-1]))
+    return out
+
+
+class FakeCacheHostView:
+    """CacheHostViewPort over a CacheWorld's paths."""
+
+    def __init__(self, world: CacheWorld) -> None:
+        self.world = world
+
+    def crypttab(self) -> str | None:
+        self.world.look()
+        return _fresh(self.world.crypttab)
+
+    def binding_paths(self, binding: CacheMountBinding) -> BindingPaths:
+        w = self.world
+        w.look()
+        src, tgt = binding.source, binding.target
+        is_link = w.is_link(tgt)
+        exists = w.exists(tgt)
+        return BindingPaths(
+            target_is_link=is_link,
+            target_exists=exists,
+            target_nonempty=False if is_link else w.nonempty(tgt),
+            source_is_dir=w.is_dir(src),
+            source_is_link=w.is_link(src),
+            target_is_dir=exists and not is_link and w.is_dir(tgt),
+        )
+
+    def home_exists(self, home: str) -> bool:
+        self.world.look()
+        return self.world.is_dir(home)
+
+
+class FakeCacheAccounts:
+    """CacheAccountsPort over a CacheWorld's accounts: the home resolved through its folder links."""
+
+    def __init__(self, world: CacheWorld) -> None:
+        self.world = world
+
+    def resolve(self, requested: str | None) -> tuple[CacheMountUser | None, str | None]:
+        w = self.world
+        w.look()
+        name = requested or w.caller
+        user = w.users.get(name)
+        if user is None:
+            return None, f"user {name!r} does not exist"
+        if user.uid < MIN_HUMAN_UID:
+            return None, f"refusing system user {user.name!r} (uid={user.uid} < {MIN_HUMAN_UID})"
+        return CacheMountUser(user.name, user.uid, user.gid, w.real_path(user.home)), None  # os.path.realpath
