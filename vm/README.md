@@ -946,7 +946,9 @@ found"). The next NAS backup of the VM gives the entry the new ID, which
 `cst vm list` then shows, and keeps the first ID in the entry's `original`
 key, so the entry follows its snapshot through later tag changes too. An
 older CST reads such an entry by its new ID and keeps it until the tags
-change again.
+change again. An entry whose ID restic still lists keeps it, also when
+another listed snapshot has that ID as its `original` (a `restic rewrite`
+without `--forget` keeps both).
 When `restic snapshots` cannot be read as a list of snapshots with their ids
 (another shape, an id that is not text), no entry leaves: the index keeps them
 all until a later backup reads the list.

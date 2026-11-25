@@ -42,10 +42,15 @@ if TYPE_CHECKING:
 
 def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> dict[str, str] | None:
     """Each id the VM's restic snapshots answer to (snapshot_names: its own, and the one it had first
-    when its tags were changed) with the id restic lists that snapshot under, or None when not
-    readable."""
+    when its tags were changed) with the id restic lists that snapshot under (a listed id: itself), or
+    None when not readable."""
     snaps = nas_snapshots(restic, vm, nas)
-    return None if snaps is None else {n: s["id"] for s in snaps for n in snapshot_names(s)}
+    if snaps is None:
+        return None
+    # A listed id is always its own snapshot's; an original names its copy only when restic does not
+    # list it itself (restic rewrite without --forget keeps both), whatever the listing's order.
+    originals = {n: s["id"] for s in snaps for n in snapshot_names(s)[1:]}
+    return {**originals, **{s["id"]: s["id"] for s in snaps}}
 
 
 def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = None) -> list[ResticSnapshot] | None:

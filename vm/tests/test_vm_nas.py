@@ -2041,6 +2041,30 @@ class SnapshotNamesTest(unittest.TestCase):
             [("other", "first1"), ("win", SNAP_ID), ("win", "kept22"), ("win", "second"), ("win", "short")],
         )
 
+    def test_a_listed_id_that_is_another_snapshots_original_names_itself_in_either_order(self) -> None:
+        # restic lists both a snapshot and a copy whose original it is (restic rewrite without --forget):
+        # the later one in the listing won, and an entry of the first moved to the copy.
+        first, copy = {"id": "first1"}, {"id": "copy22", "original": "first1"}
+        entry: vm_domain_backup.IndexEntry = {"vm": "win", "mode": "nas", "snapshot": "first1", "repository": "/repo"}
+
+        class Listing(FakeNasRestic):
+            answer = ""
+
+            @override
+            def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+                del env, args, timeout
+                return 0, self.answer, ""
+
+        for listed in ([first, copy], [copy, first]):
+            with self.subTest(listed=listed):
+                restic = Listing()
+                restic.answer = json.dumps(listed)
+                alive = vm_app_nas_torn.nas_snapshot_ids(restic, "win", _NAS_REPO)
+                self.assertEqual(alive, {"first1": "first1", "copy22": "copy22"})
+                assert alive is not None
+                own: vm_domain_backup.IndexEntry = {**entry, "snapshot": SNAP_ID}
+                got = vm_domain_backup.nas_index([entry], own, alive)
+                self.assertEqual([e.get("snapshot") for e in got], ["first1", SNAP_ID])
 
     def test_an_entry_retagged_twice_keeps_its_first_id_and_follows_the_second_copy(self) -> None:
         def nas(snap: str, **more: str) -> vm_domain_backup.IndexEntry:
