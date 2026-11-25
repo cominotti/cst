@@ -123,6 +123,16 @@ class _StopInRetention(FakeNasRestic):
         return answer
 
 
+class _StopAtReadLine(FakeNasOut):
+    """A stop comes while the line of what restic read is printed."""
+
+    @override
+    def say(self, text: str, *, flush: bool = False) -> None:
+        super().say(text, flush=flush)
+        if text.startswith("  restic snapshot ") and " read, " in text:
+            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+
 def _write_failed() -> str:
     """The words of a good NAS backup of win whose index write failed with ENOSPC."""
     return (
@@ -201,6 +211,22 @@ class NasIndexWriteFailsTest(unittest.TestCase):
         with self.assertRaises(vm_domain_backup.Stop) as e:
             run.go()
         self.assertTrue(str(e.exception).startswith(f"stopped by signal SIGTERM; {_write_failed()}"), str(e.exception))
+
+
+class NasStopAtTheReadLineTest(unittest.TestCase):
+    """A stop that comes while a good read's "restic snapshot ... read" line is printed (after the merge
+    back) ends the run only once the snapshot is indexed, as a stop in the retention does."""
+
+    def test_the_snapshot_is_indexed_before_the_stop_ends_the_run(self) -> None:
+        run = _Run(out=_StopAtReadLine())
+        with self.assertRaises(vm_domain_backup.Stop) as e:
+            run.go()
+        self.assertEqual(
+            str(e.exception),
+            f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} of win is a backup: indexed (the retention "
+            "runs at the next backup)",
+        )
+        self.assertEqual([[x["snapshot"] for x in w] for w in run.store.written], [[SNAP_ID]])
 
 
 if __name__ == "__main__":

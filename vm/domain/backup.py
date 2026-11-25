@@ -573,6 +573,16 @@ def unreadable_keep_keys(numbers: NasNumbers) -> list[str]:
     return [k for k, v in keep if v is None]
 
 
+@dataclass(frozen=True, slots=True)
+class NasRead:
+    """restic's read of a NAS run once it is a backup (what _nas_read returns): its consistency,
+    snapshot and summary."""
+
+    consistency: str
+    snap: str
+    summary: ResticSummary
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NasRun:
     """One NAS backup: what its checks read before restic is asked anything (the definition, the
@@ -596,6 +606,8 @@ class NasRun:
     versions: dict[str, str]
     deployment: BootedDeployment | None
     numbers: NasNumbers = field(default_factory=NasNumbers)
+    # The read once it is a backup (nas_run adds it when _nas_read returns; empty before).
+    read: list[NasRead] = field(default_factory=list)
     before: dict[str, Fingerprint] = field(default_factory=dict)
     overlaid: dict[str, tuple[str, str]] = field(default_factory=dict)
     # The snapshot's unclear outcome (virsh did not answer, and some disk never showed its overlay): the

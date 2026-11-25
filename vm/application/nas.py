@@ -49,6 +49,7 @@ from vm.domain.backup import (
     Manifest,
     NasMergeBack,
     NasNumbers,
+    NasRead,
     NasRun,
     CopiedFile,
     ResticSummary,
@@ -250,9 +251,8 @@ def nas_run(
         f"{vm}: backup to the NAS ({nas['repo']}), {'running: live snapshot' if live else 'shut off'}", flush=True
     )
     failure: BaseException | None = None
-    consistency, snap, summary = "shut-off", "", ResticSummary()
     try:
-        consistency, snap, summary = _nas_read(cfg, p, run, nas, keep)
+        run.read.append(NasRead(*_nas_read(cfg, p, run, nas, keep)))
     # Any failure, a stop included: the overlays are merged back first, then it is raised again.
     except BaseException as e:  # noqa: BLE001
         failure = e
@@ -277,20 +277,23 @@ def nas_run(
         raise refused
     if failure is not None:
         raise failure
-    p.out.say(
-        f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
-        f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
-    )
-    _nas_after_read(cfg, p, run, nas, nas_index_entry(run, nas, snap, consistency, keep))
+    read = run.read[0]
+    _nas_after_read(cfg, p, run, nas, nas_index_entry(run, nas, read.snap, read.consistency, keep))
 
 
 def _nas_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, entry: IndexEntry) -> None:
-    """After a good read, all merged back (entry: its index entry): the retention (retention_after_torn),
+    """After a good read, all merged back (entry: its index entry): what restic read, the retention (retention_after_torn),
     the index, the notes and how to restore it. A stop before the index is written (in the retention, a
     listing or the write) ends the run only once the snapshot is indexed, with no listing
     (_index_stopped_backup): else the next run names that backup as a snapshot no record names."""
     snap, vm = entry["snapshot"], run.vm
     try:
+        # Here, not before: a stop that comes while it is printed still indexes the snapshot.
+        summary = run.read[0].summary
+        p.out.say(
+            f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
+            f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({entry['consistency']})"
+        )
         retention_after_torn(cfg, p, vm, nas, run.numbers, made=snap)
         refused = _index_nas_backup(p, vm, nas, entry)
     except Stop as e:
