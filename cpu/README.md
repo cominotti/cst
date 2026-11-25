@@ -1070,7 +1070,9 @@ What else the profile does about it:
   (versions before 2026-11 wrote the line only after a set that worked, and
   a failed one stayed unset until `off`). Right after the set it reads the
   value back from systemd (`systemctl show`); when systemd shows another
-  form, a second line with that form follows. The last line of a setting
+  form, a second line with that form follows (an empty answer, a `show`
+  that failed, adds none: the line written before the set stays the
+  last). The last line of a setting
   wins, everywhere `game.intended` is read (the drift repair, `game
   state`, `cst doctor`). When a repair's set works and systemd then shows
   yet another form, the tick adds that line too, so it does not set the

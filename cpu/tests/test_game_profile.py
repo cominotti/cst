@@ -96,6 +96,7 @@ class FakeSystemd:
         self.units: dict[str, list[str]] = {"sys": [], "usr": []}
         self.active: set[str] = set()
         self.fail_reload: set[str] = set()  # daemon-reload fails: "sys", or the name of a user's manager
+        self.fail_show: set[tuple[str, str, str]] = set()  # show -P PROP UNIT of that manager fails
 
     def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
         self.actions.append(" ".join(argv))
@@ -136,6 +137,8 @@ class FakeSystemd:
         return CommandResult(0, "", "")
 
     def _show(self, mgr: str, args: Sequence[str]) -> CommandResult:
+        if args[0] == "-P" and (mgr, args[2], args[1]) in self.fail_show:
+            return CommandResult(1, "", "Failed to get properties: Connection timed out")
         if args[0] == "-P":
             return CommandResult(0, self.now(mgr, args[2], args[1]) + "\n", "")
         props: list[str] = []
@@ -771,6 +774,22 @@ class GameProfileDriftTest(GameProfileCase):
         # game.state keeps the format off() reads: six fields at most.
         for line in self.read(self.state).splitlines():
             self.assertLessEqual(len(line.split()), 6, line)
+
+    def test_a_read_back_that_fails_after_a_set_keeps_the_value_as_systemd_will_show_it(self) -> None:
+        # 'on' sets machine.slice's CPUWeight, then `systemctl show -P` cannot answer for it (a busy manager):
+        # game.intended keeps the value as systemd will show it, so the tick still sees the drift a daemon-reload
+        # makes later. The old setp added a record with an empty form after it, which won, and no drift of that
+        # setting was ever seen.
+        self.systemd.fail_show.add(("sys", "machine.slice", "CPUWeight"))
+        self.run_profile("on")
+        self.systemd.fail_show.clear()
+        recs = [r for r in intended_records(self.read(self.intended)) if r[2:4] == ("machine.slice", "CPUWeight")]
+        self.assertEqual(recs, [("prop", "sys", "machine.slice", "CPUWeight", "10", "10")])
+        self.write(self.manual, "")
+        self.set_now("sys", "machine.slice", CPUWeight="50")
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=10", actions)
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "10")
 
     def test_tick_repairs_drift_without_touching_the_state_and_off_restores(self) -> None:
         # IOWeight had a runtime override of its own before the profile.

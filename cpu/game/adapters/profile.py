@@ -262,7 +262,7 @@ class GameProfile:
         """Record, per property, whether a runtime override existed (and its value), then set them all. For a
         fixed unit, game.intended gets each value as systemd will show it (shown_form) before the set, so the
         drift repair sets one whose set-property failed; after a set that worked, a second record when systemd
-        shows another form (the last record of a setting wins: intended_records)."""
+        shows another form (the last record of a setting wins: intended_records), never for an empty read-back."""
         for kv in settings:
             p = kv.split("=", 1)[0]
             if os.path.exists(self.ctl_file(mgr, unit, p)):
@@ -279,7 +279,8 @@ class GameProfile:
             self.log(4, f"{unit}: could not set {' '.join(settings)}")
             return
         for p, value in fixed:
-            if (now := self.prop(mgr, unit, p)) != shown_form(p, value):
+            # An empty read-back (an error, [not set]) says nothing of the form: the predicted record stays last.
+            if (now := self.prop(mgr, unit, p)) not in {"", shown_form(p, value)}:
                 self.append_intended(GameRecordKind.PROP, mgr, unit, p, value, now)
 
     # ---- the boxes ----------------------------------------------------------------------------
