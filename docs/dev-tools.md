@@ -433,7 +433,11 @@ repository:
   (of the package or of cst_core), an if/elif chain or match with 3 or more
   string arms on one subject, a unit number (3600, 86400, 604800, the exit
   statuses 124, 126, 127, 137), a signature with a loose
-  `dict[str, Any | object | Json]` and a `Literal` of 3 or more strings are
+  `dict[str, Any | object | Json]`, a `Literal` of 3 or more strings and an
+  `int()` of text (its argument not a number by its form, or with a base;
+  cst_core's parsers and bash arithmetic's readers are exempt: text goes
+  through `parse_whole_number` or `parse_integer`, a float through
+  `math.trunc`) are
   counted per package and kind in `MAGIC_CEILINGS`, which they may not go
   above. A package and kind with no entry may have no hit, so a new hit
   there fails.

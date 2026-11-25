@@ -70,8 +70,12 @@ declared once and used by name.
 
 - `tests/test_magic_values.py` counts, per package of production code (tests
   keep the raw words), string comparisons with an enum's word (leak), if/elif
-  or match chains of 3 string arms, unit numbers, loose dicts in signatures
-  and `Literal`s of 3 strings, under `MAGIC_CEILINGS` (never above), one entry
+  or match chains of 3 string arms, unit numbers, loose dicts in signatures,
+  `Literal`s of 3 strings and `int()` of text (int-of-text: an `int()` whose
+  argument is not a number by its form, or that has a base; text goes
+  through `parse_whole_number` or `parse_integer`, a float through
+  `math.trunc`; cst_core's parsers and bash arithmetic's readers are
+  exempt), under `MAGIC_CEILINGS` (never above), one entry
   per package and kind of hit. A package and kind with no entry may have no
   hit at all, so a new hit there fails. `MAGIC_EXEMPT` names a scope that
   keeps one (`path:qualname`), with its reason; a stale entry fails. No

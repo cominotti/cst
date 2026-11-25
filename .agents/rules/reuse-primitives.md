@@ -94,6 +94,8 @@ one place only.
 - `tests/test_magic_values.py`: a word of a cst_core StrEnum (`OwnedState`,
   `Urgency`, ...) compared as a plain string, and a unit number written out
   (3600, 86400, 604800, 124, 126, 127, 137) where cst_core has its name
-  ([magic-values](magic-values.md)).
+  ([magic-values](magic-values.md)); and an `int()` of text outside
+  cst_core's parsers (int-of-text, a copy of `parse_whole_number` or
+  `parse_integer`), counted per package under `MAGIC_CEILINGS`.
 
 See [docs/architecture.md, "Static gates beyond lint and types"](../../docs/architecture.md#static-gates-beyond-lint-and-types).
