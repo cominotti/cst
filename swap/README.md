@@ -196,7 +196,12 @@ over a value set at run time. `plan` shows that old file as `remove`, and
 `apply` deletes it and its line in the install record, but only when CST
 (or `apply-swap-config.sh`) wrote it: a file of that name with no
 "Managed by" comment of theirs is left alone,
-and only its line in the install record goes (as when the file is gone). While a game
+and only its line in the install record goes (as when the file is gone). So
+is anything there that is not a regular file (a FIFO, a device, or a link
+to one): `plan`, `status` and `apply` do not open it in a way that waits.
+systemd itself does: it opens a FIFO among `machine.slice`'s drop-ins when
+it loads the slice or at a `daemon-reload` (`apply` runs one) and waits for
+a writer, and stops answering. Remove such a FIFO by hand. While a game
 runs, the `cpu` module's game profile gives the game's cgroups
 `MemoryLow=16G` (runtime only); it does not touch `machine.slice`'s memory
 settings. `cst swap status` shows both floors in its `low` column.
@@ -211,11 +216,14 @@ systemd's value and names that drop-in, and `apply` leaves it (it does not
 fail on it, and writes nothing for it). That is the point of the `10-` name.
 `DIFF` is left for a cgroup whose `memory.low` differs from the value
 systemd reports as CST's. When systemd cannot be asked, the cgroup is
-compared as before. The `cpu` module's game profile sets `AllowedCPUs`,
+compared as before; so it is when the drop-in that sets the value cannot be
+read, or is not a regular file (it is not opened in a way that waits). The `cpu` module's game profile sets `AllowedCPUs`,
 `CPUWeight` and `IOWeight` on `machine.slice` at run time, never
 `MemoryLow` (its `zz-cst-game.conf` drop-ins are for the user's slices), so
 it does not make this row `over`. `cst doctor` gives the same answer (an
-`info` line naming the drop-in).
+`info` line naming the drop-in), with one known gap: it still opens each
+of machine.slice's listed drop-ins in a way that waits, so a FIFO among
+them makes `cst doctor` wait for a writer where `status` answers at once.
 
 **Not managed here** (done once, by hand): `freePageReporting='on'` on the
 virtio memballoon of the `win11-devbox` VM, which lets the guest hand freed

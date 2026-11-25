@@ -375,9 +375,8 @@ class SwapReports:
         return OwnedState.UNREADABLE if copy_fails else st
 
     def old_dropin_is_ours(self) -> bool:
-        """The drop-in under its old name is there and CST (or the script before it) wrote it."""
-        text = self._fs.read_text(self._env.old_slice_dropin)
-        return text is not None and is_cst_dropin(text)
+        """The drop-in under its old name is a regular file there (not opened in a way that waits) CST wrote."""
+        return is_cst_dropin(self._fs.read_text(self._env.old_slice_dropin, "", regular_only=True) or "")
 
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
@@ -650,7 +649,8 @@ class SwapReports:
         memory controller for it); else the cgroup's memory.low against CST's value (DIFF when it differs)."""
         shown = self._systemd.show(UnitName(MACHINE_SLICE), ("MemoryLow", "DropInPaths", "ActiveState"))
         effective = shown.get("MemoryLow", "")
-        dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
+        listed = shown.get("DropInPaths", "").split()  # one not a regular file: None, as one it cannot read
+        dropins = [(p, self._fs.read_text(self._env.host_view(p), regular_only=True)) for p in listed]
         source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
         if source is not None:
             return SettingCheckRow(

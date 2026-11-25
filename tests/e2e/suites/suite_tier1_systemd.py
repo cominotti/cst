@@ -11618,3 +11618,60 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_213_swap_plan_and_status_answer_at_once_with_a_fifo_at_the_old_drop_in_name(self) -> None:
+        """cst swap plan and status as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup
+        trap set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, and a FIFO
+        that nothing ever writes to at /etc/systemd/system/machine.slice.d/50-memory-low.conf, the name an
+        older CST gave its drop-in (plan reads it to decide whether apply removes it). Each run is bounded
+        by timeout(1) at 30 s: before this change plan opened the FIFO and waited for a writer for ever
+        (exit 124 here). Now the FIFO is not CST's file: plan and status exit 0 at once with no row for it,
+        and change nothing. machine.slice is started before the FIFO is made, so systemd has loaded it and
+        its drop-ins already: systemd itself opens a FIFO drop-in when it loads the slice (and at a
+        daemon-reload) and waits for a writer, and PID 1 then stops answering (seen in a first version of
+        this test). So apply, whose daemon-reload reloads the slice, is not run here; the unit tests show
+        that apply's own read of the FIFO does not wait and leaves it alone."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+OLD="$DROPIN_DIR/50-memory-low.conf"
+# A reader that waits in the FIFO's open (systemd, should it load the slice again) is let go by a writer's
+# open; the FIFO goes before swap_cleanup's daemon-reload.
+release() { if [[ -p "$OLD" ]]; then timeout 2 sh -c 'exec 3>"$1"' sh "$OLD" || true; rm -f "$OLD"; fi; }
+trap 'release; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+bounded() {
+    rc=0
+    timeout 30 "$CST" swap "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "swap $* blocked on the FIFO"
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$OLD" && ! -L "$OLD" ]] || fail "the container's $OLD is not as the test expects"
+systemctl start machine.slice
+mkdir -p "$DROPIN_DIR"
+mkfifo -m 0644 "$OLD"
+s0="$(snap)"
+
+bounded plan
+[[ $rc == 0 ]] || fail "plan with a FIFO at $OLD exited $rc"
+grep -qE '^  write +crypttab: swap0 line' <<<"$out" || fail "plan's crypttab row"
+if grep -qF '50-memory-low.conf' <<<"$out"; then fail "plan has a row for the FIFO"; fi
+bounded status
+[[ $rc == 0 || $rc == 1 ]] || fail "status with a FIFO at $OLD exited $rc"
+if grep -qF '50-memory-low.conf' <<<"$out"; then fail "status has a row for the FIFO"; fi
+[[ -p "$OLD" ]] || fail "the FIFO is gone"
+[[ "$(snap)" == "$s0" ]] || fail "plan or status changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

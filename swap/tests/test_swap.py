@@ -1278,6 +1278,25 @@ class SwapApplicationTest(_SwapScratch):
         with open(old, encoding="utf-8") as f:
             self.assertEqual(f.read(), foreign)
 
+    def test_a_fifo_at_the_old_drop_in_name_is_left_alone_and_nothing_blocks(self) -> None:
+        # A FIFO (its open waits for a writer) at machine.slice.d/50-memory-low.conf, which an older CST
+        # wrote and its record still lists: not CST's file. plan shows no "remove" row and apply forgets the
+        # record line and leaves the FIFO. Before, plan and apply blocked in its open (bounded: CallBlocked).
+        record = os.path.join(self.tmp, "var/lib/cst/installed.json")
+        env = dataclasses.replace(self.env, install_record=record)
+        old = self._old_dropin_install(record, MAIN_DROPIN)
+        os.remove(old)
+        os.mkfifo(old)
+        with time_bound(5):
+            self.assertNotIn("50-memory-low.conf", self._plan_text(env))
+            rc, out, err, _ = self._apply_once(env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("removed:", out)
+        self.assertTrue(stat.S_ISFIFO(os.lstat(old).st_mode), "apply replaced the FIFO")
+        with open(record, encoding="utf-8") as f:
+            files = json.load(f)["files"]
+        self.assertNotIn("/etc/systemd/system/machine.slice.d/50-memory-low.conf", files)
+
     def test_the_old_record_line_goes_also_when_the_file_is_gone_or_not_cst_s(self) -> None:
         old_dest = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
         foreign = "[Slice]\nMemoryLow=8G\n"
@@ -2102,6 +2121,23 @@ class MemoryLowOverrideTest(_SwapScratch):
         self.assertEqual(rc, 0)
         self.assertIn("  over    machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
         self.assertIn(f"  over: {self.FOREIGN} sets machine.slice's MemoryLow;", out)
+
+    def test_a_fifo_among_the_drop_ins_systemd_lists_is_one_it_cannot_read_and_nothing_blocks(self) -> None:
+        # A drop-in systemd lists for machine.slice that is a FIFO (through a link, which systemd lists): it
+        # cannot be read, so it names no source; the row compares the cgroup. Before, plan and status blocked
+        # in its open (bounded: CallBlocked).
+        fifo = "/etc/systemd/system/machine.slice.d/60-foreign.conf"
+        p = self.env.host_view(fifo)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.mkfifo(p)
+        self._cgroup_low(8 * 2**30)
+        shown = {"MemoryLow": str(8 * 2**30), "DropInPaths": f"{self.CST} {fifo}", "ActiveState": "active"}
+        for cmd in (D.SwapCommand.STATUS, D.SwapCommand.PLAN):
+            with self.subTest(cmd=cmd), time_bound(5):
+                rc, out, err = self._run(cmd, shown)
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("  over", out)
+                self.assertIn("machine.slice memory.low", out)
 
     def test_diff_when_systemd_reports_cst_s_value_but_the_cgroup_disagrees(self) -> None:
         self._cgroup_low(2**30)
