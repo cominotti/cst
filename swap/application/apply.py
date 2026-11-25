@@ -9,6 +9,7 @@ from cst_core.application.install import InstallRefused, Placement
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
+from swap.application.in_the_way import folder_in_place, non_folder_above
 from swap.application.memory_tuning import (
     MM_TMPFILES_ENTRY,
     URESOURCED_BAK_SUFFIX,
@@ -321,22 +322,12 @@ class SwapApplicationService(SwapReports):
         writes whole that is not a folder, or a folder in place of zram-generator.conf (apply renames a link over
         it) or of the legacy sysctl file (apply unlinks it). A link to a folder at either is no obstacle."""
         for _src, dest in self._env.managed_files:
-            above = self._non_folder_above(dest)
+            above = non_folder_above(self._fs, dest)
             if above is not None:
                 return f"{dest}: {above} {_NOT_A_FOLDER}"
         for path in (self._env.zram_conf, self._env.old_sysctl_conf):
-            if self._fs.is_dir(path) and not self._fs.is_symlink(path):
+            if folder_in_place(self._fs, path):
                 return f"{path}: {_FOLDER_IN_PLACE}"
-        return None
-
-    def _non_folder_above(self, path: str) -> str | None:
-        """The nearest name above path that is there, when it is not a folder (a file, a link that leads to none):
-        the installer cannot create path below it. None when that name is a folder, or nothing above is there."""
-        folder = posixpath.dirname(path)
-        while folder not in ("", "/"):
-            if self._fs.lexists(folder):
-                return None if self._fs.is_dir(folder) else folder
-            folder = posixpath.dirname(folder)
         return None
 
     def _line_refusal(self, path: str, line_spec: MarkedLineSpec, st: ManagedState) -> str | None:
