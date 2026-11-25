@@ -35,7 +35,7 @@ from btrfs.cache.domain import parse_all_mounts, parse_managed_fstab_entries
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.units import parse_show_units
+from cst_core.domain.units import LoadState, parse_show_units
 from cst_core.domain.text import YES_WORDS, ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
 from doctor.application.cpu import unit_props
@@ -728,11 +728,18 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
 
 def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Result]:
     """WARN when systemd has not loaded /etc/fstab as it is on disk (fstab_lines_unread over the mount units
-    it has loaded, one `systemctl show '*.mount'`): an edit, or a cache attach or detach that stopped
-    between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked. Asked only
+    it has loaded, active or not, one `systemctl show --state=loaded '*.mount'`: a glob without
+    --state=loaded lists only the active ones): an edit, or a cache attach or detach that stopped between
+    its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked. Asked only
     where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a machine without
     one is no warning of the cache's."""
-    cmd = ["systemctl", "show", *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)), "*.mount"]
+    cmd = [
+        "systemctl",
+        "show",
+        f"--state={LoadState.LOADED}",
+        *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)),
+        "*.mount",
+    ]
     rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
     if rc != 0:
         return

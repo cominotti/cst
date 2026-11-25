@@ -105,12 +105,16 @@ esac
 exit 1
 """
 # systemctl show: prints $FIX_SHOW/<sys|usr>/<unit> (K=V lines), or fails
-# when that file is missing; everything else is the failed-units list.
+# when that file is missing; a show with no --state= prints
+# $FIX_SHOW/<sys|usr>/<unit>.active instead when that file is there (what a
+# glob lists without --state=loaded: the active units only); everything else
+# is the failed-units list.
 SYSTEMCTL = """#!/bin/sh
 echo "systemctl $*" >>"$STUB_LOG"
 case " $* " in
   *" show "*) for a in "$@"; do last="$a"; done
               mgr=sys; case " $* " in *" --user "*) mgr=usr ;; esac
+              case " $* " in *" --state="*) ;; *) [ -f "$FIX_SHOW/$mgr/$last.active" ] && exec cat "$FIX_SHOW/$mgr/$last.active" ;; esac
               [ -f "$FIX_SHOW/$mgr/$last" ] && exec cat "$FIX_SHOW/$mgr/$last"
               echo "Failed to connect to bus" >&2; exit 1 ;;
   *" --user "*) cat "$FIX_USER_FAILED" ;;
@@ -259,7 +263,7 @@ class Scratch(unittest.TestCase):
             "virsh -r -c qemu:///system domblklist ",
             "virsh -r -c qemu:///system domstate ",
             "systemctl show -p LoadState ",
-            "systemctl show -p Id -p LoadState ",
+            "systemctl show --state=loaded -p Id -p LoadState -p SourcePath ",
             "systemctl --user show -p LoadState ",
             "systemctl --user -M tester@ show -p LoadState ",
             "systemctl show --state=loaded -p Id -p LoadState -p NeedDaemonReload ",
@@ -1670,28 +1674,35 @@ class BtrfsCacheDoctorTest(Scratch):
         )
         base = "Id=var-mnt-cache.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload={}\nWhere=/var/mnt/cache\n"
         bind = "Id=var-home-danilo-.cache.mount\nLoadState=loaded\nSourcePath={}\nNeedDaemonReload=no\nWhere=/var/home/danilo/.cache\n"
-        for name, answer, warned in (
-            ("flagged", base.format("yes"), True),
-            ("mountinfo", base.format("no") + "\n" + bind.format("/proc/self/mountinfo"), True),
-            ("current", base.format("no") + "\n" + bind.format("/etc/fstab"), False),
-            ("none", "", False),
-            ("no answer", None, False),
+        # active: what a glob without --state=loaded lists (the active units only); None: the same as the
+        # whole answer. The inactive cases are the base not mounted: a question without --state=loaded
+        # does not see its unit.
+        for name, answer, active, warned in (
+            ("flagged", base.format("yes"), None, True),
+            ("mountinfo", base.format("no") + "\n" + bind.format("/proc/self/mountinfo"), None, True),
+            ("current", base.format("no") + "\n" + bind.format("/etc/fstab"), None, False),
+            ("inactive flagged", base.format("yes"), "", True),
+            ("inactive current", base.format("no"), "", False),
+            ("none", "", None, False),
+            ("no answer", None, None, False),
         ):
             with self.subTest(name):
                 show = os.path.join(self.env["FIX_SHOW"], "sys", "*.mount")
                 os.makedirs(os.path.dirname(show), exist_ok=True)
-                if answer is None:
-                    if os.path.exists(show):
-                        os.unlink(show)
-                else:
-                    with open(show, "w", encoding="utf-8") as fh:
-                        fh.write(answer)
+                for path, text in ((show, answer), (f"{show}.active", active)):
+                    if text is None:
+                        if os.path.exists(path):
+                            os.unlink(path)
+                    else:
+                        with open(path, "w", encoding="utf-8") as fh:
+                            fh.write(text)
                 out = self.run_tool().stdout
                 btrfs_text = "\n".join(area_lines(out, "btrfs"))
                 self.assertEqual(warn in btrfs_text, warned, btrfs_text)
                 self.assertEqual("fix: sudo systemctl daemon-reload" in btrfs_text, warned, btrfs_text)
                 self.assertIn(
-                    "systemctl show -p Id -p LoadState -p SourcePath -p NeedDaemonReload -p Where *.mount", self.calls()
+                    "systemctl show --state=loaded -p Id -p LoadState -p SourcePath -p NeedDaemonReload -p Where *.mount",
+                    self.calls(),
                 )
 
     def test_systemd_behind_on_fstab_is_no_warning_without_the_cache(self) -> None:
