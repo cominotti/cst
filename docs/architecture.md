@@ -45,7 +45,7 @@ and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
 doctor, `perf`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, docker-gc,
-docker-volumes-nocow and snapshot have the full profile (the list is `HEXAGONAL_PACKAGES`); in the other packages `cli.py` orchestrates the commands and some
+docker-volumes-nocow, scrub-limit and snapshot have the full profile (the list is `HEXAGONAL_PACKAGES`); in the other packages `cli.py` orchestrates the commands and some
 still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
 each `cli.py`: new logic goes into `domain` (pure),
@@ -200,7 +200,7 @@ the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
 `HEXAGONAL_PACKAGES` (swap, doctor, cst_core, toolchains, vm, `bluetooth/setup`, `cpu/setup`, `btrfs/bulk`, `btrfs/docker_gc`,
-`btrfs/docker_volumes_nocow` and `btrfs/snapshot` today): their `cli.py` and
+`btrfs/docker_volumes_nocow`, `btrfs/scrub_limit` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other
 module, use `os.environ`, `sys.executable` and `os.execvp` without them

@@ -16,12 +16,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
-from btrfs.scrub_limit.adapters import (
-    ScrubPaths,
-    scrub_limit_apply,
-    scrub_limit_plan,
-    scrub_limit_status,
-)
+from btrfs.scrub_limit.adapters import ScrubPaths
 from btrfs.scrub_limit.cli import ScrubCliDeps, run_scrub_limit_cli
 from btrfs.scrub_limit.domain import (
     DEFAULT_SCRUB_LIMIT,
@@ -35,6 +30,7 @@ from btrfs.scrub_limit.domain import (
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
+from btrfs.scrub_limit.wiring import scrub_limit_apply, scrub_limit_plan, scrub_limit_status
 from btrfs.tests.fakes import RecordingInstallerRunner, ScrubFakeRunner, ScrubWorld, core_text
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runtime import lc_ctype_handover

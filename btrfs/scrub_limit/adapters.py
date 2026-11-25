@@ -4,31 +4,17 @@ snapshots.conf, the installer, systemctl and sysfs."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 import glob
 import os
 from typing import Final
 
-from btrfs.scrub_limit.application import ScrubLimit
-from btrfs.scrub_limit.domain import (
-    SCRUB_CONF_PATH,
-    SCRUB_DROPIN_PATH,
-    SCRUB_SERVICE,
-    ScrubLimitAction,
-    ScrubParsedArgs,
-)
+from btrfs.scrub_limit.domain import SCRUB_CONF_PATH, SCRUB_DROPIN_PATH, SCRUB_SERVICE
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
-from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
-from cst_core.adapters.runtime import (
-    ManagedCliEnv,
-    host_view_path,
-    installer_script_for,
-    run_installer,
-    undo_python_start,
-)
+from cst_core.adapters.runner import HostExecutionContext
+from cst_core.adapters.runtime import host_view_path, installer_script_for, run_installer
 from cst_core.domain.install import Component
 from cst_core.domain.text import YES_WORDS
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, UnitName
@@ -46,11 +32,6 @@ class ScrubPaths:
     dropin_path: str = SCRUB_DROPIN_PATH
     btrfs_sysfs: str = _BTRFS_SYSFS
     installer_script: str = ""
-
-
-def start_scrub_process() -> None:
-    """Restore default SIGPIPE/SIGXFSZ and caller LC_CTYPE."""
-    undo_python_start()
 
 
 def scrub_paths_for(
@@ -202,69 +183,3 @@ class ScrubSysfs:
                 devid = parts[-2]
                 out.append(f"{uuid} device {devid} {raw.strip()}")
         return tuple(out)
-
-
-def build_scrub_limit(paths: ScrubPaths, runner: CommandRunnerPort, *, read_only: bool) -> ScrubLimit:
-    """The use cases over the real files, installer and systemctl at paths; read_only (status and plan):
-    systemd's answer comes from the host's systemd from a toolbox too."""
-    return ScrubLimit(
-        settings=ScrubSettingsFile(paths.conf_path),
-        dropin=ScrubDropinInstaller(paths.dropin_path, paths.installer_script, runner),
-        systemd=ScrubSystemd(runner, SystemctlHost.SHOW_ONLY if read_only else SystemctlHost.LOCAL),
-        sysfs=ScrubSysfs(paths.btrfs_sysfs),
-    )
-
-
-def scrub_limit_status(paths: ScrubPaths, *, runner: CommandRunnerPort | None = None) -> tuple[int, list[str]]:
-    """Read-only status of `SCRUB_LIMIT`, drop-in, sysfs, and whether systemd loaded the drop-in."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    return build_scrub_limit(paths, cmd_runner, read_only=True).status()
-
-
-def scrub_limit_plan(
-    paths: ScrubPaths, target_limit: str | None, *, runner: CommandRunnerPort | None = None
-) -> tuple[int, list[str]]:
-    """Read-only dry run of `cst btrfs scrub-limit set|off`, the daemon-reload included that apply runs
-    when systemd has not loaded the drop-in as it is on disk."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    return build_scrub_limit(paths, cmd_runner, read_only=True).plan(target_limit)
-
-
-def scrub_limit_apply(
-    paths: ScrubPaths,
-    target_limit: str | None,
-    *,
-    runner: CommandRunnerPort | None = None,
-) -> tuple[int, list[str]]:
-    """Update `SCRUB_LIMIT` in `snapshots.conf`, update/remove `10-cst-limit.conf`, and reload systemd if needed.
-
-    When the installer or daemon-reload fails, snapshots.conf and the drop-in go back to what they were."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    return build_scrub_limit(paths, cmd_runner, read_only=False).apply(target_limit)
-
-
-type ScrubBuild = Callable[[bool], ScrubLimit]  # the use case for read_only (status and plan: True)
-
-
-def _run_action(service: ScrubLimit, parsed: ScrubParsedArgs) -> tuple[int, list[str]]:
-    if parsed.action == ScrubLimitAction.STATUS:
-        return service.status()
-    if parsed.action == ScrubLimitAction.PLAN:
-        return service.plan(parsed.limit)
-    return service.apply(parsed.limit)
-
-
-@dataclass(frozen=True, slots=True)
-class ScrubCliExecutor:
-    """The command line's action: status, plan or set|off over the use case build gives (None: the real one,
-    at the paths of the program's entry file and context, through the runner of its environment)."""
-
-    build: ScrubBuild | None = None
-
-    def __call__(self, parsed: ScrubParsedArgs, env: ManagedCliEnv, /, *, read_only: bool) -> tuple[int, list[str]]:
-        """Run the parsed action; read_only: status and plan (the host's view from a toolbox)."""
-        if self.build is not None:
-            return _run_action(self.build(read_only), parsed)
-        paths = scrub_paths_for(env.entry_file, ctx=env.ctx, read_only=read_only, fallback_root=env.fallback_root)
-        runner = SubprocessCommandRunner() if env.runner is None else env.runner
-        return _run_action(build_scrub_limit(paths, runner, read_only=read_only), parsed)

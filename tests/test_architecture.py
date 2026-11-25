@@ -19,8 +19,8 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 - A package's `cli.py` is the outer layer that orchestrates a program's
   commands; in the modules without an application layer (all but swap,
-  doctor, cst_core, toolchains, vm, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow
-  and btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
+  doctor, cst_core, toolchains, vm, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow,
+  btrfs/scrub_limit and btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
   size of each one: new logic goes into domain (pure) or adapters (I/O),
   or into an application layer with ports.
 - Every package module has one role (`module_role`): domain, ports,
@@ -158,7 +158,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/iocost/cli.py": 18,
     "btrfs/pending_alerts/cli.py": 74,
     "btrfs/cache/cli.py": 20,
-    "btrfs/scrub_limit/cli.py": 27,
+    "btrfs/scrub_limit/cli.py": 14,
     "btrfs/snapshot/cli.py": 147,
     "btrfs/snapshot_runtime/cli.py": 13,
     "btrfs/stall_monitord/cli.py": 11,
@@ -226,6 +226,7 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "btrfs/compress": "btrfs/compress/wiring.py",
     "btrfs/docker_gc": "btrfs/docker_gc/wiring.py",
     "btrfs/docker_volumes_nocow": "btrfs/docker_volumes_nocow/wiring.py",
+    "btrfs/scrub_limit": "btrfs/scrub_limit/wiring.py",
     "btrfs/snapshot": "btrfs/snapshot/wiring.py",
     "cpu/setup": "cpu/setup/wiring.py",
     "cst_core": "cst_core/wiring.py",
