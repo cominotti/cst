@@ -203,6 +203,9 @@ EXPECTED_SKIPS: Final[dict[str, str]] = {
         "needs an unprivileged user namespace (unshare -r: off in CI's container; tier 1 test_108 runs it as root)"
     ),
     "btrfs.tests.test_btrfs_snapshot_core.CacheWalkTests.test_drop_failure_keeps_the_tag_and_goes_on": "not as root",
+    "btrfs.tests.test_scrub_limit_ports.RealPortsContractTest.test_a_settings_write_whose_folder_sync_fails_after_its_rename_raises_with_the_new_text_in_place": (
+        "not as root"
+    ),
     "btrfs.tests.test_btrfs_steam.RealBtrfsSteamTest": "opt-in, needs a real btrfs scratch folder",
     "tests.mutation.tests.test_cst_mutation.RealBwrapTest": "needs bwrap and a Python outside the hidden folders",
     "tests.test_cst_core_shared.ShellAssignmentsTest.test_every_value_is_what_bash_sets": "needs /usr/bin/bash",

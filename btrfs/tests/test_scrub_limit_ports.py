@@ -8,10 +8,13 @@ systemctl's, the time limits, the modes of what is written)."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 import errno
 import os
+import resource
 import shutil
+import signal
 import stat
 import tempfile
 from typing import Protocol, override
@@ -35,6 +38,7 @@ from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.domain.install import Component
 from cst_core.domain.record import ComponentState
 from cst_core.ports import CommandResult, OutputMode
+from tests.fault_injection import no_space
 
 TEXT_A = "[Service]\nExecStartPre=a\n"
 TEXT_B = "[Service]\nExecStartPre=b\n"
@@ -43,6 +47,34 @@ INSTALLER = "/opt/cst/cst_core/installer.py"
 
 def _access_denied() -> OSError:
     return OSError(errno.EACCES, "Access denied")
+
+
+@contextmanager
+def _no_file_may_grow() -> Generator[None]:
+    """RLIMIT_FSIZE 0 for this process: a write of a byte to a file fails (EFBIG), as a full disk's does;
+    making a folder or an empty file still works. Python starts with SIGXFSZ ignored, which turns the
+    kernel's signal into that error."""
+    if signal.getsignal(signal.SIGXFSZ) != signal.SIG_IGN:
+        raise AssertionError("SIGXFSZ is not ignored: RLIMIT_FSIZE would kill the test process")
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+
+
+@contextmanager
+def _folder_unreadable(folder: str) -> Generator[None]:
+    """folder 0300: a file in it can still be made, renamed and read, but the folder cannot be opened
+    for reading, so write_atomic's fsync of it, after its rename, fails (EACCES)."""
+    if os.geteuid() == 0:
+        raise unittest.SkipTest("root opens a folder whatever its mode")
+    os.chmod(folder, 0o300)
+    try:
+        yield
+    finally:
+        os.chmod(folder, 0o755)
 
 
 class Side(Protocol):
@@ -54,6 +86,8 @@ class Side(Protocol):
     def sysfs(self) -> ScrubSysfsPort: ...
     def conf_unreadable(self) -> None: ...
     def conf_folder_unwritable(self) -> None: ...
+    def conf_write_fails_before_rename(self) -> AbstractContextManager[None]: ...
+    def conf_sync_fails_after_rename(self) -> AbstractContextManager[None]: ...
     def dropin_unreadable(self) -> None: ...
     def dropin_folder_exists(self) -> bool: ...
     def installer_fails(self) -> None: ...
@@ -88,6 +122,14 @@ class FakeSide:
 
     def conf_folder_unwritable(self) -> None:
         self.world.fail("settings folder", OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)))
+
+    def conf_write_fails_before_rename(self) -> AbstractContextManager[None]:
+        self.world.fail("settings replace", no_space(), times=1)
+        return nullcontext()
+
+    def conf_sync_fails_after_rename(self) -> AbstractContextManager[None]:
+        self.world.fail("settings sync", OSError(errno.EACCES, os.strerror(errno.EACCES)), times=1)
+        return nullcontext()
 
     def dropin_unreadable(self) -> None:
         self.world.dropin_unreadable = True
@@ -147,6 +189,12 @@ class RealSide:
         os.makedirs(os.path.dirname(folder), exist_ok=True)
         with open(folder, "w", encoding="utf-8") as fh:  # a file where its folder should be
             fh.write("x\n")
+
+    def conf_write_fails_before_rename(self) -> AbstractContextManager[None]:
+        return _no_file_may_grow()
+
+    def conf_sync_fails_after_rename(self) -> AbstractContextManager[None]:
+        return _folder_unreadable(os.path.dirname(self.conf))
 
     def dropin_unreadable(self) -> None:
         os.makedirs(self.dropin_path)
@@ -228,6 +276,38 @@ class _PortsContract(unittest.TestCase):
         with self.assertRaises(OSError):
             p.write("A=1\n")
         self.assertFalse(p.folder_exists())
+
+    def test_a_settings_write_that_fails_before_its_rename_leaves_the_old_text(self) -> None:
+        p = self.side.settings()
+        p.write("A=1\n")
+        with self.side.conf_write_fails_before_rename(), self.assertRaises(OSError):
+            p.write("B=2\n")
+        self.assertEqual(p.read(), ("A=1\n", False))
+        p.remove()
+        p.remove_folder_if_empty()
+        self.assertFalse(p.folder_exists())  # no temporary file left in it
+
+    def test_a_new_settings_write_that_fails_before_its_rename_leaves_its_folder_empty(self) -> None:
+        p = self.side.settings()
+        with self.side.conf_write_fails_before_rename(), self.assertRaises(OSError):
+            p.write("A=1\n")
+        self.assertEqual(p.read(), (None, False))
+        self.assertTrue(p.folder_exists())  # made by the write
+        p.remove_folder_if_empty()
+        self.assertFalse(p.folder_exists())  # empty: no temporary file left in it
+
+    def test_a_settings_write_whose_folder_sync_fails_after_its_rename_raises_with_the_new_text_in_place(
+        self,
+    ) -> None:
+        p = self.side.settings()
+        p.write("A=1\n")
+        with self.side.conf_sync_fails_after_rename(), self.assertRaises(OSError):
+            p.write("B=2\n")
+        self.assertEqual(p.read(), ("B=2\n", False))
+        p.remove()  # no file in its folder now
+        with self.side.conf_sync_fails_after_rename(), self.assertRaises(OSError):
+            p.write("C=3\n")
+        self.assertEqual(p.read(), ("C=3\n", False))
 
     def test_the_drop_in_through_the_installer_answers_its_report_lines(self) -> None:
         d = self.side.dropin()
