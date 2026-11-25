@@ -8,6 +8,8 @@ import re
 import unicodedata
 from typing import Final, override
 
+from cst_core.domain.values import ASCII_BLANKS
+
 
 def first_line(text: str | None) -> str:
     """The first non-blank line of text, stripped ("" when there is none)."""
@@ -91,7 +93,16 @@ def is_yes(answer: str) -> bool:
     return answer.strip().lower().startswith(("y", "s"))
 
 
-# A yes/no setting's words (any case, blanks around them dropped): toolchains' settings take one of
+def strip_ascii_blanks(text: str) -> str:
+    """TEXT without the ASCII blanks (space, tab, newline, carriage return, form feed, vertical tab) at
+    either end: how a word read from a settings file or argv is trimmed. str.strip() also removes
+    U+00A0 (no-break space), U+3000 (ideographic space) and other Unicode blanks, and the separators
+    U+001C-U+001F, which neither bash nor systemd treats as blanks: a word with one of them is no such
+    word."""
+    return text.strip(ASCII_BLANKS)
+
+
+# A yes/no setting's words (any case, ASCII blanks around them dropped): toolchains' settings take one of
 # each; a vm knob is off for a NO_WORDS word and on for anything else.
 YES_WORDS: Final = frozenset({"yes", "true", "on", "1"})
 NO_WORDS: Final = frozenset({"no", "false", "off", "0"})

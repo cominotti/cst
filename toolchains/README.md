@@ -160,7 +160,8 @@ RUST_BUILD_MAX_TOTAL=200G
 | `RUST_SCCACHE_WORKSPACE` | `yes` | `no`: your own crates (workspace members and path dependencies) skip sccache; only dependencies from a registry or git go through it. Matters only for builds without incremental compilation. `CST_SCCACHE_WORKSPACE=0` or `1` sets it for one build ([section 6](#local-crates-rust_sccache_workspace)). |
 
 Every key is `<LANG>_<CACHE>_<SETTING>`. Numbers are ASCII digits (`0`-`9`) and
-the unit letters and blanks ASCII ones, as bash and systemd read them: a digit
+the unit letters and blanks ASCII ones, as bash and systemd read them, around
+a word too (`off`, `yes`: a no-break space is part of the word): a digit
 of another script (an Arabic-Indic `40G`) is a wrong line. Durations take `s`, `m`, `h`, `d` or
 `w`. Sizes take `K`, `M`, `G` or `T` (`G`, `GB` and `GiB` all mean GiB), and
 the unit is required: `RUST_BUILD_MAX_TOTAL=150` is an error, not 150 bytes

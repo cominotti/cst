@@ -234,6 +234,22 @@ class SettingsTest(Base):
             with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration", msg=bad):
                 p(bad)
 
+    def test_off_and_yes_no_words_take_ascii_blanks_only(self) -> None:
+        # A no-break space or an ideographic space around the word is part of it, as bash and systemd
+        # read a word: "\N{NO-BREAK SPACE}off" is no off word (and no duration), "yes\N{IDEOGRAPHIC SPACE}"
+        # no yes. ASCII blanks around it are still dropped.
+        self.assertEqual(tcd_common.parse_off_or_duration(" off\t"), 0)
+        self.assertEqual(tcd_common.parse_off_or_duration("NONE\r"), 0)
+        self.assertTrue(tcd_common.parse_bool("YES\r"))
+        self.assertFalse(tcd_common.parse_bool(" no\t"))
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration"):
+            tcd_common.parse_off_or_duration("\N{NO-BREAK SPACE}off")
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration"):
+            tcd_common.parse_off_or_duration("off\N{IDEOGRAPHIC SPACE}")
+        for word in ("yes\N{IDEOGRAPHIC SPACE}", "\N{NO-BREAK SPACE}no"):
+            with self.subTest(word=word), self.assertRaisesRegex(tcd_common.ConfigError, "is not yes or no"):
+                tcd_common.parse_bool(word)
+
     def test_sizes(self) -> None:
         p = tcd_common.parse_size
         self.assertEqual(p("150G"), 150 << 30)

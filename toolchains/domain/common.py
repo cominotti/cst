@@ -19,7 +19,14 @@ from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.units import USER_UNIT_DIR_REL
 from cst_core.domain.shapes import json_object, parse_toml
-from cst_core.domain.text import HELP_WORDS, NO_WORDS, YES_WORDS, enum_member, parse_shell_assignments
+from cst_core.domain.text import (
+    HELP_WORDS,
+    NO_WORDS,
+    YES_WORDS,
+    enum_member,
+    parse_shell_assignments,
+    strip_ascii_blanks,
+)
 from cst_core.domain.values import (
     DAY,
     HOUR,
@@ -132,7 +139,9 @@ OFF_WORDS: Final = frozenset({"0", "off", "no", "none"})
 
 
 def parse_bool(text: str) -> bool:
-    t = text.strip().lower()
+    """True for a YES_WORDS word, False for a NO_WORDS word (any case, ASCII blanks around it dropped: a
+    no-break space is part of the word); ConfigError for anything else."""
+    t = strip_ascii_blanks(text).lower()
     if t in YES_WORDS:
         return True
     if t in NO_WORDS:
@@ -181,8 +190,8 @@ OPTIONS: dict[str, Callable[[str], bool | str]] = {
 
 
 def parse_off_or_duration(text: str) -> int:
-    """Seconds, or 0 for 0/off/no (the rule is off)."""
-    if text.strip().lower() in OFF_WORDS:
+    """Seconds, or 0 for 0/off/no/none (the rule is off; any case, ASCII blanks around the word dropped)."""
+    if strip_ascii_blanks(text).lower() in OFF_WORDS:
         return 0
     return parse_duration(text)
 

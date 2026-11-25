@@ -99,6 +99,14 @@ def format_bytes_decimal(n: float) -> str:
     return f"{val} B"
 
 
+# The ASCII blanks str.strip() removes, apart from the separators U+001C-U+001F: space, tab, newline,
+# carriage return, form feed, vertical tab. str.strip() with no argument also removes U+0085, U+00A0
+# (no-break space), U+3000 (ideographic space) and other Unicode blanks, which neither bash nor systemd
+# treats as blanks. A word read from a settings file or argv is trimmed of these only
+# (cst_core.domain.text.strip_ascii_blanks).
+ASCII_BLANKS: Final = " \t\n\r\f\v"
+
+
 def _whole_number(digits: str) -> int | None:
     """int(DIGITS), or None for more digits than int() reads (sys.get_int_max_str_digits)."""
     try:

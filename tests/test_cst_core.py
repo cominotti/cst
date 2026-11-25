@@ -43,7 +43,9 @@ from cst_core.domain.dispatch import (
 )
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
 from cst_core.domain.plan import PlanItem
+from cst_core.domain.text import strip_ascii_blanks
 from cst_core.domain.values import (
+    ASCII_BLANKS,
     ByteSize,
     CpuSet,
     DomainValidationError,
@@ -89,6 +91,30 @@ class FakeRunner:
         if check and res.returncode != 0:
             raise RuntimeError(f"command failed: {cmd}")
         return res
+
+
+class AsciiBlanksTest(unittest.TestCase):
+    def test_only_ascii_blanks_are_trimmed(self) -> None:
+        # Space, tab, newline, carriage return, form feed and vertical tab; not the Unicode blanks
+        # str.strip() also removes (no-break space, ideographic space, NEL) nor the separators
+        # U+001C-U+001F, which bash and systemd keep in a word.
+        self.assertEqual(ASCII_BLANKS, " \t\n\r\f\v")
+        self.assertEqual(strip_ascii_blanks("  off\t\r\n"), "off")
+        self.assertEqual(strip_ascii_blanks("\f\voff \v"), "off")
+        self.assertEqual(strip_ascii_blanks(""), "")
+        self.assertEqual(strip_ascii_blanks(" \t "), "")
+        for kept in (
+            "\N{NO-BREAK SPACE}off",
+            "off\N{IDEOGRAPHIC SPACE}",
+            "\x1foff",
+            "off\x1c",
+            "off\x85",
+            "\N{LINE SEPARATOR}off",
+        ):
+            with self.subTest(kept=kept):
+                self.assertEqual(strip_ascii_blanks(kept), kept)
+                self.assertNotEqual(kept.strip(), kept)  # what str.strip() would have trimmed
+        self.assertEqual(strip_ascii_blanks(" \N{NO-BREAK SPACE}off\t"), "\N{NO-BREAK SPACE}off")
 
 
 class ValueObjectsTest(unittest.TestCase):
