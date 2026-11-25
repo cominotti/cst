@@ -9738,14 +9738,15 @@ echo E2E-OK
         """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
         set before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and, where
         /etc/uresourced.conf goes (the image's own moved aside first; the test's trap removes what it put
-        there and puts it back before swap_cleanup runs), first a folder, then a link to a folder (apply
-        copies the file aside through the link before it writes it): plan's row of the file is "?" and
-        says apply refuses it; apply exits 1 with "<file>: cannot be read: nothing was changed" on
-        stderr, and every file, link, mode and owner under /etc and the scratch tree, and the install
-        record, are as before (no crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply
-        wrote crypttab and fstab, started swap0's step, set zswap, masked zram and ran sysctl first, and
-        failed at the copy with "Is a directory". With the image's file back, the same apply works and
-        a second one changes nothing."""
+        there and puts it back before swap_cleanup runs), first a folder, then a link to a folder, then a
+        link to a FIFO (apply copies the file aside through the link before it writes it; plan, bounded by
+        a timeout, reads nothing through the link): plan's row of the file is "?" and says apply refuses
+        it; apply exits 1 with "<file>: cannot be read: nothing was changed" on stderr, and every file,
+        link, mode and owner under /etc and the scratch tree, and the install record, are as before (no
+        crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply wrote crypttab and fstab,
+        started swap0's step, set zswap, masked zram and ran sysctl first, and failed at the copy with
+        "Is a directory"; with the FIFO, plan blocked in its open. With the image's file back, the same
+        apply works and a second one changes nothing."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
@@ -9792,6 +9793,14 @@ rmdir "$CONF"
 mkdir "$W/ures-dir"
 ln -s "$W/ures-dir" "$CONF"
 refused "a link to a folder in its place"
+rm "$CONF"
+mkfifo "$W/ures-fifo"
+ln -s "$W/ures-fifo" "$CONF"
+# Bounded: plan read the file through the link before, and blocked in the FIFO's open.
+rc=0
+timeout 60 "$CST" swap plan >"$W/out" 2>"$W/err" || rc=$?
+[[ $rc != 124 ]] || fail "plan blocked on a link to a FIFO"
+refused "a link to a FIFO in its place"
 
 # The image's file back (or none): the same apply works, and a second one changes nothing.
 conf_back

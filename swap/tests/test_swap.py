@@ -783,6 +783,21 @@ class _UnbufferedToPipe(io.StringIO):
         return super().write(s)
 
 
+class _ReadsRecorded(SwapTempFileSystem):
+    """Records each path read_text is asked for; a path in unopened gives the default without being opened
+    (a FIFO's open would block the test)."""
+
+    def __init__(self, block_links: Mapping[str, str], *, unopened: set[str]) -> None:
+        super().__init__(block_links)
+        self._unopened = set(unopened)
+        self.reads: list[str] = []
+
+    @override
+    def read_text(self, path: str, default: str | None = None) -> str | None:
+        self.reads.append(path)
+        return default if path in self._unopened else super().read_text(path, default)
+
+
 class _TextUnreadable(SwapTempFileSystem):
     """read_text gives its default for the paths in unread, as for a file the process may not open."""
 
@@ -1109,8 +1124,10 @@ class _SwapScratch(unittest.TestCase):
         rc = render_apply(service.apply_changes(), out=out, err=err)
         return rc, out.getvalue(), err.getvalue(), systemd
 
-    def _plan_text(self, env: SwapEnvironment, *, unreadable: set[str] | None = None) -> str:
-        fs = self._fs(unreadable=unreadable)
+    def _plan_text(
+        self, env: SwapEnvironment, *, unreadable: set[str] | None = None, fs: SwapTempFileSystem | None = None
+    ) -> str:
+        fs = self._fs(unreadable=unreadable) if fs is None else fs
         service = SwapApplicationService(
             env,
             fs,
@@ -2811,6 +2828,55 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertFalse(os.path.islink(dest))
         with open(dest, encoding="utf-8") as f, open(self.env.src_path(URESOURCED_ENTRY), encoding="utf-8") as g:
             self.assertEqual(f.read(), g.read())
+
+    def test_a_link_at_uresourced_conf_to_a_fifo_is_refused_without_reading_through_it(self) -> None:
+        # The open of a FIFO blocks until something writes into it (a device such as /dev/zero never ends).
+        # Before, plan, status and apply's check before its first write read the file through the link, and
+        # plan hung there; apply's copy aside of a FIFO fails.
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        dest = self.env.etc_path(URESOURCED_ENTRY)
+        elsewhere = tempfile.mkdtemp(prefix="swap-fifo-")  # outside self.tmp: file_tree would open the FIFO
+        self.addCleanup(shutil.rmtree, elsewhere)
+        fifo = os.path.join(elsewhere, "uresourced.fifo")
+        os.mkfifo(fifo)
+        os.symlink(fifo, dest)
+        before = file_tree(self.tmp)
+        fs = _ReadsRecorded(self._fs().block_links, unopened={dest})
+        self._assert_refused_before_any_write(
+            self._apply_on(fs), f"cst swap: ERROR: {dest}: cannot be read: nothing was changed"
+        )
+        plan = self._plan_text(dataclasses.replace(self.env, as_root=True), fs=fs)
+        line = next(x for x in plan.splitlines() if " uresourced.conf " in x)
+        self.assertTrue(line.startswith("  ?  "), line)
+        self.assertNotIn(dest, fs.reads)
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertEqual(os.readlink(dest), fifo)
+        self.assertFalse(os.path.lexists(f"{dest}.pre-swap-config.bak"))
+
+    @unittest.skipIf(os.geteuid() == 0, "not as root")
+    def test_a_link_at_uresourced_conf_to_a_file_root_cannot_read_stops_apply_before_any_write(self) -> None:
+        # The copy aside follows the link, and _inspect_file reads nothing through a link: the check before the
+        # first write looks at the file the link leads to (mode 0; this process is not root, as apply as root
+        # under a policy).
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        dest = self.env.etc_path(URESOURCED_ENTRY)
+        elsewhere = tempfile.mkdtemp(prefix="swap-mode0-")  # outside self.tmp: file_tree cannot read a mode 0 file
+        self.addCleanup(shutil.rmtree, elsewhere)
+        mine = os.path.join(elsewhere, "mine.conf")
+        with open(mine, "w", encoding="utf-8") as f:
+            f.write("# mine\n")
+        os.chmod(mine, 0)
+        os.symlink(mine, dest)
+        before = file_tree(self.tmp)
+        self._assert_refused_before_any_write(
+            self._apply_on(self._fs()), f"cst swap: ERROR: {dest}: cannot be read: nothing was changed"
+        )
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertEqual(os.readlink(dest), mine)
+        self.assertEqual(stat.S_IMODE(os.stat(mine).st_mode), 0)
+        self.assertFalse(os.path.lexists(f"{dest}.pre-swap-config.bak"))
 
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the

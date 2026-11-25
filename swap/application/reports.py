@@ -354,7 +354,8 @@ class SwapReports:
     def _managed_state(self, src: str, dest: str) -> ManagedState:
         """The state of a file apply writes whole (src: its source in swap/), as plan shows it and apply checks it
         before its first write: _inspect_file's, except unreadable for /etc/uresourced.conf when apply would copy it
-        aside and cannot read it (a link to a folder, or to a file it may not read: the copy follows the link).
+        aside and cannot read it (a link to a folder, to a file it may not read, or to anything but a file, such as
+        a FIFO, whose open would block, or a device: the copy follows the link). Nothing is read through the link.
         The installer replaces a link at any of the others itself, and reads nothing through it."""
         st = self._inspect_file(src, dest)
         if st == OwnedState.UNREADABLE or dest != self._env.etc_path(URESOURCED_ENTRY):
@@ -362,7 +363,7 @@ class SwapReports:
         copy_fails = (
             self._uresourced_copy_due(dest, st)
             and not self._fs.lexists(dest + URESOURCED_BAK_SUFFIX)
-            and self._fs.read_text(dest) is None
+            and not (self._fs.is_file(dest) and self._fs.is_readable(dest))
         )
         return OwnedState.UNREADABLE if copy_fails else st
 

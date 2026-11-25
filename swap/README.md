@@ -322,8 +322,12 @@ What `apply` does, in order:
    `/etc/tmpfiles.d/cst-mm-responsiveness.conf`,
    `/etc/sysctl.d/99-swap-tuning.conf`, `/etc/uresourced.conf`, which
    step 7 copies aside first, and the `machine.slice` drop-in) can be read
-   (a folder in place of one, or a link at `/etc/uresourced.conf` to one, is
-   refused with `<file>: cannot be read: nothing was changed`), and that
+   (a folder in place of one is refused with
+   `<file>: cannot be read: nothing was changed`; so is a link at
+   `/etc/uresourced.conf` to anything but a file it can read, such as a
+   folder or a FIFO, while step 7 has still to copy it aside: while no
+   `/etc/uresourced.conf.pre-swap-config.bak` is there; nothing is read
+   through the link), and that
    root's install record (`/var/lib/cst/installed.json`) was not written by
    a newer CST (a downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
    `/etc/cst/swap.conf` (section 5).
