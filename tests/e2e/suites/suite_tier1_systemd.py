@@ -11691,6 +11691,115 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_222_older_copies_of_the_watchers_unit(self) -> None:
+        """cst bluetooth as tester with XDG_CONFIG_HOME in the shell only (tester's manager reads
+        ~/.config/systemd/user), and the copies of the LDAC watcher's unit an older CST left, written and
+        recorded through the real installer. (1) An older copy under the shell's folder with the enable link
+        a manager that read it made (default.target.wants): plan shows both removals, apply removes both, and
+        the unit goes to ~/.config/systemd/user, loaded, enabled and active. (2) The live unit recorded once
+        more through a link to ~/.config (~/cfg222): plan shows "forget" for that path, apply drops only its
+        record line and leaves the unit file (same inode and mtime) running, with no restart. (3) The manager's
+        UnitPath question failing (a systemctl on PATH that refuses it, everything else the real one) and an
+        older copy recorded under the shell's folder again: plan and revert --check name no removal of it,
+        revert removes the unit in ~/.config and keeps that copy and its record line; with the real systemctl
+        the next revert removes it. Before: apply left the enable link; apply removed the live unit through the
+        link and wrote it again; revert removed the copy with no answer to say where the manager reads units."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "XDG_CONFIG_HOME=/home/tester/xdg222 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
+            "rm -rf /home/tester/xdg222 /home/tester/cfg222 /home/tester/bin222",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_222
+            trap 'echo "test_222 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            X="$H/xdg222"
+            lw=cst-bt-ldac48.service
+            unit="$H/.config/systemd/user/$lw"
+            old="$X/systemd/user/$lw"
+            link="$X/systemd/user/default.target.wants/$lw"
+            alias="$H/cfg222/systemd/user/$lw"
+            rec="$H/.local/state/cst/installed.json"
+            recorded() { grep -qF "\"$1\"" "$rec"; }
+            plant() {  # plant DEST: the watcher's unit written and recorded there by the real installer
+                python3 -I -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from bluetooth.domain import render_unit; print(render_unit("00:11:22:33:44:55", "48000"), end="")' |
+                    python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$1" 0644 --component bluetooth:ldac >/dev/null
+                recorded "$1"
+            }
+            mkdir -p "$X/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_RATE=48000\nLE_AUDIO=off\n' >"$X/cst/bluetooth.conf"
+            export XDG_CONFIG_HOME="$X"
+            [[ ! -e "$unit" ]] || { echo "the unit is there already" >&2; exit 1; }
+            # (1) An older copy and its enable link.
+            plant "$old"
+            mkdir -p "$(dirname "$link")"
+            ln -s "$old" "$link"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan1 "$out"
+            [[ $rc == 10 ]]
+            grep -qE "^  remove +~/xdg222/systemd/user/$lw +an older CST's copy" <<<"$out"
+            grep -qE "^  remove +~/xdg222/systemd/user/default.target.wants/$lw +the enable link" <<<"$out"
+            step apply1 apply --yes --no-restart
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            grep -qF "removed:   $link (its enable link)" <<<"$out"
+            [[ ! -e "$old" && ! -L "$link" ]]
+            if recorded "$old"; then echo "the older copy is still recorded" >&2; exit 1; fi
+            [[ "$(systemctl --user show -P FragmentPath "$lw")" == "$unit" ]]
+            [[ "$(systemctl --user is-enabled "$lw")" == enabled ]]
+            systemctl --user is-active --quiet "$lw"
+            # (2) The live unit recorded once more through a link to ~/.config.
+            ln -s .config "$H/cfg222"
+            plant "$alias"
+            before="$(stat -c '%i %Y' "$unit")"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan2 "$out"
+            [[ $rc == 10 ]]
+            grep -qE "^  forget +~/cfg222/systemd/user/$lw +the same file as the unit's" <<<"$out"
+            step apply2 apply --yes --no-restart
+            grep -qF "forgotten: $alias (the same file as $unit)" <<<"$out"
+            if grep -qE "^(removed|restarted): " <<<"$out"; then echo "apply2 removed or restarted the unit" >&2; exit 1; fi
+            [[ "$(stat -c '%i %Y' "$unit")" == "$before" ]]
+            if recorded "$alias"; then echo "the other path is still recorded" >&2; exit 1; fi
+            recorded "$unit"
+            rm "$H/cfg222"
+            # (3) No answer to UnitPath: the recorded copies are kept.
+            plant "$old"
+            mkdir -p "$H/bin222"
+            printf '#!/bin/bash\nfor a; do [[ $a == UnitPath ]] && exit 1; done\nexec /usr/bin/systemctl "$@"\n' >"$H/bin222/systemctl"
+            chmod +x "$H/bin222/systemctl"
+            if PATH="$H/bin222:$PATH" systemctl --user show -p UnitPath --value >/dev/null; then
+                echo "cannot bite: the UnitPath question did not fail" >&2
+                exit 1
+            fi
+            rc=0; out="$(PATH="$H/bin222:$PATH" bt plan 2>&1)" || rc=$?
+            show plan3 "$out"
+            if grep -qF "older CST" <<<"$out"; then echo "plan3 names the copy as an older one" >&2; exit 1; fi
+            out="$(PATH="$H/bin222:$PATH" bt revert --check 2>&1)" || true
+            show check3 "$out"
+            if grep -qF "would remove $old" <<<"$out"; then echo "revert --check would remove the copy" >&2; exit 1; fi
+            out="$(PATH="$H/bin222:$PATH" bt revert --yes --no-restart 2>&1)"
+            show revert3 "$out"
+            [[ ! -e "$unit" && -f "$old" ]]
+            recorded "$old"
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show revert4 "$out"
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            [[ ! -e "$old" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_195_doctor_names_a_cst_user_unit_the_user_manager_has_not_loaded(self) -> None:
         """tester's real install record (copied aside and put back) with a drop-in of a running user unit
