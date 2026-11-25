@@ -725,18 +725,18 @@ sys.exit(r.returncode)
 """
 
 
-# test_224: the checkout's docker-gc (argv[1]) with a DOCKER_GC_PROTECT item that has a no-break space
-# beside it (the real bytes C2 A0), against the fake docker and systemctl of test_103 and its scenario
-# (an old image of registry.example.com and old unprotected ones, the recorder running). In the settings
-# file, run --dry-run under LC_ALL=C and C.UTF-8; in the environment of a real systemd unit
-# (systemd-run, Environment=): both exit 78 naming the item and the blank, and docker is asked to remove
-# nothing. Without the blank the same unit holds the registry's image back (cannot bite otherwise).
-GC_PROTECT_BLANK = r"""
+# The setup of test_224 and test_264: the checkout's docker-gc (argv[1]) against the fake docker and
+# systemctl of test_103 and its scenario (an old image of registry.example.com and old unprotected ones,
+# the recorder running); argv[2] is the test's number. write_conf writes the settings file, unit runs the
+# dry run as a real systemd unit (systemd-run) with DOCKER_GC_PROTECT in its Environment=, and removing
+# names what docker was asked to remove.
+GC_UNIT_SETUP = r"""
 import json, os, subprocess, sys, tempfile, time
 sys.path.insert(0, "/opt/cst-rw")
 from btrfs.tests import test_docker_gc_program as t
 prog = ["/usr/bin/python3", "-I", "-B", sys.argv[1]]
-tmp = tempfile.mkdtemp(prefix="e2e-gc-blank-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
+TEST = sys.argv[2]  # the test's number: its unit's name and its lines
+tmp = tempfile.mkdtemp(prefix=f"e2e-gc-{TEST}-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
 fakes = os.path.join(tmp, "bin")
 os.mkdir(fakes)
 for name, text in (("docker", t.FAKE_DOCKER), ("systemctl", t.FAKE_SYSTEMCTL)):
@@ -759,8 +759,6 @@ env = {
     "FAKE_DOCKER_STATE": os.path.join(tmp, "docker.json"), "FAKE_DOCKER_LOG": calls_log,
 }
 reg = "registry.example.com"
-item = "\N{NO-BREAK SPACE}" + reg
-blank = "a no-break space (U+00A0) at the start of the value"
 
 
 def removing():
@@ -777,7 +775,7 @@ def write_conf(value):
 
 def unit(protect):
     # The dry run as a real unit, DOCKER_GC_PROTECT in its Environment=: (exit status, its journal).
-    name = "e2e-224-gc.service"
+    name = f"e2e-{TEST}-gc.service"
     props = [f"--property=Environment={k}={v}" for k, v in env.items()]
     props.append(f"--property=Environment=DOCKER_GC_PROTECT=other.example.org,{protect}")
     start = time.time()
@@ -789,10 +787,22 @@ def unit(protect):
     log = subprocess.run(["journalctl", "-q", "--no-pager", "-o", "cat", "-u", name, "--since", f"@{int(start) - 1}"],
                          capture_output=True, text=True, encoding="utf-8", errors="replace", check=False).stdout
     subprocess.run(["systemctl", "reset-failed", name], capture_output=True, check=False)
-    sys.stderr.write(f"test_224 unit {protect!r}: status={status}\n{log}")
+    sys.stderr.write(f"test_{TEST} unit {protect!r}: status={status}\n{log}")
     return status, log
 
 
+"""
+
+# test_224 (on GC_UNIT_SETUP): a DOCKER_GC_PROTECT item that has a no-break space beside it (the real
+# bytes C2 A0). In the settings file, run --dry-run under LC_ALL=C and C.UTF-8; in the environment of a
+# real systemd unit (systemd-run, Environment=): both exit 78 naming the item and the blank, and docker
+# is asked to remove nothing. Without the blank the same unit holds the registry's image back (cannot
+# bite otherwise).
+GC_PROTECT_BLANK = (
+    GC_UNIT_SETUP
+    + r"""
+item = "\N{NO-BREAK SPACE}" + reg
+blank = "a no-break space (U+00A0) at the start of the value"
 # 1. The settings file: exit 78 under both locales, docker asked to remove nothing.
 write_conf(item)
 for locale in ("C", "C.UTF-8"):
@@ -817,6 +827,7 @@ if status != "0" or "protected registry" not in log:
     sys.exit("test_224: without the blank: expected exit 0 and the protected image held back")
 print("E2E-OK")
 """
+)
 
 # test_145: the program at argv[1] with its settings file at argv[2] against the same fake docker and
 # scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
@@ -5596,12 +5607,12 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.addCleanup(
             exec_bash,
             c,
-            "systemctl reset-failed e2e-224-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-blank-*",
+            "systemctl reset-failed e2e-224-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-224-*",
             check=False,
         )
         out = exec_bash(
             c,
-            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_BLANK)} /opt/cst-rw/btrfs/docker-gc",
+            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_BLANK)} /opt/cst-rw/btrfs/docker-gc 224",
         ).stdout
         self.assertIn("E2E-OK", out)
 
