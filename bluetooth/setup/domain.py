@@ -40,6 +40,9 @@ LE_AUDIO_LABEL: Final = "LE Audio"  # LE Audio's row in plan and status (and sta
 LW_STALE_NOTE: Final = "an older CST's copy, where your user manager does not read units: apply removes it"
 LW_STALE_FOREIGN_NOTE: Final = "recorded as CST's, not written by CST: left alone; apply drops its record line"
 LW_STALE_SAME_NOTE: Final = "the same file as the unit's, by another path: apply only drops this record line"
+LW_STALE_LINK_NOTE: Final = "the enable link of that older copy: apply removes it"
+# Where `systemctl --user enable` links the watcher's unit, beside it (its WantedBy=default.target).
+LW_WANTS_DIR: Final = "default.target.wants"
 
 
 class OlderCopy(StrEnum):

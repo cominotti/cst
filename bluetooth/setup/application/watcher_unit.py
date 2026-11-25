@@ -9,7 +9,14 @@ import posixpath
 from collections.abc import Callable
 
 from bluetooth.domain import LDAC_UNIT, MARKER
-from bluetooth.setup.domain import LW_STALE_FOREIGN_NOTE, LW_STALE_NOTE, LW_STALE_SAME_NOTE, OlderCopy
+from bluetooth.setup.domain import (
+    LW_STALE_FOREIGN_NOTE,
+    LW_STALE_LINK_NOTE,
+    LW_STALE_NOTE,
+    LW_STALE_SAME_NOTE,
+    LW_WANTS_DIR,
+    OlderCopy,
+)
 from bluetooth.setup.ports import SetupFilesPort
 from cst_core.application.install import record_file
 from cst_core.domain.install import Component, Owner
@@ -60,11 +67,21 @@ def copy_kind(files: SetupFilesPort, path: str, current: str) -> OlderCopy:
     return OlderCopy.FOREIGN
 
 
+def enable_link(files: SetupFilesPort, path: str) -> str | None:
+    """The link `systemctl --user enable` made for the copy at path, in its folder's
+    default.target.wants, when it is there and points to that copy (a manager that read that folder
+    then); None otherwise."""
+    link = posixpath.join(posixpath.dirname(path), LW_WANTS_DIR, posixpath.basename(path))
+    if files.is_symlink(link) and files.realpath(link) == files.realpath(path):
+        return link
+    return None
+
+
 def stale_rows(
     files: SetupFilesPort, copies: tuple[str, ...], current: str, tilde: Callable[[str], str]
 ) -> list[tuple[str, str, str]]:
-    """plan's row of each older copy (word, label, note): apply removes it, or drops only its record
-    line (one CST did not write, left alone; another path to the current file)."""
+    """plan's row of each older copy (word, label, note): apply removes it, and its enable link, or drops
+    only its record line (one CST did not write, left alone; another path to the current file)."""
     notes = {
         OlderCopy.REMOVE: ("remove", LW_STALE_NOTE),
         OlderCopy.FOREIGN: ("forget", LW_STALE_FOREIGN_NOTE),
@@ -72,6 +89,9 @@ def stale_rows(
     }
     rows = []
     for p in copies:
-        word, note = notes[copy_kind(files, p, current)]
+        kind = copy_kind(files, p, current)
+        word, note = notes[kind]
         rows.append((word, tilde(p), note))
+        if kind == OlderCopy.REMOVE and (link := enable_link(files, p)) is not None:
+            rows.append(("remove", tilde(link), LW_STALE_LINK_NOTE))
     return rows

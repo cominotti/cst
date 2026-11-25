@@ -199,6 +199,7 @@ OWED = "(still owed: an earlier run did not restart it)"
 LW_STALE = "an older CST's copy, where your user manager does not read units: apply removes it"
 LW_STALE_FOREIGN = "recorded as CST's, not written by CST: left alone; apply drops its record line"
 LW_STALE_SAME = "the same file as the unit's, by another path: apply only drops this record line"
+LW_STALE_LINK = "the enable link of that older copy: apply removes it"
 
 
 def row(word: str, label: str, note: str = "") -> str:
@@ -1743,13 +1744,22 @@ class WatcherTest(SetupCase):
         m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
         m.run("apply", "--no-restart")
         self.assertTrue(os.path.isfile(old))
+        # The enable link that manager's `systemctl --user enable` made beside it (FAKE makes none).
+        link = os.path.join(os.path.dirname(old), "default.target.wants", LW)
+        os.makedirs(os.path.dirname(link))
+        os.symlink(old, link)
         os.unlink(m.state + "/unit-path")
         r = m.run("plan")
         self.assertEqual(r.returncode, 10, r.text)
         self.assertIn(row("remove", "~/xdg/systemd/user/" + LW, LW_STALE), r.stdout)
+        self.assertIn(row("remove", "~/xdg/systemd/user/default.target.wants/" + LW, LW_STALE_LINK), r.stdout)
         self.assertIn(row("write", f"systemd/user/{LW}", "the LDAC rate watcher (LDAC_RATE=48000)"), r.stdout)
+        r = m.run("revert", "--check")
+        self.assertIn(f"would remove {old} (an older CST's copy)\nwould remove {link} (its enable link)\n", r.stdout)
+        self.assertTrue(os.path.islink(link))
         r = m.run("apply", "--no-restart")
-        self.assertIn(f"removed:   {old} (an older CST's copy)\n", r.stdout)
+        self.assertIn(f"removed:   {old} (an older CST's copy)\nremoved:   {link} (its enable link)\n", r.stdout)
+        self.assertFalse(os.path.lexists(link))
         self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
         self.assertFalse(os.path.exists(old))
         self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, m.lw_unit]))

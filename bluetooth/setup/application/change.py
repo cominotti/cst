@@ -543,8 +543,9 @@ class Change(Checks):
         """An older CST's copies of the watcher's unit (lw_stale: recorded where the user manager does not
         read units) removed through the installer, which forgets them in the record too; a file there
         that CST did not write is left alone and only forgotten, with a warning, and so is another path to
-        the current unit file (only its record line goes). The manager never
-        loaded them: no disable, no reload. With --check: only said."""
+        the current unit file (only its record line goes). The manager does not read their folder now:
+        no disable and no reload, but the enable link a manager that read it made is removed with the
+        copy (lw_remove_older). With --check: only said."""
         current = self.lw_unit_file
         for path in self.lw_stale:
             kind = watcher_unit.copy_kind(self.m.files, path, current)
@@ -561,11 +562,23 @@ class Change(Checks):
                     continue
                 self.checked(["forget-text", "--home", self.p.home, path])
                 self.err(f"WARNING: {path} was not written by CST: left alone (forgotten from the install record)\n")
-            elif self.o.check:
-                self.out(f"would remove {path} (an older CST's copy)\n")
             else:
-                said = self.checked(["remove-text", "--home", self.p.home, path])
-                self.out(f"{said.rstrip(chr(10))} (an older CST's copy)\n" if said else f"forgotten: {path}\n")
+                self.lw_remove_older(path)
+
+    def lw_remove_older(self, path: str) -> None:
+        """An older CST's copy at path removed through the installer, and the enable link a manager that
+        read its folder made beside it (with --check: only said)."""
+        link = watcher_unit.enable_link(self.m.files, path)
+        if self.o.check:
+            self.out(f"would remove {path} (an older CST's copy)\n")
+            if link is not None:
+                self.out(f"would remove {link} (its enable link)\n")
+            return
+        said = self.checked(["remove-text", "--home", self.p.home, path])
+        self.out(f"{said.rstrip(chr(10))} (an older CST's copy)\n" if said else f"forgotten: {path}\n")
+        if link is not None:
+            self.m.files.remove_file(link)
+            self.out(f"removed:   {link} (its enable link)\n")
 
     def lw_remove(self) -> None:
         """The watcher stopped, disabled and removed, if CST installed it (with --check: only said)."""
