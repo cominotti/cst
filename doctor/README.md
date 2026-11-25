@@ -597,7 +597,11 @@ sccache server, started by `toolchains/rustc-wrapper`) are known and not reporte
 user manager looked at is your own, or, when the doctor runs as root, the
 user the game profile acts for: the one `game.state` names while the
 profile is on (as the drift check asks, and as the tick demotes that user's
-boxes), else the `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
+boxes), else the `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`. While no account
+has the uid the profile is on for, the profile calls no user manager until
+`off`, and the check says it leaves that manager alone instead of making
+its boxes idle while a game runs. The check reads that uid once for all its
+lines, so they say the same when an `off` removes `game.state` while it runs.
 
 ### 8.4 Settings 'off' could not undo
 
@@ -621,7 +625,9 @@ A reload due (a `daemon-reload` that failed in `off`, or that an `off`
 killed after its removals never ran) is named in the same list
 (`daemon-reload of the system manager`, `daemon-reload of uid UID's user
 manager`): until it runs, systemd still shows the game's values of what that
-`off` removed.
+`off` removed. It is counted apart from the settings, and the line then
+says what `off` could not finish (`game profile: 1 setting(s) and 1
+daemon-reload(s) 'off' could not finish keep the game's value: ...`).
 
 The fix runs `off` once more, which retries them and names in the journal
 why each one still fails. While the profile is on there is no fix line: the

@@ -5,9 +5,9 @@ could not undo, the user manager's boxes outside CST's rules."""
 from collections.abc import Iterator
 from typing import Final
 
-from cst_core.domain.units import LoadState
+from cst_core.domain.units import LoadState, user_manager_head
 from cpu.game.domain import GamePaths, GameRecordKind, Record, intended_records, newer_intended, records, state_uid
-from cpu.game.domain.leftovers import leftover_entries, newer_leftovers, undo_text
+from cpu.game.domain.leftovers import leftover_entries, leftovers_words, newer_leftovers, undo_text
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
@@ -90,6 +90,11 @@ def recorded_uid(host: DoctorHostPort) -> str | None:
         return None
 
 
+def _no_account(host: DoctorHostPort, uid: str | None) -> bool:
+    """True when game.state records UID (recorded_uid) and no account has it now."""
+    return uid is not None and not host.user_name(int(uid))
+
+
 def _user_of(host: DoctorHostPort, uid: str | None) -> str:
     """The name of the account with that uid, else TARGET_USER ("" when not set)."""
     target = conf_value(host, CPU_CONF, "TARGET_USER") or ""
@@ -109,13 +114,13 @@ def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
     None when no account has the uid game.state records: as the tick and 'state', the drift of that uid's
     user manager is not compared in TARGET_USER's, which is another user's."""
     uid = recorded_uid(host)
-    if uid is not None and not host.user_name(int(uid)):
+    if _no_account(host, uid):
         return None, f"no account has uid {uid}, the user 'on' acted for"
     target = _user_of(host, uid)
     if host.uid == 0:
         if not target:
             return None, f"no TARGET_USER in {CPU_CONF}"
-        return ["systemctl", "--user", "-M", f"{target}@"], ""
+        return user_manager_head(target), ""
     me = host.user_name(host.uid)
     if target and me and target != me:
         return None, f"the profile is for {target}, this is {me}"
@@ -280,7 +285,7 @@ def check_game_leftovers(host: DoctorHostPort) -> Iterator[Result]:
     epp = GamePaths().epp
     what = ", ".join(undo_text(rec, epp, short=True, uid=uid) for uid, rec in entries)
     message = (
-        f"game profile: {len(entries)} setting(s) 'off' could not undo keep the game's value: {what} (kept in "
+        f"game profile: {leftovers_words(entries)} keep the game's value: {what} (kept in "
         f"{GAME_LEFTOVERS}). The next 'off' and the watchdog's tick while the profile is off "
         "(cpu-game-watchdog.timer, every 30 s) undo them again; the journal of 'off' names why each one failed"
     )
@@ -322,6 +327,17 @@ def cgroup_units(host: DoctorHostPort, path: ViewPath) -> list[tuple[str, ViewPa
     return [(n.removeprefix("_"), view_join(path, n)) for n in names if host.isdir(view_join(path, n))]
 
 
+def _left_alone(host: DoctorHostPort) -> str | None:
+    """What the game profile does with the boxes the check names, after "the game profile", while game.state
+    records a uid no account has: it leaves this user manager alone until 'off' (its 'on' acted for that uid;
+    the tick and 'off' call no user manager for a user with no account). None otherwise: each line says what
+    the profile does with its boxes."""
+    uid = recorded_uid(host)
+    if not _no_account(host, uid):
+        return None
+    return f", on for uid {uid}, which no account has now, leaves this user manager alone until 'off'"
+
+
 @check(CHECKS, "cpu")
 def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
     """WARN for each top-level slice of the user manager that CST does not
@@ -333,28 +349,29 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
         return
     base = host.path(rel)
     loose = [(u, d) for u, d in cgroup_units(host, base) if u.endswith(".slice") and u not in USER_KNOWN_SLICES]
+    jobs = [
+        (u, cpu_seconds(host, d)) for u, d in cgroup_units(host, view_join(base, "app.slice")) if TRANSIENT.match(u)
+    ]
+    alone = _left_alone(host) if loose or jobs else None  # game.state read once for every line
     for unit, d in loose:
         name = unit[: -len(".slice")]
         yield Result(
             WARN,
             f"user manager: {unit} is a slice of its own next to app.slice, where the game runs "
             f"({cpu_time(cpu_seconds(host, d))} since it was created). Outside games it runs at the default "
-            "weight on every CPU, without the toolboxes' limits; the game profile only makes it idle "
-            f"while a game runs. Name it user-{name}.slice so it nests under the toolboxes' user.slice, or "
-            f"start it with --slice=user-{name}.slice",
+            "weight on every CPU, without the toolboxes' limits; the game profile"
+            f"{alone or ' only makes it idle while a game runs'}. Name it user-{name}.slice so it "
+            f"nests under the toolboxes' user.slice, or start it with --slice=user-{name}.slice",
         )
-    jobs = [
-        (u, cpu_seconds(host, d)) for u, d in cgroup_units(host, view_join(base, "app.slice")) if TRANSIENT.match(u)
-    ]
     if jobs:
         jobs.sort(key=lambda j: -(j[1] or 0))
         yield Result(
             INFO,
             f"user manager: {len(jobs)} systemd-run job(s) run straight in app.slice, next to the "
             f"game, at the default weight on every CPU: "
-            f"{name_list([f'{u} ({cpu_time(s)})' for u, s in jobs])}. The game profile makes them idle "
-            "while a game runs; for builds, start them with --slice=user-<name>.slice to get the "
-            "toolboxes' limits always",
+            f"{name_list([f'{u} ({cpu_time(s)})' for u, s in jobs])}. The game profile"
+            f"{alone or ' makes them idle while a game runs'}; for builds, start them with "
+            "--slice=user-<name>.slice to get the toolboxes' limits always",
         )
     if not loose and not jobs:
         yield Result(OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")

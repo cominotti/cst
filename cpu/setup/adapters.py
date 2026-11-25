@@ -25,6 +25,7 @@ from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
 from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
+from cst_core.domain.units import user_manager_head
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 from perf.adapters import LinuxPerfProbe, PerfPaths
@@ -212,10 +213,8 @@ class CpuSetup:
         return res
 
     def usys(self, *args: str, check: bool = False, quiet: bool = True, capture: bool = False) -> CommandResult:
-        """systemctl for the target user's manager."""
-        return self.run(
-            ["systemctl", "--user", "-M", f"{self.user}@", *args], check=check, quiet=quiet, capture=capture
-        )
+        """systemctl for the target user's manager (user_manager_head)."""
+        return self.run([*user_manager_head(self.user), *args], check=check, quiet=quiet, capture=capture)
 
     # ---- the installer (what cst-install.bash runs) ----------------------------------------------
     def installer(self, *args: str, as_user: str = "", input_text: str | None = None) -> None:

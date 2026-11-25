@@ -174,11 +174,13 @@ class GamePowerPort(GameSysValuesPort, Protocol):
     """sysfs as the profile's power steps read and write it: EPP, cpuidle and the GPU's power files."""
 
     def list_dir(self, path: str) -> list[str]:
-        """The names in the folder (OSError when it cannot be listed)."""
+        """The names in the folder; none when it cannot be listed, whatever the error (gone meanwhile: a CPU taken
+        offline)."""
         ...
 
     def drm_cards(self, sys_drm: str) -> tuple[dict[str, str], list[str]]:
-        """Each DRM card's device (its real path) to its cardN name, and every cardN, by number."""
+        """Each DRM card's device (its real path) to its cardN name, and every cardN, by number; none when the
+        folder cannot be listed (gone meanwhile)."""
         ...
 
     def pid_cards(self, proc: str, sys_drm: str, pid: str, dev_to_card: dict[str, str]) -> set[str]:
@@ -186,7 +188,8 @@ class GamePowerPort(GameSysValuesPort, Protocol):
         ...
 
     def connected_cards(self, sys_drm: str, cards: list[str]) -> list[str]:
-        """The cards with a connected display, in the order of cards."""
+        """The cards with a connected display, in the order of cards; a card whose folder cannot be listed (a
+        GPU removed meanwhile) is not connected."""
         ...
 
 

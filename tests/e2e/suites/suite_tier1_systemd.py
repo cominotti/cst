@@ -8935,7 +8935,7 @@ echo E2E-OK
                 || { echo "off: $got" >&2; exit 1; }
             grep -qF "off: the daemon-reload of uid $tuid's user manager failed: kept in $lo for the next off and tick" <<<"$got" \
                 || { echo "off: $got" >&2; exit 1; }
-            gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: daemon-reload of the system manager, daemon-reload of uid $tuid's user manager" \
+            gp state | grep -qF "leftovers: 2 daemon-reload(s) 'off' could not finish, retried by the next off and tick: daemon-reload of the system manager, daemon-reload of uid $tuid's user manager" \
                 || { gp state >&2; exit 1; }
             # The next tick, with the real systemctl, runs both reloads.
             gp tick >/dev/null
@@ -9139,14 +9139,16 @@ echo E2E-OK
         call): the set-property works, and game.intended's last record of that setting is still the one 'on'
         wrote before the set (machine.slice CPUWeight 10 10). When machine.slice's CPUWeight then drifts, the
         next tick with the real systemctl sets it again, and 'off' gives machine.slice its own CPUWeight back.
-        The old 'on' added a record with an empty form after the set, which won: no tick saw that drift."""
+        The old 'on' added a record with an empty form after the set, which won: no tick saw that drift. The
+        wrapper notes each call in /var/tmp/e2e-210-ran, and the test checks it refused the read-back, so a
+        wrapper that never ran cannot pass it."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
             """
             printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
             python3 -I -B /opt/cst-rw/cpu/game-profile off || true
-            rm -rf /var/tmp/e2e-210-bin
+            rm -rf /var/tmp/e2e-210-bin /var/tmp/e2e-210-ran
             rm -f /etc/cpu-setup/cpu-setup.conf
             if [[ -e /tmp/e2e-210-conf.bak ]]; then mv /tmp/e2e-210-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rmdir /etc/cpu-setup 2>/dev/null || true
@@ -9171,12 +9173,17 @@ echo E2E-OK
             [[ "$own" != 10 ]] || { echo "the test cannot bite: machine.slice CPUWeight is already 10" >&2; exit 1; }
             install -d /var/tmp/e2e-210-bin  # not /tmp: noexec here, and a PATH entry there is skipped
             real=$(command -v systemctl)
-            printf '#!/bin/bash\nif [[ "$*" == "show -P CPUWeight machine.slice" ]]; then echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
+            rm -f /var/tmp/e2e-210-ran
+            # The wrapper notes each call it sees, so a wrapper that never ran (a noexec folder, a PATH the code
+            # fixes itself) fails the test instead of passing it on the old code too.
+            printf '#!/bin/bash\necho "$*" >>/var/tmp/e2e-210-ran\nif [[ "$*" == "show -P CPUWeight machine.slice" ]]; then echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
                 "$real" >/var/tmp/e2e-210-bin/systemctl
             chmod 0755 /var/tmp/e2e-210-bin/systemctl
             touch /run/cpu-setup/manual
             got=$(PATH=/var/tmp/e2e-210-bin:$PATH gp on 2>&1)
             [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || { echo "on did not set it: $got" >&2; exit 1; }
+            grep -qxF 'show -P CPUWeight machine.slice' /var/tmp/e2e-210-ran \
+                || { echo "the wrapper did not refuse the read-back; it saw: $(cat /var/tmp/e2e-210-ran 2>&1)" >&2; exit 1; }
             last=$(grep '^prop sys machine\.slice CPUWeight ' "$intended" | tail -n 1)
             [[ "$last" == 'prop sys machine.slice CPUWeight 10 10' ]] \
                 || { echo "game.intended:" >&2; cat "$intended" >&2; exit 1; }
@@ -9187,10 +9194,247 @@ echo E2E-OK
             gp off >/dev/null
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
                 || { echo "machine.slice CPUWeight after off: $(systemctl show -P CPUWeight machine.slice)" >&2; exit 1; }
-            rm -rf /var/tmp/e2e-210-bin
+            rm -rf /var/tmp/e2e-210-bin /var/tmp/e2e-210-ran
             echo E2E-OK
             """,
         ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_250_cpu_game_profile_off_calls_no_user_manager_for_a_user_with_no_account(self) -> None:
+        """The real game profile and systemd, as root, with root's own user manager running (user@0.service).
+        'off' with a game.state whose record of the user manager has no uid to act for (an 'on' whose first
+        record failed: no user@UID.service record), `prop usr app.slice CPUWeight existed 100`, and TARGET_USER
+        unset. A logging systemctl wrapper first on PATH notes every call and runs the real systemctl: 'off' runs
+        its system manager's undo (the wrapper ran) and no `systemctl --user` at all, says the record is dropped,
+        and root's app.slice keeps its CPUWeight. The old 'off' ran `systemctl --user -M @ set-property --runtime
+        app.slice CPUWeight=100`, which systemd sends to the caller's own user manager: root's (r26.2)."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            rm -rf /var/tmp/e2e-250-bin /var/tmp/e2e-250-calls
+            rm -f /run/user/0/systemd/user.control/app.slice.d/50-CPUWeight.conf
+            systemctl stop user@0.service 2>/dev/null || true
+            rm -f /run/systemd/system.control/machine.slice.d/50-CPUWeight.conf
+            if [[ -e /tmp/e2e-250-machine.bak ]]; then
+                mv /tmp/e2e-250-machine.bak /run/systemd/system.control/machine.slice.d/50-CPUWeight.conf
+            fi
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-250-conf.bak ]]; then mv /tmp/e2e-250-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-250-conf.bak
+            mo=/run/systemd/system.control/machine.slice.d/50-CPUWeight.conf
+            [[ ! -e "$mo" ]] || cp -a "$mo" /tmp/e2e-250-machine.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf   # no TARGET_USER
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            systemctl start user@0.service
+            systemctl --user -M root@ set-property --runtime app.slice CPUWeight=55
+            [[ "$(systemctl --user -M root@ show -P CPUWeight app.slice)" == 55 ]]
+            systemctl set-property --runtime machine.slice CPUWeight=60   # a value of its own, which 'off' sets back
+            printf '%s\n' 'prop usr app.slice CPUWeight existed 100' 'prop sys machine.slice CPUWeight existed 60' >"$st"
+            install -d /var/tmp/e2e-250-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nprintf "%%s\\n" "$*" >>/var/tmp/e2e-250-calls\nexec %s "$@"\n' "$real" \
+                >/var/tmp/e2e-250-bin/systemctl
+            chmod 0755 /var/tmp/e2e-250-bin/systemctl
+            got=$(PATH=/var/tmp/e2e-250-bin:$PATH gp off 2>&1) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qx "set-property --runtime machine.slice CPUWeight=60" /var/tmp/e2e-250-calls \
+                || { echo "the wrapper did not run (or off did not undo machine.slice):" >&2; cat /var/tmp/e2e-250-calls >&2; exit 1; }
+            if grep -q -- '--user' /var/tmp/e2e-250-calls; then
+                echo "off called a user manager:" >&2; cat /var/tmp/e2e-250-calls >&2; exit 1
+            fi
+            grep -qF "off: could not undo app.slice CPUWeight=100: TARGET_USER names no account, no user manager to undo it in: dropped" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(systemctl --user -M root@ show -P CPUWeight app.slice)" == 55 ]] \
+                || { echo "root's app.slice CPUWeight: $(systemctl --user -M root@ show -P CPUWeight app.slice)" >&2; exit 1; }
+            test ! -e "$st"
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_251_cpu_game_profile_tick_writes_a_cpuset_fallback_whose_write_failed_in_on(self) -> None:
+        """The real game profile and systemd, with cpuset delegated to tester's user manager (a runtime
+        Delegate= drop-in, the manager restarted, and a unit in its user.slice that asks for CPUs, so cpuset is
+        in the subtree) and a user manager that ignores user.slice's AllowedCPUs (a systemctl wrapper first on
+        PATH refuses that set-property and leaves a marker). 'on' then writes user.slice's cpuset.cpus itself
+        (cpus_fallback), and that write fails: an empty file in a full 4k tmpfs is bound over it (ENOSPC, its
+        line in the journal). game.intended still holds what 'on' meant to write (cgw FILE 0 0). With the bind
+        gone, the next tick (wrapper still there) writes 0 and says so, a second tick writes nothing, and 'off'
+        gives the file its own value back (""). The old 'on' recorded the file in game.intended only after a
+        write that worked, so no tick wrote it and the toolboxes kept every CPU until 'off' (r26.1)."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            f=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/user.slice/cpuset.cpus
+            mountpoint -q "$f" 2>/dev/null && umount "$f"
+            mountpoint -q /run/e2e-251-full 2>/dev/null && umount /run/e2e-251-full
+            rmdir /run/e2e-251-full 2>/dev/null || true
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            systemctl --user -M tester@ stop e2e251-hold.service 2>/dev/null || true
+            rm -rf /var/tmp/e2e-251-bin /var/tmp/e2e-251-refused
+            rm -f /run/systemd/system/user@1000.service.d/50-e2e251.conf
+            rmdir /run/systemd/system/user@1000.service.d 2>/dev/null || true
+            systemctl daemon-reload || true
+            systemctl restart user@1000.service || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-251-conf.bak ]]; then mv /tmp/e2e-251-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-251-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            intended=/run/cpu-setup/game.intended
+            u=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+            f=$u/user.slice/cpuset.cpus
+            # cpuset delegated to tester's manager, kept in its subtree by a unit of user.slice that asks for CPUs.
+            install -d /run/systemd/system/user@1000.service.d
+            printf '[Service]\nDelegate=cpu cpuset io memory pids\n' >/run/systemd/system/user@1000.service.d/50-e2e251.conf
+            systemctl daemon-reload
+            systemctl restart user@1000.service
+            systemd-run --user -M tester@ --quiet --unit=e2e251-hold --slice=user.slice -p AllowedCPUs=0-63 sleep 600
+            for _ in $(seq 50); do [[ -e "$f" ]] && break; sleep 0.1; done
+            grep -qw cpuset "$u/cgroup.subtree_control" || { echo "cpuset not delegated: $(cat "$u/cgroup.subtree_control")" >&2; exit 1; }
+            own=$(cat "$f")
+            [[ -z "$own" ]] || { echo "user.slice has a cpuset.cpus of its own: $own" >&2; exit 1; }
+            # A user manager that ignores AllowedCPUs on user.slice (the case cpus_fallback is for).
+            install -d /var/tmp/e2e-251-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nif [[ "$*" == *" set-property --runtime user.slice AllowedCPUs="* ]]; then echo "$*" >>/var/tmp/e2e-251-refused; echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
+                "$real" >/var/tmp/e2e-251-bin/systemctl
+            chmod 0755 /var/tmp/e2e-251-bin/systemctl
+            # The fallback's write fails: an empty file in a full tmpfs over cpuset.cpus (it reads "", a write needs
+            # a page the tmpfs does not have: ENOSPC).
+            install -d /run/e2e-251-full
+            mount -t tmpfs -o size=4k tmpfs /run/e2e-251-full
+            : >/run/e2e-251-full/cpus
+            head -c 1M /dev/zero >/run/e2e-251-full/filler 2>/dev/null || true
+            mount --bind /run/e2e-251-full/cpus "$f"
+            touch /run/cpu-setup/manual
+            got=$(PATH=/var/tmp/e2e-251-bin:$PATH gp on 2>&1) || { echo "on failed: $got" >&2; exit 1; }
+            grep -qF -- "--user -M tester@ set-property --runtime user.slice AllowedCPUs=0" /var/tmp/e2e-251-refused \
+                || { echo "the wrapper did not refuse AllowedCPUs: $got" >&2; exit 1; }
+            grep -qF "user.slice: could not write $f" <<<"$got" || { echo "the fallback's write did not fail: $got" >&2; exit 1; }
+            grep -qx "cgw $f 0 0" "$intended" || { echo "game.intended:" >&2; cat "$intended" >&2; exit 1; }
+            umount "$f"
+            umount /run/e2e-251-full
+            [[ "$(cat "$f")" == "$own" ]] || { echo "cpuset.cpus after on: $(cat "$f")" >&2; exit 1; }
+            got=$(PATH=/var/tmp/e2e-251-bin:$PATH gp tick 2>&1)
+            grep -qF "drift: $f was '', wrote 0 again" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(cat "$f")" == 0 ]] || { echo "cpuset.cpus after the tick: $(cat "$f")" >&2; exit 1; }
+            got=$(PATH=/var/tmp/e2e-251-bin:$PATH gp tick 2>&1)
+            if grep -qF "$f" <<<"$got"; then echo "the second tick wrote it again: $got" >&2; exit 1; fi
+            gp off >/dev/null
+            [[ "$(cat "$f")" == "$own" ]] || { echo "cpuset.cpus after off: $(cat "$f")" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_252_cpu_game_profile_on_leaves_a_cpuset_the_user_manager_wrote_in_the_kernel_s_form(self) -> None:
+        """The real game profile and systemd, with cpuset delegated to tester's user manager (as test_251: a
+        runtime Delegate= drop-in, the manager restarted, a unit of its user.slice that asks for CPUs) and
+        BUILD_CPUS='A,B', two consecutive CPUs user.slice has (its cpuset.cpus.effective), not in the kernel's
+        form. The manager honours user.slice's AllowedCPUs and writes its cpuset.cpus as A-B, so 'on''s fallback
+        (cpus_fallback) finds the list there: no cgw record in game.state or game.intended, and 'off' gives the
+        file its own value back (""). The old 'on' compared the file with BUILD_CPUS as written ('A-B' !=
+        'A,B'): it recorded the game's own value as the file's old one (cgw FILE A-B) and wrote the file again.
+        Skipped where user.slice has no two consecutive CPUs (fewer than 2 in the container)."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            systemctl --user -M tester@ stop e2e252-hold.service 2>/dev/null || true
+            rm -f /run/systemd/system/user@1000.service.d/50-e2e252.conf
+            rmdir /run/systemd/system/user@1000.service.d 2>/dev/null || true
+            systemctl daemon-reload || true
+            systemctl restart user@1000.service || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-252-conf.bak ]]; then mv /tmp/e2e-252-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-252-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            intended=/run/cpu-setup/game.intended
+            u=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+            f=$u/user.slice/cpuset.cpus
+            # cpuset delegated to tester's manager, kept in its subtree by a unit of user.slice that asks for CPUs.
+            install -d /run/systemd/system/user@1000.service.d
+            printf '[Service]\nDelegate=cpu cpuset io memory pids\n' >/run/systemd/system/user@1000.service.d/50-e2e252.conf
+            systemctl daemon-reload
+            systemctl restart user@1000.service
+            systemd-run --user -M tester@ --quiet --unit=e2e252-hold --slice=user.slice -p AllowedCPUs=0-63 sleep 600
+            for _ in $(seq 50); do [[ -e "$f" ]] && break; sleep 0.1; done
+            grep -qw cpuset "$u/cgroup.subtree_control" || { echo "cpuset not delegated: $(cat "$u/cgroup.subtree_control")" >&2; exit 1; }
+            own=$(cat "$f")
+            [[ -z "$own" ]] || { echo "user.slice has a cpuset.cpus of its own: $own" >&2; exit 1; }
+            # Two consecutive CPUs user.slice may use: BUILD_CPUS lists them as A,B, the kernel shows A-B.
+            pair=$(python3 -I -c '
+import sys
+cpus = set()
+for part in sys.stdin.read().strip().split(","):
+    if part:
+        lo, _, hi = part.partition("-")
+        cpus.update(range(int(lo), int(hi or lo) + 1))
+print(next((f"{c} {c + 1}" for c in sorted(cpus) if c + 1 in cpus), ""))
+' <"$f.effective")
+            if [[ -z "$pair" ]]; then
+                echo "E2E-SKIP: user.slice has no two consecutive CPUs (fewer than 2 in the container): $(cat "$f.effective")"
+                exit 0
+            fi
+            read -r a b <<<"$pair"
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='$a,$b'" "P_CORES='$a'" >/etc/cpu-setup/cpu-setup.conf
+            got=$(gp on 2>&1) || { echo "on failed: $got" >&2; exit 1; }
+            # The manager set it (so 'on' saw cpuset delegated and its fallback looked at the file), in its own form.
+            grep -q "^prop usr user.slice AllowedCPUs " "$st" || { echo "game.state:" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(cat "$f")" == "$a-$b" ]] || { echo "cpuset.cpus after on: $(cat "$f")" >&2; exit 1; }
+            if grep -qF "cgw $f" "$st" "$intended"; then
+                echo "the fallback recorded a file the manager had written:" >&2; cat "$st" "$intended" >&2; exit 1
+            fi
+            gp off >/dev/null
+            [[ "$(cat "$f")" == "$own" ]] || { echo "cpuset.cpus after off: $(cat "$f")" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        if "E2E-SKIP" in out:
+            self.skipTest(out.strip())
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS)

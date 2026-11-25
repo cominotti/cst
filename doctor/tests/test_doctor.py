@@ -2724,6 +2724,24 @@ class GameProfileTest(Scratch):
         self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
         self.assertIn("/sys/fs/cgroup/in\tner/cpuset.cpus is 0-3 (the profile wrote 12-23)", res[0].message)
 
+    def test_the_last_cgw_record_of_a_file_wins(self) -> None:
+        # 'on' writes the kernel's form of the list before the write, and a second record when the read-back
+        # differs: the last one is compared (here the file holds 12-23, the prediction said 12-15).
+        one = "cgw /sys/fs/cgroup/inner/cpuset.cpus 12-23 12-23\n"
+        predicted = "cgw /sys/fs/cgroup/inner/cpuset.cpus 12-23 12-15\n"
+        base = self.intended
+        self.intended = base.replace(one, predicted + one)
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+        self.assertIn("the 8 settings it made still hold", res[0].message)
+        # The other order: the last record says 12-15, which the file does not hold.
+        self.intended = base.replace(one, one + predicted)
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+        self.assertIn("/sys/fs/cgroup/inner/cpuset.cpus is 12-23 (the profile wrote 12-15)", res[0].message)
+
     def test_off_is_ok_and_absent_module_is_silent(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=True):
             res = list(doc_cpu.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO)))
@@ -2853,6 +2871,47 @@ class GameProfileTest(Scratch):
             "game profile: drift not checked for user.slice (no account has uid 999999, the user 'on' acted for)",
         )
 
+    def test_as_root_the_user_manager_is_reached_with_m_target_user_at(self) -> None:
+        # The argv as one list, and unit_props runs it with a 20 s timeout and the caller's locale.
+        self.profile_on()
+        host = doc_adapters.Host(self.env, repo=REPO)
+        host.uid = 0
+        conf = os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf")
+        with open(conf, "w") as f:
+            f.write("TARGET_USER='tester'\n")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            mgr = doc_cpu.user_manager(host)
+            self.assertEqual(mgr, (["systemctl", "--user", "-M", "tester@"], ""))
+            base = mgr[0]
+            assert base is not None
+            with mock.patch.object(host, "run", wraps=host.run) as run:
+                doc_cpu.unit_props(host, base, "user.slice", ["CPUWeight"])
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(
+                    [
+                        "systemctl",
+                        "--user",
+                        "-M",
+                        "tester@",
+                        "show",
+                        "-p",
+                        "LoadState",
+                        "-p",
+                        "CPUWeight",
+                        "user.slice",
+                    ],
+                    timeout=20,
+                )
+            ],
+        )
+        # No TARGET_USER: no -M @ is ever built, and the reason says why.
+        with open(conf, "w") as f:
+            f.write("")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertEqual(doc_cpu.user_manager(host), (None, f"no TARGET_USER in {doc_cpu.CPU_CONF}"))
+
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()
         host = doc_adapters.Host(self.env, repo=REPO)
@@ -2925,8 +2984,9 @@ class GameProfileTest(Scratch):
         res = self.leftovers_results()
         self.assertEqual([r[0] for r in res], [doc_domain.WARN])
         self.assertIn(
-            "3 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight, daemon-reload of the"
-            " system manager, daemon-reload of uid 1000's user manager (kept in",
+            "game profile: 1 setting(s) and 2 daemon-reload(s) 'off' could not finish keep the game's value:"
+            " machine.slice CPUWeight, daemon-reload of the system manager, daemon-reload of uid 1000's user manager"
+            " (kept in",
             res[0].message,
         )
 
@@ -3118,6 +3178,83 @@ class UserManagerBoxesTest(Scratch):
         res = self.results(uid=0)
         self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
         self.assertIn("x.slice is a slice of its own", res[0].message)
+
+    def as_root_with_game_state_uid(self, uid: str) -> None:
+        """As root: TARGET_USER is this user's account (its boxes are looked at) and game.state records UID."""
+        me = pwd.getpwuid(os.getuid())
+        mine = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", f"user-{me.pw_uid}.slice")
+        if not os.path.isdir(mine):
+            shutil.move(self.ucg, os.path.join(mine, f"user@{me.pw_uid}.service"))
+            self.ucg = os.path.join(mine, f"user@{me.pw_uid}.service")
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write(f"TARGET_USER='{me.pw_name}'\n")
+        os.makedirs(os.path.join(self.root, "run", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "run", "cpu-setup", "game.state"), "w") as f:
+            f.write(f"prop sys user@{uid}.service MemoryLow new -\n")
+
+    def test_a_uid_no_account_has_is_left_alone_by_the_profile(self) -> None:
+        # game.state records a uid no account has: the profile's tick and 'off' call no user manager, so the
+        # boxes of TARGET_USER's manager are not made idle while a game runs; the lines say so.
+        self.as_root_with_game_state_uid("999999")
+        self.cg("x.slice", usage_usec=1_000_000)
+        self.cg("app.slice/run-u1.service", usage_usec=1_000_000)
+        res = self.results(uid=0)
+        self.assertEqual([r.status for r in res], [doc_domain.WARN, doc_domain.INFO], res)
+        alone = "game profile, on for uid 999999, which no account has now, leaves this user manager alone until 'off'"
+        warn, info = res[0].message, res[1].message
+        self.assertIn(f"without the toolboxes' limits; the {alone}. Name it user-x.slice", warn)
+        self.assertNotIn("idle", warn)
+        self.assertIn(f"The {alone}; for builds", info)
+        self.assertNotIn("idle", info)
+
+    def test_the_lines_of_one_check_agree_when_off_removes_game_state_midway(self) -> None:
+        # game.state records a uid no account has, and an 'off' removes it while the check runs: right after
+        # the check's first read of it past the one that picks the user manager. The check reads the uid once
+        # for all its lines, so the jobs line says what the slice's line says; before, it read game.state again
+        # for each line and the jobs line, finding none, got the idle words.
+        self.as_root_with_game_state_uid("999999")
+        self.cg("x.slice", usage_usec=1_000_000)
+        self.cg("app.slice/run-u1.service", usage_usec=1_000_000)
+        host = doc_adapters.Host(self.env, repo=REPO)
+        host.uid = 0
+        state = os.path.join(self.root, "run", "cpu-setup", "game.state")
+        opened = host.open_text
+        reads: list[str] = []
+
+        def open_text(path: str) -> TextIO:
+            f = opened(doc_domain.ViewPath(path))
+            if path == state:
+                reads.append(path)
+                if len(reads) == 2:
+                    os.remove(state)  # 'off' ends the profile after this read
+            return f
+
+        with mock.patch.object(host, "open_text", open_text), mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(doc_cpu.check_user_manager_boxes(host))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(len(reads), 2)  # one read to pick the manager, one for every line
+        self.assertEqual([r.status for r in res], [doc_domain.WARN, doc_domain.INFO], res)
+        alone = "game profile, on for uid 999999, which no account has now, leaves this user manager alone until 'off'"
+        warn, info = res[0].message, res[1].message
+        self.assertIn(f"without the toolboxes' limits; the {alone}. Name it user-x.slice", warn)
+        self.assertIn(f"The {alone}; for builds", info)
+        self.assertNotIn("idle", info)
+
+    def test_a_uid_an_account_has_keeps_the_idle_words(self) -> None:
+        self.as_root_with_game_state_uid(str(os.getuid()))
+        self.cg("x.slice", usage_usec=1_000_000)
+        self.cg("app.slice/run-u1.service", usage_usec=1_000_000)
+        res = self.results(uid=0)
+        self.assertEqual([r.status for r in res], [doc_domain.WARN, doc_domain.INFO], res)
+        self.assertIn(
+            "without the toolboxes' limits; the game profile only makes it idle while a game runs. Name it user-x.slice",
+            res[0].message,
+        )
+        self.assertIn(
+            "The game profile makes them idle while a game runs; for builds, start them with --slice=user-<name>.slice",
+            res[1].message,
+        )
 
     def test_only_known_boxes_is_ok(self) -> None:
         res = self.results()

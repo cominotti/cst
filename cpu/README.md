@@ -633,11 +633,11 @@ are the defaults from `/etc/cpu-setup/cpu-setup.conf` (`BUILD_CPUS`,
 | 1, 2 | Docker containers **outside** `builds.slice` (`docker-*.scope`) | `AllowedCPUs=12-23` (no weight change) |
 | 3 | Toolboxes (inner `user.slice`) | `CPUWeight=idle` |
 | 3 | The other boxes of your user manager next to the game (see below): `background.slice`, any other slice of its own at the top of the user manager, and `systemd-run --user` jobs straight in `app.slice` (`run-*.scope`, `run-*.service`); a box started after the profile gets it at the next watchdog run, within 30 s | `CPUWeight=idle`; with cpuset delegated (6.3) also `AllowedCPUs=12-23` |
-| 2 | Only if cpuset is delegated (6.3): toolboxes and `flatpak-session-helper.service` | `AllowedCPUs=12-23`; if your user manager is older than the delegation (no reboot since `install`), it ignores this, and the profile writes `12-23` straight into their cgroup file `cpuset.cpus` |
+| 2 | Only if cpuset is delegated (6.3): toolboxes and `flatpak-session-helper.service` | `AllowedCPUs=12-23`; if your user manager is older than the delegation (no reboot since `install`), it ignores this, and the profile writes `12-23` straight into their cgroup file `cpuset.cpus` (a write that fails is written again by the next tick, 7.5); a file that already holds the list, as written or as the kernel shows it (`12,13,14,15` as `12-15`), is left alone and not recorded |
 | 4 | Memory chain: system `user.slice`, `user-<uid>.slice`, `user@<uid>.service`, then `app.slice` in your user manager, and **every** Steam scope `app-flatpak-com.valvesoftware.Steam-*` (the client has one, and each game gets its own; a game started after the profile gets it at the next watchdog run, within 30 s) | `MemoryLow=16G`; for the first three also a drop-in, `/run/systemd/system/<unit>.d/zz-cst-game.conf`, that wins at every `daemon-reload` (7.5) |
 | 4 | Desktop apps and the game: `app.slice` in your user manager (only if `GAME_ZSWAP_WRITEBACK=no`, and only if systemd knows `MemoryZSwapWriteback`) | `MemoryZSwapWriteback=no` |
-| - | P-cores (`P_CORES`, 0-7) | EPP `performance`, and `cpuidle` states with `latency >= GAME_CSTATE_MAX_LATENCY_US` (`50 µs` -> disables `C2_ACPI` on P-cores only) |
-| - | Active game GPUs (`/proc/<pid>/fd/*` DRM `renderD*`/`card*` discovery, falling back to connected display cards; the Steam client's own processes (`steam`, `steamwebhelper`, the shader pre-compiler `fossilize_replay` and the driver probes `vulkandriverquery` and `gldriverquery`) do not count, and their GPUs are used only when no card is connected) | `power/control=on` (when `GPU_PM_MODE != off`), and on AMD GPUs `power_dpm_force_performance_level=manual` + `pp_power_profile_mode` `3D_FULL_SCREEN` (discovered dynamically by profile name; left alone when `pp_power_profile_mode` marks no current profile with `*`); watchdog `tick` also picks up GPUs opened after launch |
+| - | P-cores (`P_CORES`, 0-7) | EPP `performance`, and `cpuidle` states with `latency >= GAME_CSTATE_MAX_LATENCY_US` (`50 µs` -> disables `C2_ACPI` on P-cores only); a CPU taken offline while `on` or a tick looks at it is skipped (until 2026-11 that failed `on`, and the profile stayed on until a reboot) |
+| - | Active game GPUs (`/proc/<pid>/fd/*` DRM `renderD*`/`card*` discovery, falling back to connected display cards; the Steam client's own processes (`steam`, `steamwebhelper`, the shader pre-compiler `fossilize_replay` and the driver probes `vulkandriverquery` and `gldriverquery`) do not count, and their GPUs are used only when no card is connected) | `power/control=on` (when `GPU_PM_MODE != off`), and on AMD GPUs `power_dpm_force_performance_level=manual` + `pp_power_profile_mode` `3D_FULL_SCREEN` (discovered dynamically by profile name; left alone when `pp_power_profile_mode` marks no current profile with `*`); watchdog `tick` also picks up GPUs opened after launch; a GPU removed while `on` or a tick looks at it is skipped (until 2026-11 that failed `on`) |
 
 In short: the game gets the P-cores and E-cores 8-11, the VM and Docker move
 to 12-23 with a low priority, toolboxes and the other boxes next to the game
@@ -864,7 +864,16 @@ uid, never in another user's (`TARGET_USER`'s):
   manager is gone. Versions before 2026-11 dropped them as if undone.
 
 With no such record (an `on` that died before its first record), the user
-manager's side is `TARGET_USER`'s, as before. While the profile is on and no
+manager's side is `TARGET_USER`'s, as before. While `TARGET_USER` names no
+account either (unset, or a name of no account), `off`, the tick and
+`cst cpu game state` run no `systemctl --user` at all: each record of the
+user manager is dropped, a new override or an old value alike, with
+`<4>off: could not undo app.slice CPUWeight=100: TARGET_USER names no
+account, no user manager to undo it in: dropped`, and its drift is not
+compared. Until 2026-11 they ran `systemctl --user -M @` (an empty name),
+which systemd sends to the caller's own user manager: as root, root's. So
+`off` set the old value in root's user manager when it ran, and counted the
+record undone when it did not. While the profile is on and no
 account has the recorded uid, the watchdog's `tick` leaves the user
 manager's side alone (no Steam scope, no box next to the game, no drift of
 the user manager set in `TARGET_USER`'s manager, which is another user's)
@@ -943,7 +952,9 @@ from `off` nor from the ticks that retry it. It writes its record
 to `/run/cpu-setup/game.leftovers`, then names the failed step in the journal
 (`<4>off: could not undo machine.slice CPUWeight=70: kept in
 /run/cpu-setup/game.leftovers for the next off and tick`), and ends with `..., except N setting(s)
-kept in /run/cpu-setup/game.leftovers`. The next `off` and every watchdog
+kept in /run/cpu-setup/game.leftovers`; a `daemon-reload` that failed is
+counted apart (`..., except 2 setting(s) and 1 daemon-reload(s) kept in
+/run/cpu-setup/game.leftovers`). The next `off` and every watchdog
 `tick` while the profile is off undo the kept records again and keep only
 those that fail again; the file is removed when none is left. An `off` with
 no `game.state` and the tick log `<5>undid ..., kept in
@@ -984,11 +995,17 @@ be written, the journal says so (`<3>off: could not keep the daemon-reload
 of ... in /run/cpu-setup/game.leftovers: not done`). (Versions before
 2026-11 never read a reload's exit status and kept nothing for it: the
 game's values stayed until a reboot or someone else's `daemon-reload`.)
-A kept new override of the user manager with no `user` line (kept while
-`TARGET_USER` named no account) is dropped while `TARGET_USER` still names
-none: no user's runtime folder holds it and no user manager can be reloaded,
-so nothing is said undone (`<4>... could not undo ...: TARGET_USER names no
-account, no user manager to undo it in: dropped`). An entry of no user is
+A kept record of the user manager with no `user` line (kept while
+`TARGET_USER` named no account: a new override, or an old value) is undone
+in the manager of the user the pass acts for when it starts: in `off`, the
+user game.state records when it records one, else `TARGET_USER`'s; in the
+tick, `TARGET_USER`'s. It is dropped only while that user has no account:
+no name reaches a user manager to undo it in (and for a new override, no
+user's runtime folder holds it), so nothing is said undone (`<4>... could
+not undo ...: TARGET_USER names no account, no user manager to undo it in:
+dropped`). It is not kept: a kept entry of no user would later be undone for
+whatever account `TARGET_USER` names then, which may be another user's.
+An entry of no user is
 judged so whatever entry of another user's the same pass undid before it:
 it is never undone in that user's manager (versions before 2026-11 went on
 acting for the user of the entry undone last).
@@ -1002,7 +1019,9 @@ cgroup, sysfs or EPP file whose folder is gone (a cgroup that ended, a CPU
 taken offline), so a folder made again later (the next login's cgroup) never
 gets the old session's value. A fixed unit's override outlives the unit, so
 it stays kept. `cst cpu game state` lists the
-kept settings (`leftovers: N setting(s) 'off' could not undo, ...`), and
+kept settings (`leftovers: N setting(s) 'off' could not undo, ...`; with a
+`daemon-reload` among them `leftovers: N setting(s) and M daemon-reload(s)
+'off' could not finish, ...`), and
 `cst doctor` warns about them, by name
 ([doctor/README.md, section 8.4](../doctor/README.md#84-settings-off-could-not-undo)). When
 `game.leftovers` cannot be written (`/run` full), the old file is left as
@@ -1015,7 +1034,8 @@ kept (`<3>off: could not keep ... in /run/cpu-setup/game.leftovers: not
 undone`, without `off:` from the tick); `off` then ends with `..., except N
 setting(s) not undone` (`..., except N setting(s): K kept in
 /run/cpu-setup/game.leftovers, M not undone` when the old file still holds
-some of them). The file is format 2 (`cst-game-leftovers 2` on its first line); format 1
+some of them; `not done` instead of `not undone` when a `daemon-reload` is
+among them). The file is format 2 (`cst-game-leftovers 2` on its first line); format 1
 files, which have a `user UID` line only where the user changes (so an entry
 of no user written after one of a uid reads as that uid's), are still read,
 and every write is format 2. A CST that reads only format 1 leaves a format
@@ -1090,7 +1110,15 @@ What else the profile does about it:
   tried again at every tick. (An installed bash copy of an older CST, during
   an upgrade inside one game session, reads two lines of one setting as two
   records.) A `cpuset.cpus` file it
-  wrote directly (7.1) gets a `cgw` line. The transient units (the scopes
+  writes directly (7.1) gets a `cgw` line the same way: before the write,
+  with the list as the kernel shows it (commas and ranges, no blanks:
+  `cgw FILE 12-23 12-23`), and a second line when the file then reads back in
+  another form; the tick's write of it adds one too. So a write that fails in
+  `on` (`<4>user.slice: could not write FILE`) is a drift the next tick
+  writes (`drift: FILE was '...', wrote 12-23 again`). Until 2026-11 the
+  line came only after a write that worked, and the toolboxes kept every CPU,
+  the game's too, until `off`; the older bash copy reads two lines of one
+  file as two records too. The transient units (the scopes
   of Docker containers and Steam, the `run-*.service` of `systemd-run`) are
   not recorded: no drop-in can win over theirs; the watchdog's check of the
   boxes it handled (7.2) sets them again instead. The slices made idle in the
