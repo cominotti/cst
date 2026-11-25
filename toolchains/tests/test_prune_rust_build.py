@@ -249,6 +249,12 @@ class SettingsTest(Base):
         for word in ("yes\N{IDEOGRAPHIC SPACE}", "\N{NO-BREAK SPACE}no"):
             with self.subTest(word=word), self.assertRaisesRegex(tcd_common.ConfigError, "is not yes or no"):
                 tcd_common.parse_bool(word)
+        # A separator U+001F before off is part of the word for a size as for a duration: one file no
+        # longer takes "\x1foff" as no cap for RUST_BUILD_MAX_TOTAL and refuses it one line below.
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a size"):
+            tcd_common.parse_size("\x1foff")
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration"):
+            tcd_common.parse_off_or_duration("\x1foff")
 
     def test_sizes(self) -> None:
         p = tcd_common.parse_size

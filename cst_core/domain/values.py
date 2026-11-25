@@ -170,7 +170,7 @@ class ByteSize:
         letter lower() would fold to an ASCII one (the Kelvin sign K) is no size."""
         m = None
         if spec.isascii():
-            t = spec.strip().lower()
+            t = spec.strip(ASCII_BLANKS).lower()  # not U+001C-U+001F, which str.strip() also drops
             if re.fullmatch(r"0+(?:\.0*)?|off|none|no", t, re.ASCII):
                 return cls(0)
             m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?", t, re.ASCII)

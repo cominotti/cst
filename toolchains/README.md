@@ -161,7 +161,8 @@ RUST_BUILD_MAX_TOTAL=200G
 
 Every key is `<LANG>_<CACHE>_<SETTING>`. Numbers are ASCII digits (`0`-`9`) and
 the unit letters and blanks ASCII ones, as bash and systemd read them, around
-a word too (`off`, `yes`: a no-break space is part of the word): a digit
+a word too (`off`, `yes`: a no-break space, or a separator U+001C-U+001F, is
+part of the word, for a size as for a duration): a digit
 of another script (an Arabic-Indic `40G`) is a wrong line. Durations take `s`, `m`, `h`, `d` or
 `w`. Sizes take `K`, `M`, `G` or `T` (`G`, `GB` and `GiB` all mean GiB), and
 the unit is required: `RUST_BUILD_MAX_TOTAL=150` is an error, not 150 bytes

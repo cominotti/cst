@@ -168,6 +168,15 @@ class ValueObjectsTest(unittest.TestCase):
         self.assertEqual(Duration.parse_float("3S"), 3.0)
         self.assertEqual(Duration.parse(" 2h "), Duration(7200))
 
+    def test_a_size_is_trimmed_of_ascii_blanks_only(self) -> None:
+        # str.strip() also dropped the separators U+001C-U+001F, which are no blanks to bash or systemd
+        # (strip_ascii_blanks): "\x1foff" was 0, no cap. ASCII blanks around a size are still dropped.
+        for spec in ("\x1foff", "\x1f150G", "150G\x1c", "\x1d0", "\x1enone"):
+            with self.subTest(spec=spec), self.assertRaisesRegex(DomainValidationError, "is not a size"):
+                ByteSize.parse_iec(spec)
+        self.assertEqual(ByteSize.parse_iec("\t\r\f\v150G \n"), ByteSize(150 * 2**30))
+        self.assertEqual(ByteSize.parse_iec(" off\v"), ByteSize(0))
+
     def test_a_whole_number_is_ascii_digits_only(self) -> None:
         for text, want in (("0", 0), ("060", 60), ("300", 300)):
             with self.subTest(text=text):
