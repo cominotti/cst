@@ -34,17 +34,18 @@ if TYPE_CHECKING:
 @dataclasses.dataclass
 class Reloads:
     """The managers an undo removed a runtime override in, each due a daemon-reload: the system manager
-    (system), and each user's manager by the user's name (users, in the order they were first acted in)."""
+    (system), and each user's manager by its uid, with the name of the user acted for there (users, in the
+    order they were first acted in)."""
 
     system: bool = False
-    users: list[str] = dataclasses.field(default_factory=list)
+    users: dict[str, str] = dataclasses.field(default_factory=dict)
 
-    def add(self, mgr: Manager, user: str) -> None:
-        """An override of that manager was removed (user: the user acted for, for the user manager)."""
+    def add(self, mgr: Manager, uid: str, user: str) -> None:
+        """An override of that manager was removed (uid and user: the user acted for, for the user manager)."""
         if mgr == "sys":
             self.system = True
-        elif user not in self.users:
-            self.users.append(user)
+        else:
+            self.users.setdefault(uid, user)
 
 
 def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:

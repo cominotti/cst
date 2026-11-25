@@ -565,7 +565,7 @@ class GameProfile:
         manager of each user it was removed for (an 'off' and a retry act for several users' kept records)."""
         if reload.system:
             self.ctl("sys", "daemon-reload")
-        for user in reload.users:
+        for user in reload.users.values():
             self.ctl("usr", "daemon-reload", user=user)
 
     def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> bool:
@@ -616,7 +616,7 @@ class GameProfile:
                         return False  # the override is still there: no daemon-reload for it
                     with contextlib.suppress(OSError):
                         os.rmdir(os.path.dirname(f))
-                    reload.add(mgr, self.s.target_user)
+                    reload.add(mgr, self.uid(say=say) if mgr == "usr" else "", self.s.target_user)
                     return True
                 rc = self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
                 return rc == 0 or unit_gone(self, mgr, unit)
