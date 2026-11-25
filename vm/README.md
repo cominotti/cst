@@ -861,7 +861,7 @@ restic forget --host <NAS_RESTIC_HOST> --tag cst-vm,vm:<name> --group-by host \
 - A backup made with `--keep-tag NAME` carries `cst-keep` and is kept until
   you remove it: `restic forget <ID>` (the ID from `restic snapshots --tag
   cst-vm`), or `restic tag --remove cst-keep <ID>` to let the retention have
-  it.
+  it (`cst vm list` follows at the next backup: no longer "kept").
 - `forget` only removes the snapshot records. The space is freed by
   `restic prune`, which the `/home` NAS job runs for the whole repository,
   at most every `NAS_PRUNE_EVERY_DAYS` (7). The VM backup never prunes.
@@ -951,7 +951,10 @@ keeps that first ID through every later change of the tags), and finds it by
 the new ID only (`restic restore` of the old one says "no matching ID
 found"). The next NAS backup of the VM gives the entry the new ID, which
 `cst vm list` then shows, and keeps the first ID in the entry's `original`
-key, so the entry follows its snapshot through later tag changes too. An
+key, so the entry follows its snapshot through later tag changes too. Its
+keep tag follows restic's tags too: when the listed snapshot no longer has
+`cst-keep`, the entry is no longer kept (`cst vm list` drops "kept: NAME"); when
+restic gives no tags, the entry keeps what it had. An
 older CST reads such an entry by its new ID and keeps it until the tags
 change again. An entry whose ID restic still lists keeps it, also when
 another listed snapshot has that ID as its `original` (a `restic rewrite`

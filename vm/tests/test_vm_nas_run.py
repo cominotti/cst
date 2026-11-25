@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import json
 from dataclasses import dataclass, field, replace
 import os
 import tempfile
@@ -15,6 +16,7 @@ import unittest
 from cst_core.domain.errors import Refused
 from vm import domain as vm_domain, wiring as vm_wiring
 from vm.adapters import conf_number
+from vm.adapters.backup import describe_entry
 from vm.application import nas as vm_app_nas
 from vm.domain import backup as vm_domain_backup
 from vm.tests.test_vm_nas import (
@@ -227,6 +229,75 @@ class NasStopAtTheReadLineTest(unittest.TestCase):
             "runs at the next backup)",
         )
         self.assertEqual([[x["snapshot"] for x in w] for w in run.store.written], [[SNAP_ID]])
+
+
+def _kept_entry(snap: str) -> vm_domain_backup.IndexEntry:
+    return {
+        "vm": "win",
+        "mode": "nas",
+        "snapshot": snap,
+        "repository": "/repo",
+        "host": "sophia",
+        "epoch": 1,
+        "keep": "X",
+    }
+
+
+class NasKeepFollowsTagsTest(unittest.TestCase):
+    """An index entry's keep follows restic's tags: after restic tag --remove cst-keep, restic lists the
+    snapshot under a new id without the tag, and the next NAS backup's index no longer calls it kept."""
+
+    def test_nas_listing_names_the_ids_whose_tags_have_no_keep_tag(self) -> None:
+        listing = vm_domain_backup.nas_listing(
+            [
+                {"id": "new", "original": "old", "tags": ["cst-vm", "vm:win", "X"]},
+                {"id": "kept", "tags": ["cst-vm", "vm:win", "cst-keep", "X"]},
+                {"id": "none"},
+                {"id": "odd", "tags": "cst-vm"},
+                {"id": "mixed", "tags": ["cst-vm", 5]},
+            ]
+        )
+        self.assertEqual(listing.unkept, frozenset({"new"}))
+        self.assertEqual(listing.alive["old"], "new")
+
+    def test_the_entry_kept_no_longer_is_not_called_kept(self) -> None:
+        old, new, own = "old11111", "new22222", _kept_entry(SNAP_ID) | {"keep": None}
+        for tags, keep in (
+            (["cst-vm", "vm:win", "X"], None),
+            (["cst-vm", "vm:win", "cst-keep", "X"], "X"),
+            (None, "X"),  # tags unknown: the entry's own keep
+            ("cst-vm", "X"),
+        ):
+            with self.subTest(tags=tags):
+                listed: dict[str, object] = {"id": new, "original": old, **({} if tags is None else {"tags": tags})}
+                assert vm_domain_backup.is_restic_snapshot(listed)
+                alive, unkept = vm_domain_backup.nas_listing([listed, {"id": SNAP_ID}])
+                got = vm_domain_backup.nas_index([_kept_entry(old)], own, alive, unkept=unkept)
+                moved = next(e for e in got if e["snapshot"] == new)
+                self.assertEqual((moved.get("keep"), moved.get("original")), (keep, old))
+                shown = describe_entry(moved)
+                self.assertEqual("kept: X" in shown, keep is not None, shown)
+
+    def test_the_backup_s_index_follows_the_listing(self) -> None:
+        class _Listing(FakeNasRestic):
+            @override
+            def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+                if args[0] == "snapshots":
+                    self.calls.append(list(args))
+                    listed = [{"id": "new22222", "original": "old11111", "tags": ["cst-vm", "vm:win", "X"]}]
+                    return 0, json.dumps([*listed, {"id": SNAP_ID, "tags": ["cst-vm", "vm:win"]}]), ""
+                return super().run(env, args, timeout)
+
+        class _Store(FakeNasStore):
+            @override
+            def read_index(self) -> list[vm_domain_backup.IndexEntry]:
+                return [_kept_entry("old11111")]
+
+        run = _Run(restic=_Listing(), store=_Store([DISK]))
+        run.go()
+        self.assertEqual(
+            [(e["snapshot"], e.get("keep")) for e in run.store.written[-1]], [("new22222", None), (SNAP_ID, None)]
+        )
 
 
 if __name__ == "__main__":

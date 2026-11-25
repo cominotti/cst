@@ -679,7 +679,9 @@ def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) ->
     snap = entry["snapshot"]
     try:
         entries = p.store.read_index()
-        p.store.write_index(nas_index(entries, entry, nas_snapshot_ids(p.restic, vm, nas)))
+        listing = nas_snapshot_ids(p.restic, vm, nas)
+        alive, unkept = (None, frozenset[str]()) if listing is None else listing
+        p.store.write_index(nas_index(entries, entry, alive, unkept=unkept))
     except IndexRefused as e:
         return Refused(_not_indexed(snap, vm, e))
     except OSError as e:

@@ -4,7 +4,7 @@ the fingerprint of a source, the two ways a backup stops (Stop, Uncertain) and t
 backup run (NasRun); the NAS backup's snapshot arguments, index, torn records and last lines, and the
 lines status and backup-timer status print about them. Pure."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field
 import datetime
 import json
@@ -469,13 +469,44 @@ def restic_failure_why(rc: int) -> str:
     }.get(rc, f"restic exit {rc}")
 
 
-def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[str, str] | None) -> list[IndexEntry]:
+class NasListing(NamedTuple):
+    """The VM's snapshots restic lists, as the index reads them (nas_index): alive, each id they answer to
+    (snapshot_names: its own, and the one it had first when its tags were changed) with the id restic lists
+    that snapshot under (a listed id: itself); unkept, the listed ids whose tags restic gives (a list of
+    text) without KEEP_TAG."""
+
+    alive: dict[str, str]
+    unkept: frozenset[str]
+
+
+def nas_listing(snaps: Sequence[ResticSnapshot]) -> NasListing:
+    """The NasListing of restic's listing snaps."""
+    # A listed id is always its own snapshot's; an original names its copy only when restic does not
+    # list it itself (restic rewrite without --forget keeps both), whatever the listing's order.
+    originals = {n: s["id"] for s in snaps for n in snapshot_names(s)[1:]}
+    unkept = frozenset(
+        s["id"]
+        for s in snaps
+        if isinstance(tags := s.get("tags"), list) and all(isinstance(t, str) for t in tags) and KEEP_TAG not in tags
+    )
+    return NasListing({**originals, **{s["id"]: s["id"] for s in snaps}}, unkept)
+
+
+def nas_index(
+    entries: Sequence[IndexEntry],
+    entry: IndexEntry,
+    alive: Mapping[str, str] | None,
+    *,
+    unkept: AbstractSet[str] = frozenset(),
+) -> list[IndexEntry]:
     """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: each id
     the VM's snapshots restic lists answer to (snapshot_names), with the id restic lists that snapshot
     under (None: not readable). The VM's NAS entries of entry's repository that answer to none leave
     the index; one that answers only to the original a restic tag kept takes the listed id, the one
     restic restores, lists and forgets the snapshot by, and keeps its first id as its original
-    (entry_names): restic keeps that first id as the original of every later tag change."""
+    (entry_names): restic keeps that first id as the original of every later tag change. An entry kept
+    (keep) whose listed id is in unkept (its tags no longer have KEEP_TAG: restic tag --remove) is kept no
+    longer: the retention may forget it; entry itself stays as the run made it."""
     snap = entry["snapshot"]
     out = [e for e in entries if not (e.get("mode") == BackupMode.NAS and e.get("snapshot") == snap)]
     out.append(entry)
@@ -491,20 +522,28 @@ def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[s
                 now = _listed_as(entry_names(e), alive)
                 if now is None:
                     continue
-                if now != e["snapshot"]:
-                    moved = e.copy()  # the entry under the id restic lists it by, its first id kept
-                    first = e.get("original") or e["snapshot"]
-                    moved["snapshot"] = now
-                    if first != now:
-                        moved["original"] = first
-                    else:
-                        moved.pop("original", None)
-                    kept.append(moved)
+                if now != e["snapshot"] or (now in unkept and now != snap and e.get("keep") is not None):
+                    kept.append(_as_listed(e, now, unkept))
                     continue
             kept.append(e)
         out = kept
     out.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
     return out
+
+
+def _as_listed(e: IndexEntry, now: str, unkept: AbstractSet[str]) -> IndexEntry:
+    """Index entry e as restic lists its snapshot (nas_index): under the id now, its first id kept as its
+    original, and no longer kept when now's tags have no KEEP_TAG (unkept)."""
+    moved = e.copy()
+    first = e.get("original") or e["snapshot"]
+    moved["snapshot"] = now
+    if first != now:
+        moved["original"] = first
+    else:
+        moved.pop("original", None)
+    if now in unkept and moved.get("keep") is not None:
+        moved["keep"] = None
+    return moved
 
 
 def entry_names(e: IndexEntry) -> list[str]:

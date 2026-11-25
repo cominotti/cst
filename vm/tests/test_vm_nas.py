@@ -2026,7 +2026,7 @@ class SnapshotNamesTest(unittest.TestCase):
                 return 0, json.dumps([{"id": "new", "original": "old"}, {"id": SNAP_ID}]), ""
 
         got = vm_app_nas_torn.nas_snapshot_ids(Listing(), "win", _NAS_REPO)
-        self.assertEqual(got, {"new": "new", "old": "new", SNAP_ID: SNAP_ID})
+        self.assertEqual(got, ({"new": "new", "old": "new", SNAP_ID: SNAP_ID}, frozenset()))
 
     def test_an_indexed_entry_named_by_an_original_takes_the_listed_id(self) -> None:
         def nas(snap: str, vm: str = "win") -> vm_domain_backup.IndexEntry:
@@ -2059,9 +2059,10 @@ class SnapshotNamesTest(unittest.TestCase):
             with self.subTest(listed=listed):
                 restic = Listing()
                 restic.answer = json.dumps(listed)
-                alive = vm_app_nas_torn.nas_snapshot_ids(restic, "win", _NAS_REPO)
+                listing = vm_app_nas_torn.nas_snapshot_ids(restic, "win", _NAS_REPO)
+                assert listing is not None
+                alive = listing.alive
                 self.assertEqual(alive, {"first1": "first1", "copy22": "copy22"})
-                assert alive is not None
                 own: vm_domain_backup.IndexEntry = {**entry, "snapshot": SNAP_ID}
                 got = vm_domain_backup.nas_index([entry], own, alive)
                 self.assertEqual([e.get("snapshot") for e in got], ["first1", SNAP_ID])
