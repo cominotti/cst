@@ -18,7 +18,7 @@ from bluetooth.setup.domain import (
     OlderCopy,
 )
 from bluetooth.setup.ports import SetupFilesPort
-from cst_core.application.user_units import kept_unit_copies, manager_unit_path, older_unit_copies
+from cst_core.application.user_units import RecordedUnitCopies, manager_unit_path
 from cst_core.domain.install import Component
 from cst_core.domain.units import user_unit_dir
 from cst_core.ports import InstallRecordPort, SystemdPort
@@ -42,7 +42,7 @@ def older_copies(records: InstallRecordPort, home: str, current: str, answer: st
     either when the user manager's UnitPath (answer) names no folder of the user's own units
     (named_user_unit_dir): current is then only systemd's default, and a recorded copy elsewhere may be
     the one the manager loads, so every recorded copy is kept (kept_copies)."""
-    return older_unit_copies(records, home, Component.BLUETOOTH_LDAC, LDAC_UNIT, current, answer)
+    return RecordedUnitCopies(records, home, Component.BLUETOOTH_LDAC, LDAC_UNIT).older(current, answer)
 
 
 def kept_copies(
@@ -51,9 +51,8 @@ def kept_copies(
     """The recorded copies older_copies keeps because the user manager's UnitPath (answer) names no
     folder: those on disk that are not current by another path. One of them may be the unit the manager
     runs, so revert keeps the watcher's program with them. None when the manager names its folder."""
-    return kept_unit_copies(
-        files.exists, files.realpath, records, home, Component.BLUETOOTH_LDAC, LDAC_UNIT, current, answer
-    )
+    copies = RecordedUnitCopies(records, home, Component.BLUETOOTH_LDAC, LDAC_UNIT)
+    return copies.kept(current, answer, files.exists, files.realpath)
 
 
 def copy_kind(files: SetupFilesPort, path: str, current: str) -> OlderCopy:

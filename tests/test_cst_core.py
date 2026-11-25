@@ -30,11 +30,7 @@ from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import beside_program, lc_ctype_handover, restore_lc_ctype, undo_python_start
 from cst_core import wiring as core_wiring
 from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format, version_of
-from cst_core.application.user_units import (
-    kept_unit_copies,
-    manager_unit_path,
-    older_unit_copies,
-)
+from cst_core.application.user_units import RecordedUnitCopies, manager_unit_path
 from cst_core.domain.install import INSTALL_MANIFEST, Component, Owner
 from cst_core.domain.record import InstallRecord, RecordedFile, RecordFormatError
 from cst_core.domain.ostree import OstreeStatus, query_status
@@ -618,14 +614,17 @@ class UserUnitCopiesTest(unittest.TestCase):
             ("/home/u/old/x.service", Component.TOOLCHAINS_AUTO),  # another component
         )
         records = _Records(rec)
-        found = older_unit_copies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME, self.CURRENT, self.NAMED)
+        found = RecordedUnitCopies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME).older(self.CURRENT, self.NAMED)
         self.assertEqual(found, (self.OLD,))
         self.assertEqual(records.paths, ["/home/u/.local/state/cst/installed.json"])
         # No answer, or an answer that names no folder of the user's own: every recorded copy is kept.
         for answer in (None, "/etc/systemd/user /usr/lib/systemd/user"):
             with self.subTest(answer=answer):
                 self.assertEqual(
-                    older_unit_copies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME, self.CURRENT, answer), ()
+                    RecordedUnitCopies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME).older(
+                        self.CURRENT, answer
+                    ),
+                    (),
                 )
 
     def test_a_record_that_cannot_be_read_lists_no_copy(self) -> None:
@@ -637,7 +636,9 @@ class UserUnitCopiesTest(unittest.TestCase):
         ):
             with self.subTest(error=records.error):
                 self.assertEqual(
-                    older_unit_copies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME, self.CURRENT, self.NAMED),
+                    RecordedUnitCopies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME).older(
+                        self.CURRENT, self.NAMED
+                    ),
                     (),
                 )
 
@@ -651,16 +652,8 @@ class UserUnitCopiesTest(unittest.TestCase):
         real = {link: self.CURRENT}
 
         def kept(answer: str | None) -> tuple[str, ...]:
-            return kept_unit_copies(
-                on_disk.__contains__,
-                lambda p: real.get(p, p),
-                _Records(rec),
-                self.HOME,
-                Component.CPU_TOOLBOX,
-                self.NAME,
-                self.CURRENT,
-                answer,
-            )
+            copies = RecordedUnitCopies(_Records(rec), self.HOME, Component.CPU_TOOLBOX, self.NAME)
+            return copies.kept(self.CURRENT, answer, on_disk.__contains__, lambda p: real.get(p, p))
 
         self.assertEqual(kept(None), (self.OLD,))
         self.assertEqual(kept(self.NAMED), ())
