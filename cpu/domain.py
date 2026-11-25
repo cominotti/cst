@@ -540,15 +540,16 @@ def _window_seconds(val: str) -> int:
     return seconds
 
 
-# A limit's number: ASCII digits, a fraction and an exponent allowed, blanks or tabs around it. float() alone
-# also took every Unicode digit, Unicode blanks, 1_0, a leading sign (+3) and whitespace other than blank and
-# tab (a newline, \r, \v, \f): this refuses them all (inf and nan fail the 0 < v < inf check of positive()).
-_LIMIT_NUMBER: Final = re.compile(r"[ \t]*(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?[ \t]*", re.ASCII)
+# A limit's number: ASCII digits, a fraction and an exponent allowed (positive() strips the blanks or tabs
+# around it first). float() alone also took every Unicode digit, Unicode blanks, 1_0, a leading sign (+3) and
+# whitespace other than blank and tab (a newline, \r, \v, \f): this refuses them all (inf and nan fail the
+# 0 < v < inf check of positive()).
+_LIMIT_NUMBER: Final = re.compile(r"(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?", re.ASCII)
 
 
 def positive(text: str, what: str) -> float:
-    """TEXT as a finite number above 0 (_LIMIT_NUMBER), or ValueError naming WHAT."""
-    if _LIMIT_NUMBER.fullmatch(text):
+    """TEXT as a finite number above 0 (_LIMIT_NUMBER, blanks or tabs around it), or ValueError naming WHAT."""
+    if _LIMIT_NUMBER.fullmatch(text.strip(" \t")):
         v = float(text)
         if 0 < v < float("inf"):
             return v
