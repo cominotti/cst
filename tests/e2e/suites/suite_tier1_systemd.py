@@ -11703,14 +11703,17 @@ EOF
         UnitPath question failing (a systemctl on PATH that refuses it, everything else the real one) and an
         older copy recorded under the shell's folder again: plan and revert --check name no removal of it,
         revert removes the unit in ~/.config and keeps that copy and its record line; with the real systemctl
-        the next revert removes it. Before: apply left the enable link; apply removed the live unit through the
-        link and wrote it again; revert removed the copy with no answer to say where the manager reads units."""
+        the next revert removes it. (4) A link of the unit's name in the older copy's wants folder to a unit of
+        tester's own elsewhere (~/mine222), not to the copy: plan and revert --check name no removal of it, and
+        apply and revert remove the copy and leave the link and that unit as they are. Before: apply left the
+        enable link; apply removed the live unit through the link and wrote it again; revert removed the copy
+        with no answer to say where the manager reads units."""
         c = self.SYSTEMD_CONTAINER
         self.addCleanup(
             as_tester_bash,
             c,
             "XDG_CONFIG_HOME=/home/tester/xdg222 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
-            "rm -rf /home/tester/xdg222 /home/tester/cfg222 /home/tester/bin222",
+            "rm -rf /home/tester/xdg222 /home/tester/cfg222 /home/tester/bin222 /home/tester/mine222",
             check=False,
         )
         exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
@@ -11795,6 +11798,35 @@ EOF
             show revert4 "$out"
             grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
             [[ ! -e "$old" ]]
+            # (4) A link of the unit's name in the older copy's wants folder to a unit of tester's own
+            # elsewhere, not to the copy: plan, revert --check, apply and revert remove the copy and leave
+            # the link and that unit as they are.
+            mine="$H/mine222/$lw"
+            mkdir -p "$H/mine222"
+            printf '[Unit]\nDescription=mine\n' >"$mine"
+            for cmd in apply revert; do
+                plant "$old"
+                mkdir -p "$(dirname "$link")"
+                ln -sfn "$mine" "$link"
+                out="$(bt plan 2>&1)" || true
+                show "plan4 $cmd" "$out"
+                grep -qE "^  remove +~/xdg222/systemd/user/$lw +an older CST's copy" <<<"$out"
+                if grep -qF default.target.wants <<<"$out"; then echo "plan4 names the link to tester's unit" >&2; exit 1; fi
+                out="$(bt revert --check 2>&1)" || true
+                show "check4 $cmd" "$out"
+                grep -qF "would remove $old (an older CST's copy)" <<<"$out"
+                if grep -qF "$link" <<<"$out"; then echo "revert --check names the link to tester's unit" >&2; exit 1; fi
+                if [[ $cmd == apply ]]; then
+                    step apply4 apply --yes --no-restart
+                else
+                    out="$(bt revert --yes --no-restart 2>&1)"
+                    show revert5 "$out"
+                fi
+                grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+                if grep -qF "$link" <<<"$out"; then echo "$cmd names the link to tester's unit" >&2; exit 1; fi
+                [[ ! -e "$old" && "$(readlink "$link")" == "$mine" ]]
+                [[ "$(cat "$mine")" == "$(printf '[Unit]\nDescription=mine')" ]]
+            done
             echo E2E-OK
             """,
         ).stdout

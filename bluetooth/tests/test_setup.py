@@ -1771,6 +1771,37 @@ class WatcherTest(SetupCase):
         self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
 
+    def test_an_enable_link_to_a_unit_of_the_users_own_is_left_alone(self) -> None:
+        # The older copy's wants folder holds a link of the unit's name to a unit of the user's own
+        # elsewhere, not to the copy (no manager enabled that copy). plan shows only the copy's removal,
+        # revert --check names no removal of the link, and apply and revert remove the copy and leave the
+        # link and the unit it points to as they are. A link is CST's to remove only when it points to
+        # the copy (watcher_unit.enable_link).
+        for cmd in ("apply", "revert"):
+            with self.subTest(cmd=cmd):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+                m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+                m.run("apply", "--no-restart")
+                os.unlink(m.state + "/unit-path")
+                mine = m.put(os.path.join(m.home, "mine", LW), "[Unit]\nDescription=mine\n")
+                link = os.path.join(os.path.dirname(old), "default.target.wants", LW)
+                os.makedirs(os.path.dirname(link))
+                os.symlink(mine, link)
+                r = m.run("plan")
+                self.assertIn(row("remove", "~/xdg/systemd/user/" + LW, LW_STALE), r.stdout)
+                self.assertNotIn("default.target.wants", r.stdout)
+                self.assertNotIn(LW_STALE_LINK, r.stdout)
+                r = m.run("revert", "--check")
+                self.assertIn(f"would remove {old} (an older CST's copy)\n", r.stdout)
+                self.assertNotIn(link, r.stdout)
+                r = m.run(cmd, "--yes", "--no-restart")
+                self.assertIn(f"removed:   {old} (an older CST's copy)\n", r.stdout)
+                self.assertNotIn(link, r.stdout + r.stderr)
+                self.assertFalse(os.path.exists(old))
+                self.assertEqual(os.readlink(link), mine)
+                self.assertEqual(self.text(mine), "[Unit]\nDescription=mine\n")
+
     def test_older_copies_are_kept_when_the_manager_names_no_folder(self) -> None:
         # The manager's UnitPath cannot be read (no answer): the unit's folder is only systemd's default,
         # and the copy the record lists elsewhere may be the one the manager loads. plan shows no removal,
