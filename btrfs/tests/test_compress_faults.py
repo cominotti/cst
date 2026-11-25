@@ -1311,6 +1311,41 @@ class CatchUpReloadTest(unittest.TestCase):
         self.assertTrue(w.systemd.current(w.fstab_id))
 
 
+class TopMountWithoutUuidTest(unittest.TestCase):
+    """A top-mount unit whose What= names no UUID (TopMountInfo.uuid ""): both tools install it, and undo a
+    torn install, with the root filesystem's UUID."""
+
+    def _world(self, name: str) -> tuple[Start, CompressWorld, TopMountInfo]:
+        s = BY_NAME[name]
+        w = start_world(s)
+        self.assertIsNotNone(w.top)
+        old = TopMountInfo(installed=True, uuid="", options=w.top.options if w.top is not None else "")
+        w.top = old
+        return s, w, old
+
+    def test_an_apply_installs_the_unit_with_the_root_uuid(self) -> None:
+        for name in ("P1", "C1"):
+            with self.subTest(start=name):
+                s, w, old = self._world(name)
+                self.assertEqual(run_tool(s, w, s.command)[0], 0)
+                top = w.top
+                self.assertIsNotNone(top)
+                self.assertEqual(top.uuid if top is not None else None, UUID)
+                self.assertNotEqual(top, old)
+
+    def test_a_torn_install_is_undone_with_the_root_uuid(self) -> None:
+        for name in ("P1", "C1"):
+            with self.subTest(start=name):
+                s, w, old = self._world(name)
+                w.torn = frozenset({"top-mount"})
+                w.fail("top-mount", no_space(), times=1)
+                rc, out, _ = run_tool(s, w, s.command)
+                self.assertEqual(rc, 1)
+                self.assertNotIn(INCOMPLETE, out)
+                self.assertEqual(w.calls.count("top-mount"), 2)
+                self.assertEqual(w.top, TopMountInfo(installed=True, uuid=UUID, options=old.options))
+
+
 class AlreadyAtTheTargetTest(unittest.TestCase):
     """N: a run from the target has no point and makes no mutating call."""
 
