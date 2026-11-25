@@ -144,7 +144,8 @@ class _FakeHost:
     def read_top_mount(self) -> TopMountInfo | None:
         return self.s.top_mount
 
-    def write_fstab(self, text: str) -> None:
+    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
+        del put_back  # the fake puts nothing back after a failure
         self.calls.append("write_fstab")
         self.s.fstab = text
 
@@ -173,7 +174,8 @@ class _FakeHost:
             self.s.proc_mounts = "\n".join(updated) + "\n"
         return True, ""
 
-    def update_top_mount(self, uuid: str, options: str) -> None:
+    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
+        del put_back  # the fake puts nothing back after a failure
         self.calls.append(f"update_top_mount:{uuid}")
         if self.s.fail_top_mount is not None:
             raise self.s.fail_top_mount
@@ -198,8 +200,8 @@ class _TornCommitHost(_FakeHost):
         return sum(1 for c in self.calls if c.startswith(prefix)) == 1
 
     @override
-    def write_fstab(self, text: str) -> None:
-        super().write_fstab(text)
+    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
+        super().write_fstab(text, put_back=put_back)
         if self.torn == "fstab" and self._first("write_fstab"):
             raise OSError(errno.EIO, "Input/output error")
 
@@ -211,8 +213,8 @@ class _TornCommitHost(_FakeHost):
         return answer
 
     @override
-    def update_top_mount(self, uuid: str, options: str) -> None:
-        super().update_top_mount(uuid, options)
+    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
+        super().update_top_mount(uuid, options, put_back=put_back)
         if self.torn == "top" and self._first("update_top_mount"):
             raise OSError(errno.ENOSPC, "No space left on device")
 

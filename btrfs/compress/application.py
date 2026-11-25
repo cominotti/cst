@@ -217,7 +217,9 @@ class CompressService:
         errors: list[str] = list(prog.unknown)
         if prog.top_written and snap.top_mount is not None:
             try:
-                self._host.update_top_mount(snap.top_mount.uuid or snap.root_uuid, snap.top_mount.options)
+                self._host.update_top_mount(
+                    snap.top_mount.uuid or snap.root_uuid, snap.top_mount.options, put_back=False
+                )
             except TOP_MOUNT_ERRORS as exc:
                 errors.append(f"top-mount: {exc}")
         if prog.remounted and plan.remount_target is not None:
@@ -231,7 +233,7 @@ class CompressService:
                 errors.append(f"kargs: {kerr}")
         if prog.fstab_written and snap.fstab_text is not None:
             try:
-                self._host.write_fstab(snap.fstab_text)
+                self._host.write_fstab(snap.fstab_text, put_back=False)
             except (OSError, CommandFailed) as exc:
                 errors.append(f"fstab: {exc}")
         return f"ROLLBACK INCOMPLETE ({'; '.join(errors)})" if errors else "previous configuration restored."

@@ -1595,7 +1595,11 @@ client that timed out leaves its transaction running, and the change it
 stages later would otherwise be missed. A transaction still running after
 that counts as a layer it cannot read again (below). The error ends with
 `previous configuration restored.`, or with `ROLLBACK INCOMPLETE (...)`
-naming each layer that could not be put back. A layer the run cannot read
+naming each layer that could not be put back. An undo of `/etc/fstab` or of
+the top-mount unit keeps the old value it wrote even when the
+`daemon-reload` after it fails (that error is named): a forward write puts
+its previous text back on such a failure, but for an undo that text is the
+new value. A layer the run cannot read
 again after its step failed is named there too, as unknown (`fstab: cannot
 read /etc/fstab back, its state is unknown`), and is left as it is. In
 `compress-force`, a failed `/etc/fstab` write that left the old text, the

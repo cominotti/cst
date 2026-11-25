@@ -88,7 +88,7 @@ def _unknown(layer_error: str) -> Callable[[], str | None]:
 
 def _undo_fstab(host: CompressHostPort, prev_fstab: str) -> str | None:
     try:
-        host.write_fstab(prev_fstab)
+        host.write_fstab(prev_fstab, put_back=False)
     except (OSError, CommandFailed) as exc:
         return f"fstab: {exc}"
     return None
@@ -190,7 +190,7 @@ def _step_remount(run: _Run) -> str | None:
 
 def _undo_top_mount(host: CompressHostPort, uuid: str, options: str) -> str | None:
     try:
-        host.update_top_mount(uuid, options)
+        host.update_top_mount(uuid, options, put_back=False)
     except TOP_MOUNT_ERRORS as exc:
         return f"top-mount: {exc}"
     return None

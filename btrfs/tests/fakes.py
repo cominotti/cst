@@ -2078,7 +2078,9 @@ class CompressWorld(FaultPoints):
         if point in self.unreadable_after:
             self.unreadable.add(point)
 
-    def write_fstab(self, text: str) -> None:
+    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
+        del put_back  # a failure has no effect here and a torn one keeps it: nothing is put back
+
         def write() -> None:
             self.fstab = text
 
@@ -2108,7 +2110,9 @@ class CompressWorld(FaultPoints):
 
         return self.step("kargs", staged, failed)
 
-    def update_top_mount(self, uuid: str, options: str) -> None:
+    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
+        del put_back  # as write_fstab's
+
         def install() -> None:
             self.top = TopMountInfo(installed=True, uuid=uuid, options=options)
 

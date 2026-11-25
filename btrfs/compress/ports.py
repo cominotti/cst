@@ -50,8 +50,9 @@ class CompressHostPort(Protocol):
         """Read installed `var-mnt-btrfs\\x2dtop.mount`, or return None if not installed."""
         ...
 
-    def write_fstab(self, text: str) -> None:
-        """Atomically write `/etc/fstab` and reload systemd units."""
+    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
+        """Atomically write `/etc/fstab` and reload systemd units; on a reload error the previous text is put
+        back, unless put_back is False (an undo: the previous text is the one it undoes)."""
         ...
 
     def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
@@ -62,8 +63,9 @@ class CompressHostPort(Protocol):
         """Run `mount -o remount,<option> <target>`."""
         ...
 
-    def update_top_mount(self, uuid: str, options: str) -> None:
-        """Re-render and verify `btrfs:top-mount`, reload systemd, and update install record."""
+    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
+        """Re-render and verify `btrfs:top-mount`, reload systemd, and update install record; on an error the
+        previous unit is put back, unless put_back is False (an undo, as write_fstab's)."""
         ...
 
     def confirm(self, prompt: str) -> bool:

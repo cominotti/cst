@@ -184,7 +184,11 @@ class AdapterFailureTest(unittest.TestCase):
         self.plan = FaultPlan()
         self.inner = _Answers()
         self.fs = _TearingFs()
-        self.adapter = LinuxCompressHostAdapter(
+        self.adapter = self.build()
+
+    def build(self) -> LinuxCompressHostAdapter:
+        """The adapter over the temporary root, its reloads through self.plan."""
+        return LinuxCompressHostAdapter(
             CompressAdapterConfig(
                 entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
                 fallback_root=REPO,
@@ -259,6 +263,82 @@ class AdapterFailureTest(unittest.TestCase):
         self.assertEqual(installs, [NEW_TOP_OPTIONS, OLD_TOP_OPTIONS])
         unit = parse_top_mount_unit(self.text(f"etc/systemd/system/{TOP_UNIT}"))
         self.assertEqual(unit.options, NEW_TOP_OPTIONS)
+
+    def test_an_undo_whose_reload_fails_keeps_the_old_fstab(self) -> None:
+        # put_back=False (an undo): the text it writes stays after a failed reload; the error comes out.
+        self.put("etc/fstab", NEW_FSTAB)
+        self.plan.arm((FaultMode.FAIL, 1))
+        with self.assertRaises(CommandFailed):
+            self.adapter.write_fstab(OLD_FSTAB, put_back=False)
+        self.assertEqual(self.text("etc/fstab"), OLD_FSTAB)
+
+    def test_an_undo_of_the_top_mount_whose_reload_fails_keeps_its_unit(self) -> None:
+        self.plan.arm((FaultMode.FAIL, 1))
+        with self.assertRaises(CommandFailed):
+            self.adapter.update_top_mount(UUID, NEW_TOP_OPTIONS, put_back=False)
+        unit = parse_top_mount_unit(self.text(f"etc/systemd/system/{TOP_UNIT}"))
+        self.assertEqual(unit.options, NEW_TOP_OPTIONS)
+
+    def run_tool_here(self, tool: Tool) -> tuple[int, str]:
+        """One apply of the tool over the real adapter and the temporary root: (exit, its last line)."""
+        if tool == Tool.COMPRESS:
+            res = CompressService(self.adapter).execute_change(CompressArgs(CompressCommand.APPLY, yes=True))
+            return res.exit_code, res.error
+        rc, lines = execute_commit_change(self.adapter, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+        return rc, lines[-1]
+
+    def test_the_undo_of_a_torn_fstab_keeps_the_old_text_when_its_reload_fails(self) -> None:
+        # The forward write's reload fails and its put-back fails (the new text stays: the run undoes it); the
+        # undo writes the old text and its reload fails too: the old text stays, the undo's error is named.
+        for tool in Tool:
+            with self.subTest(tool=tool):
+                self.put("etc/fstab", OLD_FSTAB)
+                self.plan = FaultPlan()
+                self.adapter = self.build()
+                self.plan.arm((FaultMode.FAIL, 1), (FaultMode.FAIL, 2))
+                self.fs.tears = [None, _Tear.BEFORE, None]
+                rc, last = self.run_tool_here(tool)
+                self.assertEqual(rc, 1, last)
+                self.assertIn(f"{INCOMPLETE} (fstab: ", last)
+                self.assertEqual(self.text("etc/fstab"), OLD_FSTAB)
+
+    def test_the_undo_of_a_torn_top_mount_keeps_the_old_unit_when_its_reload_fails(self) -> None:
+        # /etc/fstab is written; the unit's reload fails and its put-back fails (the new unit stays: the run
+        # undoes it first); the undo installs the old unit and its reload fails too: the old unit stays, the
+        # undo's error is named, and /etc/fstab is put back.
+        real_install = InstallService.install
+        for tool in Tool:
+            with self.subTest(tool=tool):
+                self.put("etc/fstab", OLD_FSTAB)
+                self.put(
+                    f"etc/systemd/system/{TOP_UNIT}",
+                    "[Unit]\nDescription=btrfs top level\n\n[Mount]\n"
+                    f"What=/dev/disk/by-uuid/{UUID}\nWhere=/var/mnt/btrfs-top\nType=btrfs\nOptions={OLD_TOP_OPTIONS}\n",
+                )
+                self.plan = FaultPlan()
+                self.adapter = self.build()
+                self.plan.arm((FaultMode.FAIL, 2), (FaultMode.FAIL, 3))
+                installs: list[str] = []
+
+                def put_back_fails(
+                    svc: InstallService,
+                    entries: Sequence[InstallEntry],
+                    req: InstallRequest,
+                    installs: list[str] = installs,
+                ) -> Iterator[str]:
+                    installs.append(req.values.get("OPTIONS", "") if req.values is not None else "")
+                    if len(installs) == 2:
+                        raise no_space()
+                    return real_install(svc, entries, req)
+
+                with mock.patch.object(InstallService, "install", put_back_fails):
+                    rc, last = self.run_tool_here(tool)
+                self.assertEqual(rc, 1, last)
+                self.assertIn(f"{INCOMPLETE} (top-mount: ", last)
+                self.assertEqual(len(installs), 3, installs)  # the new unit, its failed put-back, the undo
+                unit = parse_top_mount_unit(self.text(f"etc/systemd/system/{TOP_UNIT}"))
+                self.assertEqual(unit.options, OLD_TOP_OPTIONS)
+                self.assertEqual(self.text("etc/fstab"), OLD_FSTAB)
 
     def test_a_top_mount_whose_reload_fails_is_put_back(self) -> None:
         # The contrast of (d): the put-back works, the reload's error comes out.

@@ -189,10 +189,11 @@ class LinuxCompressHostAdapter:
             return None
         return parse_top_mount_unit(text)
 
-    def write_fstab(self, text: str) -> None:
-        """Atomically write `/etc/fstab` and reload systemd units (restoring previous text on reload error)."""
+    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
+        """Atomically write `/etc/fstab` and reload systemd units (restoring previous text on reload error, unless
+        put_back is False: an undo, whose previous text is the one it undoes)."""
         path = self._etc_file("fstab")
-        previous = self._fs.read_text(path, None)
+        previous = self._fs.read_text(path, None) if put_back else None
         self._fs.write_atomic(path, text, mode=0o644)
         try:
             self._systemctl.daemon_reload()
@@ -222,10 +223,11 @@ class LinuxCompressHostAdapter:
         )
         return (res.returncode == 0, res.stderr.strip() or res.stdout.strip())
 
-    def update_top_mount(self, uuid: str, options: str) -> None:
-        """Re-render and verify `btrfs:top-mount` through `InstallService`, reload systemd, and mark done."""
+    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
+        """Re-render and verify `btrfs:top-mount` through `InstallService`, reload systemd, and mark done (the
+        previous unit put back on an error, unless put_back is False: an undo)."""
         root = checkout_root(self._entry_file) or self._fallback_root
-        prev_top = self.read_top_mount()
+        prev_top = self.read_top_mount() if put_back else None
         installer = InstallService(
             LocalInstallTarget(),
             lambda e: entry_payload(root, e),
