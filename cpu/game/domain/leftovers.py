@@ -105,7 +105,11 @@ def off_text(failed: int, path: str, *, kept: bool = True) -> str:
     done = "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
     if not failed:
         return done
-    return f"{done}, except {failed} setting(s) kept in {path}" if kept else f"{done}, except {failed} setting(s) not undone"
+    return (
+        f"{done}, except {failed} setting(s) kept in {path}"
+        if kept
+        else f"{done}, except {failed} setting(s) not undone"
+    )
 
 
 def leftovers_line(entries: Sequence[Entry], epp: Callable[[str], str]) -> str:

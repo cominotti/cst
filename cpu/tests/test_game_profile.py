@@ -2585,7 +2585,9 @@ class LeftoversTest(GameProfileCase):
     def kept_for_the_user(self, target: str) -> tuple[GameProfile, io.StringIO]:
         """A game.leftovers whose record of the user manager, for USER, still fails; a profile whose
         TARGET_USER is target (accounts_profile)."""
-        self.write(self.paths.leftovers, f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n")
+        self.write(
+            self.paths.leftovers, f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n"
+        )
         self.systemd.fail_set.add(("usr", "user.slice"))
         os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)  # USER is logged in
         return self.accounts_profile(target)
@@ -2601,7 +2603,9 @@ class LeftoversTest(GameProfileCase):
                 self.systemd.actions = []
                 self.assertEqual(p.tick(), 0)
                 # The kept record was tried for the user it is for, and is still kept.
-                self.assertEqual(self.sets(self.systemd.actions), [f"{USR} set-property --runtime user.slice CPUWeight=30"])
+                self.assertEqual(
+                    self.sets(self.systemd.actions), [f"{USR} set-property --runtime user.slice CPUWeight=30"]
+                )
                 self.assertTrue(os.path.exists(self.paths.leftovers))
                 self.assertNotIn("switching on", out.getvalue())
                 self.assertNotIn(f"{SYS} start --no-block cpu-game.service", self.systemd.actions)
@@ -2805,7 +2809,9 @@ class LeftoversTest(GameProfileCase):
         self.prior_machine_weight()
         self.run_profile("on")
         out, _ = self.run_profile("off")
-        self.assertIn(f"<4>game-profile: {self.paths.leftovers}: cannot be read (Is a directory): left alone, neither", out)
+        self.assertIn(
+            f"<4>game-profile: {self.paths.leftovers}: cannot be read (Is a directory): left alone, neither", out
+        )
         self.assertFalse(os.path.exists(self.state))
         self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "70")
         self.assertTrue(os.path.isdir(os.path.join(self.paths.leftovers, "inside")))
