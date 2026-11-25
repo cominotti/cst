@@ -495,6 +495,52 @@ def remove_text_files(argv: list[str]) -> None:
             os.remove(w)
 
 
+class RecordingRunner:
+    """CommandRunnerPort: records each call's argv and every keyword it was given; answers exit 0."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        self.calls.append((list(argv), kw))
+        return CommandResult(0, "", "")
+
+
+class UserManagerArgvTest(CpuSetupCase):
+    """usys: `systemctl --user -M USER@ ARGS` as one list, with no env and no input, the output as asked."""
+
+    def test_the_user_s_manager_is_reached_with_m_user_at(self) -> None:
+        runner = RecordingRunner()
+        s, _, _ = self.setup_for(runner=runner)
+        s.usys("daemon-reload")
+        s.usys("show", "-p", "Id", "a b.slice", quiet=False, capture=True)
+        s.usys("daemon-reload", quiet=False)
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    ["systemctl", "--user", "-M", "tester@", "daemon-reload"],
+                    {"output": OutputMode.STDOUT, "input_text": None, "env": None},
+                ),
+                (
+                    ["systemctl", "--user", "-M", "tester@", "show", "-p", "Id", "a b.slice"],
+                    {"output": OutputMode.CAPTURE, "input_text": None, "env": None},
+                ),
+                (
+                    ["systemctl", "--user", "-M", "tester@", "daemon-reload"],
+                    {"output": OutputMode.INHERIT, "input_text": None, "env": None},
+                ),
+            ],
+        )
+
+    def test_an_empty_user_gives_m_at(self) -> None:
+        # usys builds the argv as given: its callers check for a user first (uninstall: no user, no call).
+        runner = RecordingRunner()
+        s, _, _ = self.setup_for(user="", runner=runner)
+        s.usys("daemon-reload")
+        self.assertEqual([c[0] for c in runner.calls], [["systemctl", "--user", "-M", "@", "daemon-reload"]])
+
+
 class InstallTest(CpuSetupCase):
     def test_install_writes_in_order_and_reloads_after_the_old_names_are_gone(self) -> None:
         old = [

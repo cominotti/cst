@@ -2853,6 +2853,47 @@ class GameProfileTest(Scratch):
             "game profile: drift not checked for user.slice (no account has uid 999999, the user 'on' acted for)",
         )
 
+    def test_as_root_the_user_manager_is_reached_with_m_target_user_at(self) -> None:
+        # The argv as one list, and unit_props runs it with a 20 s timeout and the caller's locale.
+        self.profile_on()
+        host = doc_adapters.Host(self.env, repo=REPO)
+        host.uid = 0
+        conf = os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf")
+        with open(conf, "w") as f:
+            f.write("TARGET_USER='tester'\n")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            mgr = doc_cpu.user_manager(host)
+            self.assertEqual(mgr, (["systemctl", "--user", "-M", "tester@"], ""))
+            base = mgr[0]
+            assert base is not None
+            with mock.patch.object(host, "run", wraps=host.run) as run:
+                doc_cpu.unit_props(host, base, "user.slice", ["CPUWeight"])
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(
+                    [
+                        "systemctl",
+                        "--user",
+                        "-M",
+                        "tester@",
+                        "show",
+                        "-p",
+                        "LoadState",
+                        "-p",
+                        "CPUWeight",
+                        "user.slice",
+                    ],
+                    timeout=20,
+                )
+            ],
+        )
+        # No TARGET_USER: no -M @ is ever built, and the reason says why.
+        with open(conf, "w") as f:
+            f.write("")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertEqual(doc_cpu.user_manager(host), (None, f"no TARGET_USER in {doc_cpu.CPU_CONF}"))
+
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()
         host = doc_adapters.Host(self.env, repo=REPO)
