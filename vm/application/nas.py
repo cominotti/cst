@@ -587,17 +587,19 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: StopAfterBackup, entry: I
     try:
         p.store.write_index(nas_index(p.store.read_index(), entry, None))
     except IndexRefused as e:
-        return Stop(f"{stop}; {not_indexed_text(f'the restic snapshot {snap[:8]} of {vm}', _NOT_INDEXED_KEPT, e)}")
+        return Stop(f"{stop}; {_not_indexed(snap, vm, e)}")
     return Stop(
         f"{stop}; restic snapshot {snap[:8]} of {vm} is a backup: indexed (the retention runs at the next backup)"
     )
 
 
-# What a NAS backup the index could not take says of its snapshot.
-_NOT_INDEXED_KEPT = (
-    "the snapshot stays in the repository, where the retention sees it as any VM backup of its tags "
-    '(restore it by its ID: vm/README.md, section "Restore from the NAS")'
-)
+def _not_indexed(snap: str, vm: str, e: IndexRefused) -> str:
+    """What a NAS backup the index could not take says of its snapshot."""
+    kept = (
+        "the snapshot stays in the repository, where the retention sees it as any VM backup of its tags "
+        '(restore it by its ID: vm/README.md, section "Restore from the NAS")'
+    )
+    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e)
 
 
 def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) -> Refused | None:
@@ -610,7 +612,7 @@ def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) ->
         entries = p.store.read_index()
         p.store.write_index(nas_index(entries, entry, nas_snapshot_ids(p.restic, vm, nas)))
     except IndexRefused as e:
-        return Refused(not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", _NOT_INDEXED_KEPT, e))
+        return Refused(_not_indexed(snap, vm, e))
     return None
 
 

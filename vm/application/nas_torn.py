@@ -144,7 +144,7 @@ def retry_torn(p: NasBackup, vm: str, nas: NasRepo) -> str | None:
     the record. Returns why the retention must wait (an entry kept, the listing or the record not
     usable), else None. With no such entry it runs nothing."""
     try:
-        mine = [e for e in p.store.read_torn() if e["vm"] == vm and e["repository"] == nas["repo"]]
+        mine = _torn_of(p, vm, nas)
     except (OSError, Refused) as e:
         return f"the record of torn snapshots cannot be read ({e})"
     if not mine:
@@ -171,6 +171,11 @@ def retry_torn(p: NasBackup, vm: str, nas: NasRepo) -> str | None:
         except (OSError, Refused) as e:
             kept.append(f"the record of torn snapshots was not updated ({e})")
     return "; ".join(kept) or None
+
+
+def _torn_of(p: NasBackup, vm: str, nas: NasRepo) -> list[TornEntry]:
+    """The entries of the torn record for vm in this repository (read_torn's errors propagate)."""
+    return [e for e in p.store.read_torn() if e["vm"] == vm and e["repository"] == nas["repo"]]
 
 
 def forget_listed(p: NasBackup, vm: str, nas: NasRepo, e: TornEntry, listed: Sequence[ResticSnapshot]) -> str | None:
@@ -216,7 +221,7 @@ def unaccounted(p: NasBackup, vm: str, nas: NasRepo, made: str) -> tuple[str, bo
             if e["vm"] == vm and e.get("mode") == BackupMode.NAS and e.get("repository") == nas["repo"]
             if (snap := e.get("snapshot")) is not None and snap
         ]
-        torn = [e["snapshot"] for e in p.store.read_torn() if e["vm"] == vm and e["repository"] == nas["repo"]]
+        torn = [e["snapshot"] for e in _torn_of(p, vm, nas)]
     except (OSError, Refused) as e:
         return f"the snapshots no record names were not checked ({e})", False
     if not indexed:
