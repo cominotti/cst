@@ -450,7 +450,8 @@ When keeping **`irqbalance`** active, run `cst cpu irq apply` to ban `BUILD_CPUS
 (intersected with online CPUs, keeping `>= 2` unbanned IRQ handler CPUs) via
 `/etc/cpu-setup/irqbalance.env` and `irqbalance.service.d/10-cst-ban.conf`.
 `apply` refuses (exit 1, nothing written, removed or restarted) when
-`BUILD_CPUS` is empty or not a CPU list, or `cpu-setup.conf` has a syntax
+`BUILD_CPUS` is empty or not a CPU list (a CPU index is at most 8191, as
+systemd's CPU sets: `12-8192` is no CPU list), or `cpu-setup.conf` has a syntax
 error; `plan` shows the same error. Otherwise it goes in this order and
 stops at the first failure: it installs the `irqbalance` package when
 `irqbalance.service` is missing (`rpm-ostree install --apply-live`; skipped

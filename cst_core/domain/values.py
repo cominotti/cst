@@ -227,6 +227,13 @@ class Duration:
         return total
 
 
+# The first CPU index no CPU list may hold: no AllowedCPUs=, CPUAffinity= or kernel cpulist names one.
+# systemd's src/shared/cpu-set-util.c: CPU_SET_MAX_NCPU is 8192 ("As of kernel 5.1, CONFIG_NR_CPUS can be
+# set to 8192 on PowerPC") and cpu_set_add returns -ERANGE for an index (or a range end) >= it. Linux's
+# arch/x86/Kconfig: NR_CPUS_RANGE_END is 8192 with MAXSMP or CPUMASK_OFFSTACK, the largest NR_CPUS of x86_64.
+_CPU_INDEX_LIMIT: Final = 8192
+
+
 @dataclass(frozen=True, slots=True)
 class CpuSet:
     """Non-empty set of non-negative CPU indices parsed from a Linux CPU range list."""
@@ -243,7 +250,8 @@ class CpuSet:
     def parse(cls, spec: str) -> Self:
         """Parse a CPU range specification such as '0-3,6' into a CpuSet. ASCII blanks around the list and
         around each element are dropped; a no-break space or another Unicode blank is an invalid element
-        (systemd's AllowedCPUs= refuses it too)."""
+        (systemd's AllowedCPUs= refuses it too). An index of _CPU_INDEX_LIMIT (8192) or more is invalid, as systemd
+        refuses it (a range end too, before the range is built)."""
         cleaned = spec.strip(ASCII_BLANKS)
         if not cleaned:
             raise DomainValidationError("CpuSet specification must not be empty")
@@ -256,7 +264,7 @@ class CpuSet:
                 selected.update(_parse_range(token, spec))
             else:
                 index = parse_whole_number(token)
-                if index is None:
+                if index is None or index >= _CPU_INDEX_LIMIT:
                     raise DomainValidationError(f"invalid CPU index {token!r} in {spec!r}")
                 selected.add(index)
         return cls(frozenset(selected))
@@ -277,6 +285,8 @@ def _parse_range(token: str, spec: str) -> range:
         raise DomainValidationError(f"invalid CPU range {token!r} in {spec!r}")
     if start > end:
         raise DomainValidationError(f"descending CPU range {token!r} in {spec!r}")
+    if end >= _CPU_INDEX_LIMIT:
+        raise DomainValidationError(f"CPU range {token!r} in {spec!r} beyond the CPU limit {_CPU_INDEX_LIMIT - 1}")
     return range(start, end + 1)
 
 
