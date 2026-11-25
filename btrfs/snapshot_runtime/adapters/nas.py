@@ -18,7 +18,7 @@ import signal
 import sys
 from typing import TextIO
 
-from btrfs.health_check.domain import bash_div, bash_wrap
+from btrfs.health_check.domain import bash_wrap
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
@@ -38,9 +38,11 @@ from btrfs.snapshot_runtime.domain import (
     CoreCommand,
     GuardError,
     restic_time,
+    days_between,
     duration_s,
     features_type,
     guard_number,
+    next_check_failures,
     repo_id,
     restic_line,
     summary_text,
@@ -122,7 +124,7 @@ class Nas:
         return self.deadline - self.m.now()
 
     def days_since(self, last: int) -> int:
-        return bash_div(self.m.now() - last, DAY)
+        return days_between(self.m.now(), last)
 
     def due(self, path: str, key: str) -> bool:
         """The epoch in PATH is missing, no number, or KEY days old, as the old bash's due() decided:
@@ -445,7 +447,7 @@ class Nas:
             # bash stopped here too ("abc: unbound variable"): say why, as the settings do.
             print(f"{m.front}: {path} holds {before!r}: not a number", file=sys.stderr, flush=True)
             raise RunStopped
-        fails = (0 if n is GuardError.BAD_NUMBER else n) + 1
+        fails = next_check_failures(n if isinstance(n, int) else None)
         m.write(path, f"{fails}\n")
         m.log(4, f"NAS: restic check failed (rc={rc}) without naming damaged data (connection lost?); retried next run")
         if fails >= CHECK_FAILURES_ALERTED:

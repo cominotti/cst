@@ -511,6 +511,17 @@ CHECK_FAILURES_ALERTED: Final = 3
 SUMMARY_CHARS: Final = 300
 
 
+def days_between(now: int, last: int) -> int:
+    """Whole days from LAST to NOW: the old $(( ($(date +%s) - last) / 86400 ))."""
+    return bash_div(now - last, DAY)
+
+
+def next_check_failures(before: int | None) -> int:
+    """nas-check-failures after one more failed check: the old $(( $(cat nas-check-failures || echo 0) + 1 ));
+    BEFORE None where bash's arithmetic failed on the file (08: it counted from 0)."""
+    return (0 if before is None else before) + 1
+
+
 # Messages of restic check (0.19) that name damaged data, not a transport problem.
 RESTIC_DAMAGE_RE: Final = re.compile(
     r"error for tree|not found in index|ciphertext verification failed|does not match|index is damaged|"
