@@ -33,7 +33,9 @@ Checked:
 - Q6, game.intended: its format line and the drift records GameProfile.setp writes for a fixed
   unit, with systemd showing a generated value right after the set (valid Unicode: systemctl's
   output reaches the profile decoded with U+FFFD), read with intended_records: the six fields
-  exactly, the format line no record, every line readable, newer_intended None.
+  exactly, the last record of each setting (setp writes the predicted one before the set, and a
+  second when systemd shows another form), the format line no record, every line readable,
+  newer_intended None.
 """
 
 from collections.abc import Generator, Sequence
@@ -249,8 +251,11 @@ class GameStateFilesTest(profiles.MbtTestCase):
                 profile.setp(mgr, unit, f"{prop}={value}")
             with open(profile.paths.intended, encoding="utf-8") as fh:
                 text = fh.read()
-            want = [(GameRecordKind.PROP.value, m, u, p, v, shown_value) for m, u, p, v in settings]
-            self.assertEqual(intended_records(text), want)
+            last: dict[tuple[str, str, str], tuple[str, ...]] = {}
+            for m, u, p, v in settings:  # the last record of a setting wins, at its own place
+                last.pop((m, u, p), None)
+                last[m, u, p] = (GameRecordKind.PROP.value, m, u, p, v, shown_value)
+            self.assertEqual(intended_records(text), list(last.values()))
             self.assertEqual(unreadable_lines(text, intended=True), [])
             self.assertIsNone(newer_intended(profile.paths.intended, text))
 

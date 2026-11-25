@@ -283,6 +283,26 @@ class GameProfileCase(unittest.TestCase):
 
 
 class PureRulesTest(unittest.TestCase):
+    def test_the_last_record_of_a_setting_in_game_intended_wins_at_its_place(self) -> None:
+        one_each = "cst-game-intended 1\nprop sys a.slice CPUWeight 10 10\ncgw /cg/cpuset.cpus 1-2 1-2\n"
+        self.assertEqual(
+            intended_records(one_each),
+            [("prop", "sys", "a.slice", "CPUWeight", "10", "10"), ("cgw", "/cg/cpuset.cpus", "1-2", "1-2")],
+        )  # a file with one record per setting (every one before G1) reads as before
+        text = (
+            one_each + "prop sys b.slice CPUWeight 5 5\nprop usr a.slice CPUWeight 7 7\n"
+            "prop sys a.slice CPUWeight 10 x\ncgw /cg/cpuset.cpus 1-2 3\n"
+        )
+        self.assertEqual(
+            intended_records(text),
+            [
+                ("prop", "sys", "b.slice", "CPUWeight", "5", "5"),
+                ("prop", "usr", "a.slice", "CPUWeight", "7", "7"),
+                ("prop", "sys", "a.slice", "CPUWeight", "10", "x"),
+                ("cgw", "/cg/cpuset.cpus", "1-2", "3"),
+            ],
+        )
+
     def test_unit_name_valid(self) -> None:
         for name in (
             "lushtext.slice",
@@ -634,12 +654,80 @@ class GameProfileOnOffTest(GameProfileCase):
         _, actions = self.run_profile("off")
         self.assertFalse(os.path.exists(self.ctrl("sys", "docker-a.scope", "AllowedCPUs")))
 
-    def test_a_failed_set_property_is_logged_and_records_no_intended_value(self) -> None:
+    def test_a_failed_set_property_is_logged_and_records_the_intended_value_the_tick_sets(self) -> None:
+        # G1: game.intended holds what 'on' sets before its set-property, as systemd will show it, so a
+        # fixed unit whose set-property failed is a drift the next tick sets (the old 'on' recorded nothing
+        # for it, and nothing set it again until 'off').
         self.systemd.fail_set.add(("sys", "machine.slice"))
         out, _ = self.run_profile("on")
         self.assertIn("<4>game-profile: machine.slice: could not set AllowedCPUs=12-23 CPUWeight=10 IOWeight=10\n", out)
-        self.assertNotIn("machine.slice", self.read(self.intended))
+        intended = self.read(self.intended)
+        for rec in ("AllowedCPUs 12-23 12-23", "CPUWeight 10 10", "IOWeight 10 10"):
+            self.assertEqual(intended.count(f"prop sys machine.slice {rec}\n"), 1, intended)
         self.assertIn("prop sys machine.slice CPUWeight new -", self.read(self.state))
+        self.systemd.fail_set.clear()
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(
+            sorted(a for a in self.sets(actions) if "machine.slice" in a),
+            [
+                f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23",
+                f"{SYS} set-property --runtime machine.slice CPUWeight=10",
+                f"{SYS} set-property --runtime machine.slice IOWeight=10",
+            ],
+        )
+        self.assertIn("drift: machine.slice CPUWeight was '50' instead of '10'", out)
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "10")
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+        self.assertEqual(self.read(self.intended), intended)  # each repair showed what the record says
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))  # 'off' undoes it
+
+    def test_a_set_property_that_keeps_failing_is_said_once_per_boot(self) -> None:
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        self.run_profile("on")
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick")
+        self.assertIn(
+            "<4>game-profile: drift: machine.slice CPUWeight is '50' instead of '10': could not set it again", out
+        )
+        self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=10", actions)
+        out, actions = self.run_profile("tick")
+        self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=10", actions)  # tried again
+        self.assertNotIn("could not set it again", out)  # said once per boot
+
+    def test_a_value_systemd_shows_in_another_form_gets_a_second_record(self) -> None:
+        # 16384M: the prediction is its bytes; the fake systemd shows it as given. 'on' writes the prediction,
+        # then what systemd shows after the set; the last record of a setting wins, so no drift.
+        settings = dataclasses.replace(self.settings, game_memory_low="16384M")
+        self.run_profile("on", settings)
+        intended = self.read(self.intended)
+        self.assertIn(
+            f"prop sys user@{UID}.service MemoryLow 16384M 17179869184\n"
+            f"prop sys user@{UID}.service MemoryLow 16384M 16384M\n",
+            intended,
+        )
+        self.assertEqual(intended.count("prop sys machine.slice CPUWeight "), 1)  # shown as predicted: one
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [])
+        self.assertNotIn("drift", out)
+
+    def test_a_repair_that_systemd_shows_in_another_form_records_that_form_once(self) -> None:
+        # The memory chain's leaf failed in 'on': game.intended holds only the prediction (bytes); the tick's
+        # set shows 16384M: that form is recorded, and the next tick sets nothing.
+        settings = dataclasses.replace(self.settings, game_memory_low="16384M")
+        self.systemd.fail_set.add(("sys", f"user@{UID}.service"))
+        self.run_profile("on", settings)
+        self.systemd.fail_set.clear()
+        self.write(self.manual, "")
+        _, actions = self.run_profile("tick", settings)
+        self.assertIn(f"{SYS} set-property --runtime user@{UID}.service MemoryLow=16384M", self.sets(actions))
+        self.assertTrue(self.read(self.intended).endswith(f"prop sys user@{UID}.service MemoryLow 16384M 16384M\n"))
+        out, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [])
+        self.assertNotIn("drift", out)
 
     def test_the_lock_keeps_actions_apart(self) -> None:
         p, out = self.profile()
@@ -2317,14 +2405,15 @@ class HandledBoxSetAgainTest(GameProfileCase):
         self.assertEqual(self.read(self.state), state)
 
     def test_a_slice_next_to_the_game_whose_set_failed_in_on_is_set_again(self) -> None:
-        # Its set-property failed, so game.intended has no line for it and the drift repair cannot see it.
+        # Its set-property failed; game.intended holds what 'on' meant to set (G1), so the drift repair sets it
+        # (once: the box check leaves a setting the drift repair covers to it).
         self.box("e2e.slice")
         state, out, sets = self.failed_then_tick("usr", "e2e.slice")
-        self.assertNotIn("e2e.slice", self.read(self.intended))
+        self.assertIn("prop usr e2e.slice CPUWeight idle idle\n", self.read(self.intended))
         self.assertEqual(sets, [f"{USR} set-property --runtime e2e.slice CPUWeight=idle"])
         self.assertEqual(self.read(self.state), state)
-        self.assertIn("e2e.slice: CPUWeight is '', not 'idle'", out)
-        self.assertNotIn("drift:", out)
+        self.assertIn("drift: e2e.slice CPUWeight was '' instead of 'idle'", out)
+        self.assertNotIn("its set failed", out)
 
     def test_a_steam_scope_a_killed_off_undid_is_set_again_and_off_still_undoes_it(self) -> None:
         self.systemd.units["usr"] = [self.STEAM]
@@ -2370,8 +2459,9 @@ class HandledBoxSetAgainTest(GameProfileCase):
         self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime lushtext.slice CPUWeight=idle"])
         self.assertIn("drift: lushtext.slice CPUWeight was '100'", out)
         self.assertNotIn("its set failed", out)
-        # Not even asked about by the box check: the drift repair's own show is the only one.
-        shows = [a for a in actions if a.startswith(f"{USR} show") and a.endswith(" lushtext.slice")]
+        # Not even asked about by the box check: the drift repair's own show is the only one (beside its
+        # read-back of the value it set, show -P).
+        shows = [a for a in actions if a.startswith(f"{USR} show -p") and a.endswith(" lushtext.slice")]
         self.assertEqual(len(shows), 1, shows)
 
     def test_a_box_that_holds_the_game_by_now_is_left_alone(self) -> None:

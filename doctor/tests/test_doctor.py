@@ -2878,10 +2878,11 @@ class GameProfileTest(Scratch):
         self.assertEqual(self.results(), [Result(doc_domain.INFO, "game profile: ON, no recorded setting to compare")])
 
     def test_a_cgroup_record_without_a_shown_value_is_not_compared(self) -> None:
-        # The file is there and holds another value, but the record names nothing to compare with.
+        # The file is there and holds another value, but the record names nothing to compare with. It is the
+        # file's last record, which wins (G1): the earlier record of the same file is not counted either.
         self.intended += "cgw /sys/fs/cgroup/inner/cpuset.cpus 1-2 ''\n"
         self.profile_on()
-        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 8 settings it made still hold")])
+        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 7 settings it made still hold")])
 
 
 class UserManagerBoxesTest(Scratch):

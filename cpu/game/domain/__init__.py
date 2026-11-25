@@ -413,17 +413,21 @@ def intended_records(text: str) -> list[Record]:
     """The drift records of game.intended (its text), read as the profile reads the file (records: a
     last line cut short and a line bash could not read are left out, fields as bash's eval gives them):
     ("prop", MGR, UNIT, PROP, VALUE, SHOWN) with MGR sys or usr, and ("cgw", FILE, VALUE, SHOWN), any
-    further fields dropped. The format line and other kinds are none."""
-    out: list[Record] = []
+    further fields dropped. The format line and other kinds are none. The last record of a setting (MGR UNIT
+    PROP, or FILE) wins, at its own place: 'on' writes a predicted record before its set-property and a
+    second one when systemd then shows another form, and the drift repair one when its set shows another."""
+    out: dict[Record, Record] = {}
     for r in records(text):
         match _kind(r):
             case GameRecordKind.PROP if len(r) >= INTENDED_PROP_FIELDS and manager_of(r[1]) is not None:
-                out.append(r[:INTENDED_PROP_FIELDS])
+                rec, key = r[:INTENDED_PROP_FIELDS], r[:4]
             case GameRecordKind.CGW if len(r) >= INTENDED_CGW_FIELDS:
-                out.append(r[:INTENDED_CGW_FIELDS])
+                rec, key = r[:INTENDED_CGW_FIELDS], r[:2]
             case _:
-                pass
-    return out
+                continue
+        out.pop(key, None)
+        out[key] = rec
+    return list(out.values())
 
 
 def state_uid(recs: Sequence[Record]) -> str | None:

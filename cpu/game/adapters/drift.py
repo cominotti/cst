@@ -35,7 +35,7 @@ def repair_drift(profile: GameProfile, *, user_manager: bool = True) -> None:
     of a newer CST is not read (its records may mean something else), and a setting game.state holds
     no record of is not set again ('off' could not undo it): each said in the journal once per boot
     (again when the text changes, and when it comes back after a tick that had nothing to say:
-    GameProfile.say_unheld). Without user_manager, the user manager's settings are left alone (see
+    GameProfile.say_unheld), and so is a repair that failed. Without user_manager, the user manager's settings are left alone (see
     GameProfile.drift)."""
     text, newer = profile.intended()
     if newer is not None:
@@ -44,7 +44,7 @@ def repair_drift(profile: GameProfile, *, user_manager: bool = True) -> None:
         return
     drifts = settings_drift(profile, text, user_manager=user_manager)
     skipped = unheld(drifts, records(profile.state_text()))
-    profile.say_unheld(skipped)
+    failed: list[tuple[int, str]] = []
     for d in drifts:
         if d in skipped:
             continue
@@ -54,7 +54,16 @@ def repair_drift(profile: GameProfile, *, user_manager: bool = True) -> None:
         else:
             mgr = manager_of(r[1]) or "usr"
             ok = profile.ctl(mgr, "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True) == 0
-        profile.log(*repaired_text(d, ok=ok))
+            # systemd shows the value in another form than the record says (a prediction of 'on' whose
+            # set-property failed): the form it shows now is recorded, so it is not set again every 30 s.
+            after = profile.prop(mgr, r[2], r[3]) if ok else ""
+            if after not in {"", r[5], d.now}:
+                profile.append_intended(*r[:5], after)
+        if ok:
+            profile.log(*repaired_text(d, ok=ok))
+        else:  # one that fails for good (systemd refuses the value) is said once per boot, not every 30 s
+            failed.append(repaired_text(d, ok=ok))
+    profile.say_unheld(skipped, failed)
 
 
 def settings_drift(profile: GameProfile, text: str, *, user_manager: bool = True) -> list[Drift]:

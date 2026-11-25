@@ -50,7 +50,8 @@ value it sets, every value systemd shows, every sysfs file; the drop-ins and the
 4. A tick leaves nothing half applied: after a tick with no fault while the profile stays on,
    every running Docker scope has AllowedCPUs = BUILD_CPUS and its record, every Steam scope its
    MemoryLow, every box without the game all of its settings (CPUWeight idle, and AllowedCPUs with
-   cpuset delegated), and drift() lists no drift game.state holds a record of. With no exception:
+   cpuset delegated), and drift() lists no drift game.state holds a record of (game.intended holds what
+   'on' sets before its set-property, so a fixed unit whose set failed is one: G1). With no exception:
    a box whose record a faulted step wrote without its setting (its set-property failed, or the
    process died between the two: O2), and a box whose setting an 'off' that was killed undid while
    game.state stayed (O6), are set again by the next whole tick, with no new record.
@@ -665,6 +666,18 @@ class GameProfileMachineTest(profiles.MbtTestCase):
     def test_any_sequence_of_on_tick_and_off_keeps_the_invariants(self) -> None:
         profiles.run_machine(GameProfileMachine)
 
+    def point(self, action: str, prefix: str, *before: Callable[[GameProfileMachine], object]) -> int:
+        """The number of the first point of action whose name starts with prefix, on a fresh machine (no
+        prior override, no cpuset, no builds.slice) after the steps before: a replay names its point so,
+        and other points the code gains or loses before it do not move the fault onto another one."""
+        machine = GameProfileMachine()
+        self.addCleanup(machine.teardown)
+        machine.start(prior=False, cpuset=False, builds=False)
+        for step in before:
+            step(machine)
+        machine.call(action, ProfileFault.NONE, 1)
+        return next(n for n, name in enumerate(machine.plan.calls, 1) if name.startswith(prefix))
+
     def replay(self, *steps: Callable[[GameProfileMachine], object]) -> None:
         """A sequence of the machine's steps, in order, with its invariant after each: one that
         Hypothesis found (or that its draws today miss), pinned whatever the draws become."""
@@ -701,6 +714,27 @@ class GameProfileMachineTest(profiles.MbtTestCase):
             lambda m: m.off(ProfileFault.KILL, 1),
             lambda m: m.reload("usr"),
             lambda m: m.tick(ProfileFault.NONE, 1),
+        )
+
+    def test_a_fixed_unit_whose_set_failed_in_on_is_set_by_the_next_tick(self) -> None:
+        # G1: machine.slice's set-property fails in 'on'; game.intended holds what 'on' meant to set (written
+        # before the set), so the next whole tick's drift repair sets it. The old 'on' recorded nothing for it,
+        # and machine.slice kept its own values until 'off'.
+        at = self.point("on", "systemctl set-property --runtime machine.slice ")
+
+        def shows_the_profile_s_values(m: GameProfileMachine) -> None:
+            got = [m.systemd.now("sys", "machine.slice", p) for p in ("AllowedCPUs", "CPUWeight", "IOWeight")]
+            assert got == [BUILD, SETTINGS.vm_weight, SETTINGS.vm_weight], f"machine.slice: {got}"
+
+        self.replay(
+            lambda m: m.start(prior=False, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.FAIL, at),
+            lambda m: self.assertTrue(
+                m.plan.calls[at - 1].startswith("systemctl set-property --runtime machine.slice")
+            ),
+            lambda m: m.tick(ProfileFault.NONE, 1),
+            shows_the_profile_s_values,
+            lambda m: m.off(ProfileFault.NONE, 1),
         )
 
     def test_a_setting_an_off_could_not_undo_is_undone_by_the_next_tick(self) -> None:

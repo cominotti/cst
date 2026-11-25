@@ -31,6 +31,7 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
+from cpu.game.domain.boxes import shown_form
 from cpu.game.adapters.drift import repair_drift, settings_drift
 from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_entries, unit_gone, user_side
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
@@ -246,9 +247,15 @@ class GameProfile:
         """Append one whole record to `game.state`."""
         return self._append(self.paths.state, *fields)
 
+    def append_intended(self, *fields: str) -> bool:
+        """Append one whole record to game.intended (best effort: a failed write stops nothing)."""
+        return self._append(self.paths.intended, *fields)
+
     def setp(self, mgr: Manager, unit: str, *settings: str) -> None:
-        """Record, per property, whether a runtime override existed (and its value), then set
-        them all; for a fixed unit, also record in game.intended what systemd shows right after."""
+        """Record, per property, whether a runtime override existed (and its value), then set them all. For a
+        fixed unit, game.intended gets each value as systemd will show it (shown_form) before the set, so the
+        drift repair sets one whose set-property failed; after a set that worked, a second record when systemd
+        shows another form (the last record of a setting wins: intended_records)."""
         for kv in settings:
             p = kv.split("=", 1)[0]
             if os.path.exists(self.ctl_file(mgr, unit, p)):
@@ -258,14 +265,15 @@ class GameProfile:
             if not self._append(self.paths.state, *rec):
                 self.report_unrecorded(f"{unit}: {' '.join(settings)}")
                 return
+        fixed = [kv.partition("=")[::2] for kv in settings] if not transient_unit(unit) else []
+        for p, value in fixed:
+            self.append_intended(GameRecordKind.PROP, mgr, unit, p, value, shown_form(p, value))
         if self.ctl(mgr, "set-property", "--runtime", unit, *settings) != 0:
             self.log(4, f"{unit}: could not set {' '.join(settings)}")
             return
-        if transient_unit(unit):
-            return
-        for kv in settings:
-            p, _, value = kv.partition("=")
-            self._append(self.paths.intended, GameRecordKind.PROP, mgr, unit, p, value, self.prop(mgr, unit, p))
+        for p, value in fixed:
+            if (now := self.prop(mgr, unit, p)) != shown_form(p, value):
+                self.append_intended(GameRecordKind.PROP, mgr, unit, p, value, now)
 
     # ---- the boxes ----------------------------------------------------------------------------
     def steam_scopes(self) -> list[str]:
@@ -619,18 +627,20 @@ class GameProfile:
         """The settings in game.intended (its text) that no longer hold (settings_drift)."""
         return settings_drift(self, text, user_manager=user_manager)
 
-    def say_unheld(self, skipped: Sequence[Drift]) -> None:
-        """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
-        notice; with none, forget the mark, so a later one is said again."""
-        if not skipped:
+    def say_unheld(self, skipped: Sequence[Drift], failed: Sequence[tuple[int, str]] = ()) -> None:
+        """Say the drifts the tick does not set again ('off' could not undo them), at notice, and the ones whose
+        repair failed (failed: their lines), once per boot; with none, forget the mark, so a later one is said
+        again."""
+        lines = [(5, unheld_text(d)) for d in skipped] + list(failed)
+        if not lines:
             with contextlib.suppress(OSError):
                 os.unlink(self.paths.drift_warned)
             return
-        said = "\n".join(unheld_text(d) for d in skipped)
+        said = "\n".join(text for _prio, text in lines)
 
         def emit() -> None:
-            for line in said.split("\n"):
-                self.log(5, line)
+            for prio, text in lines:
+                self.log(prio, text)
 
         self.say_once(self.paths.drift_warned, said, emit)
 

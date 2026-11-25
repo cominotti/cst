@@ -8195,6 +8195,70 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_207_cpu_game_profile_tick_sets_a_fixed_unit_whose_set_failed_in_on(self) -> None:
+        """The real game profile, on for tester, with machine.slice's set-property failing in 'on' (a systemctl
+        wrapper first on PATH for that one call fails it and runs the real systemctl for every other call):
+        machine.slice keeps its own CPUWeight, game.intended holds what 'on' meant to set (machine.slice
+        CPUWeight 10 10, G1), cst doctor (as tester) warns about the drift, the next tick with the real
+        systemctl sets it (CPUWeight 10) and says so, a second tick sets nothing, and 'off' gives machine.slice
+        its own CPUWeight back. The old 'on' recorded nothing for it, and no tick set it until 'off'."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -rf /var/tmp/e2e-207-bin
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-207-conf.bak ]]; then mv /tmp/e2e-207-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-207-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            own=$(systemctl show -P CPUWeight machine.slice)
+            [[ "$own" != 10 ]] || { echo "the test cannot bite: machine.slice CPUWeight is already 10" >&2; exit 1; }
+            install -d /var/tmp/e2e-207-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nif [[ "$1 $2 $3" == "set-property --runtime machine.slice" ]]; then echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
+                "$real" >/var/tmp/e2e-207-bin/systemctl
+            chmod 0755 /var/tmp/e2e-207-bin/systemctl
+            touch /run/cpu-setup/manual
+            got=$(PATH=/var/tmp/e2e-207-bin:$PATH gp on)
+            grep -qF 'machine.slice: could not set AllowedCPUs=0 CPUWeight=10 IOWeight=10' <<<"$got" \
+                || { echo "on: $got" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "the wrapper did not fail the set" >&2; exit 1; }
+            grep -qx 'prop sys machine.slice CPUWeight 10 10' /run/cpu-setup/game.intended \
+                || { echo "game.intended:" >&2; cat /run/cpu-setup/game.intended >&2; exit 1; }
+            d=$(runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+                /opt/cst-rw/cst doctor 2>&1 || true)
+            grep -qE 'machine\.slice CPUWeight is [^;]* \(the profile set 10\)' <<<"$d" || { echo "doctor: $d" >&2; exit 1; }
+            got=$(gp tick)
+            grep -qE "drift: machine\.slice CPUWeight was '[^']*' instead of '10'" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || { echo "the tick did not set it" >&2; exit 1; }
+            got=$(gp tick)
+            if grep -qF 'drift:' <<<"$got"; then echo "the second tick set it again: $got" >&2; exit 1; fi
+            gp off >/dev/null
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "machine.slice CPUWeight after off: $(systemctl show -P CPUWeight machine.slice)" >&2; exit 1; }
+            rm -rf /var/tmp/e2e-207-bin
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS)
     def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
         """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose

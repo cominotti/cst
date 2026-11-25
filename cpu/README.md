@@ -1028,10 +1028,24 @@ warns if one is still there while the profile is off.
 
 What else the profile does about it:
 
-- Right after `on` sets a property, it reads it back from systemd
-  (`systemctl show`; `16G` reads back as `17179869184` bytes) and writes the
-  value to `/run/cpu-setup/game.intended`, one line per property:
-  `prop sys user.slice MemoryLow 16G 17179869184`. A `cpuset.cpus` file it
+- Right before `on` sets a property of a fixed unit, it writes the value to
+  `/run/cpu-setup/game.intended` as systemd will show it (`16G` as
+  `17179869184` bytes, a CPU list with blanks between its ranges), one line
+  per property: `prop sys user.slice MemoryLow 16G 17179869184`. So a
+  `set-property` that fails in `on` is a drift like any other, which the
+  next tick sets, `cst cpu game state` shows and `cst doctor` warns about
+  (versions before 2026-11 wrote the line only after a set that worked, and
+  a failed one stayed unset until `off`). Right after the set it reads the
+  value back from systemd (`systemctl show`); when systemd shows another
+  form, a second line with that form follows. The last line of a setting
+  wins, everywhere `game.intended` is read (the drift repair, `game
+  state`, `cst doctor`). When a repair's set works and systemd then shows
+  yet another form, the tick adds that line too, so it does not set the
+  same value again every 30 s. A repair that fails is said once per boot,
+  in the same mark as the settings it does not set again (below), and
+  tried again at every tick. (An installed bash copy of an older CST, during
+  an upgrade inside one game session, reads two lines of one setting as two
+  records.) A `cpuset.cpus` file it
   wrote directly (7.1) gets a `cgw` line. The transient units (the scopes
   of Docker containers and Steam, the `run-*.service` of `systemd-run`) are
   not recorded: no drop-in can win over theirs; the watchdog's check of the
