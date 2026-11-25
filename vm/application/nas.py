@@ -405,8 +405,9 @@ class _ResticAnswer:
         self.hold = hold
 
     def end_hold(self, failure: BaseException | None = None) -> None:
-        """The stops let in again, as a with block ends: a stop that waited is raised here, unless failure
-        (the exception that ends the hold) is given."""
+        """The stops let in again, as a with block ends: a stop that waited is raised here, also when failure
+        (the exception that ends the hold) is given; the stop then replaces failure, which stays its
+        __context__."""
         hold, self.hold = self.hold, None
         if hold is None:
             return
