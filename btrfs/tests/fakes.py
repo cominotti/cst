@@ -1554,7 +1554,8 @@ class CacheWorld(FaultPoints):
     "fstab remove" (the put-back when there was no file) and "systemctl daemon-reload". A failed command
     answers "WHAT failed: REASON" (the error's text); a failed folder, tag or /etc/fstab call raises it.
     Every error the fakes model (a link at a private folder: ENOTDIR, as O_NOFOLLOW with O_DIRECTORY gives;
-    a file or a dangling link in its way: EEXIST; a file above a tag: ENOTDIR; /etc/fstab a folder: EISDIR) raises inside the call, before a
+    a file or a dangling link in its way: EEXIST; a file at or above a tag's folder: EEXIST, as write_atomic's
+    ensure_dir gives; /etc/fstab a folder: EISDIR) raises inside the call, before a
     kill armed there fires. before_reload runs before a reload takes effect (a kill there leaves systemd
     behind); a KILL of the plan at the reload point is one after it took effect. Reads are not points;
     each read gives a new object, never the one the world holds."""
@@ -1821,7 +1822,7 @@ class FakeCacheFolders:
         def write() -> None:
             in_the_way = [q for q in _self_and_parents(source) if q in w.files]
             if in_the_way:
-                raise _os_error(errno.ENOTDIR, tag)
+                raise _os_error(errno.EEXIST, in_the_way[-1])  # ensure_dir's mkdir of a file's path
             w.mkdirs(source)  # write_atomic makes the folder it writes in
             w.files.add(tag)
             w.tags[source] = (user.uid, user.gid)

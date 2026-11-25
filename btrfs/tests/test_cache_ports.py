@@ -477,11 +477,13 @@ class _PortsContract(unittest.TestCase):
 
     def test_a_file_in_the_way_of_a_private_folder_fails(self) -> None:
         self.side.put_file("/var/mnt/cache")
-        with self.assertRaises(OSError):
+        with self.assertRaises(OSError) as above:
             self.side.folders().ensure_private(CACHE.source, USER)
+        self.assertEqual(above.exception.errno, errno.EEXIST)
         self.side.put_file(SCRATCHPAD.target)
-        with self.assertRaises(OSError):
+        with self.assertRaises(OSError) as at:
             self.side.folders().ensure_private(SCRATCHPAD.target, USER)
+        self.assertEqual(at.exception.errno, errno.EEXIST)
 
     def test_the_tag_is_written_once_and_a_link_there_left_alone(self) -> None:
         f = self.side.folders()
@@ -504,8 +506,9 @@ class _PortsContract(unittest.TestCase):
 
     def test_a_tag_under_a_file_fails(self) -> None:
         self.side.put_file("/var/mnt/scratchpad")
-        with self.assertRaises(OSError):
+        with self.assertRaises(OSError) as above:
             self.side.folders().ensure_tag(SCRATCHPAD.source, USER)
+        self.assertEqual(above.exception.errno, errno.EEXIST)  # write_atomic's ensure_dir: mkdir of a file
 
     # the host's facts
     def test_binding_paths_for_each_kind_of_path(self) -> None:
