@@ -26,6 +26,7 @@ from btrfs.bulk.domain import (
     BulkItemState,
     BulkJournalKind,
     BulkTargetState,
+    BootCountKeptError,
     CacheTagState,
     FlatpakAccess,
     Item,
@@ -431,6 +432,14 @@ def exit_status(b: Bulk, deferred: Sequence[str], problems: Sequence[str]) -> in
     if problems:
         return 4
     return 3 if deferred else 0
+
+
+def new_request(b: Bulk) -> None:
+    """apply's request gets its two boots: the count a boot left goes first (BootCountKeptError when it cannot)."""
+    try:
+        b.boots.forget()
+    except OSError as e:
+        raise BootCountKeptError(f"btrfs-bulk: cannot reset the count of boot attempts: {e}; nothing was moved") from e
 
 
 def apply(b: Bulk) -> tuple[list[str], list[str]]:

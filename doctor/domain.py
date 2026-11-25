@@ -125,6 +125,13 @@ SNAP_WRITABLE = HostPath(f"{SNAP_STATE}/{WRITABLE_FILE}")
 SNAP_CONF = HostPath(SNAPSHOTS_CONF)  # also read by the VM NAS check
 
 NOCOW_POSTPONED = HostPath(NocowPaths().postponed)  # docker-volumes-nocow's record (StoredPostponed)
+# What docker-volumes-nocow leaves on disk for a migration no boot will ask for (cst doctor never opens
+# Docker's own folders, which are root's only): its outcome record (parse_outcome), its count of boots
+# (CounterFile), its flag; and the helper itself, as installed.
+NOCOW_OUTCOME = HostPath(NocowPaths().outcome)
+NOCOW_ATTEMPTS = HostPath(NocowPaths().attempts)
+NOCOW_FLAG = HostPath(NocowPaths().flag)
+NOCOW_HELPER_HOST = HostPath(_BY_SRC["btrfs/docker-volumes-nocow"].dest)
 
 # The weekly scrub and the drop-in `cst btrfs install` writes from SCRUB_LIMIT.
 SCRUB_UNIT = HostPath("/etc/systemd/system/btrfs-scrub-weekly.service")

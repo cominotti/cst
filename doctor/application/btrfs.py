@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
 """The btrfs area of `cst doctor`: chunk allocation, the weekly scrub's speed limit, the snapshot settings,
-snapshots left writable, Docker's postponed NOCOW."""
+snapshots left writable, Docker's NOCOW migration (docker_nocow.py)."""
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 import os
 import re
 import shlex
-import time
 from typing import Final, NamedTuple
 
 from btrfs.commit.domain import (
@@ -30,14 +29,13 @@ from btrfs.compress.domain import (
     parse_top_mount_unit,
     pick_root_mounts,
 )
-from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
 from btrfs.cache.domain import parse_all_mounts, parse_managed_fstab_entries
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread
-from cst_core.domain.shapes import parse_json
-from cst_core.domain.units import parse_show_units
+from cst_core.domain.units import parse_show_units, show_units_argv
 from cst_core.domain.text import YES_WORDS, ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
+from doctor.application import docker_nocow
 from doctor.application.cpu import unit_props
 from doctor.application.findmnt import findmnt_all_mounts, findmnt_root_btrfs_info
 from doctor.application.shared import (
@@ -57,8 +55,6 @@ from doctor.domain import (
     HEALTH_CHECK_HOST,
     INFO,
     MIRROR_COPIES,
-    NOCOW_POSTPONED,
-    NOCOW_WARN_BOOTS,
     OK,
     ONE_DEVICE_FACTOR,
     RECLAIM_CONF,
@@ -581,39 +577,9 @@ def check_snapshots_writable(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(OK, "snapshots: none left writable")
 
 
-@check(CHECKS, "btrfs")
-def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
-    try:
-        with host.open_text(host.path(NOCOW_POSTPONED)) as f:
-            rec = parse_json(f.read(65536))
-    except FileNotFoundError:
-        return  # never postponed, or not set up
-    except OSError, ValueError:
-        rec = None
-    if not is_stored_postponed(rec):
-        yield Result(INFO, f"Docker volumes NOCOW: cannot read {NOCOW_POSTPONED}")
-        return
-    boots, last = rec.get("boots"), rec.get("last")
-    if type(boots) is not int or boots < 1:
-        boots = 1
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "at an unknown time"
-    reason = str(rec.get("reason") or "no reason recorded")
-    msg = f"Docker volumes NOCOW: the boot-time migration was postponed at {boots} boot(s) in a row, last {when}: {reason}"
-    if boots >= NOCOW_WARN_BOOTS and is_config_reason(reason):
-        # Waiting for a quiet boot does not help: only a fixed file lets the migration run.
-        yield Result(
-            WARN,
-            f"{msg}; fix {DAEMON_JSON} (the fix line checks it as dockerd reads it), and the next boot runs it",
-            f"sudo dockerd --validate --config-file {DAEMON_JSON}",
-        )
-    elif boots >= NOCOW_WARN_BOOTS:
-        yield Result(
-            WARN,
-            f"{msg}; the volumes keep copy-on-write data (and new ones may too) until a boot where nothing uses them",
-            "journalctl -b -u docker-volumes-nocow",
-        )
-    else:
-        yield Result(INFO, f"{msg}; tried again at the next boot")
+# The Docker volumes NOCOW checks (docker_nocow.py) come here.
+check(CHECKS, "btrfs")(docker_nocow.check_docker_nocow_postponed)
+check(CHECKS, "btrfs")(docker_nocow.check_docker_nocow_outcome)
 
 
 _COMPRESSION_LABEL: Final[str] = "root btrfs compression"
@@ -728,12 +694,12 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
 
 def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Result]:
     """WARN when systemd has not loaded /etc/fstab as it is on disk (fstab_lines_unread over the mount units
-    it has loaded, one `systemctl show '*.mount'`): an edit, or a cache attach or detach that stopped
-    between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked. Asked only
-    where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a machine without
-    one is no warning of the cache's."""
-    cmd = ["systemctl", "show", *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)), "*.mount"]
-    rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
+    it has loaded, active or not, one `systemctl show --state=loaded '*.mount'`: a glob without
+    --state=loaded hides the inactive ones with no job queued): an edit, or a cache attach or detach that
+    stopped between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked.
+    Asked only where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a
+    machine without one is no warning of the cache's."""
+    rc, out, _ = host.run(show_units_argv(["systemctl"], "*.mount", MOUNT_UNIT_PROPS), timeout=20, locale_c=True)
     if rc != 0:
         return
     if fstab_lines_unread(parse_show_units(out), {e.target for e in parse_managed_fstab_entries(fstab_raw)}) is True:

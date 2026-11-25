@@ -66,6 +66,8 @@ def as_tester_bash(container: str, script: str, *, check: bool = True) -> subpro
 # tests/e2e test_13: the fakes `btrfs-degraded-boot-setup.sh` runs against
 # (sourced by every step) and the fake deployment, boot entry and overlay.
 DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
+# The rustc wrapper `cst toolchains config apply --sccache` installs for tester (component toolchains:sccache).
+RUSTC_WRAPPER = "/home/tester/.local/libexec/cst/rustc-wrapper"
 # RECORD_COMPONENT RECORD COMPONENT: the destinations a record lists under the component, sorted, then its
 # state ("-": none; no record: "- -"). RECORD_STRIP RECORD COMPONENT: the record as an install from before
 # the component was recorded left it (its lines and its state taken out).
@@ -889,11 +891,12 @@ echo E2E-OK
 )
 
 
-# test_151: helpers for its bash steps, and cst vm's torn-snapshot steps (vm/application/nas.py) over the
-# real restic; argv[1] the step. "summary" and "ids" read restic's JSON on stdin; "record" and "entries"
-# write and read the torn record; "retry" (the torn snapshots of earlier runs, then the retention) and
-# "forget" (forget_torn of a snapshot, as a torn run does) run cst vm's code, with the settings, the record
-# and its lock the CST_VM_* variables name.
+# test_151, test_200: helpers for their bash steps, and cst vm's torn-snapshot steps (vm/application/nas_torn.py)
+# over the real restic; argv[1] the step. "summary" and "ids" read restic's JSON on stdin; "record",
+# "entries" and "whys" write and read the torn record; "retry" (the torn snapshots of earlier runs, then the
+# retention), "forget" (forget_torn of a snapshot, as a torn run does) and "stopped" (restic's read and the
+# check after it, vm/application/nas.py, with this process's real stop signals) run cst vm's code, with the
+# settings, the record and its lock the CST_VM_* variables name.
 VM_TORN_DRIVER = r"""
 import json, os, sys
 step = sys.argv[1]
@@ -915,6 +918,9 @@ elif step == "entries":  # the record at argv[2]: its version, then VM=ID per en
     with open(sys.argv[2]) as f:
         doc = json.load(f)
     print(doc["version"], *(f"{e['vm']}={e['snapshot']}" for e in doc["torn"]))
+elif step == "whys":  # the record at argv[2]: what tore each entry
+    with open(sys.argv[2]) as f:
+        print(*(e["why"] for e in json.load(f)["torn"]))
 else:
     sys.path.insert(0, "/opt/cst-rw")
     from vm import wiring
@@ -925,6 +931,23 @@ else:
     repo = p.settings.nas_repo()
     if step == "retry":
         nas.retention_after_torn(cfg, p, vm, repo)
+    elif step == "stopped":  # restic's read of the folder argv[3] for a live run, as nas_run makes it
+        from vm.domain import DomainParts
+        from vm.domain.backup import NasRun, Stop, nas_manifest
+        p.signals.catch_stops()
+        src = sys.argv[3]
+        run = NasRun(
+            vm=vm, live=True, quiesce=False, xml_text="<domain/>",
+            parts=DomainParts(uuid="e2e", disks=[src], nvram="", tpm=False, skipped=[], problems=[]),
+            notes=[], sources=[(src, "disk")], epoch=1795000000.0, stamp="20261124T000000Z", specs={}, others=[],
+            agent="none", versions={}, deployment=None,
+        )
+        try:
+            nas._nas_restic_read(cfg, p, run, repo, nas_manifest(run, [], "crash-consistent", None))
+        except Stop as e:
+            print(f"stop: {e}")
+        else:
+            print("no stop")
     else:
         left = nas.forget_torn(cfg, p, repo, nas.torn_entry(repo, sys.argv[3], vm, "20261119T000000Z", "incomplete"))
         print(f"forget_torn: {left}")
@@ -1099,6 +1122,86 @@ elif prog == "umount":
 else:
     sys.exit(2)
 """
+
+
+def cache_reload_cleanup(w: str) -> str:
+    """The cleanup of cache_reload_scaffold(w): the bases stopped, /etc/fstab put back (removed only where
+    the scaffold found none, w/no-fstab; left alone where the scaffold stopped before it looked) and loaded,
+    the base folders this test made and the work folder removed. exec_bash runs bash -e: every step must
+    run, also after one that fails."""
+    return f"""
+            set +e
+            systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
+            systemctl daemon-reload
+            if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
+            if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
+            rm -rf {w}
+            """
+
+
+def cache_reload_scaffold(w: str) -> str:
+    """The start of a bash script that runs `cst btrfs cache` for u1 under the test root w
+    (CST_BTRFS_CACHE_ROOT, CACHE_MOUNT_STUB for findmnt, mount and umount over w/mounts, where both bases
+    are mounted), with the real systemd: tmpfs nofail lines for the two bases in w/etc/fstab, copied to the
+    real /etc/fstab and loaded (daemon-reload; nothing started). PATH="w/sync:$PATH" runs a command whose
+    daemon-reload first copies w/etc/fstab to /etc/fstab and counts it (`reloads` prints the count);
+    PATH="w/kill:$PATH" one whose daemon-reload copies it, then kills the pid in w/pid. $cst is the
+    checkout's cst. Clean up with cache_reload_cleanup(w)."""
+    return f"""
+            set -euo pipefail
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
+            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
+            [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
+            [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
+            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\n' >{w}/etc/passwd
+            cat >{w}/etc/fstab <<'EOF'
+tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
+tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
+EOF
+            row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }}
+            {{
+                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
+                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cat >{w}/bin/mnt-stub <<'STUB'
+{CACHE_MOUNT_STUB}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            cat >{w}/kill/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    for _ in $(seq 100); do [[ -s {w}/pid ]] && break; sleep 0.1; done
+    touch {w}/killed
+    kill -KILL "$(cat {w}/pid)"
+    sleep 5
+    exit 1
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            cat >{w}/sync/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    echo reload >>{w}/reloads
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/kill/systemctl {w}/sync/systemctl
+            touch {w}/reloads
+            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            cst=/opt/cst-rw/cst
+            reloads() {{ wc -l <{w}/reloads; }}
+            cp {w}/etc/fstab /etc/fstab
+            systemctl daemon-reload
+            """
 
 
 class Tier1SystemdE2ETest(unittest.TestCase):
@@ -2309,6 +2412,24 @@ echo E2E-OK
                 check=False,
             )
 
+    def _undo_sccache_after(self) -> None:
+        """Undo `cst toolchains config apply --sccache` once the test is done, every step even when one fails
+        (set +e): --no-sccache takes CST's rustc-wrapper line out of ~/.cargo/config.toml, and the wrapper,
+        which --no-sccache leaves in place by design (toolchains/README.md), is removed with its record line
+        when it was not there before the test. Left there, it made test_19 skip toolchains:sccache in the
+        same container ("already there (another test's)"). Called before the test's own addCleanup, so it
+        runs last, after the test has stopped its servers."""
+        c = self.SYSTEMD_CONTAINER
+        there = exec_bash(c, f"[[ ! -e {RUSTC_WRAPPER} ]] || echo there").stdout.strip() == "there"
+        remove = (
+            ""
+            if there
+            else "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py remove --home /home/tester "
+            "--component toolchains:sccache >/dev/null"
+        )
+        script = f"set +e\n/opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1\n{remove}\n"
+        self.addCleanup(as_tester_bash, c, script, check=False)
+
     @e2e_tags(E2ETag.TOOLCHAINS)
     def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self) -> None:
         """The real rustc wrapper, installed by `cst toolchains config apply
@@ -2323,11 +2444,11 @@ echo E2E-OK
         caller's own TMPDIR. Also the setting's cycle: plan changes
         nothing, apply writes it in, a second apply keeps it, a wrapper without
         the setting (the previous version) is rewritten, --no-sccache undoes."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             """
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/knob /home/tester/.config/cst/toolchains.conf /home/tester/.cargo/git
             """,
             check=False,
@@ -2339,7 +2460,9 @@ echo E2E-OK
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
             w=/home/tester/work/knob
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             conf=/home/tester/.config/cst/toolchains.conf
             rm -rf "$w" "$conf"
             mkdir -p "$w/bin" "$w/pathdep/src" "$w/gitdep/src" "$w/ws/app/src" "$w/ws/.cargo" \
@@ -5130,18 +5253,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    @e2e_tags(E2ETag.VM, E2ETag.NAS)
-    def test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic(self) -> None:
-        """cst vm's torn NAS snapshots against the real restic over SFTP (the NAS container): a record
-        naming two snapshots of the VM (a full ID and a short one, the newest of them a torn one that
-        the retention would keep in place of the good backup) and one of another VM; the retry lists
-        them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
-        their listed IDs, and the retention then keeps the good backup; the other VM's entry and
-        snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
-        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
-        libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
-        w = "/var/tmp/e2e-vm-torn"
-        nas_dir = "/srv/backup/e2e-vm-torn"
+    def _vm_torn_prelude(self, test: str, w: str, nas_dir: str) -> str:
+        """The start of test_151 and test_200: the NAS container takes the systemd container's SSH key,
+        both folders are removed after the test; the bash that sets up $w (the payload, the settings
+        cst vm reads), the repository at nas_dir and the helpers d (the driver), snap and listed."""
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
         self.addCleanup(exec_bash, self.NAS_CONTAINER, f"rm -rf {nas_dir}", check=False)
         pub = exec_bash(
@@ -5161,11 +5276,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             chmod 0600 /root/.ssh/authorized_keys
             """,
         )
-        out = exec_bash(
-            self.SYSTEMD_CONTAINER,
-            f"""
+        return f"""
             set -E
-            trap 'echo "test_151 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            trap 'echo "{test} FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             w={w}
             rm -rf "$w" && mkdir -p "$w/payload"
@@ -5189,15 +5302,34 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 restic backup --json --host e2ehost --tag "$1" "$w/payload" | d summary
             }}
             listed() {{ restic snapshots --json --no-lock | d ids; }}
+            """
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic(self) -> None:
+        """cst vm's torn NAS snapshots against the real restic over SFTP (the NAS container): a record
+        naming two snapshots of the VM (a full ID and a short one, the newest of them a torn one that
+        the retention would keep in place of the good backup) and one of another VM; the retry lists
+        them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
+        their listed IDs, and the retention then keeps the good backup; the other VM's entry and
+        snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
+        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
+        libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
+        w = "/var/tmp/e2e-vm-torn"
+        nas_dir = "/srv/backup/e2e-vm-torn"
+        prelude = self._vm_torn_prelude("test_151", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
             good="$(snap cst-vm,vm:e2evm)"
             torn_short="$(snap cst-vm,vm:e2evm)"
             other="$(snap cst-vm,vm:e2eother)"
             torn="$(snap cst-vm,vm:e2evm)"  # the newest: the retention alone would keep it, not $good
-            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$torn" "e2evm=${{torn_short:0:8}}" "e2eother=$other"
+            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$torn" "e2evm=${torn_short:0:8}" "e2eother=$other"
             d retry e2evm >"$w/retry.out"
             cat "$w/retry.out" >&2
-            grep -qF "torn restic snapshot ${{torn:0:8}} of an earlier run forgotten" "$w/retry.out"
-            grep -qF "torn restic snapshot ${{torn_short:0:8}} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "torn restic snapshot ${torn:0:8} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "torn restic snapshot ${torn_short:0:8} of an earlier run forgotten" "$w/retry.out"
             grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
             if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
             [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
@@ -5209,6 +5341,57 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qx "forget_torn: None" "$w/forget.out"
             [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
             [[ "$(d entries "$CST_VM_TORN")" == "1 e2eother=$other" ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_200_a_stop_after_restics_snapshot_leaves_it_recorded_with_the_real_restic(self) -> None:
+        """A stop that ends restic once restic printed its snapshot, against the real restic over SFTP:
+        restic's read of a live run (cst vm's code, its real stop signals, Restic.backup's own child and
+        timer thread) through a wrapper that runs the real restic to its end, then sends cst vm a SIGTERM
+        and waits. The stop ends the wrapper; cst vm reads the snapshot's ID from restic's real output,
+        records the snapshot as torn ("stopped") and names it in the stop; nothing is forgotten after a
+        stop, so restic still lists it, and the next run's retry forgets it and keeps the good backup."""
+        w = "/var/tmp/e2e-vm-stopped"
+        nas_dir = "/srv/backup/e2e-vm-stopped"
+        prelude = self._vm_torn_prelude("test_200", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
+            export CST_VM_NAS_STAGE="$w/stage" REAL_RESTIC="$(command -v restic)"
+            mkdir -p "$w/bin"
+            cat >"$w/bin/restic" <<'EOF'
+#!/bin/bash
+# restic backup to its end, then a stop to cst vm while restic seems to run on; the sleep holds no pipe.
+if [ "$1" = backup ]; then
+    "$REAL_RESTIC" "$@" || exit
+    kill -TERM "$PPID"
+    sleep 5 </dev/null >/dev/null 2>&1 &
+    wait $!
+    exit 3
+fi
+exec "$REAL_RESTIC" "$@"
+EOF
+            chmod 755 "$w/bin/restic"
+            good="$(snap cst-vm,vm:e2evm)"
+            PATH="$w/bin:$PATH" timeout 120 python3 -I -B -c "$DRIVER" stopped e2evm "$w/payload" >"$w/stopped.out"
+            cat "$w/stopped.out" >&2
+            rec="$(d entries "$CST_VM_TORN")"
+            torn="${rec#1 e2evm=}"
+            [[ "$rec" == "1 e2evm=$torn" && ${#torn} == 64 && "$torn" != "$good" ]]
+            [[ "$(d whys "$CST_VM_TORN")" == stopped ]]
+            grep -qF "stop: stopped by signal SIGTERM; restic snapshot ${torn:0:8} is no backup: recorded in $CST_VM_TORN" \
+                "$w/stopped.out"
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$torn" | sort | xargs)" ]]
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            grep -qF "torn restic snapshot ${torn:0:8} of an earlier run forgotten" "$w/retry.out"
+            [[ "$(listed)" == "$good" ]]
+            [[ "$(d entries "$CST_VM_TORN")" == 1 ]]
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},
@@ -5589,6 +5772,202 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
+    def test_190_doctor_warns_when_no_boot_will_ask_for_a_docker_volumes_migration(self) -> None:
+        """cst doctor as tester on what docker-volumes-nocow (the checkout's program, as root) leaves on
+        disk; doctor never opens Docker's own folders. The helper is at its installed path (a copy the
+        test makes when there is none, removed after). Part 1, the real state through the real helper:
+        a data root of the test's own on a tmpfs holding a copy-on-write volume, no flag, and a count
+        of 2 in a read-only bind-mounted file: mark cannot reset it, and doctor warns about a count left
+        with no migration scheduled (fix: cst btrfs install). With the mount gone, mark writes the
+        request (exit 2: tmpfs refuses +C) and doctor says nothing. Part 2: the record an install leaves
+        when it finds +C and cannot write the request (planted through the helper's own writer: tmpfs
+        cannot hold +C) under a umask of 077 with no state folder yet: the folder is 0755 (it was
+        0700, and doctor as the user could not read the record), and doctor warns with its line; beside a flag it says nothing; mark then writes the
+        request and removes the record, and doctor is quiet; without the installed helper a planted
+        record is silent too. Before, doctor said nothing in each case."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-190-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        helper = "/usr/local/sbin/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {state}/attempts || umount {state}/attempts || umount -l {state}/attempts; "
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            f"[ -e /var/tmp/e2e-190-made-helper ] && rm -f {helper} || true; "
+            "[ -e /var/tmp/e2e-190-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-190-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-190-made-helper /var/tmp/e2e-190-made-docker /var/tmp/e2e-190-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_190 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            state={state}
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            nocow_lines() {{ {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }} | grep -F "Docker volumes NOCOW" || true; }}
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-190-made-docker; }}
+            [ -d /etc/btrfs-setup ] || {{ mkdir -p /etc/btrfs-setup && touch /var/tmp/e2e-190-made-setup; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e "$state" ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            if [ ! -e {helper} ]; then
+                printf '#!/bin/bash\nexec /usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow "$@"\n' >{helper}
+                chmod 0755 {helper}
+                touch /var/tmp/e2e-190-made-helper
+            fi
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor warns before the test: $(nocow_lines)" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p "$vols/v/_data"
+            printf 'data\n' >"$vols/v/_data/file"
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            # Part 1: a count of 2 mark cannot reset (its file a read-only bind mount).
+            mkdir -p "$state"
+            printf '2\n' >"$state/attempts"
+            mount --bind "$state/attempts" "$state/attempts"
+            mount -o remount,bind,ro "$state/attempts"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_190 mark, the count read-only: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]
+            grep -qF "cannot schedule the migration (" <<<"$out"
+            [[ ! -e "$flag" ]]
+            [[ "$(cat "$state/attempts")" == 2 ]]
+            d="$(nocow_lines)"
+            echo "test_190 doctor, a count of 2 and no flag: $d" >&2
+            grep -qF "WARN   Docker volumes NOCOW: a count of 2 boot(s) is left with no migration scheduled" <<<"$d" || {{ echo "doctor did not warn about the count" >&2; exit 1; }}
+            umount "$state/attempts"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_190 mark, the mount gone: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]   # tmpfs refuses +C, after the request
+            [[ -e "$flag" ]]
+            [[ "$(cat "$state/attempts")" == 0 ]]
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor still warns after the repair: $(nocow_lines)" >&2; exit 1; }}
+            # Part 2: the record an install leaves when it finds +C and cannot write the request, with
+            # no state folder yet and sudo's umask of a user who set 077: the folder it creates is 0755.
+            rm -f "$flag"
+            rm -rf "$state"
+            ( umask 077; /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from btrfs.docker_volumes_nocow.adapters import NocowStateFiles; from btrfs.docker_volumes_nocow.domain import NocowOutcome, NocowPaths, outcome_record; NocowStateFiles(NocowPaths()).write_outcome(outcome_record(NocowOutcome.NOT_SCHEDULED, at=1700000000, volumes=sys.argv[1], reason="cannot schedule the migration: planted"))' "$vols" )
+            [[ "$(stat -c %a "$state")" == 755 ]] || {{ echo "the record's folder is $(stat -c %a "$state")" >&2; exit 1; }}
+            [[ "$(stat -c %a "$state/outcome")" == 644 ]]
+            d="$(nocow_lines)"
+            echo "test_190 doctor, a not-scheduled record: $d" >&2
+            grep -qF "WARN   Docker volumes NOCOW: $vols keeps copy-on-write data and no boot will migrate it" <<<"$d"
+            grep -qF "failed: cannot schedule the migration: planted" <<<"$d"
+            touch "$flag"
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor warns beside the flag: $(nocow_lines)" >&2; exit 1; }}
+            rm -f "$flag"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_190 mark, a not-scheduled record: rc=$rc $out" >&2
+            [[ -e "$flag" ]]
+            [[ ! -e "$state/outcome" ]] || {{ echo "the request left the record" >&2; exit 1; }}
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor still warns after the request: $(nocow_lines)" >&2; exit 1; }}
+            rm -f "$flag"
+            /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from btrfs.docker_volumes_nocow.adapters import NocowStateFiles; from btrfs.docker_volumes_nocow.domain import NocowOutcome, NocowPaths, outcome_record; NocowStateFiles(NocowPaths()).write_outcome(outcome_record(NocowOutcome.NOT_SCHEDULED, at=1700000000, volumes=sys.argv[1], reason="planted"))' "$vols"
+            if [ -e /var/tmp/e2e-190-made-helper ]; then
+                mv {helper} /var/tmp/e2e-190-helper-aside
+                d="$(nocow_lines)"
+                mv /var/tmp/e2e-190-helper-aside {helper}
+                [[ -z "$d" ]] || {{ echo "doctor warns without the helper: $d" >&2; exit 1; }}
+            fi
+            rm -f "$state/outcome"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_191_docker_volumes_nocow_says_what_it_cannot_reset_or_records(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) on a data root of the
+        test's own on a tmpfs (/etc/docker/daemon.json names it). Part 1: a volume with no
+        copy-on-write data (an empty file) and a folder where the count of boots belongs: mark exits 2
+        with a journal line naming that path and "Is a directory", before it tries +C, and the folder
+        stays. Before, CounterFile.forget swallowed the error and mark went on to the +C that tmpfs
+        refuses, so its line named that refusal instead. Part 2: a give-up's record planted in
+        /var/lib/docker-volumes-nocow/outcome (the boot's give-up needs its two failed boots first):
+        status shows when and why with no flag; mark with a copy-on-write volume writes the flag and
+        removes the record (it exits 2: tmpfs refuses +C); unmark removes a record planted again; a
+        record of format 99 is named as one of a newer CST."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-191-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-191-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-191-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-191-made-docker /var/tmp/e2e-191-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_191 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            state={state}
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-191-made-docker; }}
+            [ -d /etc/btrfs-setup ] || touch /var/tmp/e2e-191-made-setup
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e "$state" ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            # Part 1: no copy-on-write data, and a folder where the count belongs.
+            mkdir -p "$vols/v/_data"
+            : >"$vols/v/_data/empty"
+            mkdir -p "$state/attempts"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_191 mark, the count a folder: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]
+            grep -qF "Is a directory: '$state/attempts'" <<<"$out" || {{ echo "mark did not name the count it cannot remove" >&2; exit 1; }}
+            if grep -qiF "not supported" <<<"$out"; then echo "mark tried +C before it forgot the count" >&2; exit 1; fi
+            [[ -d "$state/attempts" ]]
+            [[ ! -e "$flag" ]]
+            rmdir "$state/attempts"
+            # Part 2: the record of a give-up.
+            plant() {{   # a give-up's record of format $1
+                printf '{{"v": %s, "outcome": "gave-up", "at": 1700000000, "volumes": "%s", "reason": "it did not finish"}}\n' "$1" "$vols" >"$state/outcome"
+            }}
+            plant 1
+            out="$($prog status 2>&1)"
+            echo "test_191 status, a give-up recorded: $out" >&2
+            grep -qE '^  migration gave up 2023-11-1[45] [0-9]{{2}}:[0-9]{{2}}: it did not finish; run cst btrfs install to try again$' <<<"$out" || {{ echo "status did not show the give-up" >&2; exit 1; }}
+            printf 'data\n' >"$vols/v/_data/file"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_191 mark, a give-up recorded: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]
+            [[ -e "$flag" ]] || {{ echo "mark wrote no request" >&2; exit 1; }}
+            [[ ! -e "$state/outcome" ]] || {{ echo "the new request left the give-up's record" >&2; exit 1; }}
+            rm -f "$flag"
+            plant 1
+            $prog unmark
+            [[ ! -e "$state/outcome" ]] || {{ echo "unmark left the record" >&2; exit 1; }}
+            plant 99
+            out="$($prog status 2>&1)"
+            echo "test_191 status, a record of format 99: $out" >&2
+            grep -qF "$state/outcome is format 99 of the docker-nocow-outcome (this CST reads format 1 and older): written by a newer CST" <<<"$out"
+            rm -f "$state/outcome"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.TOOLCHAINS)
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
@@ -5925,6 +6304,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         one runs on); a start that systemd refuses (a unit of that name in
         another slice) is tried once, and the server the client then starts
         is used without another try; --no-sccache undoes the cargo setting."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
@@ -5933,7 +6313,6 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true
             done
             systemctl --user stop 'e2e-scc-*' cst-sccache-e2ebox.scope 2>/dev/null || true
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/scc-scope /run/user/1000/cst-sccache-e2ebox.sock \
                 /run/user/1000/cst-sccache-e2ebox.sock.lock /run/user/1000/cst-sccache-e2ebox.sock.failed
             """,
@@ -5958,7 +6337,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             scc_setup
 
             "$cst" toolchains config apply --sccache >/dev/null
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
 
             build 1
@@ -6043,6 +6424,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         starts a new server in `sccache.slice`. Live upgrade: when an older server already runs in
         `app.slice/cst-sccache-host.scope` listening on the socket, a build reuses it (no start,
         no `.failed` marker), then starts in `sccache.slice` once the old server stops."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
@@ -6051,7 +6433,6 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true
             done
             systemctl --user stop 'e2e-scc-*' cst-sccache-host.scope 2>/dev/null || true
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/scc-host /run/user/1000/cst-sccache-host.sock \
                 /run/user/1000/cst-sccache-host.sock.lock /run/user/1000/cst-sccache-host.sock.failed
             """,
@@ -9311,87 +9692,21 @@ EOF
         only unmounted (detach), and systemd kept the old /etc/fstab until some later reload."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-177"
-        self.addCleanup(
-            exec_bash,
-            c,
-            # exec_bash runs bash -e: every step must run, also after one that fails.
-            f"""
-            set +e
-            systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
-            systemctl daemon-reload
-            if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
-            if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
-            rm -rf {w}
-            """,
-            check=False,
-        )
-        out = exec_bash(
-            c,
-            f"""
-            set -euo pipefail
-            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
-            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
-            [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
-            [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
-            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\nu2:x:1001:1001::/var/home/u2:/bin/bash\n' >{w}/etc/passwd
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            printf 'u2:x:1001:1001::/var/home/u2:/bin/bash\n' >>{w}/etc/passwd
             mkdir -p {w}/var/home/u2
-            cat >{w}/etc/fstab <<'EOF'
-tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
-tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
-EOF
-            row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }}
-            {{
-                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
-                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
-                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime uuid-cache-2222 /cache
-                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime uuid-cache-2222 /scratchpad
-            }} >{w}/mounts
-            cat >{w}/bin/mnt-stub <<'STUB'
-{CACHE_MOUNT_STUB}
-STUB
-            for p in findmnt mount umount; do
-                printf '#!/bin/bash\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\n' "$p" >{w}/bin/$p
-                chmod +x {w}/bin/$p
-            done
-            # Both shims hand systemd the test root's fstab at each daemon-reload; kill/ then kills the
-            # command (the pid this script recorded) before the reload runs, sync/ logs it and runs it.
-            cat >{w}/kill/systemctl <<'EOF'
-#!/bin/bash
-if [[ "$1" == daemon-reload ]]; then
-    cp {w}/etc/fstab /etc/fstab || exit 1
-    for _ in $(seq 100); do [[ -s {w}/pid ]] && break; sleep 0.1; done
-    touch {w}/killed
-    kill -KILL "$(cat {w}/pid)"
-    sleep 5
-    exit 1
-fi
-exec /usr/bin/systemctl "$@"
-EOF
-            cat >{w}/sync/systemctl <<'EOF'
-#!/bin/bash
-if [[ "$1" == daemon-reload ]]; then
-    cp {w}/etc/fstab /etc/fstab || exit 1
-    echo reload >>{w}/reloads
-fi
-exec /usr/bin/systemctl "$@"
-EOF
             # fail/: a daemon-reload that fails (nothing copied, systemd keeps what it loaded).
             mkdir -p {w}/fail
             printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then echo "Failed to reload daemon" >&2; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/fail/systemctl
             # nobus/: no systemd that answers (a rescue shell): every systemctl call fails.
             mkdir -p {w}/nobus
             printf '#!/bin/bash\necho "Failed to connect to bus: No such file or directory" >&2\nexit 1\n' >{w}/nobus/systemctl
-            chmod +x {w}/kill/systemctl {w}/sync/systemctl {w}/fail/systemctl {w}/nobus/systemctl
-            touch {w}/reloads
-            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
-            cst=/opt/cst-rw/cst
+            chmod +x {w}/fail/systemctl {w}/nobus/systemctl
             behind() {{ systemctl show -P NeedDaemonReload var-mnt-cache.mount; }}
-            reloads() {{ wc -l <{w}/reloads; }}
-            # The bases in the real /etc/fstab, loaded and started: their units come from /etc/fstab.
-            cp {w}/etc/fstab /etc/fstab
-            systemctl daemon-reload
+            # The bases in the real /etc/fstab (the scaffold loaded them), started: their units come from /etc/fstab.
             systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
             [[ "$(systemctl show -P SourcePath var-mnt-cache.mount)" == /etc/fstab ]]
             [[ "$(behind)" == no ]]
@@ -9494,9 +9809,137 @@ EOF
             [[ "$(behind)" == yes ]]
             again detach
             echo E2E-CACHE-177-OK
-            """,
-        ).stdout
+            """
+        )
+        out = exec_bash(c, script).stdout
         self.assertIn("E2E-CACHE-177-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_201_btrfs_cache_status_and_doctor_see_a_stale_fstab_whose_units_are_all_inactive(self) -> None:
+        """`cst btrfs cache` for u1 under a test root (cache_reload_scaffold: test_160's stand-ins for findmnt,
+        mount and umount) with the real systemd, where every unit of /etc/fstab is loaded and inactive: the
+        tmpfs base lines are loaded and not started, and the binds' units are loaded and not mounted (the
+        stand-ins' mounts are not real). /etc/fstab rewritten with no daemon-reload flags them all
+        (NeedDaemonReload=yes), and `systemctl show '*.mount'` without --state=loaded lists none of them
+        (the test fails as "cannot bite" otherwise). `status` and `cst doctor` say systemd has not loaded
+        /etc/fstab; an attach with nothing to mount reloads once (`reloaded:`), and then neither says it.
+        A detach killed at its daemon-reload after it took u1's lines out, the binds unmounted since: the
+        old lines' units stay loaded, inactive and flagged; the next detach reloads once and leaves no mount
+        unit of ~/.cache; a third has nothing to do. Before, status and doctor said nothing, and attach and
+        detach said "nothing to do" without a reload, since a glob alone hides inactive units."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-201"
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            st_line="  systemd            has not loaded /etc/fstab as it is on disk"
+            doc_line="btrfs cache: systemd has not loaded /etc/fstab as it is on disk"
+            # cst doctor also warns of the bases, which are not mounted: only its line of /etc/fstab counts.
+            doc() {{ $cst doctor >{w}/doc 2>&1 || true; grep -qF "$doc_line" {w}/doc; }}
+            status_warns() {{ $cst btrfs cache status --user u1 >{w}/st 2>&1; grep -qF "$st_line" {w}/st; }}
+            # listed UNIT [OPTION...]: whether `systemctl show [OPTION...] -p Id '*.mount'` lists UNIT.
+            listed() {{ local u=$1 ids; shift; ids="$(systemctl show "$@" -p Id '*.mount')"; grep -qxF "Id=$u" <<<"$ids"; }}
+            unit=var-mnt-cache.mount
+            [[ "$(systemctl show -P SourcePath $unit)" == /etc/fstab ]]
+            [[ "$(systemctl show -P ActiveState $unit)" == inactive ]]
+            listed $unit --state=loaded || {{ echo "the test cannot bite: --state=loaded does not list $unit" >&2; exit 1; }}
+            if listed $unit; then echo "the test cannot bite: a glob alone lists the inactive $unit" >&2; exit 1; fi
+
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || {{ cat {w}/out >&2; exit 1; }}
+            grep -qF "user=u1 kind=cache" /etc/fstab
+            bind_unit=var-home-u1-.cache.mount
+            [[ "$(systemctl show -P SourcePath $bind_unit)" == /etc/fstab ]]
+            [[ "$(systemctl show -P ActiveState $bind_unit)" == inactive ]]
+            if status_warns; then echo "status warns with systemd current" >&2; cat {w}/st >&2; exit 1; fi
+            # /etc/fstab rewritten (the same bytes, a new mtime), no reload: every unit of it flagged.
+            cp {w}/etc/fstab /etc/fstab
+            [[ "$(systemctl show -P NeedDaemonReload $unit)" == yes ]] \
+                || {{ echo "the test cannot bite: systemd does not flag $unit" >&2; exit 1; }}
+            if grep -qxF SourcePath=/etc/fstab <<<"$(systemctl show -p SourcePath '*.mount')"; then
+                echo "the test cannot bite: an active unit of /etc/fstab" >&2; exit 1
+            fi
+            status_warns || {{ echo "status does not say systemd has not loaded /etc/fstab" >&2; cat {w}/st >&2; exit 1; }}
+            doc || {{ echo "cst doctor does not warn that systemd has not loaded /etc/fstab" >&2; cat {w}/doc >&2; exit 1; }}
+            n=$(reloads)
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "attach: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" {w}/out \
+                || {{ echo "attach did not reload:" >&2; cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]] || {{ echo "attach: $(($(reloads) - n)) reloads" >&2; exit 1; }}
+            [[ "$(systemctl show -P NeedDaemonReload $unit)" == no ]]
+            if status_warns; then echo "status still warns after the reload" >&2; cat {w}/st >&2; exit 1; fi
+            if doc; then echo "cst doctor still warns after the reload" >&2; cat {w}/doc >&2; exit 1; fi
+
+            # A detach killed at its reload, after it took u1's lines out, then the binds unmounted.
+            rm -f {w}/pid {w}/killed
+            PATH="{w}/kill:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 &
+            echo $! >{w}/pid
+            rc=0; wait $! || rc=$?
+            [[ $rc == 137 && -e {w}/killed ]] || {{ echo "the killed detach exited $rc" >&2; cat {w}/out >&2; exit 1; }}
+            if grep -qF "user=u1" /etc/fstab; then echo "a u1 line after the killed detach" >&2; exit 1; fi
+            [[ "$(systemctl show -P NeedDaemonReload $bind_unit)" == yes ]] \
+                || {{ echo "the test cannot bite: systemd does not flag $bind_unit" >&2; exit 1; }}
+            [[ "$(systemctl show -P ActiveState $bind_unit)" == inactive ]]
+            if listed $bind_unit; then echo "the test cannot bite: a glob alone lists $bind_unit" >&2; exit 1; fi
+            grep -vF /var/home/u1/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            n=$(reloads)
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "detach: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" {w}/out \
+                || {{ echo "detach did not reload:" >&2; cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]] || {{ echo "detach: $(($(reloads) - n)) reloads" >&2; exit 1; }}
+            cache_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/.cache)"
+            [[ ! -e "$cache_unit" ]] || {{ echo "a mount unit of ~/.cache after the detach's reload" >&2; exit 1; }}
+            PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1
+            grep -qF "nothing to do" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]] || {{ echo "a third detach reloaded" >&2; exit 1; }}
+            echo E2E-CACHE-201-OK
+            """
+        )
+        self.assertIn("E2E-CACHE-201-OK", exec_bash(c, script).stdout)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_202_btrfs_cache_plan_and_attach_mount_binds_without_a_reload_when_systemd_is_current(self) -> None:
+        """`cst btrfs cache` for u1 under a test root (cache_reload_scaffold) with the real systemd and both
+        tmpfs bases started: after an attach, u1's binds unmounted (from the stand-ins' table). systemd has
+        read their lines: their units are loaded from /etc/fstab, inactive, NeedDaemonReload=no, and
+        `systemctl show '*.mount'` without --state=loaded lists neither (the test fails as "cannot bite"
+        otherwise). `plan` shows the mounts and no daemon-reload, `attach` mounts them and runs no reload,
+        and `status` says nothing of systemd. Before, plan said "attach runs systemctl daemon-reload after
+        the mounts" and attach reloaded, since the unmounted binds' units were not asked."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-202"
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || {{ cat {w}/out >&2; exit 1; }}
+            grep -vF /var/home/u1/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            unit=var-home-u1-.cache.mount
+            [[ "$(systemctl show -P LoadState $unit)" == loaded ]]
+            [[ "$(systemctl show -P ActiveState $unit)" == inactive ]]
+            [[ "$(systemctl show -P SourcePath $unit)" == /etc/fstab ]]
+            [[ "$(systemctl show -P NeedDaemonReload $unit)" == no ]]
+            if grep -qxF "Id=$unit" <<<"$(systemctl show -p Id '*.mount')"; then
+                echo "the test cannot bite: a glob alone lists the inactive $unit" >&2; exit 1
+            fi
+            plan_out="$($cst btrfs cache plan --user u1)"
+            grep -qF "mount --bind" <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            if grep -qF daemon-reload <<<"$plan_out"; then echo "$plan_out" >&2; exit 1; fi
+            n=$(reloads)
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "attach: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "Mounted /var/mnt/cache/u1 -> /var/home/u1/.cache." {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            if grep -qF "reloaded:" {w}/out; then echo "attach reloaded:" >&2; cat {w}/out >&2; exit 1; fi
+            [[ $(reloads) == "$n" ]] || {{ echo "attach: $(($(reloads) - n)) reloads" >&2; exit 1; }}
+            st_out="$($cst btrfs cache status --user u1)"
+            if grep -qF "  systemd   " <<<"$st_out"; then echo "$st_out" >&2; exit 1; fi
+            echo E2E-CACHE-202-OK
+            """
+        )
+        self.assertIn("E2E-CACHE-202-OK", exec_bash(c, script).stdout)
 
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed(self) -> None:
@@ -10593,12 +11036,12 @@ EOF
         real rustc wrapper, never 40G (before, the digits were read as 40G). With ASCII "40G" the same
         apply writes 40G and a second apply keeps the wrapper; removing the file and
         --no-sccache undo it."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             """
             rm -f /home/tester/.config/cst/toolchains.conf
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/e2e-169
             """,
             check=False,
@@ -10610,7 +11053,9 @@ EOF
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
             w=/home/tester/work/e2e-169
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             conf=/home/tester/.config/cst/toolchains.conf
             rm -rf "$w"
             mkdir -p "$w" /home/tester/.config/cst

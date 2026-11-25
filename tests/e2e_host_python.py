@@ -26,7 +26,8 @@ problems() checks:
   job runs, names a file of HOST_ENTRIES: the program it runs, read as python3
   reads its own options (python_program: `python3 -I -B PROGRAM`, with or
   without .py, or `python3 -m NAME` of a repository module; a program named
-  by a variable is a problem where python3 runs as a command, _is_command);
+  by a variable is a problem where python3 runs as a command, _is_command, the
+  quoted argument of a shell's -c included: bash -c "python3 $tool");
 - the runner of each job that runs one of them is in HOST_PYTHON_BY_RUNNER
   (the oldest python3 found is the target);
 - each file of the set parses with the target's grammar
@@ -108,17 +109,23 @@ _LONG_OPTIONS_WITH_ARGUMENT: Final = frozenset({"--check-hash-based-pycs"})
 # The shell's tokens after python3, in order: a redirection (its target is the next word: >log, 2>&1, &>log, <in),
 # a word (its quoted parts, $(...), ${...} and ${{ ... }} kept whole, blanks and all), or what ends the command
 # (; | & ( ), or a quote no word closes). In a command inside quotes (bash -c "python3 x.py"; echo "ok"), that
-# quote opens no quoted part of a word: it closes the quotes python3 is in, and ends the command.
+# quote opens no quoted part of a word: it closes the quotes python3 is in, and ends the command. Inside double
+# quotes an escaped one (bash -c "python3 \"x.py\"") is the inner shell's quote: \"...\" is a quoted part of a
+# word, and the word loses the backslashes the outer shell removes (_unescape_double_quoted).
 _REDIRECT: Final = "redirect"
 _WORD: Final = "word"
 _END: Final = "end"
-_QUOTES: Final = "\"'"
+_SINGLE_QUOTE: Final = "'"
+_DOUBLE_QUOTE: Final = '"'
+_QUOTES: Final = _DOUBLE_QUOTE + _SINGLE_QUOTE
 _UNQUOTE: Final = str.maketrans("", "", _QUOTES)
 
 
 def _shell_token(inside: str) -> re.Pattern[str]:
     """The shell's tokens after a python3 inside the quote `inside` ("" for none)."""
     quoted = "".join(f"{q}[^{q}]*{q}|" for q in _QUOTES if q != inside)
+    if inside == _DOUBLE_QUOTE:
+        quoted = r'\\"[^"]*?\\"|' + quoted
     return re.compile(
         rf"(?P<{_REDIRECT}>\d*(?:&>>?|[<>]+&?))"
         rf"|(?P<{_WORD}>(?:{quoted}\$\{{\{{.*?\}}\}}|\$\([^()]*\)|\$\{{[^}}]*\}}|[^\s;|&()<>\"'])+)"
@@ -128,6 +135,8 @@ def _shell_token(inside: str) -> re.Pattern[str]:
 
 # By the quote python3 is in ("" for none).
 _SHELL_TOKENS: Final = {inside: _shell_token(inside) for inside in ("", *_QUOTES)}
+# What a backslash escapes inside double quotes (the outer shell removes the backslash): \" \\ \$ and \`.
+_DOUBLE_QUOTE_ESCAPE: Final = re.compile(r'\\([\\"$`])')
 _STDIN: Final = "-"
 # The checkout's folder in a step, read as the top of the repository: ${{ github.workspace }}/ (GitHub's expression,
 # put in before the shell runs) or $GITHUB_WORKSPACE/.
@@ -140,15 +149,22 @@ _ASSIGNMENT: Final = re.compile(r"^\w+=")
 # A YAML key at the start of a line (- name: ..., run: ...): only run:'s value is shell.
 _YAML_KEY: Final = re.compile(r"^\s*(?:-\s+)?([\w-]+):(?:\s|$)")
 _RUN_KEY: Final = "run"
-# What opens a context of a shell line (_is_command): a quote, a command substitution, a subshell.
-_SINGLE_QUOTE: Final = "'"
-_DOUBLE_QUOTE: Final = '"'
+# What opens a context of a shell line (_is_command): a quote (_SINGLE_QUOTE, _DOUBLE_QUOTE), a command
+# substitution, a subshell.
 _BACKQUOTE: Final = "`"
 _SUBSTITUTION: Final = "$("
 _SUBSHELL: Final = "("
 _SUBSHELL_END: Final = ")"
 _COMMAND_END: Final = ";|&"
 _END_OF_OPTIONS: Final = "--"
+# The shells whose -c argument is a command line (_shell_code), by the basename of their command word.
+_SHELLS: Final = frozenset({"bash", "sh"})
+# A shell's option cluster that holds -c, the option whose argument is the command line: -c, -ec, -euxc.
+_SHELL_CODE_OPTION: Final = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+# What starts a shell's option (-e sets it, +e unsets it), and the letters of a cluster that take the next
+# word as their name (-o pipefail, -O extglob).
+_SHELL_OPTION_SIGNS: Final = ("-", "+")
+_SHELL_OPTION_WITH_NAME: Final = frozenset("oO")
 # The words of an invowk task a step runs, up to the first flag, quote or variable: `invowk cmd` where a
 # command starts (a line, a run: key, after ; & | or an opening parenthesis), not in a message's text.
 _INVOWK_RUN: Final = re.compile(r"(?:^\s*(?:-\s+)?(?:run:\s*)?|[;&|(]\s*)(?:exec\s+)?invowk cmd((?: [a-z0-9][\w-]*)+)")
@@ -491,6 +507,11 @@ def python_program(text: str, inside: str = "") -> tuple[ProgramKind, str] | Non
     return None
 
 
+def _unescape_double_quoted(text: str) -> str:
+    """Text inside double quotes as the shell passes it on: without the backslash of \\" \\\\ \\$ and \\`."""
+    return _DOUBLE_QUOTE_ESCAPE.sub(r"\1", text)
+
+
 def _command_words(text: str, inside: str = "") -> list[str]:
     """The words of the shell command text starts, without their quotes, up to what ends it (; | & ( ),
     a quote no word closes, or the quote `inside` that closes the quotes the command is in: _SHELL_TOKENS).
@@ -505,7 +526,10 @@ def _command_words(text: str, inside: str = "") -> list[str]:
         elif target:
             target = False
         else:
-            words.append(group(token, _WORD).translate(_UNQUOTE))
+            word = group(token, _WORD)
+            if inside == _DOUBLE_QUOTE:
+                word = _unescape_double_quoted(word)
+            words.append(word.translate(_UNQUOTE))
     return words
 
 
@@ -527,8 +551,8 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
     $GITHUB_WORKSPACE/) is that path from the top of the repository. Another script word with a "$"
     or a backquote is a path given at run time: it is returned in the second list, so the caller
     reports it, when python3 runs there as a command (_is_command: not in quoted text, an echo or a
-    YAML name:; a python3 in bash -c "..." is quoted text too, so its $ word is not reported, while
-    a file it names still is). Any other word (a system program, an absolute path, python3 in a
+    YAML name:; the quoted argument of a shell's -c, bash -c "...", is no text but a command line of
+    its own, so its $ word is reported). Any other word (a system program, an absolute path, python3 in a
     message or a package list) is left out."""
     files: list[str] = []
     unnamed: list[str] = []
@@ -563,16 +587,62 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
 
 def _is_command(before: str) -> bool:
     """Whether a python3 word after this text of its line is a command the shell runs: not text inside
-    quotes (a $(...) or a backquote there is a command again), not a word of an echo or printf, and
-    not in the value of a YAML key other than run:."""
+    quotes (a $(...) or a backquote there is a command again, and so is the quoted argument of a shell's
+    -c: _shell_code), not a word of an echo or printf, and not in the value of a YAML key other than run:."""
     key = _YAML_KEY.match(before)
     if key is not None and group(key, 1) != _RUN_KEY:
         return False
-    opener, start = _innermost_context(before, 0 if key is None else key.end())
+    return _is_command_at(before, 0 if key is None else key.end())
+
+
+def _is_command_at(before: str, base: int) -> bool:
+    """_is_command for the shell text of before from base on. A quote that is the argument of a shell's -c,
+    in a command the outer shell runs, holds a command line of its own: the text inside it, as the inner
+    shell gets it (inside double quotes without the backslashes the outer shell removes), is read again by
+    the same rules, so the inner shell's quotes and echo are text again, and a nested bash -c is read too."""
+    opener, start = _innermost_context(before, base)
     if opener in {_SINGLE_QUOTE, _DOUBLE_QUOTE}:
+        outer = before[: start - 1]
+        if not (_shell_code(outer, base) and _is_command_at(outer, base)):
+            return False
+        inner = before[start:]
+        if opener == _DOUBLE_QUOTE:
+            inner = _unescape_double_quoted(inner)
+        return _is_command_at(inner, 0)
+    return not _text_command(before[start:])
+
+
+def _text_command(command: str) -> bool:
+    """Whether the start of a command (its text up to a python3) is a word of echo or printf."""
+    words = [w for w in command.split() if w not in _BEFORE_COMMAND and _ASSIGNMENT.match(w) is None]
+    return bool(words) and words[0] in _TEXT_COMMANDS
+
+
+def _shell_code(outer: str, base: int) -> bool:
+    """Whether a quote that opens right after outer is the argument of a shell's -c: the words of its command
+    (a wrapper may come first: runuser -u ci --, env VAR=..., docker exec NAME) hold a shell by its basename
+    (bash, sh, /bin/sh) followed by options only (-e, -o NAME, +o NAME, --norc), the last of them, right before
+    the quote, a cluster with c (-c, -ec, -euxc). A word after the shell that is no option is its script, and
+    a quote after it is that script's argument (bash x.sh "..."), text."""
+    _, start = _innermost_context(outer, base)
+    words = [w.translate(_UNQUOTE) for w in outer[start:].split()]
+    if not words or _SHELL_CODE_OPTION.fullmatch(words[-1]) is None:
         return False
-    words = [w for w in before[start:].split() if w not in _BEFORE_COMMAND and _ASSIGNMENT.match(w) is None]
-    return not (words and words[0] in _TEXT_COMMANDS)
+    return any(
+        posixpath.basename(word) in _SHELLS and _only_options(words[at + 1 : -1]) for at, word in enumerate(words[:-1])
+    )
+
+
+def _only_options(words: Sequence[str]) -> bool:
+    """Whether these words of a shell's command line are its options: a cluster (-e, -eu, +x) or a long
+    option (--norc), and the name after a cluster that ends in o or O (-o pipefail, -euo pipefail)."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if not word.startswith(_SHELL_OPTION_SIGNS) or word in _SHELL_OPTION_SIGNS:
+            return False
+        i += 2 if not word.startswith("--") and word[-1] in _SHELL_OPTION_WITH_NAME else 1
+    return True
 
 
 def _innermost_context(text: str, start: int) -> tuple[str, int]:

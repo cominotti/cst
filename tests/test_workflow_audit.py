@@ -992,19 +992,6 @@ class WorkflowAuditTest(unittest.TestCase):
 
     def test_ci_and_the_nightly_run_the_mbt_profiles(self) -> None:
         self.assertEqual(mbt_step_problems(GOOD_CI, GOOD_MBT_NIGHTLY), [])
-
-    def test_a_job_line_with_a_comment_is_still_that_job(self) -> None:
-        # _JOB took only `  NAME:` with nothing after it: a comment after fast-gates hid its mbt step, and
-        # after uv-audit its audit step, while tests/e2e_host_python.py (a reader of its own) still saw both.
-        ci = GOOD_CI.replace("  fast-gates:\n", "  fast-gates:  # the fast gates\n")
-        self.assertEqual(mbt_step_problems(ci, GOOD_MBT_NIGHTLY), [])
-        nightly = GOOD_NIGHTLY.replace("  uv-audit:\n", "  uv-audit:  # the audit\n")
-        self.assertEqual(uv_audit_problems(GOOD_CUE, nightly), [])
-
-    def test_only_keys_of_the_top_level_jobs_key_are_jobs(self) -> None:
-        # Every `  NAME:` was a job, `on:`'s `  push:` too.
-        text = "on:\n  push:\n    branches: [main]\njobs:  # all of them\n  a:  # one\n    runs-on: x\n"
-        self.assertEqual(workflow_jobs(uncommented_lines(text)), {"a": [(6, "    runs-on: x")]})
         ci_none = [
             (
                 f"{CI}: the job fast-gates has no step "
@@ -1074,6 +1061,19 @@ class WorkflowAuditTest(unittest.TestCase):
         ):
             with self.subTest(nightly=nightly):
                 self.assertEqual(mbt_step_problems(GOOD_CI, nightly), want)
+
+    def test_a_job_line_with_a_comment_is_still_that_job(self) -> None:
+        # _JOB took only `  NAME:` with nothing after it: a comment after fast-gates hid its mbt step, and
+        # after uv-audit its audit step, while tests/e2e_host_python.py (a reader of its own) still saw both.
+        ci = GOOD_CI.replace("  fast-gates:\n", "  fast-gates:  # the fast gates\n")
+        self.assertEqual(mbt_step_problems(ci, GOOD_MBT_NIGHTLY), [])
+        nightly = GOOD_NIGHTLY.replace("  uv-audit:\n", "  uv-audit:  # the audit\n")
+        self.assertEqual(uv_audit_problems(GOOD_CUE, nightly), [])
+
+    def test_only_keys_of_the_top_level_jobs_key_are_jobs(self) -> None:
+        # Every `  NAME:` was a job, `on:`'s `  push:` too.
+        text = "on:\n  push:\n    branches: [main]\njobs:  # all of them\n  a:  # one\n    runs-on: x\n"
+        self.assertEqual(workflow_jobs(uncommented_lines(text)), {"a": [(6, "    runs-on: x")]})
 
     def test_no_mbt_variable_and_no_lenient_fast_gates_job(self) -> None:
         # The task leaves CST_MBT_EXAMPLES (and the other CST_MBT_ variables) alone when its flags are not

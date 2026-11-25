@@ -18,7 +18,12 @@
 # land in the snapshots of ~/Workspace): it lives under
 # ${XDG_CACHE_HOME:-~/.cache}/cst-dev-venv/<key>, one per checkout or
 # worktree, where <key> is the first 12 hex digits of the SHA-1 of the
-# checkout's physical path. ruff's cache goes next to it. `--locked` makes uv
+# checkout's physical path. ruff's cache goes next to it. The cache folder is
+# found as tests/xdg_cache.py finds it for the Python tools: XDG_CACHE_HOME
+# when it is an absolute path (the XDG spec ignores a relative one), else
+# .cache under HOME when HOME is absolute, else under the home folder of the
+# password database (getent); with none of them it stops (exit 1) before uv
+# runs. `--locked` makes uv
 # refuse to run when uv.lock does not match pyproject.toml, and installs
 # exactly the locked versions (hashes checked). See docs/dev-tools.md.
 set -euo pipefail
@@ -40,7 +45,19 @@ fi
 
 repo="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd -P)"
 key="$(printf '%s' "${repo}" | sha1sum | cut -c1-12)"
-cache="${XDG_CACHE_HOME:-${HOME}/.cache}"
+if [[ "${XDG_CACHE_HOME-}" == /* ]]; then
+    cache="${XDG_CACHE_HOME}"
+else
+    home="${HOME-}"
+    if [[ "${home}" != /* ]]; then
+        home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || home=""
+    fi
+    if [[ "${home}" != /* ]]; then
+        echo "uv-dev: no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, and the password database has no home folder for this user" >&2
+        exit 1
+    fi
+    cache="${home}/.cache"
+fi
 export UV_PROJECT_ENVIRONMENT="${cache}/cst-dev-venv/${key}"
 export RUFF_CACHE_DIR="${cache}/cst-dev-ruff/${key}"
 

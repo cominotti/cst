@@ -23,8 +23,8 @@ Options:
     --traces          write the checked-in traces again (simulator and Apalache), then run the replay
     --keep            keep the work folder (it names it at the end)
 
-The tools are pinned and fetched into ${XDG_CACHE_HOME:-~/.cache}/cst-quint, never into the
-checkout: quint (npm ci --ignore-scripts from tests/quint/package-lock.json, which pins every package
+The tools are pinned and fetched into ${XDG_CACHE_HOME:-~/.cache}/cst-quint (a relative
+XDG_CACHE_HOME is ignored: tests/xdg_cache.py), never into the checkout: quint (npm ci --ignore-scripts from tests/quint/package-lock.json, which pins every package
 with its hash), and the two programs quint would otherwise download unchecked on first use,
 Apalache (whose jar also runs TLC) and the Rust evaluator, each checked against its SHA-256 before it
 is unpacked into QUINT_HOME. A tool is used as it is only when the stamp beside it records the
@@ -64,6 +64,7 @@ if _CHECKOUT not in sys.path:
 
 from cst_core.domain.errors import ExitStatus
 from cst_core.domain.values import format_bytes_human
+from tests.xdg_cache import NO_CACHE_BASE, cache_base
 
 QUINT_VERSION: Final = "0.33.1"
 JVM_ARGS: Final = "-Xmx4g"
@@ -144,13 +145,15 @@ NAS_PROPERTIES: Final = (
     "unreachableNoOverlay",
     "noStacking",
     "tornHandled",
+    "tornHandledFull",
     "indexClean",
     "goodKept",
+    "goodKeptFull",
     "keepKept",
     "consistentRead",
     "indexInRepo",
 )
-NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed")
+NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial")
 CHECKS: Final[tuple[Check, ...]] = (
     *(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES),
     *(Check(NAS_SPEC, main, NAS_PROPERTIES) for main in NAS_INSTANCES),
@@ -159,8 +162,8 @@ CHECKS: Final[tuple[Check, ...]] = (
 # to each witness a random walk rarely reaches (the seed and the bounds fix which one): a "never..."
 # value of the spec, or the negation of a step's label for a call with no witness of its own.
 NOCOW_WITNESSES: Final = (
-    ("recovered", "nocow_a", "neverRecovered", 45),
-    ("recover_failed", "nocow_a", "neverRecoverFailed", 40),
+    ("recovered", "nocow_a", "neverRecovered", 50),
+    ("recover_failed", "nocow_a", "neverRecoverFailed", 80),
     ("old_removed", "nocow_a", "neverOldRemoved", 40),
     ("twin_removed", "nocow_a", "neverTwinRemoved", 20),
     ("rolled_back", "nocow_a", "neverRolledBack", 30),
@@ -168,8 +171,10 @@ NOCOW_WITNESSES: Final = (
     ("gave_up_flag_kept", "nocow_a", "neverGaveUpFlagKept", 30),
     ("converged", "nocow_a", "neverConverged", 30),
     ("install_forgot", "nocow_a", 'not(step.name == "forget_attempts")', 20),
+    ("forget_failed", "nocow_a", 'not(step.name == "forget_attempts" and step.outcome == "fail")', 20),
     ("reset_failed", "nocow_a", 'not(step.name == "save_attempts" and step.outcome == "fail")', 20),
     ("label_failed", "nocow_a", 'not(step.name == "reference_label" and step.outcome == "fail")', 20),
+    ("copy_failed", "nocow_a", 'not(step.name == "copy" and step.outcome == "fail")', 20),
     ("copy_mismatch", "nocow_a", 'not(step.name == "copy" and step.outcome == "mismatch")', 20),
     ("copy_killed", "nocow_a", 'not(step.name == "copy" and step.outcome == "killed")', 25),
     ("power_loss_partial", "nocow_a", "neverPowerLossPartial", 20),
@@ -196,9 +201,17 @@ NAS_WITNESSES: Final = (
     ("ready_failed", "nas_mixed", "neverReadyFailed"),
     ("listings_unreadable", "nas_mixed", "neverListingsUnreadable"),
     ("live_listing_unreadable", "nas_mixed", "neverLiveListingUnreadable"),
+    ("inactive_listing_unreadable", "nas_mixed", "neverInactiveListingUnreadable"),
     ("remove_failed", "nas_mixed", "neverRemoveFailed"),
+    ("overlay_removed", "nas_mixed", "neverOverlayRemoved"),
+    ("partial_refused", "nas_partial", "neverPartialRefused"),
+    ("partial_stop_dropped", "nas_partial", "neverPartialStopDropped"),
+    ("partial_ok", "nas_partial", "neverPartialOk"),
     ("stop_after_commit", "nas_mixed", "neverStopAfterCommit"),
     ("retention_failed", "nas_mixed", "neverRetentionFailed"),
+    ("stop_after_commit_recorded", "nas_shutoff", "neverStopAfterCommitRecorded"),
+    ("stop_answered", "nas_shutoff", "neverStopAnswered"),
+    ("stop_held_check", "nas_shutoff", "neverStopHeldCheck"),
     ("started_during_read", "nas_shutoff", "neverStartedDuringRead"),
     ("shut_off_same", "nas_shutoff", "neverShutOffSame"),
     ("torn_forget_failed", "nas_shutoff", "neverTornForgetFailed"),
@@ -578,9 +591,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def cache_root(env: Mapping[str, str]) -> str:
-    base = env.get("XDG_CACHE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "cst-quint")
+def cache_root(env: Mapping[str, str]) -> str | None:
+    """The tool's folder under the user's cache folder (tests/xdg_cache.py), or None when there is none."""
+    base = cache_base(env)
+    return None if base is None else os.path.join(base, "cst-quint")
 
 
 def checkout_root() -> str:
@@ -628,7 +642,11 @@ def main(argv: Sequence[str], seams: Seams | None = None) -> int:
     if problem is not None:
         out(problem)
         return EX_USAGE
-    session = Session(checkout or checkout_root(), cache_root(env), run, env, out)
+    cache = cache_root(env)
+    if cache is None:
+        out(f"cst-quint: {NO_CACHE_BASE}")
+        return EX_USAGE
+    session = Session(checkout or checkout_root(), cache, run, env, out)
     os.makedirs(os.path.join(session.cache, "work"), exist_ok=True)
     work = tempfile.mkdtemp(prefix="run-", dir=os.path.join(session.cache, "work"))
     try:

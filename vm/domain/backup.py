@@ -269,6 +269,17 @@ def is_restic_summary(value: object) -> TypeIs[ResticSummary]:
     return has_shape(value, {}, _SUMMARY_KEYS) and json_object(value) and value.get("snapshot_id") != ""
 
 
+class StopAfterSnapshot(Stop):
+    """A stop that ended restic after restic had written its snapshot (its summary named it): the stop's
+    message, with restic's exit status and its summary, so the run records the snapshot as torn (or
+    names it) before the stop ends the read."""
+
+    def __init__(self, message: str, rc: int, summary: ResticSummary) -> None:
+        super().__init__(message)
+        self.rc = rc
+        self.summary = summary
+
+
 def copied_kind(src: str, tpm_dir: str, *, big: bool) -> str:
     """What a copied source is in the manifest: a disk (big), the TPM folder or the UEFI variables."""
     if big:

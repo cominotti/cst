@@ -105,12 +105,16 @@ esac
 exit 1
 """
 # systemctl show: prints $FIX_SHOW/<sys|usr>/<unit> (K=V lines), or fails
-# when that file is missing; everything else is the failed-units list.
+# when that file is missing; a show with no --state= prints
+# $FIX_SHOW/<sys|usr>/<unit>.active instead when that file is there (what a
+# glob lists without --state=loaded: not the inactive units); everything else
+# is the failed-units list.
 SYSTEMCTL = """#!/bin/sh
 echo "systemctl $*" >>"$STUB_LOG"
 case " $* " in
   *" show "*) for a in "$@"; do last="$a"; done
               mgr=sys; case " $* " in *" --user "*) mgr=usr ;; esac
+              case " $* " in *" --state="*) ;; *) [ -f "$FIX_SHOW/$mgr/$last.active" ] && exec cat "$FIX_SHOW/$mgr/$last.active" ;; esac
               [ -f "$FIX_SHOW/$mgr/$last" ] && exec cat "$FIX_SHOW/$mgr/$last"
               echo "Failed to connect to bus" >&2; exit 1 ;;
   *" --user "*) cat "$FIX_USER_FAILED" ;;
@@ -259,7 +263,7 @@ class Scratch(unittest.TestCase):
             "virsh -r -c qemu:///system domblklist ",
             "virsh -r -c qemu:///system domstate ",
             "systemctl show -p LoadState ",
-            "systemctl show -p Id -p LoadState ",
+            "systemctl show --state=loaded -p Id -p LoadState -p SourcePath ",
             "systemctl --user show -p LoadState ",
             "systemctl --user -M tester@ show -p LoadState ",
             "systemctl show --state=loaded -p Id -p LoadState -p NeedDaemonReload ",
@@ -1670,28 +1674,35 @@ class BtrfsCacheDoctorTest(Scratch):
         )
         base = "Id=var-mnt-cache.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload={}\nWhere=/var/mnt/cache\n"
         bind = "Id=var-home-danilo-.cache.mount\nLoadState=loaded\nSourcePath={}\nNeedDaemonReload=no\nWhere=/var/home/danilo/.cache\n"
-        for name, answer, warned in (
-            ("flagged", base.format("yes"), True),
-            ("mountinfo", base.format("no") + "\n" + bind.format("/proc/self/mountinfo"), True),
-            ("current", base.format("no") + "\n" + bind.format("/etc/fstab"), False),
-            ("none", "", False),
-            ("no answer", None, False),
+        # active: what a glob without --state=loaded lists (not the inactive units); None: the same as the
+        # whole answer. The inactive cases are the base not mounted: a question without --state=loaded
+        # does not see its unit.
+        for name, answer, active, warned in (
+            ("flagged", base.format("yes"), None, True),
+            ("mountinfo", base.format("no") + "\n" + bind.format("/proc/self/mountinfo"), None, True),
+            ("current", base.format("no") + "\n" + bind.format("/etc/fstab"), None, False),
+            ("inactive flagged", base.format("yes"), "", True),
+            ("inactive current", base.format("no"), "", False),
+            ("none", "", None, False),
+            ("no answer", None, None, False),
         ):
             with self.subTest(name):
                 show = os.path.join(self.env["FIX_SHOW"], "sys", "*.mount")
                 os.makedirs(os.path.dirname(show), exist_ok=True)
-                if answer is None:
-                    if os.path.exists(show):
-                        os.unlink(show)
-                else:
-                    with open(show, "w", encoding="utf-8") as fh:
-                        fh.write(answer)
+                for path, text in ((show, answer), (f"{show}.active", active)):
+                    if text is None:
+                        if os.path.exists(path):
+                            os.unlink(path)
+                    else:
+                        with open(path, "w", encoding="utf-8") as fh:
+                            fh.write(text)
                 out = self.run_tool().stdout
                 btrfs_text = "\n".join(area_lines(out, "btrfs"))
                 self.assertEqual(warn in btrfs_text, warned, btrfs_text)
                 self.assertEqual("fix: sudo systemctl daemon-reload" in btrfs_text, warned, btrfs_text)
                 self.assertIn(
-                    "systemctl show -p Id -p LoadState -p SourcePath -p NeedDaemonReload -p Where *.mount", self.calls()
+                    "systemctl show --state=loaded -p Id -p LoadState -p SourcePath -p NeedDaemonReload -p Where *.mount",
+                    self.calls(),
                 )
 
     def test_systemd_behind_on_fstab_is_no_warning_without_the_cache(self) -> None:
@@ -2350,6 +2361,150 @@ class DockerNocowPostponedTest(Scratch):
         os.mkdir(os.path.join(self.root, "var", "lib", "docker-volumes-nocow", "postponed"))
         r = self.run_tool()
         self.assertIn("info   Docker volumes NOCOW: cannot read", r.stdout)
+
+
+class DockerNocowOutcomeTest(Scratch):
+    """check_docker_nocow_outcome: a Docker volumes migration no boot will ask for, read from what
+    docker-volumes-nocow leaves (its outcome record, its count of boots, its flag); doctor never opens
+    Docker's own folders."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.state_dir = os.path.join(self.root, "var", "lib", "docker-volumes-nocow")
+        os.makedirs(self.state_dir)
+        self.flag = os.path.join(self.root, "etc", "btrfs-setup", "docker-nocow-pending")
+        os.makedirs(os.path.dirname(self.flag))
+        self.helper = os.path.join(self.root, "usr", "local", "sbin", "docker-volumes-nocow")
+        os.makedirs(os.path.dirname(self.helper))
+        with open(self.helper, "w") as f:
+            f.write("#!/bin/sh\n")
+
+    def record(self, outcome: str, *, version: int = 1, reason: str = "cannot schedule the migration: boom") -> None:
+        with open(os.path.join(self.state_dir, "outcome"), "w") as f:
+            json.dump(
+                {"v": version, "outcome": outcome, "at": NOW, "volumes": "/var/lib/docker/volumes", "reason": reason},
+                f,
+            )
+
+    def count(self, text: str) -> None:
+        with open(os.path.join(self.state_dir, "attempts"), "w") as f:
+            f.write(text)
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "Docker volumes NOCOW" in ln]
+
+    def test_an_install_that_could_not_schedule_warns(self) -> None:
+        # The line names no cause doctor cannot know: +C without a flag also follows a give-up (the
+        # flag removed, +C kept), not only an older install stopped half-way or a container's write.
+        self.record("not-scheduled")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                (
+                    "  WARN   Docker volumes NOCOW: /var/lib/docker/volumes keeps copy-on-write data and no boot will "
+                    "migrate it (the folder has +C already, and a boot asks only for one without it), and the "
+                    "install at 2026-11-05 17:33 failed: cannot schedule the migration: boom; fix that, then run the "
+                    "install"
+                )
+            ],
+        )
+        self.assertIn("fix: cst btrfs install", r.stdout)
+        self.assert_read_only()
+
+    def test_nothing_beside_the_flag(self) -> None:
+        self.record("not-scheduled")
+        self.count("2")
+        open(self.flag, "w").close()
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+    def test_a_count_left_without_its_flag_warns(self) -> None:
+        self.count("2\n")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                (
+                    "  WARN   Docker volumes NOCOW: a count of 2 boot(s) is left with no migration scheduled: an install "
+                    "or a boot could not reset it, so a migration may not be asked for (journalctl -u "
+                    "docker-volumes-nocow says why); fix that, then run the install"
+                )
+            ],
+        )
+        self.assertIn("fix: cst btrfs install", r.stdout)
+        # A give-up's record does not hide it (the give-up removes the count first).
+        self.record("gave-up", reason="the migration did not finish after 2 boot(s)")
+        self.assertEqual(len(self.lines(self.run_tool().stdout)), 1)
+
+    def test_a_count_of_0_none_or_no_number_is_silent(self) -> None:
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+        for text in ("0", "", "two"):
+            with self.subTest(text=text):
+                self.count(text)
+                self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+    def test_a_give_up_alone_is_silent(self) -> None:
+        # Its alert reached the next login, and status shows it.
+        self.record("gave-up", reason="the migration did not finish after 2 boot(s)")
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+    def test_nothing_without_the_helper(self) -> None:
+        os.remove(self.helper)
+        self.record("not-scheduled")
+        self.count("2")
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+    def test_a_flag_it_cannot_look_for_is_info_and_no_warning(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root searches any folder")
+        self.record("not-scheduled")
+        folder = os.path.dirname(self.flag)
+        os.chmod(folder, 0)
+        self.addCleanup(os.chmod, folder, 0o755)
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            ["  info   Docker volumes NOCOW: cannot tell whether a migration is scheduled (Permission denied)"],
+        )
+
+    def test_a_record_whose_folder_is_a_file_is_none(self) -> None:
+        # No record can be there, as the helper's status reads it (doctor said it could not read it).
+        shutil.rmtree(self.state_dir)
+        with open(self.state_dir, "w") as f:
+            f.write("in the way\n")
+        lines = self.lines(self.run_tool().stdout)
+        self.assertEqual([ln for ln in lines if "outcome" in ln or "scheduled" in ln], [], lines)
+
+    def test_a_record_it_cannot_read_or_of_a_newer_cst_is_info(self) -> None:
+        path = "/var/lib/docker-volumes-nocow/outcome"
+        for text in (
+            "not json",
+            '{"outcome": "lost", "at": 1, "volumes": "v", "reason": "r"}',
+            # A time past what the C library can show: the check itself failed before.
+            '{"v": 1, "outcome": "not-scheduled", "at": 100000000000000000000, "volumes": "v", "reason": "r"}',
+            '{"v": 1, "outcome": "not-scheduled", "at": 1000000000000000000, "volumes": "v", "reason": "r"}',
+            # A time localtime accepts but strftime cannot show (a year past a C int, in UTC and west).
+            '{"v": 1, "outcome": "not-scheduled", "at": 67768036191676799, "volumes": "v", "reason": "r"}',
+        ):
+            with self.subTest(text=text):
+                with open(os.path.join(self.state_dir, "outcome"), "w") as f:
+                    f.write(text)
+                self.assertEqual(
+                    self.lines(self.run_tool().stdout), [f"  info   Docker volumes NOCOW: cannot read {path}"]
+                )
+        self.record("not-scheduled", version=99)
+        self.assertEqual(
+            self.lines(self.run_tool().stdout),
+            [
+                (
+                    f"  info   Docker volumes NOCOW: {path} is format 99 of the docker-nocow-outcome (this CST reads "
+                    "format 1 and older): written by a newer CST"
+                )
+            ],
+        )
 
 
 # ---- vm ----------------------------------------------------------------------------------------

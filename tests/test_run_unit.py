@@ -48,6 +48,13 @@ def _child_env(tmp: str, **more: str) -> dict[str, str]:
     return {**os.environ, "XDG_CACHE_HOME": os.path.join(tmp, "cache"), **more}
 
 
+def _copy_runner(tmp: str) -> None:
+    """A copy of the runner, and of the module of tests/ it imports, in the temporary checkout tmp."""
+    os.makedirs(os.path.join(tmp, "tests"))
+    for name in ("run_unit.py", "xdg_cache.py"):
+        shutil.copy2(os.path.join(REPO, "tests", name), os.path.join(tmp, "tests", name))
+
+
 def ids(suite: unittest.TestSuite) -> set[str]:
     out: set[str] = set()
     for test in suite:
@@ -684,8 +691,7 @@ class BytecodeGateTest(unittest.TestCase):
     def run_copy(self, name: str) -> tuple[subprocess.CompletedProcess[str], str]:
         """A copy of the runner in a temporary checkout of its own, run by its shebang on one test of _BYTECODE."""
         tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-pyc-run-"))
-        os.makedirs(os.path.join(tmp, "tests"))
-        shutil.copy2(os.path.join(REPO, "tests", "run_unit.py"), os.path.join(tmp, "tests", "run_unit.py"))
+        _copy_runner(tmp)
         for rel, text in (
             ("probe_bytecode.py", _BYTECODE),
             (
@@ -1259,8 +1265,7 @@ class ParallelRunnerTest(unittest.TestCase):
 
     def test_parallel_detects_bytecode_written_into_copy(self) -> None:
         tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-par-pyc-"))
-        os.makedirs(os.path.join(tmp, "tests"))
-        shutil.copy2(os.path.join(REPO, "tests", "run_unit.py"), os.path.join(tmp, "tests", "run_unit.py"))
+        _copy_runner(tmp)
         for rel, text in (
             ("probe_bytecode.py", _BYTECODE),
             (
@@ -1583,8 +1588,7 @@ class LongestFirstTest(unittest.TestCase):
     def _probe_tree(self) -> str:
         """A checkout of its own: a copy of the runner and two probe modules, discovered as the whole suite."""
         tmp = self.tmp()
-        os.makedirs(os.path.join(tmp, "tests"))
-        shutil.copy2(os.path.join(REPO, "tests", "run_unit.py"), os.path.join(tmp, "tests", "run_unit.py"))
+        _copy_runner(tmp)
         for name, text in (("test_probe_a.py", _PROBE_A), ("test_probe_b.py", _PROBE_B)):
             with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
                 f.write(text)

@@ -348,14 +348,15 @@ def _reload_systemd(rt: _CacheMountRuntime) -> str | None:
 
 def _fstab_behind(snap: CacheMountSnapshot, rt: _CacheMountRuntime, mounting: Collection[str] = ()) -> bool | None:
     """Whether systemd has not loaded /etc/fstab as it is on disk (systemd_behind_fstab over the mount
-    units it has loaded, one `systemctl show '*.mount'`, on the host from a toolbox as findmnt is; mounting:
-    the targets attach mounts); None when systemctl gives no answer."""
+    units it has loaded, active or not, one `systemctl show --state=loaded '*.mount'`, on the host from a
+    toolbox as findmnt is; mounting: the targets attach mounts); None when systemctl gives no answer."""
     return systemd_behind_fstab(_mount_units(rt), snap.bindings, mounting)
 
 
 def _mount_units(rt: _CacheMountRuntime) -> list[dict[str, str]] | None:
-    """The mount units systemd has loaded (MOUNT_UNIT_PROPS), one `systemctl show '*.mount'`, on the host
-    from a toolbox as findmnt is; None when systemctl gives no answer."""
+    """The mount units systemd has loaded, active or not (MOUNT_UNIT_PROPS), one `systemctl show
+    --state=loaded '*.mount'`, on the host from a toolbox as findmnt is; None when systemctl gives no
+    answer."""
     on_host = SystemctlHost.SHOW_ONLY if _from_toolbox(rt) else SystemctlHost.LOCAL
     return SystemctlAdapter(rt.runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
 

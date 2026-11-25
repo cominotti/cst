@@ -15,6 +15,7 @@ import tempfile
 from typing import override
 import unittest
 
+from tests.e2e_host_python import host_closure
 from tests.repo_files import REPO
 from tests.test_workflow_audit import CI, INVOWKFILE, task_script
 
@@ -88,14 +89,15 @@ class QuintCiPathsTest(unittest.TestCase):
         return r.returncode == 0
 
     def test_a_change_to_what_the_job_runs_runs_it(self) -> None:
-        # The code each spec models, the specs and their traces, the replays, the tool, and what runs
-        # the tool: the job itself, the invowk task, the action that installs invowk.
+        # The code each spec models, the specs and their traces, the replays, the tool, what runs the
+        # tool (the job itself, the invowk task, the action that installs invowk), and what it imports.
         for path in (
             "btrfs/docker_volumes_nocow/application.py",
             "btrfs/tests/quint/docker_volumes_nocow.qnt",
             "btrfs/tests/quint/traces/walk_ab.itf.json",
             "btrfs/tests/test_docker_volumes_nocow_replay.py",
             "vm/application/nas.py",
+            "vm/application/nas_torn.py",
             "vm/adapters/restic.py",
             "vm/adapters/backup.py",
             "vm/domain/backup.py",
@@ -107,7 +109,24 @@ class QuintCiPathsTest(unittest.TestCase):
             ".github/workflows/ci.yml",
             "cst.invowkmod/invowkfile.cue",
             ".github/actions/setup-invowk/action.yml",
+            "cst_core/__init__.py",
+            "cst_core/domain/__init__.py",
+            "cst_core/domain/errors.py",
+            "cst_core/domain/values.py",
+            "tests/__init__.py",
+            "tests/xdg_cache.py",
         ):
+            with self.subTest(path=path):
+                self.assertTrue(self.quint_path(path))
+
+    def test_every_file_cst_quint_imports_runs_it(self) -> None:
+        # The job runs cst-quint on the runner's python3: a change to a file it imports (cst_core's errors
+        # and values) could break the job while the job was skipped. An import added later fails here
+        # until quint_path names the file.
+        closure, problems = host_closure(REPO, ("tests/quint/cst-quint",))
+        self.assertEqual(problems, [])
+        self.assertIn("tests/quint/cst-quint", closure)
+        for path in closure:
             with self.subTest(path=path):
                 self.assertTrue(self.quint_path(path))
 
@@ -116,6 +135,8 @@ class QuintCiPathsTest(unittest.TestCase):
         for path in (
             "README.md",
             "btrfs/cache/adapters.py",
+            "cst_core/adapters/runner.py",
+            "cst_core/domain/text.py",
             ".github/workflows/nightly.yml",
             "tests/mbt/profiles.py",
             "vm/application/backup.py",

@@ -15,7 +15,8 @@
 // Abstraction: a volume's folders hold contents, not files: "cow" (the original, copy-on-write), "copy"
 // (a complete NOCOW copy of it), "partial" (an incomplete or wrong copy), "empty" (the twin just made),
 // "absent". Not modelled: scan(fix) setting +C in place on folders and empty files, the postponed
-// record, journal lines and the alert, daemon.json problems, a dockerd outside docker.service, status
+// record, the outcome record (written and removed best effort, read by no decision of migrate or
+// mark), journal lines and the alert, daemon.json problems, a dockerd outside docker.service, status
 // and unmark, a failing remove_tree, containers writing during an install (mark's second scan finds
 // what the first did), durability of metadata, and the start an older install could leave (+C on
 // the folder, copy-on-write data, no flag: requestKept rules it out; MarkUnmarkTest and tier 2
@@ -127,7 +128,8 @@ module nocow {
   // cst btrfs install: mark (btrfs-setup.sh writes nothing after it, whatever its exit status). mark's
   // request comes before +C: with copy-on-write data it resets an old count (renew: the request gets
   // its GIVE_UP_AFTER boots again) and writes the flag, flushed; exit 2 when either fails (no +C then:
-  // the next boot asks again). Without copy-on-write data it forgets the count; +C; exit 0.
+  // the next boot asks again). Without copy-on-write data it forgets the count (exit 2 when that
+  // fails, no +C); +C; exit 0.
   action install = all {
     s.pc == "idle",
     s.env < MAX_ENV,
@@ -151,10 +153,15 @@ module nocow {
     else all { s' = { ...s, pc: "idle" }, step' = lbl("request_migration", "", "fail") },
   }
   // Install renews the count either way: forgotten here, reset above. Its round starts once that is done.
+  // A forget that fails (a folder where the counter belongs, a read-only /var) is mark's error: exit 2,
+  // the count kept, no +C (the next boot sets it: no copy-on-write data, no request).
   action installForget = all {
     s.pc == "install_forget",
-    s' = { ...newRound(s), gaveUp: s.gaveUp, attempts: 0, pc: "install_nocow" },
-    step' = lbl("forget_attempts", "", ""),
+    nondet roll = ROLLS.oneOf()
+    if (roll != 0) all {
+      s' = { ...newRound(s), gaveUp: s.gaveUp, attempts: 0, pc: "install_nocow" },
+      step' = lbl("forget_attempts", "", ""),
+    } else all { s' = { ...s, pc: "idle" }, step' = lbl("forget_attempts", "", "fail") },
   }
   action installNocow = all {
     s.pc == "install_nocow",

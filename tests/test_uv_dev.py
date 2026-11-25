@@ -9,7 +9,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest tests.test_uv_dev -v
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import hashlib
 import json
 import os
@@ -18,6 +18,8 @@ import subprocess
 import tempfile
 from typing import override
 import unittest
+
+from tests.xdg_cache import NO_CACHE_BASE
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UV_DEV = os.path.join(REPO, "tests", "uv-dev")
@@ -48,7 +50,7 @@ class UvDevTest(unittest.TestCase):
         # machine is never found.
         self.tools = os.path.join(self.tmp.name, "tools")
         os.mkdir(self.tools)
-        for prog in ("bash", "dirname", "readlink", "sha1sum", "cut"):
+        for prog in ("bash", "dirname", "readlink", "sha1sum", "cut", "id"):
             found = shutil.which(prog)
             if found is None:
                 self.fail(f"{prog} is not on PATH")
@@ -60,20 +62,30 @@ class UvDevTest(unittest.TestCase):
             fh.write(FAKE_UV)
         os.chmod(path, 0o755)
 
+    def fake_getent(self, home: str | None) -> None:
+        """A getent that answers `getent passwd UID` for this user with home, or fails (2) for None."""
+        answer = "exit 2" if home is None else f'echo "u:x:{os.getuid()}:{os.getgid()}::{home}:/bin/sh"'
+        path = os.path.join(self.tools, "getent")
+        with open(path, "w") as fh:
+            fh.write(f'#!/bin/sh\n[ "$1 $2" = "passwd {os.getuid()}" ] || exit 2\n{answer}\n')
+        os.chmod(path, 0o755)
+
     def run_uv_dev(
         self,
         *args: str,
         script: str = UV_DEV,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        unset: Sequence[str] = (),
     ) -> subprocess.CompletedProcess[str]:
         base = {"PATH": f"{self.bin}:{self.tools}", "HOME": self.home}
+        full = {name: value for name, value in {**base, **(env or {})}.items() if name not in unset}
         return subprocess.run(
             [os.path.join(self.tools, "bash"), script, *args],
             check=False,
             capture_output=True,
             text=True,
-            env={**base, **(env or {})},
+            env=full,
             cwd=cwd or self.tmp.name,
             stdin=subprocess.DEVNULL,
         )
@@ -101,6 +113,48 @@ class UvDevTest(unittest.TestCase):
         got = json.loads(self.run_uv_dev("ty", "check", env={"XDG_CACHE_HOME": xdg}).stdout)
         self.assertEqual(got["venv"], os.path.join(xdg, "cst-dev-venv", key(REPO)))
         self.assertEqual(got["ruff_cache"], os.path.join(xdg, "cst-dev-ruff", key(REPO)))
+
+    def test_a_relative_xdg_cache_home_is_ignored(self) -> None:
+        # XDG_CACHE_HOME=rel was used as it is: the venv went to rel/cst-dev-venv/KEY, inside the checkout
+        # uv-dev runs uv from.
+        self.fake_uv()
+        cache = os.path.join(self.home, ".cache")
+        for xdg in ("rel", "./rel", ""):
+            with self.subTest(xdg=xdg):
+                r = self.run_uv_dev("ty", "check", env={"XDG_CACHE_HOME": xdg})
+                self.assertEqual(r.returncode, 0, r.stderr)
+                got = json.loads(r.stdout)
+                self.assertEqual(got["venv"], os.path.join(cache, "cst-dev-venv", key(REPO)))
+                self.assertEqual(got["ruff_cache"], os.path.join(cache, "cst-dev-ruff", key(REPO)))
+
+    def test_an_empty_relative_or_unset_home_goes_to_the_password_database(self) -> None:
+        # HOME="" gave the venv /.cache/cst-dev-venv/KEY; an unset HOME stopped the script (set -u).
+        self.fake_uv()
+        pw_home = os.path.join(self.tmp.name, "pw-home")
+        self.fake_getent(pw_home)
+        cache = os.path.join(pw_home, ".cache")
+        for env, unset in (
+            (({"HOME": ""}), ()),
+            ({"HOME": "h"}, ()),
+            ({}, ("HOME",)),
+            ({"XDG_CACHE_HOME": "x"}, ("HOME",)),
+        ):
+            with self.subTest(env=env, unset=unset):
+                r = self.run_uv_dev("ty", env=env, unset=unset)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                got = json.loads(r.stdout)
+                self.assertEqual(got["venv"], os.path.join(cache, "cst-dev-venv", key(REPO)))
+                self.assertEqual(got["ruff_cache"], os.path.join(cache, "cst-dev-ruff", key(REPO)))
+
+    def test_no_cache_folder_stops_before_uv(self) -> None:
+        self.fake_uv()
+        for home in (None, "relative"):
+            with self.subTest(getent_home=home):
+                self.fake_getent(home)
+                r = self.run_uv_dev("ty", env={"HOME": ""})
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertEqual(r.stdout, "")  # uv never ran
+                self.assertIn(f"uv-dev: {NO_CACHE_BASE}", r.stderr)
 
     def test_a_symlinked_path_to_the_checkout_gets_the_same_environment(self) -> None:
         # /home and /var/home name the same folder on Silverblue: one venv, not two.

@@ -20,7 +20,9 @@ Checked after each fault, after the recovery and at the end:
   no attempts counter, and status says every volume is fully NOCOW.
 
 A boot that gives up (the third of a scheduled migration) is checked the same way: each fault
-there, then two more boots, leave the volumes as they were and no flag and no counter.
+there, then two more boots, leave the volumes as they were and no flag and no counter, and the
+give-up recorded (or no record, when its write failed and the boot went on). The outcome record's
+write and removals go through the plan too; a converged run leaves no record.
 
 A migration from a count of boots an older helper left without its flag (the volumes folder
 without +C again, as after Docker is reinstalled) is checked as the first one: its new request
@@ -51,7 +53,9 @@ from btrfs.docker_volumes_nocow.domain import (
     GIVE_UP_AFTER,
     OLD_MARK,
     NocowCommand,
+    NocowOutcome,
     NocowPaths,
+    OutcomeRecord,
     PostponedRecord,
     TreeScan,
 )
@@ -86,15 +90,18 @@ def newest_old_copy(names: list[str]) -> str | None:
 
 
 # The cases each class runs (a change of the protocol's calls moves them: pinned so it is seen).
-CASES_MIGRATION_KILL = 67  # 25 first faults, 42 with a second fault in recover()
-CASES_MIGRATION_FAIL = 55  # 25 and 30
-CASES_MIGRATION_FAIL_FROM = 67  # 25 and 42
-CASES_GIVE_UP = 4  # per mode: each of the boot's points, and the boot with no fault
+# The migration's 27 points include the outcome record's two removals (after the flag is written, and
+# at the end); a fault there leaves recover() no step of its own.
+CASES_MIGRATION_KILL = 69  # 27 first faults, 42 with a second fault in recover()
+CASES_MIGRATION_FAIL = 57  # 27 and 30
+CASES_MIGRATION_FAIL_FROM = 69  # 27 and 42
+# Per mode: each of the boot's points (the outcome record's write first), and the boot with no fault.
+CASES_GIVE_UP = 5
 # The migration's cases, and one more first fault: the reset of the old count (recover has no step then).
-CASES_STALE_KILL = 68
-CASES_STALE_FAIL = 56
-CASES_STALE_FAIL_FROM = 68
-CASES_INSTALL = 5  # per mode: each of the install's points
+CASES_STALE_KILL = 70
+CASES_STALE_FAIL = 58
+CASES_STALE_FAIL_FROM = 70
+CASES_INSTALL = 6  # per mode: each of the install's points (the outcome record's removal among them)
 
 
 class FaultyTree(LocalVolumeTree):
@@ -177,6 +184,14 @@ class FaultyState(NocowStateFiles):
     def clear_postponed(self) -> None:
         self.plan.step("clear_postponed", super().clear_postponed)
 
+    @override
+    def write_outcome(self, record: OutcomeRecord) -> None:
+        self.plan.step("write_outcome", functools.partial(super().write_outcome, record))
+
+    @override
+    def clear_outcome(self) -> None:
+        self.plan.step("clear_outcome", super().clear_outcome)
+
 
 class NocowFaultBase(Base):
     """The fixture: a volumes folder without +C holding two copy-on-write volumes, no flag."""
@@ -255,6 +270,7 @@ class NocowFaultBase(Base):
         self.assertTrue(self.fs.nocow(self.vols), when)
         self.assertFalse(os.path.exists(self.flag), f"{when}: flag left")
         self.assertFalse(os.path.exists(self.attempts), f"{when}: attempts left")
+        self.assertFalse(os.path.exists(self.outcome), f"{when}: an outcome record left")
         status = self.quiet(self.service.status)
         self.assertIn(f"{len(VOLUMES)} of {len(VOLUMES)} volume(s) fully NOCOW", status, when)
 
@@ -277,6 +293,7 @@ class MigrationCutPointsTest(NocowFaultBase):
         want = [
             "clear_postponed",
             "request_migration",
+            "clear_outcome",
             "set_nocow . True",
             "scan-fix a/_data",
             "scan-fix b/_data",
@@ -287,6 +304,7 @@ class MigrationCutPointsTest(NocowFaultBase):
             *(c.format(v=v) for v in VOLUMES for c in per_volume),
             "remove_attempts",
             "remove_flag",
+            "clear_outcome",
         ]
         # The old copy's name ends with the time: compared up to its mark.
         self.assertEqual([c.split(OLD_MARK)[0] + (OLD_MARK if OLD_MARK in c else "") for c in calls], want)
@@ -369,12 +387,17 @@ class GiveUpFaultBase(NocowFaultBase):
             self.assertEqual(os.listdir(os.path.join(self.vols, name)), ["_data"], f"{when}: {name} leftovers")
         self.assertFalse(os.path.exists(self.flag), f"{when}: flag left")
         self.assertFalse(os.path.exists(self.attempts), f"{when}: attempts left without a flag")
+        # The give-up recorded, or (a fault at the record's write, the boot going on) no record.
+        read = self.service.state.read_outcome()
+        self.assertEqual(read.problem, "", when)
+        self.assertIn(read.outcome, (NocowOutcome.GAVE_UP, None), when)
 
     def every_fault_while_giving_up(self, mode: FaultMode) -> int:
         """A boot with no fault gives up once; then each point of it failing in mode, and two more
         boots; the number of cases (the one with no fault included)."""
         n = len(cut_points(self.plan, self.boot))
         self.assert_settled("no fault")
+        self.assertEqual(self.service.state.read_outcome().outcome, NocowOutcome.GAVE_UP)
         self.assertEqual(len(self.fs.commands(self.notify)), 1)
         cases = 1
         for _mode, k in every_fault(n, (mode,)):
@@ -477,7 +500,15 @@ class InstallCutPointsTest(InstallFaultBase):
     def test_the_request_is_written_before_nocow_is_set(self) -> None:
         calls = cut_points(self.plan, self.install)
         self.assertEqual(
-            calls, ["save_attempts 0", "request_migration", "set_nocow . True", "scan-fix a/_data", "scan-fix b/_data"]
+            calls,
+            [
+                "save_attempts 0",
+                "request_migration",
+                "clear_outcome",
+                "set_nocow . True",
+                "scan-fix a/_data",
+                "scan-fix b/_data",
+            ],
         )
         self.assertTrue(os.path.exists(self.flag))
         self.boot()

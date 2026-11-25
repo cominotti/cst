@@ -26,6 +26,7 @@ import json
 import os
 import pty
 import re
+import resource
 import shutil
 import signal
 import stat
@@ -98,6 +99,14 @@ def xml(sources, secret):
     return (f"<domain type='kvm'><name>win</name><uuid>{vm['uuid']}</uuid><os><nvram>{vm['nvram']}</nvram></os>"
             f"<devices>{disks}{chan}{pw}{tpm}</devices></domain>\n")
 if cmd == "domstate":
+    log = os.path.join(fix, "restic.log")
+    sent = os.path.join(fix, "term-sent")
+    if ("term-during-check" in fail and not os.path.exists(sent) and os.path.exists(log)
+            and any(json.loads(ln)["args"][:1] == ["backup"] for ln in open(log))):
+        # The stop comes while the check after restic's read waits for virsh.
+        import signal
+        open(sent, "w").close()
+        os.kill(os.getppid(), signal.SIGTERM)
     print(vm["state"]); print()
 elif cmd == "list":
     print("\n".join(vm.get("managed", [])))
@@ -247,6 +256,12 @@ if cmd == "backup":
     if rc in (0, 3):
         print(json.dumps({"message_type": "summary", "snapshot_id": cfg.get("id", "a1b2c3d4" + "e" * 56),
                           "total_bytes_processed": 2048, "data_added": 1024}))
+    if "term-after-summary" in vm.get("fail", []):
+        # The snapshot is saved and named; the stop comes before restic exits.
+        import signal, time
+        sys.stdout.flush()
+        os.kill(os.getppid(), signal.SIGTERM)
+        time.sleep(30)
     sys.exit(rc)
 if cmd == "forget":
     one = "--keep-weekly" not in args  # one snapshot by its id, not the retention
@@ -1627,6 +1642,52 @@ class TornRecordTest(Nas):
             r.stderr,
         )
 
+    def test_a_stop_that_ends_restic_after_its_snapshot_leaves_the_snapshot_recorded(self) -> None:
+        # restic printed its summary (the snapshot is saved) and is ended by the stop before it exits:
+        # the snapshot counts as torn, is recorded for the next run to forget, and nothing is forgotten now.
+        self.vm(fail=["term-after-summary"], agent="connected")
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup: recorded in {self.torn}, "
+            "the next NAS backup of win forgets it before its retention",
+            r.stderr,
+        )
+        self.assertEqual(self.torn_list(), [self.torn_entry(SNAP_ID, timestamp=STAMP, why="stopped")])
+        self.assertEqual(self.forgets(), [], "the forget is the next run's")
+        self.assertEqual(len(self.virsh_calls("blockcommit")), 1, "merged back as after any stop")
+        self.assertEqual(self.vm_state()["live"]["sda"], self.disk)
+        self.assertFalse(os.path.exists(self.index))
+
+    def test_a_stop_during_the_check_after_the_read_waits_for_the_torn_record(self) -> None:
+        # A shut-off VM started during restic's read: the check after it finds the snapshot torn, and a
+        # stop that came while the check waited for virsh is raised only once the snapshot is recorded.
+        self.vm(state="shut off", fail=["start-during-backup", "term-during-check"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.fix, "term-sent")), "the stub sent its stop")
+        self.assertIn(
+            f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup: recorded in {self.torn}, "
+            "the next NAS backup of win forgets it before its retention",
+            r.stderr,
+        )
+        self.assertEqual(self.torn_list(), [self.torn_entry(SNAP_ID, timestamp=STAMP, why="state changed")])
+        self.assertEqual(self.forgets(), [], "the forget is the next run's")
+        self.assertFalse(os.path.exists(self.index))
+
+    def test_a_stop_that_ends_restic_after_its_snapshot_names_it_when_the_record_fails(self) -> None:
+        self.vm(fail=["term-after-summary"], agent="connected")
+        self.restic_cfg(break_torn=self.torn)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup and could NOT be recorded (",
+            r.stderr,
+        )
+        self.assertIn(f"restic forget {SNAP_ID}, with the repository's variables of vm/README.md", r.stderr)
+        self.assertEqual(self.forgets(), [])
+        self.assertEqual(self.vm_state()["live"]["sda"], self.disk)
+
     def test_the_next_run_forgets_a_recorded_snapshot_restic_still_lists_with_both_tags(self) -> None:
         for recorded in (TORN_ID, TORN_ID[:8]):  # the full id, or a short one restic named
             with self.subTest(recorded=recorded):
@@ -2317,6 +2378,8 @@ class FakeNasStore:
         self.overlays: set[str] = set()
         self.dropped: list[str] = []
         self.removed: list[str] = []
+        self.torn: list[vm_domain_backup.TornEntry] = []
+        self.record_fails = False
 
     def is_file(self, path: str) -> bool:
         return path in self.disk_paths
@@ -2390,7 +2453,9 @@ class FakeNasStore:
         return []
 
     def record_torn(self, entry: vm_domain_backup.TornEntry) -> None:
-        del entry
+        if self.record_fails:
+            raise OSError(28, "No space left on device")
+        self.torn.append(entry)
 
     def drop_torn(self, entries: Sequence[vm_domain_backup.TornEntry]) -> None:
         del entries
@@ -2420,20 +2485,34 @@ class FakeNasSettings:
 class FakeNasRestic:
     def __init__(self, backup_fn: Callable[[], tuple[int, vm_domain_backup.ResticSummary]] | None = None) -> None:
         self.backup_fn = backup_fn
+        self.calls: list[list[str]] = []
 
     def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
         del env, timeout
+        self.calls.append(list(args))
         if args and args[0] == "snapshots":
             return 0, json.dumps([{"id": SNAP_ID}]), ""
         return 0, "", ""
 
     def backup(
-        self, env: Mapping[str, str], args: Sequence[str], timeout: int, out: ProgressPort
+        self,
+        env: Mapping[str, str],
+        args: Sequence[str],
+        timeout: int,
+        out: ProgressPort,
+        *,
+        answered: Callable[[], None] | None = None,
     ) -> tuple[int, vm_domain_backup.ResticSummary]:
         del env, args, timeout, out
-        if self.backup_fn is not None:
-            return self.backup_fn()
-        return 0, {"snapshot_id": SNAP_ID, "total_bytes_processed": 1024, "data_added": 512}
+        good: vm_domain_backup.ResticSummary = {
+            "snapshot_id": SNAP_ID,
+            "total_bytes_processed": 1024,
+            "data_added": 512,
+        }
+        rc, summary = (0, good) if self.backup_fn is None else self.backup_fn()
+        if answered is not None and "snapshot_id" in summary:  # as Restic.backup: once restic exited
+            answered()
+        return rc, summary
 
 
 class FakeNasSignals:
@@ -2692,6 +2771,57 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         self.assertIn("list failed", alerts[0][1])
         self.assertIn("commit crashed", alerts[0][1])
 
+    def _partial(self, rc: int) -> tuple[str, FakeNasCommands, FakeNasStore, list[bool]]:
+        """nas_run of a VM with two disks whose snapshot answers rc (settled) with only vda switched;
+        (the refusal, the commands, the store, restic's backups)."""
+        disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+        backups: list[bool] = []
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] != "snapshot-create-as":
+                return None
+            store.overlays.update((overlay_a, overlay_b))  # libvirt made both files, switched vda only
+            live["vda"] = overlay_a
+            return (0, "", "") if rc == 0 else (rc, "", "error: internal error: snapshot failed")
+
+        def backup() -> tuple[int, vm_domain_backup.ResticSummary]:
+            backups.append(True)
+            return 0, {"snapshot_id": SNAP_ID}
+
+        port, commands, store, _signals, _alerts = self._make_backup(
+            [("vda", disk_a), ("vdb", disk_b)], on_virsh=hook, backup_fn=backup
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        return str(ctx.exception), commands, store, backups
+
+    def test_a_snapshot_that_switched_some_disks_only_is_no_backup(self) -> None:
+        overlay_a = f"/img/a.qcow2{vm_domain.OVERLAY_MARK}{STAMP}"
+        overlay_b = f"/img/b.qcow2{vm_domain.OVERLAY_MARK}{STAMP}"
+        for rc in (0, 1):  # virsh answered ok, or with an error
+            with self.subTest(rc=rc):
+                msg, commands, store, backups = self._partial(rc)
+                self.assertIn(
+                    "virsh snapshot-create-as win switched only some disks (switched: vda; not: vdb): no backup, "
+                    "the switched disks are merged back",
+                    msg,
+                )
+                self.assertEqual(backups, [], "restic never read it")
+                self.assertEqual(store.dropped, [overlay_b], "the file of the disk not switched")
+                self.assertEqual(store.removed, [overlay_a], "the switched disk merged back, its file removed")
+                cmds = [c[0][0] for c in commands.virsh_log]
+                self.assertEqual(cmds.count("snapshot-create-as"), 1, "no second attempt")
+                self.assertEqual([c[0][2] for c in commands.virsh_log if c[0][0] == "blockcommit"], ["vda"])
+
     def test_drop_stray_overlays_keeps_switched_disk_and_drops_unswitched(self) -> None:
         disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
         overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
@@ -2724,31 +2854,6 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         self.assertEqual(store.dropped, [overlay_b])
         self.assertTrue(store.exists(overlay_a))
 
-        # End-to-end 2-disk partial switch: snapshot-create-as fails after switching vda only; vda merges cleanly.
-        def partial_hook(
-            args: Sequence[str],
-            _cmds: FakeNasCommands,
-            _sigs: FakeNasSignals,
-            live: dict[str, str],
-            st: FakeNasStore,
-        ) -> tuple[int, str, str] | None:
-            if args[0] == "snapshot-create-as":
-                st.overlays.update((overlay_a, overlay_b))
-                live["vda"] = overlay_a
-                return 1, "", "error: vdb failed"
-            return None
-
-        port2, commands2, store2, _sig2, alerts2 = self._make_backup(
-            [("vda", disk_a), ("vdb", disk_b)], on_virsh=partial_hook
-        )
-        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
-        vm_app_nas.nas_run(self._cfg(), port2, "win", None, nas, quiesce=False, live=True)
-        self.assertEqual(alerts2, [])
-        self.assertEqual(store2.dropped, [])
-        self.assertEqual(store2.removed, [overlay_a])
-        commits = [c[0][2] for c in commands2.virsh_log if c[0][0] == "blockcommit"]
-        self.assertEqual(commits, ["vda"])
-
 
 class _HeldStop(contextlib.AbstractContextManager[object]):
     """A held block that a stop came during: raised at its end, as signals_held delivers it."""
@@ -2769,6 +2874,80 @@ class _StopAtHeldEnd(FakeNasSignals):
     def held(self) -> contextlib.AbstractContextManager[object]:
         self.helds += 1
         return _HeldStop() if self.helds == 1 else contextlib.nullcontext()
+
+
+class NasHeldStopDropTest(unittest.TestCase):
+    """A stop held through a settled snapshot call that left some disks unswitched is raised once the files
+    of those disks are dropped (in the held block): none stays behind for a disk libvirt never used. An
+    unsettled answer drops nothing (libvirt may still switch), nor does a poll that failed."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+    overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+    overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+
+    def _run(
+        self, rc: int, switched: Sequence[str], *, disks: int = 2, poll_fails: bool = False
+    ) -> tuple[BaseException, FakeNasCommands, FakeNasStore]:
+        """nas_run of a running VM whose crash-consistent snapshot call answers rc, having made every
+        disk's file and switched the disks named, with a stop held through it; (what nas_run raised, the
+        commands, the store)."""
+        pairs = [("vda", self.disk_a), ("vdb", self.disk_b)][:disks]
+        overlays = {"vda": self.overlay_a, "vdb": self.overlay_b}
+        snapped: list[bool] = []
+
+        def hook(
+            args: Sequence[str],
+            cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "snapshot-create-as":
+                snapped.append(True)
+                store.overlays.update(overlays[t] for t, _ in pairs)
+                for t in switched:
+                    live[t] = overlays[t]
+                return rc, "", ("" if rc == ExitStatus.TIMED_OUT else "error: internal error: snapshot failed")
+            if args[0] == "domblklist" and poll_fails and snapped and not cmds.in_detached:
+                raise OSError("libvirt vanished")
+            return None
+
+        port, commands, store, _signals, _alerts = self._make_backup(
+            pairs, on_virsh=hook, signals=_StopAtHeldEnd(), clock=FakeNasMovingClock()
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(BaseException) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        return ctx.exception, commands, store
+
+    def test_a_failed_call_that_switched_nothing_drops_its_files_before_the_stop(self) -> None:
+        raised, commands, store = self._run(1, [], disks=1)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)
+        self.assertEqual(store.dropped, [self.overlay_a])
+        self.assertNotIn("blockcommit", [c[0][0] for c in commands.virsh_log])
+
+    def test_a_call_that_switched_some_disks_drops_the_others_files_before_the_stop(self) -> None:
+        for rc in (0, 1):
+            with self.subTest(rc=rc):
+                raised, commands, store = self._run(rc, ["vda"])
+                self.assertIsInstance(raised, vm_domain_backup.Stop)
+                self.assertEqual(store.dropped, [self.overlay_b])
+                self.assertEqual(store.removed, [self.overlay_a], "vda merged back")
+                self.assertEqual([c[0][2] for c in commands.virsh_log if c[0][0] == "blockcommit"], ["vda"])
+
+    def test_an_unsettled_answer_drops_nothing(self) -> None:
+        raised, _commands, store = self._run(int(ExitStatus.TIMED_OUT), ["vda"])
+        self.assertIsInstance(raised, Refused)
+        self.assertIn("may still switch to it", str(raised))
+        self.assertEqual(store.dropped, [])
+
+    def test_a_poll_that_fails_drops_nothing(self) -> None:
+        # Passes on the code before the fix too: it guards the drop's condition (the poll answered).
+        raised, _commands, store = self._run(1, [], poll_fails=True)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)  # the fake's held block ends with its stop
+        self.assertEqual(store.dropped, [])
 
 
 class FakeNasMovingClock(FakeNasClock):
@@ -3033,6 +3212,194 @@ class NasHeldStopThawTest(unittest.TestCase):
         self.assertEqual(alerts, [])
 
 
+class NasStopAfterSnapshotTest(unittest.TestCase):
+    """A stop that ended restic once restic had written its snapshot (StopAfterSnapshot, with restic's exit
+    status and summary): a torn snapshot is recorded before the stop is raised, with no forget (the next
+    run's), or named when the record fails; a good answer of a shut-off VM is checked first; the overlays
+    are merged back."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a = "/img/a.qcow2"
+
+    def _run(
+        self, rc: int, *, live: bool = True, started: bool = False, record_fails: bool = False
+    ) -> tuple[str, FakeNasStore, FakeNasRestic, list[str]]:
+        """nas_run whose restic is stopped after its snapshot with exit status rc (started: a shut-off VM
+        runs from then on); (the stop's message, the store, restic, the virsh commands)."""
+        disks = [("vda", self.disk_a)]
+        answered: list[bool] = []
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            _live: dict[str, str],
+            _store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "domstate" and not live:
+                return 0, ("running" if started and answered else vm_domain.SHUT_OFF) + "\n", ""
+            return None
+
+        def backup() -> tuple[int, vm_domain_backup.ResticSummary]:
+            answered.append(True)
+            raise vm_domain_backup.StopAfterSnapshot("stopped by signal SIGTERM", rc, {"snapshot_id": SNAP_ID})
+
+        port, commands, store, _signals, _alerts = self._make_backup(disks, on_virsh=hook, backup_fn=backup)
+        store.record_fails = record_fails
+        restic = port.restic
+        assert isinstance(restic, FakeNasRestic)
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(vm_domain_backup.Stop) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=live)
+        return str(ctx.exception), store, restic, [c[0][0] for c in commands.virsh_log]
+
+    def test_a_torn_snapshot_is_recorded_and_nothing_forgotten_before_the_stop(self) -> None:
+        msg, store, restic, cmds = self._run(-signal.SIGTERM)
+        self.assertEqual([(e["snapshot"], e["why"]) for e in store.torn], [(SNAP_ID, "stopped")])
+        self.assertIn(f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup: recorded in ", msg)
+        self.assertNotIn("forget", [c[0] for c in restic.calls])
+        self.assertEqual(cmds.count("blockcommit"), 1)
+
+    def test_a_torn_snapshot_whose_record_fails_is_named_by_the_stop(self) -> None:
+        msg, store, restic, cmds = self._run(-signal.SIGTERM, record_fails=True)
+        self.assertEqual(store.torn, [])
+        self.assertIn(f"restic snapshot {SNAP_ID[:8]} is no backup and could NOT be recorded (", msg)
+        self.assertIn(f"restic forget {SNAP_ID}", msg)
+        self.assertNotIn("forget", [c[0] for c in restic.calls])
+        self.assertEqual(cmds.count("blockcommit"), 1)
+
+    def test_a_good_answer_of_a_running_vm_records_nothing(self) -> None:
+        # Passes on the code before the fix too (the stop then came as a plain Stop): it pins that a
+        # snapshot restic ended on its own (exit 0) is not counted as torn.
+        msg, store, restic, cmds = self._run(0)
+        self.assertEqual((msg, store.torn), ("stopped by signal SIGTERM", []))
+        self.assertNotIn("forget", [c[0] for c in restic.calls])
+        self.assertEqual(cmds.count("blockcommit"), 1)
+
+    def test_a_good_answer_of_a_shut_off_vm_is_checked_before_the_stop(self) -> None:
+        msg, store, _restic, cmds = self._run(0, live=False)
+        self.assertEqual((msg, store.torn), ("stopped by signal SIGTERM", []))
+        self.assertEqual(cmds.count("domstate"), 1, "the check after the read ran")
+
+    def test_a_shut_off_vm_started_during_the_read_has_its_snapshot_recorded(self) -> None:
+        msg, store, restic, _cmds = self._run(0, live=False, started=True)
+        self.assertEqual([(e["snapshot"], e["why"]) for e in store.torn], [(SNAP_ID, "state changed")])
+        self.assertIn("is no backup: recorded in ", msg)
+        self.assertNotIn("forget", [c[0] for c in restic.calls])
+
+
+_NAS_REPO: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+
+
+class _PendingStops(FakeNasSignals):
+    """SignalsPort whose stops wait in held blocks, as signals_held: a stop (stop_now) that came in one is
+    raised at the end of the outermost, else at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 0
+        self.pending = False
+
+    def stop_now(self) -> None:
+        if self.depth:
+            self.pending = True
+            return
+        raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+    @override
+    @contextlib.contextmanager
+    def held(self) -> Generator[None]:
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+        if self.depth == 0 and self.pending:
+            self.pending = False
+            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+
+class NasStopHeldFromAnswerTest(unittest.TestCase):
+    """From restic's answer with a snapshot on, a stop waits (the staged files' removal, the shut-off VM's
+    check) until a torn snapshot is recorded or the check is done: it never leaves a torn snapshot neither
+    recorded nor named."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a = "/img/a.qcow2"
+
+    def _shut_off(self, *, started: bool) -> tuple[str, FakeNasStore, FakeNasRestic, int, int]:
+        """nas_run of a shut-off VM whose check after the read gets a stop (started: the VM runs by then);
+        (the stop's message, the store, restic, the fingerprints taken by the check's start, in all)."""
+        signals = _PendingStops()
+        answered: list[bool] = []
+        at_check: list[int] = []
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            _live: dict[str, str],
+            _store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] != "domstate":
+                return None
+            if answered:
+                at_check.append(fingerprint.call_count)
+                signals.stop_now()
+            return 0, ("running" if started and answered else vm_domain.SHUT_OFF) + "\n", ""
+
+        def backup() -> tuple[int, vm_domain_backup.ResticSummary]:
+            answered.append(True)
+            return 0, {"snapshot_id": SNAP_ID}
+
+        port, _commands, store, _signals, _alerts = self._make_backup(
+            [("vda", self.disk_a)], on_virsh=hook, backup_fn=backup, signals=signals
+        )
+        restic = port.restic
+        assert isinstance(restic, FakeNasRestic)
+        with (
+            mock.patch.object(store, "fingerprint", wraps=store.fingerprint) as fingerprint,
+            self.assertRaises(vm_domain_backup.Stop) as ctx,
+        ):
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, _NAS_REPO, quiesce=False, live=False)
+        return str(ctx.exception), store, restic, at_check[0], fingerprint.call_count
+
+    def test_a_stop_at_the_staged_files_removal_waits_for_the_torn_record(self) -> None:
+        signals = _PendingStops()
+        port, commands, store, _signals, _alerts = self._make_backup(
+            [("vda", self.disk_a)],
+            on_virsh=lambda *_: None,
+            backup_fn=lambda: (3, {"snapshot_id": SNAP_ID}),
+            signals=signals,
+        )
+        restic = port.restic
+        assert isinstance(restic, FakeNasRestic)
+        with (
+            mock.patch.object(store, "unstage", side_effect=lambda _folder: signals.stop_now()),
+            self.assertRaises(vm_domain_backup.Stop) as ctx,
+        ):
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, _NAS_REPO, quiesce=False, live=True)
+        self.assertEqual([(e["snapshot"], e["why"]) for e in store.torn], [(SNAP_ID, "incomplete")])
+        self.assertIn(
+            f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup: recorded in ", str(ctx.exception)
+        )
+        self.assertNotIn("forget", [c[0] for c in restic.calls], "the forget is the next run's")
+        self.assertEqual([c[0][0] for c in commands.virsh_log].count("blockcommit"), 1, "merged back")
+
+    def test_a_stop_during_the_check_of_a_started_vm_waits_for_the_torn_record(self) -> None:
+        msg, store, restic, _at_check, _total = self._shut_off(started=True)
+        self.assertEqual([(e["snapshot"], e["why"]) for e in store.torn], [(SNAP_ID, "state changed")])
+        self.assertIn(f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup: recorded in ", msg)
+        self.assertNotIn("forget", [c[0] for c in restic.calls])
+
+    def test_a_stop_during_the_check_of_a_vm_still_shut_off_waits_for_the_checks_end(self) -> None:
+        msg, store, _restic, at_check, total = self._shut_off(started=False)
+        self.assertEqual((msg, store.torn), ("stopped by signal SIGTERM", []))
+        self.assertGreater(total, at_check, "the sources' fingerprints were taken after the stop came")
+
+
 class _LingeringTimer(threading.Timer):
     """A Timer whose thread goes on a while after cancel(), as a thread can under load."""
 
@@ -3046,6 +3413,43 @@ class ResticBackupThreadTest(unittest.TestCase):
     """Restic.backup's timeout timer is a thread: none may outlive the backup, since a stop signal can go
     to any thread that does not block it, and signals_held (the record of a torn snapshot) blocks it
     only in the main thread."""
+
+    def test_the_timers_thread_blocks_the_stops(self) -> None:
+        # A stop that went to the timer's thread would run its handler in the main thread while it holds
+        # the stops (a read of restic's output, the torn record).
+        masks: list[set[int]] = []
+
+        class _Recording(threading.Timer):
+            @override
+            def run(self) -> None:
+                masks.append({int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, [])})
+
+        class _Out:
+            def say(self, text: str, *, flush: bool = False) -> None:
+                pass
+
+            def warn(self, text: str) -> None:
+                pass
+
+        class _Child:
+            stdout = io.BytesIO(b"")
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def kill(self) -> None:
+                pass
+
+        with (
+            mock.patch.object(vm_adapters_restic.subprocess, "Popen", autospec=True, return_value=_Child()),
+            mock.patch.object(vm_adapters_restic.threading, "Timer", _Recording),
+        ):
+            vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, _Out())
+        self.assertEqual(len(masks), 1)
+        self.assertLessEqual({int(signal.SIGTERM), int(signal.SIGHUP), int(signal.SIGINT)}, masks[0])
+        self.assertNotIn(
+            int(signal.SIGTERM), signal.pthread_sigmask(signal.SIG_BLOCK, []), "the main thread's mask is back"
+        )
 
     def test_no_thread_of_the_backup_outlives_it(self) -> None:
         made: list[threading.Timer] = []
@@ -3062,7 +3466,7 @@ class ResticBackupThreadTest(unittest.TestCase):
                 pass
 
         class _Child:  # restic backup --json that printed its summary and exited 0
-            stdout = io.StringIO('{"message_type": "summary", "snapshot_id": "abc"}\n')
+            stdout = io.BytesIO(b'{"message_type": "summary", "snapshot_id": "abc"}\n')
 
             def wait(self, timeout: float | None = None) -> int:
                 return 0
@@ -3080,13 +3484,75 @@ class ResticBackupThreadTest(unittest.TestCase):
         self.assertFalse(made[0].is_alive(), "the timer's thread is still running")
 
 
+class ResticBackupAnsweredTest(unittest.TestCase):
+    """Restic.backup's answered: called once restic has exited, only when its summary names its snapshot;
+    a stop it raises comes as one after the snapshot (StopAfterSnapshot, with restic's exit status)."""
+
+    class _Out:
+        def say(self, text: str, *, flush: bool = False) -> None:
+            pass
+
+        def warn(self, text: str) -> None:
+            pass
+
+    class _Child:  # restic backup --json that exited 0
+        def __init__(self, text: bytes) -> None:
+            self.stdout = io.BytesIO(text)
+            self.waited = False
+
+        def poll(self) -> int | None:
+            return 0 if self.waited else None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.waited = True
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+    SUMMARY = b'{"message_type": "summary", "snapshot_id": "abc"}\n'
+
+    def _backup(self, child: _Child, answered: Callable[[], None]) -> tuple[int, vm_domain_backup.ResticSummary]:
+        with mock.patch.object(vm_adapters_restic.subprocess, "Popen", autospec=True, return_value=child):
+            return vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup(
+                {}, ["backup"], 60, self._Out(), answered=answered
+            )
+
+    def test_it_is_called_once_after_restic_exited_with_a_snapshot(self) -> None:
+        child = self._Child(self.SUMMARY)
+        seen: list[bool] = []
+        rc, summary = self._backup(child, lambda: seen.append(child.waited))
+        self.assertEqual((rc, summary.get("snapshot_id"), seen), (0, "abc", [True]))
+
+    def test_it_is_not_called_without_a_snapshot(self) -> None:
+        seen: list[bool] = []
+        rc, summary = self._backup(self._Child(b""), lambda: seen.append(True))
+        self.assertEqual((rc, summary, seen), (0, {}, []))
+
+    def test_a_stop_it_raises_carries_the_snapshot(self) -> None:
+        def stop() -> None:
+            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+        with self.assertRaises(vm_domain_backup.StopAfterSnapshot) as ctx:
+            self._backup(self._Child(self.SUMMARY), stop)
+        self.assertEqual((str(ctx.exception), ctx.exception.rc), ("stopped by signal SIGTERM", 0))
+        self.assertEqual(ctx.exception.summary.get("snapshot_id"), "abc")
+
+
 class ResticBackupOutputTest(unittest.TestCase):
     """Restic.backup closes the pipe it reads restic's output from, whether the backup ends or fails."""
 
     class _Child:  # restic backup --json, its output a pipe
         def __init__(self, text: str) -> None:
-            self.stdout = io.StringIO(text)
+            self.stdout = io.BytesIO(text.encode())
             self.terminated = False
+
+        def poll(self) -> int | None:
+            return None
 
         def wait(self, timeout: float | None = None) -> int:
             return 0
@@ -3120,6 +3586,190 @@ class ResticBackupOutputTest(unittest.TestCase):
             self._backup(child)
         self.assertTrue(child.terminated)
         self.assertTrue(child.stdout.closed)
+
+
+# select's FD_SETSIZE (glibc's): select refuses a descriptor at or above it.
+SELECT_FD_LIMIT = 1024
+
+
+class ResticOutputDescriptorTest(unittest.TestCase):
+    """restic's output is read whatever the number of its pipe's descriptor, also one at or above select's
+    FD_SETSIZE: a process with many descriptors open gets such a pipe."""
+
+    def _high_pipe(self) -> tuple[io.FileIO, int]:
+        """A pipe whose read end has a descriptor at or above SELECT_FD_LIMIT: (read end, write end)."""
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft <= SELECT_FD_LIMIT:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (SELECT_FD_LIMIT * 2, hard))
+            self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
+        r, w = os.pipe()
+        self.addCleanup(os.close, w)
+        high = fcntl.fcntl(r, fcntl.F_DUPFD_CLOEXEC, SELECT_FD_LIMIT)
+        os.close(r)
+        stream = io.FileIO(high, "rb")
+        self.addCleanup(stream.close)
+        self.assertGreaterEqual(stream.fileno(), SELECT_FD_LIMIT)
+        return stream, w
+
+    def test_a_line_from_a_high_descriptor_is_read(self) -> None:
+        stream, w = self._high_pipe()
+        os.write(w, b'{"message_type": "status"}\n')
+        output = vm_adapters_restic._Output(stream)
+        self.assertTrue(output.fill(5.0))
+        self.assertEqual(output.line(), '{"message_type": "status"}\n')
+
+    def test_a_high_descriptor_with_nothing_to_read_times_out(self) -> None:
+        stream, _ = self._high_pipe()
+        self.assertFalse(vm_adapters_restic._Output(stream).fill(0.01))
+
+
+class ResticBackupStartStopTest(unittest.TestCase):
+    """A stop that waited while the timeout timer started is raised when the stops are let in again: restic
+    is ended and the timer cancelled and joined, as for a stop while restic is read."""
+
+    class _Child:  # restic backup --json that keeps running until it is ended
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"")
+            self.terminated = False
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return -signal.SIGTERM
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            pass
+
+    class _Out:
+        def say(self, text: str, *, flush: bool = False) -> None:
+            pass
+
+        def warn(self, text: str) -> None:
+            pass
+
+    def test_a_stop_let_in_after_the_timer_started_ends_restic_and_the_timer(self) -> None:
+        made: list[threading.Timer] = []
+        real_timer = threading.Timer
+
+        def timer(interval: float, function: Callable[[], object]) -> threading.Timer:
+            made.append(real_timer(interval, function))
+            self.addCleanup(made[-1].cancel)
+            return made[-1]
+
+        unmasks: list[int] = []
+
+        class _StopAtFirstUnmask(contextlib.AbstractContextManager[object]):
+            # signals_held: a stop that came while the stops were held is raised at the unmask (once: the
+            # stops are ignored after it, on_signal).
+            @override
+            def __exit__(self, *_: object) -> None:
+                unmasks.append(1)
+                if len(unmasks) == 1:
+                    raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+        child = self._Child()
+        with (
+            mock.patch.object(vm_adapters_restic.subprocess, "Popen", return_value=child),
+            mock.patch.object(vm_adapters_restic.threading, "Timer", timer),
+            mock.patch.object(vm_adapters_restic, "signals_held", _StopAtFirstUnmask),
+            self.assertRaises(vm_domain_backup.Stop) as ctx,
+        ):
+            vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, self._Out())
+        self.assertIs(type(ctx.exception), vm_domain_backup.Stop)
+        self.assertTrue(child.terminated, "restic is still running")
+        self.assertEqual(len(made), 1)
+        self.assertTrue(made[0].finished.is_set(), "the timer was not cancelled")
+        self.assertFalse(made[0].is_alive(), "the timer's thread is still running")
+        self.assertTrue(child.stdout.closed)
+
+
+SUMMARY_LINE = (
+    json.dumps({"message_type": "summary", "snapshot_id": SNAP_ID, "total_bytes_processed": 2048, "data_added": 1024})
+    + "\n"
+)
+# An error line: shown on stderr (out.warn), where the tests' stop comes.
+ERROR_LINE = json.dumps({"message_type": "error", "error": {"message": "permission denied"}, "item": "/x"}) + "\n"
+
+
+class ResticBackupStopTest(unittest.TestCase):
+    """A stop while restic backup runs: restic is ended, and when restic had written its snapshot (its
+    summary, kept or still in the pipe), StopAfterSnapshot carries restic's exit status and the summary."""
+
+    class _Child:  # restic backup --json, its output a pipe; exited: its exit status when it is gone already
+        def __init__(self, text: str, *, exited: int | None = None) -> None:
+            self.stdout = io.BytesIO(text.encode())
+            self.exited = exited
+            self.terminated = False
+
+        def poll(self) -> int | None:
+            return self.exited
+
+        def wait(self, timeout: float | None = None) -> int:
+            return -signal.SIGTERM if self.terminated else (self.exited or 0)
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            pass
+
+    class _Out:  # the stop comes while an error line is shown
+        def say(self, text: str, *, flush: bool = False) -> None:
+            pass
+
+        def warn(self, text: str) -> None:
+            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+    def _backup(self, child: _Child) -> tuple[int, object]:
+        with mock.patch.object(vm_adapters_restic.subprocess, "Popen", return_value=child):
+            return vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, self._Out())
+
+    def _carried(self, child: _Child) -> vm_domain_backup.StopAfterSnapshot:
+        with self.assertRaises(vm_domain_backup.StopAfterSnapshot) as ctx:
+            self._backup(child)
+        self.assertEqual(str(ctx.exception), "stopped by signal SIGTERM")
+        self.assertTrue(child.stdout.closed)
+        return ctx.exception
+
+    def test_a_stop_with_the_summary_still_in_the_pipe_carries_the_snapshot(self) -> None:
+        child = self._Child(ERROR_LINE + '{"message_type": "status"}\n' + SUMMARY_LINE)
+        e = self._carried(child)
+        self.assertEqual((e.rc, e.summary.get("snapshot_id")), (-signal.SIGTERM, SNAP_ID))
+        self.assertEqual(e.summary.get("total_bytes_processed"), 2048)
+        self.assertTrue(child.terminated)
+
+    def test_a_stop_after_the_summary_keeps_it_and_the_exit_status_of_a_restic_that_had_exited(self) -> None:
+        child = self._Child(SUMMARY_LINE + ERROR_LINE, exited=3)
+        e = self._carried(child)
+        self.assertEqual((e.rc, e.summary.get("snapshot_id")), (3, SNAP_ID))
+        self.assertFalse(child.terminated)
+
+    def test_the_summary_line_being_handled_when_the_stop_came_is_not_lost(self) -> None:
+        def stop_on_the_summary(line: str, summary: object, shown: float, out: object) -> object:
+            del summary, shown, out
+            if "summary" in line:
+                raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+            return {}, 0.0
+
+        child = self._Child('{"message_type": "status"}\n' + SUMMARY_LINE)
+        with mock.patch.object(vm_adapters_restic, "_backup_json_line", stop_on_the_summary):
+            e = self._carried(child)
+        self.assertEqual((e.rc, e.summary.get("snapshot_id")), (-signal.SIGTERM, SNAP_ID))
+
+    def test_a_stop_before_any_summary_is_the_stop_as_it_came(self) -> None:
+        for text in (ERROR_LINE, ERROR_LINE + '{"message_type": "summary"}\n', ERROR_LINE + "not json\n"):
+            with self.subTest(text=text):
+                child = self._Child(text)
+                with self.assertRaises(vm_domain_backup.Stop) as ctx:
+                    self._backup(child)
+                self.assertIs(type(ctx.exception), vm_domain_backup.Stop)
+                self.assertTrue(child.terminated)
+                self.assertTrue(child.stdout.closed)
 
 
 if __name__ == "__main__":

@@ -649,11 +649,37 @@ class AdaptersTest(unittest.TestCase):
             ],
         )
         argv, options = seen[0]
+        # --state=loaded: every loaded unit the glob names, active or not (a glob alone hides the
+        # inactive ones that have no job queued).
         self.assertEqual(
-            argv, ["systemctl", "show", "-p", "Id", "-p", "SourcePath", "-p", "NeedDaemonReload", "*.mount"]
+            argv,
+            [
+                "systemctl",
+                "show",
+                "--state=loaded",
+                "-p",
+                "Id",
+                "-p",
+                "SourcePath",
+                "-p",
+                "NeedDaemonReload",
+                "*.mount",
+            ],
         )
         # As show: on the host from a toolbox (SHOW_ONLY, the default), the C locale, 20 s.
         self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
+        # The user manager's adapter asks it with --user first; show of one unit names no --state.
+        seen.clear()
+        user = SystemctlAdapter(Recording(CommandResult(0, "Id=a.mount\n", "")), user=True)
+        self.assertEqual(user.show_units("*.mount", ("Id",)), [{"Id": "a.mount"}])
+        user.show(UnitName("a.mount"), ("Id",))
+        self.assertEqual(
+            [a for a, _ in seen],
+            [
+                ["systemctl", "--user", "show", "--state=loaded", "-p", "Id", "*.mount"],
+                ["systemctl", "--user", "show", "-p", "Id", "a.mount"],
+            ],
+        )
         # An answer that lists no unit is [] (blank lines too); a systemctl that fails is no answer: None.
         self.assertEqual(SystemctlAdapter(Recording(CommandResult(0, "", ""))).show_units("*.mount", props), [])
         self.assertEqual(SystemctlAdapter(Recording(CommandResult(0, "\n\n", ""))).show_units("*.mount", props), [])
@@ -1926,6 +1952,7 @@ class StateContractsTest(unittest.TestCase):
         StateFormatKey.GAME_STATE,
         StateFormatKey.GAME_INTENDED,
         StateFormatKey.GAME_LEFTOVERS,
+        StateFormatKey.DOCKER_NOCOW_OUTCOME,
     )
 
     def test_every_format_names_real_writers_and_readers(self) -> None:
@@ -1974,6 +2001,7 @@ class StateContractsTest(unittest.TestCase):
     def test_the_programs_use_the_registered_paths(self) -> None:
         from btrfs.bulk.domain import BulkPaths
         from btrfs.docker_gc.domain import GcPaths
+        from btrfs.docker_volumes_nocow.domain import NocowPaths
         from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
         from btrfs.stall_monitord.domain import VERSION
         from btrfs.stall_report.adapters import LOG_DIR
@@ -1998,6 +2026,7 @@ class StateContractsTest(unittest.TestCase):
         self.assertEqual(VM_INDEX, state_format(StateFormatKey.VM_INDEX).path)
         self.assertEqual(VM_TORN, state_format(StateFormatKey.VM_NAS_TORN).path)
         self.assertEqual(ROOT_RECORD, state_format(StateFormatKey.INSTALL_RECORD).path)
+        self.assertEqual(NocowPaths().outcome, state_format(StateFormatKey.DOCKER_NOCOW_OUTCOME).path)
 
     def test_paths_of_installed_programs_come_from_the_manifest(self) -> None:
         from btrfs.bulk.domain import BulkPaths

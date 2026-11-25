@@ -19,6 +19,16 @@ def first_line(text: str | None) -> str:
     return ""
 
 
+def count_text(text: str) -> int:
+    """A count's text as CounterFile.count reads it: its number (int(), so blanks around it are fine),
+    0 when it holds none. For a reader that cannot open the file through CounterFile (cst doctor reads
+    it through its host)."""
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
 def file_lines(content: str) -> list[str]:
     """The lines of a file as bash's `while read -r` sees them: only a newline ends one, and
     a last line without a newline is still a line (str.splitlines() would also split at a

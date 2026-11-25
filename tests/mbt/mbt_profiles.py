@@ -11,9 +11,11 @@ from collections.abc import Callable
 import glob
 import importlib
 import os
+import pwd
 import subprocess
 from typing import Final
 import unittest
+from unittest import mock
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -23,6 +25,7 @@ from hypothesis.stateful import RuleBasedStateMachine, rule
 from tests.mbt import profiles
 from tests.mbt.profiles import MbtProfile, MbtTestCase
 from tests.repo_files import REPO
+from tests.xdg_cache import NO_CACHE_BASE
 
 profiles.load()
 
@@ -138,6 +141,26 @@ class CacheDirTest(MbtTestCase):
         self.assertEqual(str(profiles.cache_dir({"XDG_CACHE_HOME": "/c"})), f"/c/cst-mbt/{key}")
         self.assertEqual(str(profiles.cache_dir({"XDG_CACHE_HOME": "", "HOME": "/h"})), f"/h/.cache/cst-mbt/{key}")
         self.assertEqual(str(profiles.cache_dir({"HOME": "/h"})), f"/h/.cache/cst-mbt/{key}")
+
+    def test_a_relative_xdg_cache_home_and_an_empty_home_are_no_cache_folder(self) -> None:
+        # XDG_CACHE_HOME=rel was used as it is (rel/cst-mbt/KEY, inside the checkout the run starts in), and
+        # an empty HOME fell to os.path.expanduser, which read os.environ's HOME: "" gave /.cache/cst-mbt/KEY.
+        key = profiles.cache_dir({"HOME": "/h"}).name
+        self.assertEqual(str(profiles.cache_dir({"XDG_CACHE_HOME": "rel", "HOME": "/h"})), f"/h/.cache/cst-mbt/{key}")
+        entry = pwd.struct_passwd(("u", "x", 1000, 1000, "", "/pw/home", "/bin/sh"))
+        with (
+            mock.patch.dict(os.environ, {"HOME": ""}),
+            mock.patch("tests.xdg_cache.pwd.getpwuid", return_value=entry),
+        ):
+            self.assertEqual(str(profiles.cache_dir({"HOME": ""})), f"/pw/home/.cache/cst-mbt/{key}")
+
+    def test_no_cache_folder_stops_the_run(self) -> None:
+        with (
+            mock.patch("tests.xdg_cache.pwd.getpwuid", side_effect=KeyError("no entry")),
+            self.assertRaises(SystemExit) as stop,
+        ):
+            profiles.cache_dir({"XDG_CACHE_HOME": "rel", "HOME": ""})
+        self.assertEqual(str(stop.exception.code), f"tests/mbt: {NO_CACHE_BASE}")
 
     def test_the_run_s_folder_is_outside_the_checkout(self) -> None:
         folder = os.path.realpath(profiles.cache_dir())

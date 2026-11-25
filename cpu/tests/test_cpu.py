@@ -1206,10 +1206,12 @@ class QuietNumbersTest(unittest.TestCase):
                 q(argv, {})
 
     def test_quiet_limits_take_ascii_numbers_only(self) -> None:
-        # float() took an Arabic-Indic "3" as 3.0, Unicode blanks and 1_0, where --for and --wait refuse them.
+        # float() took an Arabic-Indic "3" as 3.0, Unicode blanks and 1_0, where --for and --wait refuse them;
+        # also a leading sign and whitespace other than blank and tab.
         q = cpu_domain.quiet_args
         three = "\N{ARABIC-INDIC DIGIT THREE}"
-        for text in (three, f"1.{three}", "1_0", "\N{NO-BREAK SPACE}3", "\N{SUPERSCRIPT TWO}", "nan", "inf", "9e999"):
+        refused = (three, f"1.{three}", "1_0", "\N{NO-BREAK SPACE}3", "\N{SUPERSCRIPT TWO}", "nan", "inf", "9e999")
+        for text in (*refused, "+3", "-3", "3\n", "\n3", "3\r", "\v3", "3\f"):
             with self.subTest(text=text):
                 with self.assertRaisesRegex(ValueError, "^--cpu: a number above 0"):
                     q(["--cpu", text], {})

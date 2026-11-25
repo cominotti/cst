@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -34,6 +35,7 @@ if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
 from tests.script_loader import load_script
+from tests.xdg_cache import NO_CACHE_BASE
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "cst-quint")
@@ -434,6 +436,14 @@ class ChecksTest(unittest.TestCase):
                 self.assertIn(check.main, modules)
                 self.assertTrue(check.invariants)
 
+    def test_the_nas_checks_name_the_full_properties_and_the_instance_without_atomic(self) -> None:
+        nas = [c for c in M.CHECKS if c.spec == M.NAS_SPEC]
+        self.assertIn("nas_partial", [c.main for c in nas])
+        for check in nas:
+            with self.subTest(check=check.main):
+                for invariant in ("tornHandledFull", "goodKeptFull", "tornHandled", "goodKept", "consistentRead"):
+                    self.assertIn(invariant, check.invariants)
+
     def test_every_spec_has_its_traces_folder_and_its_replay(self) -> None:
         specs = {c.spec for c in M.CHECKS} | {job.spec for job in M.TRACE_JOBS}
         self.assertEqual(set(M.TRACES_DIR), specs)
@@ -451,6 +461,28 @@ class ChecksTest(unittest.TestCase):
             r"^module (\w+) \{", "module nas {\n}\nmodule nas_a {\n  // module nas_b {\n}\n", re.MULTILINE
         )
         self.assertEqual(modules, ["nas", "nas_a"])
+
+
+class CacheRootTest(Base):
+    def test_a_relative_xdg_cache_home_and_an_empty_home_are_no_cache_folder(self) -> None:
+        # XDG_CACHE_HOME=rel was used as it is (rel/cst-quint, inside the checkout the task runs from), and an
+        # empty HOME fell to os.path.expanduser, which read os.environ's HOME: "" gave /.cache/cst-quint.
+        self.assertEqual(M.cache_root({"XDG_CACHE_HOME": "/c", "HOME": "/h"}), "/c/cst-quint")
+        self.assertEqual(M.cache_root({"XDG_CACHE_HOME": "rel", "HOME": "/h"}), "/h/.cache/cst-quint")
+        entry = pwd.struct_passwd(("u", "x", 1000, 1000, "", "/pw/home", "/bin/sh"))
+        with (
+            mock.patch.dict(os.environ, {"HOME": ""}),
+            mock.patch("tests.xdg_cache.pwd.getpwuid", return_value=entry),
+        ):
+            self.assertEqual(M.cache_root({"HOME": ""}), "/pw/home/.cache/cst-quint")
+
+    def test_no_cache_folder_is_a_usage_error_that_runs_nothing(self) -> None:
+        env = {"XDG_CACHE_HOME": "rel", "HOME": "", "PATH": "/usr/bin:/bin"}
+        with mock.patch("tests.xdg_cache.pwd.getpwuid", side_effect=KeyError("no entry")):
+            self.assertEqual(self.main(env=env), 2)
+        self.assertIn(f"cst-quint: {NO_CACHE_BASE}", self.lines)
+        self.assertEqual(self.run_.calls, [])
+        self.assertFalse(os.path.exists(os.path.join(self.checkout, "rel")))
 
 
 class MainTest(Base):
