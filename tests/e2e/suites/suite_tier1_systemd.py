@@ -9662,6 +9662,48 @@ EOF
         )
         self.assertIn("E2E-CACHE-201-OK", exec_bash(c, script).stdout)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_202_btrfs_cache_plan_and_attach_mount_binds_without_a_reload_when_systemd_is_current(self) -> None:
+        """`cst btrfs cache` for u1 under a test root (cache_reload_scaffold) with the real systemd and both
+        tmpfs bases started: after an attach, u1's binds unmounted (from the stand-ins' table). systemd has
+        read their lines: their units are loaded from /etc/fstab, inactive, NeedDaemonReload=no, and
+        `systemctl show '*.mount'` without --state=loaded lists neither (the test fails as "cannot bite"
+        otherwise). `plan` shows the mounts and no daemon-reload, `attach` mounts them and runs no reload,
+        and `status` says nothing of systemd. Before, plan said "attach runs systemctl daemon-reload after
+        the mounts" and attach reloaded, since the unmounted binds' units were not asked."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-202"
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || {{ cat {w}/out >&2; exit 1; }}
+            grep -vF /var/home/u1/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            unit=var-home-u1-.cache.mount
+            [[ "$(systemctl show -P LoadState $unit)" == loaded ]]
+            [[ "$(systemctl show -P ActiveState $unit)" == inactive ]]
+            [[ "$(systemctl show -P SourcePath $unit)" == /etc/fstab ]]
+            [[ "$(systemctl show -P NeedDaemonReload $unit)" == no ]]
+            if grep -qxF "Id=$unit" <<<"$(systemctl show -p Id '*.mount')"; then
+                echo "the test cannot bite: a glob alone lists the inactive $unit" >&2; exit 1
+            fi
+            plan_out="$($cst btrfs cache plan --user u1)"
+            grep -qF "mount --bind" <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            if grep -qF daemon-reload <<<"$plan_out"; then echo "$plan_out" >&2; exit 1; fi
+            n=$(reloads)
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "attach: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "Mounted /var/mnt/cache/u1 -> /var/home/u1/.cache." {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            if grep -qF "reloaded:" {w}/out; then echo "attach reloaded:" >&2; cat {w}/out >&2; exit 1; fi
+            [[ $(reloads) == "$n" ]] || {{ echo "attach: $(($(reloads) - n)) reloads" >&2; exit 1; }}
+            st_out="$($cst btrfs cache status --user u1)"
+            if grep -qF "  systemd   " <<<"$st_out"; then echo "$st_out" >&2; exit 1; fi
+            echo E2E-CACHE-202-OK
+            """
+        )
+        self.assertIn("E2E-CACHE-202-OK", exec_bash(c, script).stdout)
+
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed(self) -> None:
         """`cst bluetooth apply` as tester with the real user manager and WirePlumber, stopped by
