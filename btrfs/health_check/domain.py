@@ -369,9 +369,7 @@ def critical_warning_value(raw: str) -> int | None:
     for decimal (64-bit, wrapping around); 0 when it printed none; None when it is no number."""
     if _HEX.fullmatch(raw):
         return bash_wrap(int(raw, 16))  # a power-of-two base has no digit limit in int()
-    if _DIGITS.fullmatch(raw):
-        return bash_decimal(raw)
-    return None if raw else 0
+    return bash_decimal(raw) if raw else 0
 
 
 def smart_problems(disk: str, role: str, log: str) -> list[str]:
