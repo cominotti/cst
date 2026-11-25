@@ -492,7 +492,7 @@ class SwapApplicationService(SwapReports):
         src = env.src_path(URESOURCED_ENTRY)
         dest = env.etc_path(URESOURCED_ENTRY)
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== session memory floor (uresourced)"))
-        if self._uresourced_copy_due(src, dest):
+        if self._uresourced_copy_due(dest, self._inspect_file(src, dest)):
             self._fs.copy_if_absent(dest, dest + URESOURCED_BAK_SUFFIX)
         written = self._apply_managed_file(URESOURCED_ENTRY, src, dest, events)
         text = self._desired_text(src)

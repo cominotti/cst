@@ -346,10 +346,10 @@ class SwapReports:
         actual = self._fs.read_text(dest)
         return inspect_managed_file(desired, actual, exists=True, is_symlink=False, readable=actual is not None)
 
-    def _uresourced_copy_due(self, src: str, dest: str) -> bool:
-        """apply copies /etc/uresourced.conf (dest) aside before it writes it: when it is there (through a
-        link) and not CST's (neither ok nor adopt)."""
-        return self._fs.exists(dest) and self._inspect_file(src, dest) not in (OwnedState.OK, OwnedState.ADOPT)
+    def _uresourced_copy_due(self, dest: str, st: ManagedState) -> bool:
+        """apply copies /etc/uresourced.conf (dest, whose _inspect_file state is st) aside before it writes it:
+        when it is there (through a link) and not CST's (neither ok nor adopt)."""
+        return self._fs.exists(dest) and st not in (OwnedState.OK, OwnedState.ADOPT)
 
     def _managed_state(self, src: str, dest: str) -> ManagedState:
         """The state of a file apply writes whole (src: its source in swap/), as plan shows it and apply checks it
@@ -360,7 +360,7 @@ class SwapReports:
         if st == OwnedState.UNREADABLE or dest != self._env.etc_path(URESOURCED_ENTRY):
             return st
         copy_fails = (
-            self._uresourced_copy_due(src, dest)
+            self._uresourced_copy_due(dest, st)
             and not self._fs.lexists(dest + URESOURCED_BAK_SUFFIX)
             and self._fs.read_text(dest) is None
         )
