@@ -4,7 +4,6 @@
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-import contextlib
 import posixpath
 import re
 import shlex
@@ -13,7 +12,7 @@ from typing import Final, Literal, TypedDict
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
-from cst_core.domain.values import ByteSize, format_bytes_human, parse_whole_number
+from cst_core.domain.values import ByteSize, format_bytes_human, parse_integer, parse_whole_number
 from cst_core.domain.units import ActiveState
 from perf.domain.models import PerfFinding
 from swap.ports import SwapSettingsFacts
@@ -171,13 +170,14 @@ def parse_swap_settings(text: str) -> SwapSettings:
         problems.append(f"SWAP_PARTUUID={partuuid}: not a PARTUUID as /dev/disk/by-partuuid names it (lower case)")
     if not _MAPPER_NAME.fullmatch(name):
         problems.append(f"SWAP_NAME={name}: letters, digits, _ . - only (it names /dev/mapper/NAME and units)")
-    if not size.isdecimal() or not size.isascii() or int(size) == 0:
+    size_bytes = parse_whole_number(size)  # ASCII digits within int()'s limit, else None
+    if size_bytes is None or size_bytes == 0:
         problems.append(
             f"SWAP_SIZE_BYTES={size}: the partition's exact size in bytes (blockdev --getsize64 /dev/disk/by-partuuid/...)"
         )
-    if problems:
+    if problems or size_bytes is None:
         return SwapSettings(None, tuple(problems))
-    return SwapSettings(SwapHardwareSpec(partuuid, name, int(size)))
+    return SwapSettings(SwapHardwareSpec(partuuid, name, size_bytes))
 
 
 def render_swap_settings(spec: SwapHardwareSpec, origin: str) -> str:
@@ -376,23 +376,24 @@ class CgroupRow(TypedDict):
 
 
 def parse_kv(text: str) -> dict[str, int]:
-    """'name value' lines (vmstat, memory.stat) -> {name: int}."""
+    """'name value' lines (vmstat, memory.stat) -> {name: int}; a value that is not an integer in ASCII
+    digits within int()'s limit (parse_integer) leaves its name out."""
     out: dict[str, int] = {}
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) >= 2:
-            with contextlib.suppress(ValueError):
-                out[parts[0]] = int(parts[1])
+        if len(parts) >= 2 and (value := parse_integer(parts[1])) is not None:
+            out[parts[0]] = value
     return out
 
 
 def parse_meminfo(text: str) -> dict[str, int]:
-    """/proc/meminfo -> {name: bytes}."""
+    """/proc/meminfo -> {name: bytes}; a value that is not ASCII digits within int()'s limit leaves its
+    name out."""
     out: dict[str, int] = {}
     for line in text.splitlines():
-        m = re.match(r"^(\S+):\s+(\d+)(?:\s+kB)?", line)
-        if m:
-            out[m.group(1)] = int(m.group(2)) * (1024 if line.rstrip().endswith("kB") else 1)
+        m = re.match(r"^(\S+):\s+([0-9]+)(?:\s+kB)?", line)
+        if m and (value := parse_whole_number(group(m, 2))) is not None:
+            out[group(m, 1)] = value * (1024 if line.rstrip().endswith("kB") else 1)
     return out
 
 
@@ -569,14 +570,8 @@ def zswap_summary(meminfo: Mapping[str, int], vmstat: Mapping[str, int], params:
     total = meminfo.get("MemTotal", 0)
     pool = meminfo.get("Zswap")
     stored = meminfo.get("Zswapped")
-    try:
-        max_pct = int(params.get("max_pool_percent", ""))
-    except ValueError:
-        max_pct = None
-    try:
-        accept = int(params.get("accept_threshold_percent", ""))
-    except ValueError:
-        accept = None
+    max_pct = parse_whole_number(params.get("max_pool_percent", ""))  # ASCII digits, else None
+    accept = parse_whole_number(params.get("accept_threshold_percent", ""))
     limit = total * max_pct // 100 if max_pct is not None else None
     zout, zin, zwb = (vmstat.get(k, 0) for k in ("zswpout", "zswpin", "zswpwb"))
     pout, pin = vmstat.get("pswpout", 0), vmstat.get("pswpin", 0)
