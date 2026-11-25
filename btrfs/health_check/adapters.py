@@ -228,7 +228,10 @@ def _sysfs_number(m: Probe, p: str) -> int:
 def allocation_problems(m: Probe, mnt: str, uuid: str, alloc: str, least: int | None) -> list[str]:
     """Metadata room, the automatic reclaim's knobs and its error counts (sysfs)."""
     problems: list[str] = []
-    meta_free = _sysfs_number(m, f"{alloc}/metadata/total_bytes") - _sysfs_number(m, f"{alloc}/metadata/bytes_used")
+    # bash's $(( total - used )): 64-bit, wrapping, as each value bash_int read.
+    meta_free = bash_wrap(
+        _sysfs_number(m, f"{alloc}/metadata/total_bytes") - _sysfs_number(m, f"{alloc}/metadata/bytes_used")
+    )
     found = metadata_problem(mnt, meta_free, _sysfs_number(m, f"{alloc}/global_rsv_size"), least)
     if found is not None:
         problems.append(found)
@@ -502,7 +505,13 @@ def snapshot_problems(m: Probe) -> list[str]:
         or os.path.exists(m.path("/etc/btrfs-setup/bulk-at-boot"))
     )
     last_n = bash_int(last)
-    if not quiet and last_n is not None and now() - last_n > SNAPSHOT_MAX_AGE and now() - awake > SNAPSHOT_GRACE:
+    # bash's (( $(date +%s) - last > 3 * 3600 )): 64-bit, wrapping (a last of 2**63 is -2**63 there).
+    if (
+        not quiet
+        and last_n is not None
+        and bash_wrap(now() - last_n) > SNAPSHOT_MAX_AGE
+        and now() - awake > SNAPSHOT_GRACE
+    ):
         problems.append("snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'")
     _log_stale_nas(m, snap)
     return problems

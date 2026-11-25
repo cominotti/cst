@@ -468,6 +468,24 @@ class HealthCheckTest(unittest.TestCase):
             "unallocated): writes may fail with ENOSPC soon",
         )
 
+    def test_metadata_room_wraps_as_bash_arithmetic(self) -> None:
+        # The old bash's meta_free=$(( total - used )) is 64-bit and wraps: total 2**63 - 1 and used
+        # 2**64 - 1 (-1 there) give -2**63, so the CRITICAL line fires with 1 GiB unallocated. Without the
+        # wrap the room was 2**63 and the check stayed silent.
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        total, used = "9223372036854775807", "18446744073709551615"
+        self.write(f"{alloc}/metadata/total_bytes", f"{total}\n")
+        self.write(f"{alloc}/metadata/bytes_used", f"{used}\n")
+        self.fs["device_usage"] = device_usage(GIB, 800 * GIB)
+        (free_mib,) = run_bash('echo "$(( ($1 - $2) / 1024 ** 2 ))"', total, used)
+        r = self.run_check()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            r.stderr.splitlines()[1],
+            f"<2>{TAG}: btrfs /var: CRITICAL: metadata almost full ({free_mib} MiB free in metadata chunks, 1024 MiB "
+            "unallocated): writes may fail with ENOSPC soon",
+        )
+
     def test_reclaim(self) -> None:
         alloc = f"sys/fs/btrfs/{UUID}/allocation"
         conf = self.path("etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
@@ -896,6 +914,27 @@ class HealthCheckTest(unittest.TestCase):
         )
         self.machine["suspend"] = f"{self.now - 3600}.5 host systemd[1]: Finished System Suspend.\n"
         self.assertEqual(self.run_check().returncode, 1)
+
+    def test_snapshot_age_wraps_as_bash_arithmetic(self) -> None:
+        # The old bash's (( $(date +%s) - last > 3 * 3600 )) is 64-bit and wraps: a last-ok of 2**63 is
+        # -2**63 there and the difference wraps negative (not stale); one of 2**64 - 1 is -1 (stale). The
+        # bash below is the oracle for each value.
+        stale = "snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'"
+        lasts = [str(2**63), str(2**64 - 1), str(2**63 + 5), "1" * 5000, str(self.now - 4 * 3600)]
+        script = (
+            "now=$1; shift; for last; do if (( now - last > 3 * 3600 )); then echo stale; else echo fresh; fi; done"
+        )
+        want = run_bash(script, str(self.now), *lasts)
+        self.assertEqual(set(want), {"fresh", "stale"})  # both outcomes are covered
+        for last, bash in zip(lasts, want, strict=True):
+            with self.subTest(last=last[:24], bash=bash):
+                self.machine["enabled"] = ["btrfs-snapshot.timer"]
+                self.write("var/lib/btrfs-snapshot/last-ok", f"{last}\n")
+                r = self.run_check()
+                if bash == "stale":
+                    self.assert_problems(r, stale)
+                else:
+                    self.assert_healthy(r)
 
     def test_snapshots_recent_or_unknown_are_fine(self) -> None:
         self.snapshots(self.now - 3600)
