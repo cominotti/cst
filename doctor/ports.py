@@ -26,6 +26,8 @@ class DoctorHostPort(Protocol):
     state_home: ViewPath
     # The home folder of the user it runs as, on the host (where that user's install record is).
     home: HostPath
+    # That user's XDG_CONFIG_HOME, on the host ("" when it is not set).
+    config_home: HostPath
 
     def path(self, p: HostPath) -> ViewPath:
         """Map an absolute host path to this process's view (e.g. /run/host)."""

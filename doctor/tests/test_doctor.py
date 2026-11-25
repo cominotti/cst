@@ -262,6 +262,8 @@ class Scratch(unittest.TestCase):
             "systemctl show -p Id -p LoadState ",
             "systemctl --user show -p LoadState ",
             "systemctl --user -M tester@ show -p LoadState ",
+            "systemctl show --state=loaded -p Id -p LoadState -p NeedDaemonReload ",
+            "systemctl --user show --state=loaded -p Id -p LoadState -p NeedDaemonReload ",
         )
         for c in self.calls():
             self.assertTrue(c.startswith(allowed), f"unexpected call: {c}")
@@ -2592,6 +2594,66 @@ class GameProfileTest(Scratch):
         self.profile_on()
         self.assertNotIn("drop-ins", " ".join(r.message for r in self.results()))
 
+    def leftovers_results(self) -> list[Result]:
+        """The check of the settings 'off' could not undo, called directly, as root."""
+        host = doc_adapters.Host(self.env, repo=REPO)
+        host.uid = 0
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(doc_cpu.check_game_leftovers(host))
+        self.assert_read_only()
+        return res
+
+    def test_settings_off_could_not_undo_warn(self) -> None:
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write(
+                "cst-game-leftovers 1\nprop sys machine.slice CPUWeight existed 70\n"
+                "user 1000\nprop usr user.slice CPUWeight existed 30\ncgw /sys/fs/cgroup/x/cpuset.cpus 0-23\n"
+            )
+        message = (
+            "game profile: 3 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight, "
+            "user.slice CPUWeight, /sys/fs/cgroup/x/cpuset.cpus (kept in /run/cpu-setup/game.leftovers). The next "
+            "'off' and the watchdog's tick while the profile is off (cpu-game-watchdog.timer, every 30 s) undo them "
+            "again; the journal of 'off' names why each one failed"
+        )
+        self.assertEqual(
+            self.leftovers_results(), [Result(doc_domain.WARN, message, "sudo /usr/local/sbin/cpu-game-profile off")]
+        )
+        self.assertEqual(self.calls(), [])  # nothing asked
+        # While the profile is on, 'off' would end the game's profile: no fix line.
+        self.profile_on()
+        self.assertEqual(
+            self.leftovers_results(),
+            [Result(doc_domain.WARN, message + ". The profile is on: the next 'off' retries them")],
+        )
+
+    def test_no_settings_off_could_not_undo_say_nothing(self) -> None:
+        self.assertEqual(self.leftovers_results(), [])  # no file
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write("cst-game-leftovers 1\n")
+        self.assertEqual(self.leftovers_results(), [])
+
+    def test_a_leftovers_file_it_cannot_read_is_info(self) -> None:
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write("cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n")
+        res = self.leftovers_results()
+        self.assertEqual([r.status for r in res], [doc_domain.INFO], res)
+        self.assertIn("is format 9 of the game-leftovers", res[0].message)
+        os.unlink(left)
+        os.makedirs(os.path.join(left, "inside"))
+        self.assertEqual(
+            self.leftovers_results(),
+            [
+                Result(
+                    doc_domain.INFO,
+                    "game profile: settings 'off' could not undo not checked "
+                    "(/run/cpu-setup/game.leftovers: Is a directory)",
+                )
+            ],
+        )
+
     def test_old_format_state_is_info(self) -> None:
         self.profile_on(intended=False)
         res = self.results()
@@ -4037,6 +4099,59 @@ class InstallAreaTest(Scratch):
         self.assertEqual([r.status for r in res], [doc_domain.INFO], res)
         self.assertIn("btrfs:docker-gc: installed before the install record; 1 of 1 file(s) differ", res[0].message)
 
+    def unreadable(self, path: str, why: str) -> Result:
+        return Result(
+            doc_domain.WARN,
+            f"{path}: the install record cannot be read ({why}): every CST install and removal stops at it, "
+            "after it has changed its files; move it aside",
+        )
+
+    def test_a_folder_in_the_place_of_a_record_is_a_warning(self) -> None:
+        # The installer leaves such a record out and stops at its update, after its files were written.
+        os.makedirs(self.record)
+        self.assertEqual(self.warns(), [self.unreadable("/var/lib/cst/installed.json", "Is a directory")])
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("/var/lib/cst/installed.json: the install record cannot be read (Is a directory)", r.stdout)
+        os.rmdir(self.record)
+        user = self.root + self.env["HOME"] + "/.local/state/cst/installed.json"
+        os.makedirs(user)
+        self.assertEqual(
+            self.warns(), [self.unreadable(self.env["HOME"] + "/.local/state/cst/installed.json", "Is a directory")]
+        )
+
+    def test_a_file_in_the_place_of_the_records_folder_is_a_warning(self) -> None:
+        os.makedirs(os.path.dirname(os.path.dirname(self.record)), exist_ok=True)
+        open(os.path.dirname(self.record), "w").close()  # /var/lib/cst a file
+        self.assertEqual(self.warns(), [self.unreadable("/var/lib/cst/installed.json", "Not a directory")])
+
+    def test_a_read_error_is_a_warning_and_a_refusal_stays_info(self) -> None:
+        home_record = self.env["HOME"] + "/.local/state/cst/installed.json"
+        with mock.patch.object(self.files, "record", side_effect=OSError(errno.EIO, "Input/output error")):
+            res = self.results()
+        self.assertEqual(
+            res,
+            [
+                self.unreadable("/var/lib/cst/installed.json", "Input/output error"),
+                self.unreadable(home_record, "Input/output error"),
+            ],
+        )
+        # A record this user may not read (its folder's mode) is no fault: info, as before this check
+        # warned on a record that cannot be read (this assertion passes on the old code too).
+        with mock.patch.object(self.files, "record", side_effect=PermissionError(errno.EACCES, "Permission denied")):
+            res = self.results()
+        self.assertEqual(
+            res,
+            [
+                Result(doc_domain.INFO, "/var/lib/cst/installed.json: not readable as your user (Permission denied)"),
+                Result(doc_domain.INFO, f"{home_record}: not readable as your user (Permission denied)"),
+            ],
+        )
+
+    def test_an_absent_record_is_no_unreadable_record(self) -> None:
+        self.assertNotIn("cannot be read", "\n".join(r.message for r in self.results()))
+        self.assertNotIn("cannot be read", self.run_tool().stdout)
+
     def test_without_a_checkout_to_compare_with_nothing_is_said_to_differ(self) -> None:
         # desired_sha256 cannot say (no checkout): a plain-script copy is not reported as differing.
         gc = os.path.join(self.root, "usr/local/sbin/docker-gc")
@@ -4231,6 +4346,306 @@ class InstallAreaTest(Scratch):
                 )
             ],
         )
+
+
+class UnitsLoadedTest(Scratch):
+    """check_units_loaded: the units of the unit files and drop-ins CST recorded that systemd has loaded and
+    not loaded again since (NeedDaemonReload yes in one `systemctl show --state=loaded '*'` per manager)."""
+
+    QUERY = "systemctl show --state=loaded -p Id -p LoadState -p NeedDaemonReload *"
+    USER_QUERY = "systemctl --user show --state=loaded -p Id -p LoadState -p NeedDaemonReload *"
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.host = doc_adapters.Host(self.env, repo=REPO)
+        self.files = doc_adapters.InstalledFiles(REPO)
+        self.svc = InstallService(
+            LocalInstallTarget(), lambda e: entry_payload(REPO, e), record=JsonInstallRecord(), commit="c"
+        )
+        self.home = self.env["HOME"]
+        self.root_record = os.path.join(self.root, "var/lib/cst/installed.json")
+        self.user_record = self.root + self.home + "/.local/state/cst/installed.json"
+
+    def record(self, *dests: str, user: bool = False) -> None:
+        """Each dest written under the scratch root by the installer's use case and listed in root's record
+        (user: the user's), its component done."""
+        rec = self.user_record if user else self.root_record
+        for dest in dests:
+            place = Placement(
+                path=self.root + dest,
+                dest=dest,
+                record=rec,
+                component="e2e:units",
+                src=None,
+                kind=GeneratedKind.TEXT,
+                owner=Owner.USER if user else Owner.ROOT,
+                mode=0o644,
+            )
+            self.svc.put(place, b"[Service]\n", as_root=False)
+        self.svc.mark(rec, "e2e:units")
+
+    def answer(self, *units: tuple[str, str], user: bool = False, load: str = "loaded") -> None:
+        """What `systemctl [--user] show --state=loaded ... '*'` prints: one block per (Id, NeedDaemonReload)."""
+        folder = os.path.join(self.env["FIX_SHOW"], "usr" if user else "sys")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "*"), "w") as f:
+            f.write(
+                "\n".join(
+                    f"Id={i}\nLoadState={load}\nActiveState=inactive\nNeedDaemonReload={need}\n" for i, need in units
+                )
+            )
+
+    def results(self) -> list[Result]:
+        return list(doc_install.check_units_loaded(self.host, installed=self.files))
+
+    def warning(self, unit_id: str, *dests: str, fix: str = "sudo systemctl daemon-reload") -> Result:
+        return Result(
+            doc_domain.WARN,
+            f"{unit_id}: systemd has not loaded its files as they are on disk (CST installed {', '.join(dests)}): "
+            "this manager has not been reloaded since they changed (a command stopped before its daemon-reload "
+            "or reloaded only another user's manager, or a hand edit); systemd runs it as it loaded it before",
+            fix,
+        )
+
+    def test_recorded_unit(self) -> None:
+        sys_, usr = doc_domain.UnitScope.SYSTEM, doc_domain.UnitScope.USER
+        home = "/home/u"
+        cases: list[tuple[str, str, tuple[doc_domain.UnitScope, str] | None]] = [
+            ("/etc/systemd/system/docker-gc.timer", "", (sys_, "docker-gc.timer")),
+            ("/etc/systemd/system/x.service.d/10-cst.conf", "", (sys_, "x.service")),
+            ("/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf", "", (sys_, "user@.service")),
+            ("/etc/systemd/system/var-mnt-btrfs\\x2dtop.mount", "", (sys_, "var-mnt-btrfs\\x2dtop.mount")),
+            ("/etc/systemd/user/cst-pending-alerts.service", "", (usr, "cst-pending-alerts.service")),
+            ("/etc/systemd/user/cst-pending-alerts.service", home, (usr, "cst-pending-alerts.service")),
+            ("/home/u/.config/systemd/user/cst-toolchains-prune.timer", home, (usr, "cst-toolchains-prune.timer")),
+            ("/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf", home, (usr, "user.slice")),
+            ("/home/u/.config/systemd/user/x.service", "", None),  # root's record has no home of a user
+            ("/home/v/.config/systemd/user/x.service", home, None),  # another home
+            ("/etc/systemd/journald.conf.d/10-cst-write-budget.conf", "", None),
+            ("/etc/systemd/system/timers.target.wants/x.timer", "", None),
+            ("/etc/systemd/system/x.service.d/README", "", None),
+            ("/etc/systemd/system/service.d/10.conf", "", None),
+            ("/etc/systemd/system/x.service.d/sub/10.conf", "", None),
+            ("/run/systemd/system/x.service", "", None),
+            ("/etc/systemd/system/10-cst.conf", "", None),
+            ("/usr/local/sbin/docker-gc", "", None),
+        ]
+        for dest, h, want in cases:
+            with self.subTest(dest=dest, home=h):
+                self.assertEqual(doc_domain.recorded_unit(dest, h), want)
+        # XDG_CONFIG_HOME's folder (cst bluetooth writes the LDAC watcher's unit there when it is set).
+        ldac = "/home/u/.cfg/systemd/user/cst-bt-ldac48.service"
+        for dest, h, config, want in (
+            (ldac, home, "/home/u/.cfg", (usr, "cst-bt-ldac48.service")),
+            (ldac, home, "/home/u/.cfg/", (usr, "cst-bt-ldac48.service")),
+            ("/home/u/.cfg/systemd/user/x.service.d/10.conf", home, "/home/u/.cfg", (usr, "x.service")),
+            (ldac, home, "", None),
+            (ldac, "", "/home/u/.cfg", None),  # root's record: no folder of a user
+            ("/home/u/.config/systemd/user/x.service", home, "/home/u/.cfg", (usr, "x.service")),
+        ):
+            with self.subTest(dest=dest, home=h, config=config):
+                self.assertEqual(doc_domain.recorded_unit(dest, h, config), want)
+
+    def test_unit_applies(self) -> None:
+        for name, unit_id, want in (
+            ("x.service", "x.service", True),
+            ("x.service", "y.service", False),
+            ("x.service", "x.service.d", False),
+            ("user@.service", "user@1000.service", True),
+            ("user@.service", "user@.service", False),
+            ("user@.service", "user@1000.socket", False),
+            ("user@.service", "xuser@1.service", False),
+            ("cst-vm-backup@win.timer", "cst-vm-backup@win.timer", True),
+            ("cst-vm-backup@win.timer", "cst-vm-backup@other.timer", False),
+            ("@.service", "@x.service", False),
+        ):
+            with self.subTest(name=name, unit_id=unit_id):
+                self.assertEqual(doc_domain.unit_applies(name, unit_id), want)
+
+    def test_a_drop_in_systemd_has_not_loaded_is_a_warning_with_the_reload(self) -> None:
+        dropin = "/etc/systemd/system/x.service.d/10-cst.conf"
+        self.record(dropin)
+        self.answer(("x.service", "yes"), ("other.service", "yes"), ("y.service", "no"))
+        self.assertEqual(self.results(), [self.warning("x.service", dropin)])
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        inst = area_lines(r.stdout, "install")
+        line = [n for n, s in enumerate(inst) if "systemd has not loaded" in s]
+        self.assertEqual(len(line), 1, inst)
+        self.assertTrue(inst[line[0]].lstrip().startswith("WARN"), inst)
+        self.assertIn(
+            f"x.service: systemd has not loaded its files as they are on disk (CST installed {dropin})", inst[line[0]]
+        )
+        self.assertEqual(inst[line[0] + 1].strip(), "fix: sudo systemctl daemon-reload")
+        self.assertNotIn("other.service", r.stdout)  # never a unit the record does not name
+        self.assertIn(self.QUERY, self.calls())
+        self.assertNotIn(self.USER_QUERY, self.calls())  # no unit of the user's manager recorded
+        self.assert_read_only()
+
+    def test_a_unit_systemd_has_loaded_as_it_is_says_nothing(self) -> None:
+        self.record("/etc/systemd/system/x.service", "/etc/systemd/system/x.service.d/10-cst.conf")
+        self.answer(("x.service", "no"))
+        self.assertEqual(self.results(), [])
+        self.assertIn(self.QUERY, self.calls())
+
+    def test_a_unit_file_and_its_drop_in_are_one_warning_naming_both(self) -> None:
+        unit, dropin = "/etc/systemd/system/x.timer", "/etc/systemd/system/x.timer.d/10-cst.conf"
+        self.record(unit, dropin)
+        self.answer(("x.timer", "yes"))
+        self.assertEqual(self.results(), [self.warning("x.timer", unit, dropin)])
+
+    def test_more_than_three_files_are_cut_short(self) -> None:
+        dests = [f"/etc/systemd/system/x.service.d/{n}-cst.conf" for n in (10, 20, 30, 40)]
+        self.record(*dests)
+        self.answer(("x.service", "yes"))
+        [res] = self.results()
+        self.assertIn(f"(CST installed {', '.join(dests[:3])}, ...)", res.message)
+
+    def test_a_template_drop_in_names_each_instance(self) -> None:
+        dropin = "/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf"
+        self.record(dropin)
+        self.answer(("user@1000.service", "yes"), ("user@1001.service", "no"), ("user-1000.slice", "yes"))
+        self.assertEqual(self.results(), [self.warning("user@1000.service", dropin)])
+
+    def test_a_unit_with_a_drop_in_of_the_game_profile_is_left_out(self) -> None:
+        # The profile writes /run/systemd/system/NAME.d/zz-cst-game.conf with no reload on purpose: the flag
+        # is its own, the cpu rows cover it.
+        dropin = "/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf"
+        self.record(dropin)
+        self.answer(("user@1000.service", "yes"))
+        self.assertEqual(self.results(), [self.warning("user@1000.service", dropin)])
+        game = os.path.join(self.root, "run/systemd/system/user@1000.service.d")
+        os.makedirs(game)
+        with open(os.path.join(game, "zz-cst-game.conf"), "w") as f:
+            f.write("[Service]\nMemoryLow=1G\n")
+        self.assertEqual(self.results(), [])
+
+    def test_a_user_unit_names_the_user_managers_reload(self) -> None:
+        unit = self.home + "/.config/systemd/user/cst-toolchains-prune.timer"
+        self.record(unit, user=True)
+        self.answer(("cst-toolchains-prune.timer", "yes"), user=True)
+        self.answer(("cst-toolchains-prune.timer", "yes"))  # the system manager's answer is never asked
+        self.assertEqual(
+            self.results(), [self.warning("cst-toolchains-prune.timer", unit, fix="systemctl --user daemon-reload")]
+        )
+        self.assertIn(self.USER_QUERY, self.calls())
+        self.assertNotIn(self.QUERY, self.calls())
+        r = self.run_tool()
+        self.assertIn("fix: systemctl --user daemon-reload", r.stdout)
+        self.assert_read_only()
+
+    def test_a_user_unit_under_xdg_config_home_is_checked(self) -> None:
+        config = self.home + "/.cfg"
+        self.env["XDG_CONFIG_HOME"] = config
+        self.host = doc_adapters.Host(self.env, repo=REPO)
+        unit = config + "/systemd/user/cst-bt-ldac48.service"
+        self.record(unit, user=True)
+        self.answer(("cst-bt-ldac48.service", "yes"), user=True)
+        self.assertEqual(
+            self.results(), [self.warning("cst-bt-ldac48.service", unit, fix="systemctl --user daemon-reload")]
+        )
+
+    def test_a_unit_of_root_s_record_in_etc_systemd_user_asks_the_user_manager(self) -> None:
+        unit = "/etc/systemd/user/cst-pending-alerts.service"
+        self.record(unit)
+        self.answer(("cst-pending-alerts.service", "yes"), user=True)
+        self.assertEqual(
+            self.results(), [self.warning("cst-pending-alerts.service", unit, fix="systemctl --user daemon-reload")]
+        )
+
+    def test_as_root_no_user_manager_is_asked(self) -> None:
+        # Root's record names a unit of the user managers and one of the system's; root's own user manager
+        # (a login of root starts it) would answer, but root's doctor asks the system manager only.
+        unit, dropin = "/etc/systemd/user/cst-pending-alerts.service", "/etc/systemd/system/x.service.d/10-cst.conf"
+        self.record(unit, dropin)
+        self.answer(("cst-pending-alerts.service", "yes"), user=True)
+        self.answer(("x.service", "yes"))
+        self.host.uid = 0
+        self.assertEqual(self.results(), [self.warning("x.service", dropin)])
+        calls = self.calls()
+        self.assertIn(self.QUERY, calls)
+        self.assertNotIn(self.USER_QUERY, calls)
+
+    def test_no_unit_file_recorded_asks_no_manager(self) -> None:
+        # A record with no unit file and no drop-in (PR #29's lesson: no question where nothing is set up).
+        self.record("/usr/local/sbin/e2e-units", "/etc/systemd/journald.conf.d/10-cst-write-budget.conf")
+        self.answer(("x.service", "yes"))
+        self.answer(("x.service", "yes"), user=True)
+        self.assertEqual(self.results(), [])
+        r = self.run_tool()
+        self.assertNotIn("systemd has not loaded", r.stdout)
+        calls = self.calls()
+        self.assertFalse([c for c in calls if "--state=loaded" in c], calls)
+
+    def test_no_record_asks_no_manager(self) -> None:
+        self.answer(("x.service", "yes"))
+        self.assertEqual(self.results(), [])
+        self.run_tool()
+        calls = self.calls()
+        self.assertFalse([c for c in calls if "--state=loaded" in c], calls)
+
+    def test_both_checks_judge_each_record_as_it_was_read_once(self) -> None:
+        # An install that rewrites a record between the install check and this one cannot make the two
+        # disagree: each record is read once per check-up.
+        dropin = "/etc/systemd/system/x.service.d/10-cst.conf"
+        self.record(dropin)
+        self.answer(("x.service", "yes"))
+        reads: list[str] = []
+
+        class Counting(doc_adapters.InstalledFiles):
+            @override
+            def record(self, path: doc_domain.ViewPath) -> InstallRecord | None:
+                reads.append(path)
+                return super().record(path)
+
+        files = Counting(REPO)
+        install = list(doc_install.check_install(self.host, installed=files))
+        self.assertIn(doc_domain.OK, [r.status for r in install])
+        os.unlink(self.root_record)  # the record changes after the install check read it
+        units = list(doc_install.check_units_loaded(self.host, installed=files))
+        self.assertEqual(units, [self.warning("x.service", dropin)])
+        self.assertEqual(sorted(reads), sorted([self.root_record, self.user_record]))
+
+    def test_a_record_that_cannot_be_read_gives_no_line_here(self) -> None:
+        os.makedirs(self.root_record)
+        self.answer(("x.service", "yes"))
+        self.assertEqual(self.results(), [])
+        self.assertEqual(self.calls(), [])
+
+    def test_a_manager_that_cannot_be_asked_says_nothing(self) -> None:
+        self.record("/etc/systemd/system/x.service.d/10-cst.conf")
+        self.assertEqual(self.results(), [])  # no fixture: the stub exits 1
+        self.assertIn(self.QUERY, self.calls())
+
+    def test_a_unit_that_is_not_loaded_is_not_trusted_to_the_filter(self) -> None:
+        self.record("/etc/systemd/system/x.service.d/10-cst.conf")
+        self.answer(("x.service", "yes"), load="not-found")
+        self.assertEqual(self.results(), [])
+
+    def test_the_scrub_unit_is_left_to_the_scrub_row(self) -> None:
+        unit, dropin = (
+            "/etc/systemd/system/btrfs-scrub-weekly.service",
+            ("/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"),
+        )
+        self.record(unit, dropin)
+        self.answer(("btrfs-scrub-weekly.service", "yes"))
+        self.assertEqual(self.results(), [])
+        # Without its unit file the scrub row asks nothing, so this check does.
+        os.unlink(self.root + unit)
+        self.assertEqual(self.results(), [self.warning("btrfs-scrub-weekly.service", unit, dropin)])
+
+    def test_in_a_toolbox_the_query_runs_on_the_host(self) -> None:
+        self.env["CST_DOCTOR_CONTAINER"] = "1"
+        dropin = "/etc/systemd/system/x.service.d/10-cst.conf"
+        self.record(dropin)
+        self.answer(("x.service", "yes"))
+        r = self.run_tool()
+        self.assertIn(f"flatpak-spawn --host --env=LC_ALL=C {self.QUERY}", self.calls())
+        inst = area_lines(r.stdout, "install")
+        n = next(n for n, s in enumerate(inst) if "x.service: systemd has not loaded" in s)
+        self.assertEqual(inst[n + 1].strip(), "fix (on the host): sudo systemctl daemon-reload")
+        self.assert_read_only()
 
 
 class ToolboxTest(Scratch):

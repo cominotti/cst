@@ -387,6 +387,24 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(fs.is_searchable(closed_dir), os.geteuid() == 0)
         self.assertFalse(fs.is_searchable(os.path.join(tmp, "missing")))
 
+    def test_is_char_device_tells_a_character_device_through_a_link(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
+        self.addCleanup(shutil.rmtree, tmp)
+        fs = LocalFileSystemAdapter()
+        regular, folder, fifo = (os.path.join(tmp, name) for name in ("file", "folder", "fifo"))
+        with open(regular, "w", encoding="utf-8") as f:
+            f.write("x\n")
+        os.mkdir(folder)
+        os.mkfifo(fifo)
+        to_null, dangling = os.path.join(tmp, "to-null"), os.path.join(tmp, "dangling")
+        os.symlink("/dev/null", to_null)
+        os.symlink(os.path.join(tmp, "missing"), dangling)
+        self.assertTrue(fs.is_char_device("/dev/null"))
+        self.assertTrue(fs.is_char_device(to_null))
+        for path in (regular, folder, fifo, dangling, os.path.join(tmp, "missing")):
+            with self.subTest(path=os.path.basename(path)):
+                self.assertFalse(fs.is_char_device(path))
+
     def test_local_filesystem_adapter(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
         self.addCleanup(shutil.rmtree, tmp)
@@ -1859,6 +1877,7 @@ class StateContractsTest(unittest.TestCase):
         StateFormatKey.INSTALL_RECORD,
         StateFormatKey.GAME_STATE,
         StateFormatKey.GAME_INTENDED,
+        StateFormatKey.GAME_LEFTOVERS,
     )
 
     def test_every_format_names_real_writers_and_readers(self) -> None:
@@ -1890,6 +1909,7 @@ class StateContractsTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(first_line_version(text, "cst-game-intended"))
         self.assertEqual(state_format(StateFormatKey.GAME_INTENDED).version, 1)
+        self.assertEqual(state_format(StateFormatKey.GAME_LEFTOVERS).version, 1)
 
     def test_a_version_is_a_whole_number_and_none_is_version_0(self) -> None:
         self.assertEqual(
@@ -1910,6 +1930,7 @@ class StateContractsTest(unittest.TestCase):
         from btrfs.stall_monitord.domain import VERSION
         from btrfs.stall_report.adapters import LOG_DIR
         from cpu.domain import GAME_STATE
+        from cpu.game.domain import GamePaths
         from cst_core.domain.record import ROOT_RECORD
         from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX, VM_TORN
 
@@ -1924,6 +1945,7 @@ class StateContractsTest(unittest.TestCase):
         )
         self.assertEqual(GAME_STATE, state_format(StateFormatKey.GAME_STATE).path)
         self.assertEqual(GAME_INTENDED, state_format(StateFormatKey.GAME_INTENDED).path)
+        self.assertEqual(GamePaths().leftovers, state_format(StateFormatKey.GAME_LEFTOVERS).path)
         self.assertEqual(ALERT_PENDING, state_format(StateFormatKey.ALERT_SPOOL).folder)
         self.assertEqual(VM_INDEX, state_format(StateFormatKey.VM_INDEX).path)
         self.assertEqual(VM_TORN, state_format(StateFormatKey.VM_NAS_TORN).path)

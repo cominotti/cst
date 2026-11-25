@@ -3,6 +3,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+import os.path
 from typing import Final
 
 from cst_core.domain.install import INSTALL_MANIFEST, Component, InstallEntry, Owner, expand_dest, manifest_by_src
@@ -14,9 +15,25 @@ from cst_core.domain.record import (
     RecordedFile,
     RecordFormatError,
 )
-from cst_core.domain.text import enum_member
-from doctor.application.shared import check, refresh, runs
-from doctor.domain import INFO, OK, WARN, HostPath, Result, ViewPath, host_join, is_unit_file, unit_exec_paths
+from cst_core.domain.text import YES_WORDS, enum_member
+from cst_core.domain.units import LoadState, parse_show_units
+from doctor.application.shared import check, facts, refresh, runs
+from doctor.domain import (
+    INFO,
+    OK,
+    SCRUB_UNIT,
+    WARN,
+    HostPath,
+    Result,
+    UnitScope,
+    ViewPath,
+    game_dropin_of,
+    host_join,
+    is_unit_file,
+    recorded_unit,
+    unit_applies,
+    unit_exec_paths,
+)
 from doctor.ports import CheckFn, DoctorHostPort, InstalledFilesPort
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -25,6 +42,17 @@ CHECKS: list[tuple[str, CheckFn]] = []
 # The components whose removal command marks them pending before it changes anything (as cst names it): a
 # pending state of one of them is an install or a removal that did not finish.
 PENDING_REMOVALS: Final = {Component.BTRFS_IOCOST: "cst btrfs iocost revert"}
+
+# What check_units_loaded asks of every unit a manager has loaded, and the reload that loads its files again.
+LOADED_UNIT_PROPS: Final = ("Id", "LoadState", "NeedDaemonReload")
+# How many paths a line names before ", ..." (_path_list).
+FILES_SHOWN: Final = 3
+RELOAD_FIX: Final = {UnitScope.SYSTEM: "sudo systemctl daemon-reload", UnitScope.USER: "systemctl --user daemon-reload"}
+
+
+def _path_list(paths: list[str]) -> str:
+    """The first FILES_SHOWN paths, then ", ..." when there are more."""
+    return f"{', '.join(paths[:FILES_SHOWN])}{', ...' if len(paths) > FILES_SHOWN else ''}"
 
 
 @dataclass(slots=True)
@@ -148,8 +176,8 @@ def _record_results(
     for component, dests in sorted(out.older.items()):
         yield Result(
             INFO,
-            f"{component}: {len(dests)} file(s) older than this checkout ({', '.join(dests[:3])}"
-            f"{', ...' if len(dests) > 3 else ''}): {refresh(host, component)} installs them again",
+            f"{component}: {len(dests)} file(s) older than this checkout ({_path_list(dests)}): "
+            f"{refresh(host, component)} installs them again",
         )
     if out.fine:
         yield Result(OK, f"{out.fine} file(s) as CST installed them ({where})")
@@ -198,9 +226,29 @@ def _without_record(
             yield Result(
                 INFO,
                 f"{component}: installed before the install record; {len(differ)} of {found} file(s) differ from "
-                f"this checkout ({', '.join(differ[:3])}{', ...' if len(differ) > 3 else ''}): "
+                f"this checkout ({_path_list(differ)}): "
                 f"{refresh(host, component)} installs them again and records them",
             )
+
+
+def _record_paths(host: DoctorHostPort) -> tuple[tuple[Owner, HostPath], ...]:
+    """Root's install record and the user's, with their owners."""
+    return ((Owner.ROOT, HostPath(ROOT_RECORD)), (Owner.USER, host_join(host.home, USER_RECORD_REL)))
+
+
+def _read_records(
+    host: DoctorHostPort, installed: InstalledFilesPort
+) -> list[tuple[Owner, HostPath, InstallRecord | RecordFormatError | OSError | None]]:
+    """Root's install record and the user's: (owner, path, the record, None for none, or the error its read
+    raised)."""
+    out: list[tuple[Owner, HostPath, InstallRecord | RecordFormatError | OSError | None]] = []
+    for owner, path in _record_paths(host):
+        try:
+            rec: InstallRecord | RecordFormatError | OSError | None = installed.record(host.path(path))
+        except (RecordFormatError, OSError) as e:
+            rec = e
+        out.append((owner, path, rec))
+    return out
 
 
 @check(CHECKS, "install")
@@ -209,18 +257,99 @@ def check_install(host: DoctorHostPort, *, installed: InstalledFilesPort | None 
     than this checkout, units whose programs are gone; without a record, the payload comparison."""
     if installed is None:
         return
-    for owner, path in ((Owner.ROOT, HostPath(ROOT_RECORD)), (Owner.USER, host_join(host.home, USER_RECORD_REL))):
-        try:
-            rec = installed.record(host.path(path))
-        except RecordFormatError as e:
-            why = "written by a newer CST: update this checkout (git pull)" if e.newer else "it is no install record"
-            yield Result(WARN, f"{path}: {e}; {why}")
+    # Kept for check_units_loaded, which then judges the records as this check read them (an install may
+    # rewrite one in between).
+    facts(host).records = reads = _read_records(host, installed)
+    for owner, path, rec in reads:
+        if isinstance(rec, RecordFormatError):
+            why = "written by a newer CST: update this checkout (git pull)" if rec.newer else "it is no install record"
+            yield Result(WARN, f"{path}: {rec}; {why}")
             continue
-        except OSError as e:
-            yield Result(INFO, f"{path}: not readable as your user ({e.strerror or e})")
+        if isinstance(rec, PermissionError):
+            yield Result(INFO, f"{path}: not readable as your user ({rec.strerror or rec})")
+            continue
+        if isinstance(rec, OSError):
+            # A folder in its place, a read error: every install and removal of CST stops at it, after it has
+            # changed its files (the record's update fails). No one command fixes it safely: no fix line.
+            yield Result(
+                WARN,
+                f"{path}: the install record cannot be read ({rec.strerror or rec}): every CST install and removal "
+                "stops at it, after it has changed its files; move it aside",
+            )
             continue
         if rec is None:
             yield from _without_record(host, installed, owner)
         else:
             yield from _record_results(host, installed, rec, path, host.home if owner == Owner.USER else "")
             yield from _without_record(host, installed, owner, frozenset(f.component for f in rec.files.values()))
+
+
+def _recorded_units(host: DoctorHostPort, installed: InstalledFilesPort) -> dict[UnitScope, dict[str, list[str]]]:
+    """{manager: {unit name: [the recorded unit files and drop-ins of it]}} of both records, as check_install
+    read them in this check-up (read here when it has not run). A record that is absent, not one or cannot be
+    read gives nothing here: check_install reports it."""
+    out: dict[UnitScope, dict[str, list[str]]] = {}
+    reads = facts(host).records
+    for owner, _, rec in _read_records(host, installed) if reads is None else reads:
+        if not isinstance(rec, InstallRecord):
+            continue
+        home, config = (host.home, host.config_home) if owner == Owner.USER else ("", "")
+        for dest in sorted(rec.files):
+            if (unit := recorded_unit(dest, home, config)) is not None:
+                scope, name = unit
+                out.setdefault(scope, {}).setdefault(name, []).append(dest)
+    return out
+
+
+def _units_not_loaded(host: DoctorHostPort, scope: UnitScope) -> list[str]:
+    """The Ids of the units the manager has loaded and not loaded again since one of their files changed
+    (NeedDaemonReload yes), sorted. One `systemctl show --state=loaded '*'`: every loaded unit, active or
+    inactive, and it loads none (a literal name would load it; a glob without --state=loaded lists only the
+    active ones). [] when the manager cannot be asked."""
+    user = ["--user"] if scope == UnitScope.USER else []
+    cmd = ["systemctl", *user, "show", "--state=loaded", *(a for p in LOADED_UNIT_PROPS for a in ("-p", p)), "*"]
+    rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
+    if rc != 0:
+        return []
+    return sorted(
+        u["Id"]
+        for u in parse_show_units(out)
+        if u.get("Id", "") != "" and u.get("LoadState") == LoadState.LOADED and u.get("NeedDaemonReload") in YES_WORDS
+    )
+
+
+def _has_game_dropin(host: DoctorHostPort, unit_id: str) -> bool:
+    """The game profile's runtime drop-in of a system unit is there: the profile writes it without a reload on
+    purpose, so the unit's NeedDaemonReload says nothing about CST's files (the cpu rows cover it)."""
+    return host.isfile(host.path(game_dropin_of(unit_id)))
+
+
+@check(CHECKS, "install")
+def check_units_loaded(host: DoctorHostPort, *, installed: InstalledFilesPort | None = None) -> Iterator[Result]:
+    """The units of the unit files and drop-ins CST installed (its install records) that systemd has loaded
+    and not loaded again since a file of them changed: a change stopped before its daemon-reload or reloaded
+    only another user's manager (cst btrfs install reloads only the calling user's), or an edit. No systemctl
+    call for a manager CST installed no unit file or drop-in for."""
+    if installed is None:
+        return
+    by_scope = _recorded_units(host, installed)
+    if host.exists(host.path(SCRUB_UNIT)):
+        # The btrfs area's scrub row warns on its NeedDaemonReload, with what it costs.
+        by_scope.get(UnitScope.SYSTEM, {}).pop(os.path.basename(SCRUB_UNIT), None)
+    for scope in UnitScope:
+        names = by_scope.get(scope, {})
+        # As root, no user manager is asked (as the services area's user units): root's own, which a login
+        # of root starts, is not the one the user's units run in.
+        if not names or (scope == UnitScope.USER and host.uid == 0):
+            continue
+        for unit_id in _units_not_loaded(host, scope):
+            dests = sorted({d for name, ds in names.items() if unit_applies(name, unit_id) for d in ds})
+            if not dests or (scope == UnitScope.SYSTEM and _has_game_dropin(host, unit_id)):
+                continue
+            yield Result(
+                WARN,
+                f"{unit_id}: systemd has not loaded its files as they are on disk (CST installed {_path_list(dests)}): "
+                "this manager has not been reloaded since they changed (a command stopped before its daemon-reload "
+                "or reloaded only another user's manager, or a hand edit); systemd runs it as it loaded it before",
+                RELOAD_FIX[scope],
+            )

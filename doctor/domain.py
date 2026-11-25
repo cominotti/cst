@@ -21,6 +21,7 @@ from cst_core.domain.contracts import CPU_SETTINGS, SNAPSHOTS_CONF, StateFormatK
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import SettingsProblem, ShellAssignments, group
+from cst_core.domain.units import GLOBAL_USER_UNIT_DIR, SYSTEM_UNIT_DIR, USER_UNIT_DIR_REL
 from cst_core.domain.values import HOUR, Json, parse_whole_number
 from swap.domain import SETTINGS_REL
 
@@ -146,10 +147,17 @@ NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 GAME_RUN = HostPath(state_format(StateFormatKey.GAME_STATE).folder)
 GAME_STATE = HostPath(state_format(StateFormatKey.GAME_STATE).path)
 GAME_INTENDED = HostPath(state_format(StateFormatKey.GAME_INTENDED).path)
+GAME_LEFTOVERS = HostPath(state_format(StateFormatKey.GAME_LEFTOVERS).path)
 GAME_MANUAL = HostPath(f"{GAME_RUN}/manual")
 GAME_DROPIN_DIR = HostPath("/run/systemd/system")
 GAME_DROPIN = "zz-cst-game.conf"
 GAME_PROFILE_HOST = _BY_SRC["cpu/game-profile"].dest
+
+
+def game_dropin_of(unit: str) -> HostPath:
+    """The game profile's MemoryLow drop-in of a system unit: GAME_DROPIN_DIR/UNIT.d/GAME_DROPIN."""
+    return host_join(GAME_DROPIN_DIR, f"{unit}.d", GAME_DROPIN)
+
 
 # The top-level slices of the user manager that CST knows: app.slice (desktop
 # apps and the game), session.slice (gnome-shell), background.slice (GNOME's
@@ -693,6 +701,50 @@ _UNIT_SUFFIXES = (".service", ".timer", ".socket", ".path", ".mount", ".automoun
 def is_unit_file(dest: str) -> bool:
     """A unit file (a drop-in, in a NAME.d folder, is not one: it runs nothing of its own)."""
     return dest.endswith(_UNIT_SUFFIXES) and not os.path.dirname(dest).endswith(".d")
+
+
+def _unit_folder_scope(folder: str, home: str, config: str) -> UnitScope | None:
+    """Whose manager loads units from folder (home: the user's, "" for root's record; config: the user's
+    XDG_CONFIG_HOME, "" when it is not set), or None."""
+    if folder == SYSTEM_UNIT_DIR:
+        return UnitScope.SYSTEM
+    if folder == GLOBAL_USER_UNIT_DIR:
+        return UnitScope.USER
+    if home and folder == os.path.join(home.rstrip("/"), USER_UNIT_DIR_REL):
+        return UnitScope.USER
+    if home and config and folder == os.path.join(config.rstrip("/"), "systemd", "user"):
+        return UnitScope.USER
+    return None
+
+
+def recorded_unit(dest: str, home: str, config: str = "") -> tuple[UnitScope, str] | None:
+    """(the manager, the unit name) of a recorded path that is a unit file (FOLDER/NAME) or a drop-in
+    (FOLDER/NAME.d/FILE.conf) in a folder a manager loads units from; None for anything else (a
+    *.wants link, a file of NAME.d that is no .conf, a drop-in of a manager's own settings such as
+    journald.conf.d, /run). home: the user's, for ~/.config/systemd/user; "" for root's record. config:
+    the user's XDG_CONFIG_HOME, for CONFIG/systemd/user (where cst bluetooth writes the LDAC watcher's
+    unit when it is set); "" when it is not set, and ignored for root's record."""
+    folder, base = os.path.split(dest)
+    scope = _unit_folder_scope(folder, home, config)
+    if scope is not None:
+        return (scope, base) if base.endswith(_UNIT_SUFFIXES) else None
+    parent, sub = os.path.split(folder)
+    scope = _unit_folder_scope(parent, home, config)
+    name = sub.removesuffix(".d")
+    if scope is None or name == sub or not name.endswith(_UNIT_SUFFIXES) or not base.endswith(".conf"):
+        return None
+    return scope, name
+
+
+def unit_applies(name: str, unit_id: str) -> bool:
+    """A recorded unit name applies to a loaded unit's Id: the same name, or a template's (p@.t) to each
+    of its instances (p@i.t). Prefix drop-ins (a-.slice.d) and type-wide ones (service.d) are not matched:
+    CST installs none."""
+    stem, at, suffix = name.partition("@")
+    if not (at and stem and suffix.startswith(".")):
+        return unit_id == name
+    head = f"{stem}@"
+    return unit_id.startswith(head) and unit_id.endswith(suffix) and len(unit_id) > len(head) + len(suffix)
 
 
 def unit_exec_paths(text: str, home: str) -> list[str]:

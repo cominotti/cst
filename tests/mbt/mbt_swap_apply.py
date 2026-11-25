@@ -15,6 +15,8 @@ CST's file, a reboot):
   crypttab line (apply writes it: resolve_spec's "write"); absent with no swap0 line at all.
 - /etc/crypttab and /etc/fstab, each: absent; CST's line; an older CST's marker; the line twice;
   other options; a swap0 line written by hand (unmarked); a folder; with unrelated lines.
+- each of the five files apply writes whole (MANAGED: zswap.conf, the sysctl file, the mm file,
+  uresourced.conf, the machine.slice drop-in): absent, CST's, someone else's, a folder in its place.
 - zswap built in or not, zstd in /proc/crypto or not, the partition's size right or not, its
   signature (none, swap, ext4), the mapper there or not, zram-generator.conf absent, masked or a file,
   zram0 in use or not, the cpu experiment wsf-300 on or off, the install record absent or of a newer
@@ -23,9 +25,9 @@ CST's file, a reboot):
 The expected outcome of an apply comes from those parts (an oracle over the files, not the code):
 1. A refusal (no partition, a bad or unreadable settings file, no zswap, no zstd, the wrong size,
    a filesystem signature on a partition with no mapper, an unmarked swap0 line, a crypttab or
-   fstab apply cannot read, an install record of a newer CST): exit 1, an ERROR line, and the
-   machine as it was: every file of the scratch tree byte for byte, no systemctl call, no
-   daemon-reload, no sysctl or zram call.
+   fstab apply cannot read, a folder in place of a file apply writes whole, an install record of a
+   newer CST): exit 1, an ERROR line, and the machine as it was: every file of the scratch tree
+   byte for byte, no systemctl call, no daemon-reload, no sysctl or zram call.
    modprobe is left out on purpose: the checks load the compressor module before they can tell
    whether zstd exists (bash parity).
 2. Otherwise exit 0 with no ERROR line and no zswap parameter skipped (a kernel with zswap has all
@@ -35,10 +37,13 @@ The expected outcome of an apply comes from those parts (an oracle over the file
    in place, and swap:core is done.
 An install record of a newer CST was gap O1 (apply wrote crypttab and fstab and started swap0
 before its first put refused); apply now checks the record before its first write, so it is a
-refusal of point 1.
+refusal of point 1. A folder in place of a file apply writes whole was a gap too (apply wrote
+crypttab and fstab, started swap0 and ran the steps before that file's, then failed there); apply
+now checks those files before its first write, so it is a refusal of point 1 as well.
 
-Not modelled: a non-root run (plan's "?" rows), a systemctl call that fails, a sysctl that fails,
-uresourced's restart, the old drop-in name (the unit tests cover them).
+Not modelled: a non-root run (plan's "?" rows), a file apply writes whole that it may not read
+(mode 0: the machine may run as root, and file_tree reads every file), a systemctl call that
+fails, a sysctl that fails, uresourced's restart, the old drop-in name (the unit tests cover them).
 """
 
 import dataclasses
@@ -104,6 +109,15 @@ class LineKind(StrEnum):
     FOLDER = "folder"  # unreadable (refused)
 
 
+class ManagedKind(StrEnum):
+    """What is at one of the files apply writes whole."""
+
+    ABSENT = "absent"
+    CST = "cst"  # the source's text
+    FOREIGN = "foreign"  # someone else's (apply copies uresourced.conf aside, then writes CST's)
+    FOLDER = "folder"  # unreadable (refused)
+
+
 class SettingsKind(StrEnum):
     """/etc/cst/swap.conf."""
 
@@ -119,6 +133,7 @@ class SettingsKind(StrEnum):
 MOSTLY_TRUE: Final = st.sampled_from((True, True, True, False))
 SETTINGS_KINDS: Final = st.sampled_from((SettingsKind.OK, SettingsKind.OK, SettingsKind.OK, *SettingsKind))
 LINE_KINDS: Final = st.sampled_from((*LineKind, LineKind.ABSENT, LineKind.CST, LineKind.CST, LineKind.OLDER))
+MANAGED_KINDS: Final = st.sampled_from((*ManagedKind, ManagedKind.CST, ManagedKind.CST, ManagedKind.FOREIGN))
 
 
 def line_text(path_key: str, kind: LineKind) -> str | None:
@@ -147,6 +162,19 @@ def line_text(path_key: str, kind: LineKind) -> str | None:
     return "".join(f"{x}\n" for x in lines)
 
 
+def managed_text(src: str, kind: ManagedKind) -> str | None:
+    """The text of a file apply writes whole for kind (src: its source in swap/); None for no file (or a
+    folder)."""
+    match kind:
+        case ManagedKind.ABSENT | ManagedKind.FOLDER:
+            return None
+        case ManagedKind.CST:
+            with open(src, encoding="utf-8") as fh:
+                return fh.read()
+        case ManagedKind.FOREIGN:
+            return "# mine\n"
+
+
 def is_key_line(line: str, key: str) -> bool:
     """The line of crypttab or fstab is one for key (its first field)."""
     return line.split()[:1] == [key]
@@ -169,6 +197,7 @@ class StartDraw:
     zram_in_use: bool
     wsf: bool
     foreign: bool
+    folder: int | None  # the index in MANAGED of a file that is a folder
     newer: bool
 
 
@@ -262,7 +291,13 @@ class SwapApplyMachine(RuleBasedStateMachine):
     def refusal(self) -> str | None:
         """Why apply must refuse this machine (the oracle), None when it must not."""
         newer = "an install record of a newer CST" if self.newer_record() else None
-        return self._settings_refusal() or self._probe_refusal() or self._lines_refusal() or newer
+        return (
+            self._settings_refusal()
+            or self._probe_refusal()
+            or self._lines_refusal()
+            or self._managed_refusal()
+            or newer
+        )
 
     def _settings_refusal(self) -> str | None:
         env = self.env
@@ -294,6 +329,13 @@ class SwapApplyMachine(RuleBasedStateMachine):
                 return f"{path} unreadable"
             if any(is_key_line(line, key) and "managed-by:" not in line for line in lines):
                 return f"{path}: an unmarked swap0 line"
+        return None
+
+    def _managed_refusal(self) -> str | None:
+        for entry in MANAGED:
+            path = self.env.etc_path(entry)
+            if os.path.isdir(path) and not os.path.islink(path):
+                return f"{path} a folder"
         return None
 
     def newer_record(self) -> bool:
@@ -332,6 +374,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
             zram_conf=st.sampled_from(("absent", "masked", "file")),
             wsf=st.booleans(),
             foreign=st.booleans(),
+            folder=st.sampled_from((*(None,) * 10, *range(len(MANAGED)))),
             newer=st.booleans(),
         )
     )
@@ -354,6 +397,8 @@ class SwapApplyMachine(RuleBasedStateMachine):
         if start.foreign:  # someone else's copy of swap's files
             for entry in MANAGED:
                 self._put(env.etc_path(entry), "# mine\n")
+        if start.folder is not None:
+            self._put(env.etc_path(MANAGED[start.folder]), None, folder=True)
         if start.newer:
             self._put(env.install_record, NEWER_RECORD)
 
@@ -362,6 +407,13 @@ class SwapApplyMachine(RuleBasedStateMachine):
         """A hand edit (or an older CST's script) of crypttab or fstab."""
         env = self.env
         self._put_line(env.crypttab if crypttab else env.fstab, CRYPT_KEY if crypttab else FSTAB_KEY, kind)
+
+    @rule(index=st.integers(0, len(MANAGED) - 1), kind=MANAGED_KINDS)
+    def managed_file(self, index: int, kind: ManagedKind) -> None:
+        """A hand edit of one of the files apply writes whole: removed, CST's, someone else's, a folder."""
+        entry = MANAGED[index]
+        text = managed_text(self.env.src_path(entry), kind)
+        self._put(self.env.etc_path(entry), text, folder=kind == ManagedKind.FOLDER)
 
     @rule(kind=SETTINGS_KINDS)
     def settings(self, kind: SettingsKind) -> None:

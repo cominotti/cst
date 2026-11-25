@@ -189,10 +189,12 @@ TIER1_WEIGHTS: Final[Mapping[str, int]] = {
     "test_26_btrfs_watch_saves_the_report_of_a_run": 66,
     "test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc": 60,
     "test_95_bluetooth_python_program_with_the_bash_one_runuser_and_le_audio": 50,
+    "test_179_bluetooth_revert_again_makes_the_restart_a_stopped_revert_owes": 40,
     "test_19_every_component_full_cycle_on_the_container_root": 33,
     "test_101_bluetooth_keeps_the_headset_of_an_older_setup_and_works_without_one": 27,
     "test_11_manifest_installs_and_every_entry_runs_from_root": 26,
     "test_106_stall_monitor_upgrade_installs_the_program_before_the_unit": 20,
+    "test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed": 20,
     "test_104_stall_monitor_unit_is_active_only_after_ready": 17,
     "test_105_stall_monitor_is_restarted_when_its_pings_stop": 15,
     "test_13_degraded_boot_install_cycle": 14,
@@ -205,6 +207,7 @@ TIER1_WEIGHTS: Final[Mapping[str, int]] = {
     "test_90_swap_upgrade_from_an_install_with_the_partition_in_the_code": 9,
     "test_05_bluetooth_config_wp_roles_and_ldac_unit": 8,
     "test_102_docker_gc_enable_keeps_the_registry_of_mains_install": 7,
+    "test_180_bluetooth_main_conf_backups_never_replace_one_another": 7,
 }
 # Tests that load all host CPUs and must run solo when local containers run in parallel.
 HOST_EXCLUSIVE_TESTS: Final[frozenset[str]] = frozenset({"test_10_cpu_quiet_reads_the_real_proc_files"})

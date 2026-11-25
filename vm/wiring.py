@@ -22,6 +22,7 @@ from cst_core.domain.contracts import (
 )
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
+from cst_core.domain.units import SYSTEM_UNIT_DIR
 from cst_core.domain.values import HOUR
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.terminal import confirm
@@ -71,7 +72,7 @@ def vm_paths(env: Mapping[str, str]) -> VmPaths:
         ("run_dir", "CST_VM_RUN_DIR", "/run/cst-vm"),
         ("notify", "CST_VM_NOTIFY", NOTIFY_PROGRAM),
         ("alerts", "CST_VM_ALERTS", PENDING_ALERTS),
-        ("unit_dir", "CST_VM_UNIT_DIR", "/etc/systemd/system"),
+        ("unit_dir", "CST_VM_UNIT_DIR", SYSTEM_UNIT_DIR),
         ("sbin_copy", "CST_VM_SBIN_COPY", manifest_by_src()["vm/cst-vm"].dest),
         ("install_record", "CST_VM_INSTALL_RECORD", ROOT_RECORD),
     )

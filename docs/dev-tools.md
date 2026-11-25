@@ -752,35 +752,42 @@ not derive from it.
   `eval` reads back the exact bytes, `record_line` is bash's own
   `printf %q` line, a line bash wrote reads back, a record cut short is
   left out and removed before the next one, and `game.intended`'s drift
-  records keep their six fields. One known gap is let through by name: a
-  field that is not UTF-8 (a cgroup folder's name the user made) reads back
-  decoded with U+FFFD, so it never matches its record.
+  records keep their six fields. A known limit of the reader is pinned: a
+  field that is not UTF-8 reads back decoded with U+FFFD. No writer is left
+  for one: the game profile leaves a cgroup folder whose name is no unit
+  name alone, and systemd names the scopes.
 - `mbt_game_profile.py`: a state machine over the game profile's `on`,
   `tick` and `off` (through `locked`), with the unit tests' scratch and fake
   systemctl, whose daemon-reload sets each value from the override files and
   the drop-ins; between them the game starts and ends, Docker containers,
-  Steam scopes and boxes appear, settings drift and someone else reloads, and
+  Steam scopes and boxes appear (also a folder whose name is no unit name:
+  no record or systemctl call ever names it), settings drift and someone
+  else reloads, and
   each call may fail or die at any of its set-property calls and file writes:
   every change has its record in `game.state`, an `off` with no fault
   restores everything, `on` twice is `on` once, and a tick leaves no box
-  half handled. Three known gaps are let through by name: a set-property that
-  failed (or a process that died between the record and the set) is never
-  tried again while the profile is on; an `off` whose undo step fails
-  still removes `game.state`, so that setting keeps the profile's value;
-  and an `off` killed after it undid a setting of a scope (a Docker
-  container's, a Steam game's) keeps that scope's record in `game.state`,
-  so while the profile stays on no tick sets it again.
+  half handled, also a box whose set-property failed (or whose process died
+  between the record and the set) and a scope whose setting an `off` that
+  was killed undid: the next tick sets them again. An `off` whose undo
+  step fails undoes everything else and keeps exactly that record in
+  `game.leftovers`, and the next tick while off (or the next `off`) puts
+  it back.
 - `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
   unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
   hand-edited settings, crypttab and fstab lines (CST's, an older CST's,
-  twice, other options, written by hand, a folder), kernels, partitions,
-  zram and install records: each refusal leaves every file as it was and
+  twice, other options, written by hand, a folder), the five files apply
+  writes whole (absent, CST's, someone else's, a folder), kernels,
+  partitions, zram and install records: each refusal leaves every file as it was and
   runs no systemctl, sysctl or zram call, and an apply that exits 0 records
   swap's files and changes nothing more when run again. Its first run, on
   the code before, found that apply wrote crypttab before it refused an
   fstab it could not read, and that with an install record of a newer CST
   it wrote crypttab and fstab and started swap0 before the installer
-  refused; apply now refuses both before its first write. `mbt_game_state.py`,
+  refused; apply now refuses both before its first write. Run on the code
+  before R17's fix, it found that a folder in place of
+  `/etc/tmpfiles.d/zswap.conf` was refused only after crypttab and fstab
+  were written and swap0 started; apply now refuses a file it writes whole
+  that it cannot read before its first write too. `mbt_game_state.py`,
   `mbt_game_profile.py` and `mbt_swap_apply.py` took 6.2 s together at
   `--jobs 1` and 2.8 s at `--jobs 4` (`--profile ci`, a shared workstation).
 - `mbt_bulk_items.py`: btrfs-bulk's classify, apply and recover over four

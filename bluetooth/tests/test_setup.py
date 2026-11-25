@@ -17,6 +17,7 @@ import pwd
 import re
 import signal
 import stat
+import time
 from typing import Final
 import unittest
 
@@ -187,8 +188,8 @@ class StepDownTest(unittest.TestCase):
 DONE = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
 CLASSIC = "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n"
 BAP_REGISTERED = "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink/lc3\n"
-HELP_SHA256 = "fb64a1365efa65790a1299e85279627d2340828584a7fcef22416f39edd1c9a6"
-USAGE_SHA256 = "e2b4c726f647f493f7f7d1690e60a00d5d4f5884b0f37aeb4fe95a0d140541a8"
+HELP_SHA256 = "024e16e4bf3bf117be2240efc15cb17a6f007bcaae54113ab9ab55d918420a08"
+USAGE_SHA256 = "9dd2a72a99899fde725a9245c38af75e42d2a058658c2e7d3757c2802563a128"
 LW = "cst-bt-ldac48.service"
 
 
@@ -901,6 +902,168 @@ class RestartOwedTest(SetupCase):
         self.assertEqual(json.loads(self.text(m.pending)), {"wireplumber.service": "wp-0"})
 
 
+class OwedBeforeTheWriteTest(SetupCase):
+    """A run records the restart a write needs before that write: stopped after the write, before its
+    restarts, the restart stays owed; plan shows it and the next apply makes it, once."""
+
+    BT_RESTART: Final = "sudo systemctl restart bluetooth"
+    WP_RESTART: Final = "systemctl --user restart wireplumber"
+
+    def wait_for_main_conf(self, m: Machine, *, keys: bool) -> None:
+        """main.conf with (or without) the two keys apply sets: the orphaned step of a run killed by
+        SIGHUP (FAKE's PARENT-HUP execs it after the signal), waited for 10 s at most."""
+        for _ in range(100):
+            if (f"KernelExperimental = {ISO}" in self.text(m.main_conf)) == keys:
+                return
+            time.sleep(0.1)
+        self.fail(f"main.conf never {'had' if keys else 'lost'} the keys")
+
+    def restarts(self, calls: Sequence[str]) -> list[str]:
+        return [c for c in calls if c in (self.BT_RESTART, self.WP_RESTART)]
+
+    def resume_twice(self, m: Machine, *restarted: str) -> None:
+        """The next apply makes each restart once and forgets the record; a third has nothing to do."""
+        r = m.run("apply", "--yes")
+        self.assertEqual(self.restarts(r.calls), list(restarted), r.text)
+        self.assertFalse(os.path.exists(m.pending), r.text)
+        r = m.run("apply", "--yes")
+        self.assertIn("== restarts\nnone needed\n", r.stdout)
+        self.assertEqual(self.restarts(r.calls), [])
+        self.assertFalse(os.path.exists(m.pending))
+
+    def test_stopped_after_main_conf(self) -> None:
+        # Before, the record was written only at the restarts: none after this stop, and plan said
+        # no restart was needed while bluetoothd ran on the old main.conf.
+        m = self.machine()
+        m.adapter(listed=False)  # it answers the wait after the restart; the checks find none
+        m.put("fail-sudo-mv", "PARENT-HUP")
+        r = m.run("apply", "--yes")
+        self.assertEqual(r.returncode, -signal.SIGHUP, r.text)
+        self.wait_for_main_conf(m, keys=True)
+        m.flag("fail-sudo-mv", on=False)
+        self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(
+            row(
+                "restart",
+                "bluetooth.service",
+                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
+            ),
+            r.stdout,
+        )
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2, r.stdout)
+        self.resume_twice(m, self.BT_RESTART, self.WP_RESTART)
+
+    def test_stopped_after_wireplumbers_files(self) -> None:
+        # main.conf is done: only WirePlumber owes a restart. The run is stopped at the look that
+        # comes right before its restarts, after the rule and the drop-in are written.
+        m = self.machine(DONE)
+        m.put("term-show-when", m.le_conf)
+        r = m.run("apply", "--yes")
+        self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
+        self.assertTrue(os.path.exists(m.wp_conf) and os.path.exists(m.le_conf), r.text)
+        m.flag("term-show-when", on=False)
+        self.assertEqual(json.loads(self.text(m.pending)), {"wireplumber.service": "wp-0"})
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(row("ok", "bluetooth.service", "no restart needed"), r.stdout)
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 1, r.stdout)
+        self.resume_twice(m, self.WP_RESTART)
+
+    def test_revert_stopped_after_main_conf(self) -> None:
+        m = self.machine()
+        m.adapter(listed=False)
+        m.run("apply", "--yes")
+        self.assertFalse(os.path.exists(m.pending))
+        m.put("fail-sudo-mv", "PARENT-HUP")
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, -signal.SIGHUP, r.text)
+        self.wait_for_main_conf(m, keys=False)
+        m.flag("fail-sudo-mv", on=False)
+        self.assertEqual(
+            json.loads(self.text(m.pending)),
+            {
+                "bluetooth.service": m.unit_inv("system", "bluetooth"),
+                "wireplumber.service": m.unit_inv("user", "wireplumber"),
+            },
+        )
+        self.assertEqual(m.run("plan").stdout.count("(still owed: an earlier run did not restart it)"), 2)
+
+
+class RevertResumesTest(SetupCase):
+    """revert makes the restarts the record owes, as apply does, also when nothing is left to revert."""
+
+    BT_RESTART: Final = "sudo systemctl restart bluetooth"
+    WP_RESTART: Final = "systemctl --user restart wireplumber"
+    OWED: Final = "(still owed: an earlier run did not restart it)"
+
+    def restarts(self, calls: Sequence[str]) -> list[str]:
+        return [c for c in calls if c in (self.BT_RESTART, self.WP_RESTART)]
+
+    def test_revert_again_after_a_stopped_one(self) -> None:
+        # Before, the second revert found nothing to revert and said "none needed": bluetoothd and
+        # WirePlumber stayed on the applied settings, and only an apply made the restarts.
+        m = self.machine()
+        m.adapter(listed=False)  # it answers the wait after the restart; the checks find none
+        m.put("bt-journal", BAP_REGISTERED)  # LE Audio on again after revert: the restart waits for it
+        m.run("apply", "--yes")
+        m.put("fail-sudo-systemctl", "PARENT-TERM")  # stopped at bluetoothd's restart
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
+        m.flag("fail-sudo-systemctl", on=False)
+        owed = {
+            "bluetooth.service": m.unit_inv("system", "bluetooth"),
+            "wireplumber.service": m.unit_inv("user", "wireplumber"),
+        }
+        self.assertEqual(json.loads(self.text(m.pending)), owed)
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn("would restart bluetooth.service (after asking) and wireplumber\n", r.stdout)
+        self.assertIn(
+            f"owed:      bluetooth.service {self.OWED}\nowed:      wireplumber.service {self.OWED}\n", r.stdout
+        )
+        self.assertEqual(json.loads(self.text(m.pending)), owed)
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"== restarts\nowed:      bluetooth.service {self.OWED}\n", r.stdout)
+        self.assertEqual(self.restarts(r.calls), [self.BT_RESTART, self.WP_RESTART])
+        self.assertFalse(os.path.exists(m.pending))
+        r = m.run("revert", "--yes")
+        self.assertTrue(r.stdout.endswith("== restarts\nnone needed\n"), r.stdout)
+        self.assertEqual(self.restarts(r.calls), [])
+        self.assertEqual(m.run("revert", "--check").returncode, 0)
+
+    def test_only_wireplumber_owed(self) -> None:
+        # Nothing to revert (no backup, no rule, no drop-in): WirePlumber's restart alone, with no
+        # question about Bluetooth (no terminal here, and no --yes).
+        m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)  # LE Audio on (no drop-in): the restart waits for it
+        m.put(m.pending, json.dumps({"wireplumber.service": "wp-0"}))
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn("would restart wireplumber\n", r.stdout)
+        self.assertNotIn("bluetooth.service (after asking)", r.stdout)
+        r = m.run("revert")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"== restarts\nowed:      wireplumber.service {self.OWED}\n", r.stdout)
+        self.assertEqual(self.restarts(r.calls), [self.WP_RESTART])
+        self.assertNotIn("No terminal to ask on", r.stdout)
+        self.assertFalse(os.path.exists(m.pending))
+
+    def test_no_restart_keeps_them_owed(self) -> None:
+        m = self.machine(DONE)
+        m.put(m.pending, json.dumps({"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"}))
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(
+            "Not restarted (--no-restart). To finish: sudo systemctl restart bluetooth && systemctl --user restart wireplumber\n",
+            r.stdout,
+        )
+        self.assertEqual(self.restarts(r.calls), [])
+        self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
+
+
 class InvocationReadTest(SetupCase):
     """One `systemctl show` per service for its state and invocation ID, read again only after CST
     restarts it (the BAP wait reads bluetoothd's at each look)."""
@@ -927,7 +1090,11 @@ class InvocationReadTest(SetupCase):
             [
                 self.BT,  # plan
                 self.WP,
-                self.BT,  # read again for the record of what is owed (either may have restarted meanwhile)
+                self.BT,  # read again for the record of what is owed, before main.conf is written (either
+                self.WP,  # may have restarted meanwhile)
+                self.BT,  # again before the rule is written
+                self.WP,
+                self.BT,  # and again before the restarts
                 self.WP,
                 "sudo systemctl restart bluetooth",
                 "systemctl --user restart wireplumber",
@@ -1342,7 +1509,7 @@ class MainConfTest(SetupCase):
             ctx = " --preserve=context" if selinux else ""
             z = " -Z" if selinux else ""
             self.assertEqual(len(sudo), 3, sudo)
-            self.assertEqual(sudo[0], f"sudo cp -p{ctx} {m.main_conf} {backup.group(1)}")
+            self.assertEqual(sudo[0], f"sudo cp -p{ctx} --update=none-fail {m.main_conf} {backup.group(1)}")
             self.assertRegex(sudo[1], rf"^sudo install -m 0644 -o root -g root{z} \S+ {re.escape(m.main_conf)}\.new$")
             self.assertEqual(sudo[2], f"sudo mv -f {m.main_conf}.new {m.main_conf}")
             self.assertEqual(self.text(backup.group(1)), VENDOR)
