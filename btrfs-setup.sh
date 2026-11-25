@@ -512,10 +512,29 @@ install_pending_alerts() {
     systemctl --global enable "${PENDING_UNIT}"
     # A user manager already running sees the new unit only after a reload
     # (otherwise from the next login on; no harm either way).
-    if [[ -n "${target_user}" && "${target_user}" != root ]]; then
-        systemctl --user -M "${target_user}@" daemon-reload 2>/dev/null || true
-    fi
+    reload_user_managers
     cst_mark btrfs:alerts
+}
+
+# reload_user_managers: every running user manager (each user@UID.service,
+# root's too: it reads /etc/systemd/user as well) reloads, so each user
+# already logged in sees a user unit just rewritten there, not only the one
+# who ran the install. Best try and silent, as the one reload was before.
+# When the managers cannot be listed, only the calling user's (SUDO_USER) is
+# reloaded, as before.
+reload_user_managers() {
+    local listing unit uid
+    local -a uids=()
+    if listing="$(systemctl list-units --type=service --state=active --plain --no-legend --no-pager 'user@*.service' 2>/dev/null)"; then
+        while read -r unit _; do
+            if [[ "${unit}" =~ ^user@([0-9]+)\.service$ ]]; then uids+=("${BASH_REMATCH[1]}"); fi
+        done <<<"${listing}"
+    elif [[ -n "${target_user}" && "${target_user}" != root ]]; then
+        uids=("${target_user}")
+    fi
+    for uid in "${uids[@]}"; do
+        systemctl --user -M "${uid}@" daemon-reload 2>/dev/null || true
+    done
 }
 
 # remove_old_reader: the reader and user unit of versions named f44-tools.

@@ -25,7 +25,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from typing import TypedDict, override
+from typing import Final, TypedDict, override
 import unittest
 import zipfile
 
@@ -56,6 +56,10 @@ systemctl() {
     echo "systemctl $*" >>"$LOG"
     if [[ "$1" == clean && -e "${UNIT_DIR}/${!#}" ]]; then echo "  (${!#} file present)" >>"$LOG"; fi
     if [[ " $* " == *" ${FAIL:-none} "* ]]; then echo "Failed to $1 unit: $*" >&2; return 1; fi
+    if [[ "$1" == list-units ]]; then  # the units listed: USER_MANAGERS's lines; LIST_FAIL: it cannot list
+        if [[ -n "${LIST_FAIL:-}" ]]; then echo "Failed to list units" >&2; return 1; fi
+        printf '%s' "${USER_MANAGERS:-}"
+    fi
 }
 rm() {
     echo "rm $*" >>"$LOG"
@@ -544,7 +548,9 @@ class ComponentInstallTest(unittest.TestCase):
         os.makedirs(self.stage)
         self.log = os.path.join(self.tmp, "log")
 
-    def run_bash(self, body: str, *, want_rc: int = 0) -> subprocess.CompletedProcess[str]:
+    def run_bash(
+        self, body: str, *, want_rc: int = 0, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         script = "\n".join(
             [
                 STUBS,
@@ -564,6 +570,7 @@ class ComponentInstallTest(unittest.TestCase):
                         "remove_old_reader",
                         "migrate_old_alerts",
                         "install_pending_alerts",
+                        "reload_user_managers",
                         "forget_timer_state",
                         "disable_timers",
                         "docker_gc_files",
@@ -580,7 +587,7 @@ class ComponentInstallTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": self.log, "T": self.tmp},
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": self.log, "T": self.tmp, **(env or {})},
             stdin=subprocess.DEVNULL,
             timeout=120,
         )
@@ -605,6 +612,55 @@ class ComponentInstallTest(unittest.TestCase):
         rec = self.record()
         self.assertEqual(sorted(rec["files"]), manifest_dests("btrfs:alerts"))
         self.assertEqual(rec["components"], {"btrfs:alerts": "done"})
+
+    # systemctl list-units --type=service --state=active --plain --no-legend 'user@*.service', as
+    # systemd 262 prints it with two users logged in (and a line that is no user manager).
+    MANAGERS: Final = (
+        "user@1000.service loaded active running User Manager for UID 1000\n"
+        "user@1001.service loaded active running User Manager for UID 1001\n"
+        "user-runtime-dir@1000.service loaded active exited User Runtime Directory /run/user/1000\n"
+    )
+
+    def reloads(self) -> list[str]:
+        """The user managers' reloads, in order."""
+        with open(self.log) as f:
+            return [line.strip() for line in f if line.startswith("systemctl --user")]
+
+    def test_alerts_install_reloads_every_running_user_manager(self) -> None:
+        # Before, only SUDO_USER's manager was reloaded (none here: target_user is empty), and a
+        # second user logged in kept the old cst-pending-alerts.service (NeedDaemonReload yes).
+        self.run_bash("install_pending_alerts", env={"USER_MANAGERS": self.MANAGERS})
+        self.assertEqual(
+            self.reloads(), ["systemctl --user -M 1000@ daemon-reload", "systemctl --user -M 1001@ daemon-reload"]
+        )
+        self.assertEqual(self.record()["components"], {"btrfs:alerts": "done"})
+        self.run_bash("target_user=tester; install_pending_alerts", env={"USER_MANAGERS": self.MANAGERS})
+        self.assertEqual(self.reloads()[2:], self.reloads()[:2])  # the same, by UID: no reload by name
+
+    def test_alerts_install_with_no_user_manager_running(self) -> None:
+        self.run_bash("target_user=tester; install_pending_alerts", env={"USER_MANAGERS": ""})
+        self.assertEqual(self.reloads(), [])
+        self.assertEqual(self.record()["components"], {"btrfs:alerts": "done"})
+
+    def test_alerts_install_goes_on_past_a_reload_that_fails(self) -> None:
+        self.run_bash("install_pending_alerts", env={"USER_MANAGERS": self.MANAGERS, "FAIL": "1000@"})
+        self.assertEqual(
+            self.reloads(), ["systemctl --user -M 1000@ daemon-reload", "systemctl --user -M 1001@ daemon-reload"]
+        )
+        self.assertEqual(self.record()["components"], {"btrfs:alerts": "done"})
+
+    def test_alerts_install_that_cannot_list_reloads_the_callers_manager(self) -> None:
+        # As before: SUDO_USER's manager, none for root or without SUDO_USER.
+        for user, want in (("tester", ["systemctl --user -M tester@ daemon-reload"]), ("root", []), ("", [])):
+            with self.subTest(user=user):
+                if os.path.exists(self.log):
+                    os.unlink(self.log)
+                self.run_bash(
+                    f"target_user={user!r}; install_pending_alerts",
+                    env={"USER_MANAGERS": self.MANAGERS, "LIST_FAIL": "1"},
+                )
+                self.assertEqual(self.reloads(), want)
+                self.assertEqual(self.record()["components"], {"btrfs:alerts": "done"})
 
     def test_docker_gc_enable_writes_btrfs_docker_gc(self) -> None:
         r = self.run_bash("docker_gc enable")

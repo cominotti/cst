@@ -26,7 +26,8 @@ from bluetooth.setup.application.change import Change, ReRun
 from bluetooth.setup.application.survey import SetupMachine
 from bluetooth.setup.domain import SETUP_SCRIPT, Config, Exit, Options, Paths
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
-from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
+from cst_core.adapters.install import JsonInstallRecord
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner, c_locale
 from cst_core.adapters.runtime import SYSTEM_PYTHON, checkout_root, lc_ctype_handover, undo_python_start
 from cst_core.adapters.files import read_text
 from cst_core.domain.dispatch import script_help, step_down_argv
@@ -119,6 +120,12 @@ def paths(env: Mapping[str, str], entry: str, *, container: bool) -> Paths:
     )
 
 
+def c_locale_words() -> tuple[str, ...]:
+    """cst_core's C locale as env(1)'s KEY=VALUE words, for a command whose answers are read and
+    that sudo runs (sudo passes the runner's LC_ALL on only when sudoers keeps it)."""
+    return tuple(f"{k}={v}" for k, v in c_locale().items())
+
+
 def bt_host() -> LocalBluetoothHostAdapter:
     """bt-helper's reads, on this machine."""
     return LocalBluetoothHostAdapter()
@@ -143,7 +150,9 @@ def build(opts: Options, cfg: Config, where: Paths, *, container: bool, bt_timeo
             host=LocalBluetoothHostAdapter(),
             container=container,
             bt_timeout=bt_timeout,
+            records=JsonInstallRecord(),
             lc_ctype=lc_ctype_handover().split("=", 1)[1],
+            c_locale=c_locale_words(),
             python=SYSTEM_PYTHON,
         ),
     )

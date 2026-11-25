@@ -83,6 +83,13 @@ case "$me" in
         exec "$@"
         ;;
     sudo)
+        # sudo-keeps-no-lc-all: a sudoers whose env_reset keeps no LC_ALL (env_keep and env_check
+        # without it), so the caller's LANG decides cp's language unless env sets LC_ALL.
+        [[ -e "$S/sudo-keeps-no-lc-all" ]] && unset LC_ALL
+        if [[ "$1" == env ]]; then  # sudo env K=V... CMD: the variables for CMD, then CMD as below
+            shift
+            while [[ "$1" == *=* ]]; do export "$1"; shift; done
+        fi
         args=()
         skip=0
         for a in "$@"; do
@@ -103,7 +110,10 @@ case "$me" in
         if [[ "$1" == cp && " ${args[*]} " == *" --update=none-fail "* ]]; then
             # GNU cp 9.5's --update=none-fail, whatever cp this machine has: a destination that is
             # there (a link too) is left alone, exit 1. race-backup: another run creates the
-            # destination just before (once), as cp's O_EXCL open then finds it.
+            # destination just before (once), as cp's O_EXCL open then finds it. In a pt_BR locale
+            # (coreutils' catalogue) cp says both refusals in Portuguese.
+            pt=0
+            [[ "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" == pt_BR* ]] && pt=1
             kept=()
             for a in "${args[@]}"; do [[ "$a" == --update=none-fail ]] || kept+=("$a"); done
             args=("${kept[@]}")
@@ -111,7 +121,11 @@ case "$me" in
             if [[ -e "$S/race-backup" ]]; then
                 rm -f "$S/race-backup"
                 echo "another run's backup" >"$dst"
-                echo "cp: cannot create regular file '$dst': File exists" >&2
+                if (( pt )); then
+                    echo "cp: não foi possível criar o arquivo comum '$dst': Arquivo existe" >&2
+                else
+                    echo "cp: cannot create regular file '$dst': File exists" >&2
+                fi
                 exit 1
             fi
             if [[ -e "$S/partial-backup" ]]; then  # a full disk: the start of the copy is left behind
@@ -119,7 +133,10 @@ case "$me" in
                 echo "cp: error writing '$dst': No space left on device" >&2
                 exit 1
             fi
-            if [[ -e "$dst" || -L "$dst" ]]; then echo "cp: not replacing '$dst'" >&2; exit 1; fi
+            if [[ -e "$dst" || -L "$dst" ]]; then
+                if (( pt )); then echo "cp: não substituindo '$dst'" >&2; else echo "cp: not replacing '$dst'" >&2; fi
+                exit 1
+            fi
         fi
         exec "${args[@]}"
         ;;
@@ -147,6 +164,11 @@ case "$me" in
                 [[ -e "$S/hang-show" ]] && exec /usr/bin/sleep 30  # systemd does not answer
                 # term-show-when names a path: a look while it exists sends SIGTERM to the program.
                 if [[ -e "$S/term-show-when" && -e "$(cat "$S/term-show-when")" ]]; then kill -TERM "$PPID"; exit 1; fi
+                if [[ "$*" == *UnitPath* ]]; then  # the manager's own: unit-path's, else systemd's default
+                    [[ -e "$S/no-unit-path" ]] && exit 1
+                    if [[ -e "$S/unit-path" ]]; then cat "$S/unit-path"; else echo "$HOME/.config/systemd/user.control $HOME/.config/systemd/user /etc/systemd/user /usr/lib/systemd/user"; fi
+                    exit 0
+                fi
                 u="$(unit "$scope" "${!#}")"
                 case "$*" in
                     *ActiveState*)   # systemd prints ActiveState= before InvocationID=
@@ -468,8 +490,11 @@ class SetupModel:
     restarts lists each restart that worked: (unit, whether it was needed then: the unit read other
     files than are on disk, or, for WirePlumber, bluetoothd restarted after it)."""
 
-    def __init__(self, m: Machine) -> None:
+    def __init__(self, m: Machine, *, lang: str = "") -> None:
+        """lang: the LANG the commands get (FAKE reads it from its environment)."""
         self.m = m
+        self.lang = lang
+        self.locale_c = False  # the call being answered asked for the C locale (runner's locale_c)
         self.calls: list[list[str]] = []
         self.restarts: list[tuple[str, bool]] = []
         self.loaded: dict[str, object] = {
@@ -531,6 +556,7 @@ class SetupModel:
         """CommandRunnerPort.run: each command FAKE answers that apply and revert run."""
         args = list(argv)
         self.calls.append(args)
+        self.locale_c = _kw.get("locale_c") is True
         rc, out, err = self.answer(args)
         return CommandResult(rc, out, err, argv=tuple(args))
 
@@ -577,14 +603,28 @@ class SetupModel:
         rc, text = self.cat("wp-roles")
         return (0, text, "") if rc == 0 else (5, "", "")
 
+    def sudo_env(self, args: list[str]) -> tuple[str, list[str]]:
+        """(LC_ALL as the command sudo runs gets it: env's, else the runner's when sudoers keeps it; that
+        command, without env and its KEY=VALUE words)."""
+        lc_all = "" if self.has("sudo-keeps-no-lc-all") or not self.locale_c else "C"
+        if args[:1] == ["env"]:
+            args = args[1:]
+            while args and "=" in args[0]:
+                key, value = args.pop(0).split("=", 1)
+                lc_all = value if key == "LC_ALL" else lc_all
+        return lc_all, args
+
     def sudo(self, args: list[str]) -> Answer:
+        lc_all, args = self.sudo_env(args)
         how = _text_or_none(self.state(f"fail-sudo-{args[0]}"))
         if how is not None:
             if not how.strip().isdigit():
                 raise AssertionError(f"SetupModel: fail-sudo-{args[0]} {how.strip()} is FAKE's alone")
             return int(how), "", ""
         if args[0] == "cp" and "--update=none-fail" in args:
-            return self.cp_none_fail([a for a in args[1:] if a != "--update=none-fail"])
+            return self.cp_none_fail(
+                [a for a in args[1:] if a != "--update=none-fail"], pt=(lc_all or self.lang).startswith("pt_BR")
+            )
         kept: list[str] = []
         skip = False
         for a in args[1:]:
@@ -611,20 +651,23 @@ class SetupModel:
                 raise AssertionError(f"SetupModel: no such sudo command: {args}")
         return 0, "", ""
 
-    def cp_none_fail(self, args: list[str]) -> Answer:
-        """sudo cp -p [--preserve=context] --update=none-fail SRC DST, as FAKE answers it."""
+    def cp_none_fail(self, args: list[str], *, pt: bool) -> Answer:
+        """sudo cp -p [--preserve=context] --update=none-fail SRC DST, as FAKE answers it (pt: in a
+        pt_BR locale, its two refusals in Portuguese)."""
         dst = args[-1]
         if self.has("race-backup"):
             os.unlink(self.state("race-backup"))
             with open(dst, "w", encoding="utf-8") as f:
                 f.write("another run's backup\n")
+            if pt:
+                return 1, "", f"cp: não foi possível criar o arquivo comum '{dst}': Arquivo existe\n"
             return 1, "", f"cp: cannot create regular file '{dst}': File exists\n"
         if self.has("partial-backup"):
             with open(args[-2], encoding="utf-8") as src, open(dst, "w", encoding="utf-8") as f:
                 f.write(src.read(8))
             return 1, "", f"cp: error writing '{dst}': No space left on device\n"
         if os.path.lexists(dst):
-            return 1, "", f"cp: not replacing '{dst}'\n"
+            return 1, "", (f"cp: não substituindo '{dst}'\n" if pt else f"cp: not replacing '{dst}'\n")
         match [a for a in args if a != "--preserve=context"]:
             case ["-p", src, _]:
                 shutil.copy2(src, dst)
@@ -664,8 +707,14 @@ class SetupModel:
     def show(self, scope: str, args: list[str]) -> Answer:
         if self.has("term-show-when"):
             raise AssertionError("SetupModel: term-show-when is FAKE's alone")
-        u = self.prefix(scope, args[-1])
         joined = " ".join(args)
+        if "UnitPath" in joined:  # the manager's own, as FAKE answers it
+            if self.has("no-unit-path"):
+                return 1, "", ""
+            home = os.path.join(self.m.home, ".config", "systemd")
+            default = f"{home}/user.control {home}/user /etc/systemd/user /usr/lib/systemd/user\n"
+            return 0, _text_or_none(self.state("unit-path")) or default, ""
+        u = self.prefix(scope, args[-1])
         if "ActiveState" in joined:
             inv = (_text_or_none(u + ".inv") or "").strip()
             return 0, f"ActiveState={self.active_state(u)}\nInvocationID={inv}\n", ""

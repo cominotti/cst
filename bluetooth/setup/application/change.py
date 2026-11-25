@@ -26,15 +26,19 @@ from bluetooth.domain import (
     revert_general,
     settings_set,
 )
+from bluetooth.setup.application import watcher_unit
 from bluetooth.setup.application.checks import Checks
-from bluetooth.setup.application.survey import StepFailed, is_cst_rule
+from bluetooth.setup.application.inputs import is_cst_rule
+from bluetooth.setup.application.survey import StepFailed
 from bluetooth.setup.domain import (
     A2DP_SINK_UUID,
     BACKUP_NAME_TRIES,
     BapState,
     BearerState,
     BluetoothCommand,
+    LW_KEPT_WHY,
     LeState,
+    OlderCopy,
     WpState,
     backup_name,
     backup_name_taken,
@@ -146,7 +150,8 @@ class Change(Checks):
         name it is given only if it does not exist (O_CREAT|O_EXCL; GNU cp 9.5 or later), so a name
         another run takes between the look and the copy is not replaced either: cp fails, the name is
         there (cp says "File exists" or "not replacing"), and the next one is tried. Any other failure
-        stops the run, also one that left a part of the copy behind (a full disk)."""
+        stops the run, also one that left a part of the copy behind (a full disk). cp runs as
+        `sudo env LC_ALL=C cp ...`: it speaks the C locale whatever sudoers keeps of the caller's."""
         mc = self.p.main_conf
         base = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
         taken = self.backup_names()
@@ -154,9 +159,12 @@ class Change(Checks):
             bak = backup_name(base, n)
             if bak in taken:
                 continue
-            # cp's words are read: in the C locale (sudo keeps LC_ALL by default on Fedora; a cp that
-            # speaks another language fails the run, as any other failure does).
-            r = self.m.runner.run(["sudo", "cp", "-p", *ctx, "--update=none-fail", mc, bak], locale_c=True)
+            # cp's words are read, so cp gets the C locale from env: sudo passes LC_ALL on only when
+            # sudoers keeps it (Fedora's does; one whose env_keep and env_check drop it gave cp the
+            # caller's LANG, and a translated "File exists" stopped the run). locale_c is for sudo's own.
+            r = self.m.runner.run(
+                ["sudo", "env", *self.m.c_locale, "cp", "-p", *ctx, "--update=none-fail", mc, bak], locale_c=True
+            )
             if r.returncode == 0:
                 return bak
             taken = self.backup_names()
@@ -360,7 +368,7 @@ class Change(Checks):
             raise self.die(f"{p.le_conf} was not written by CST: move it away, then run apply again.")
         if self.lw_want:
             if self.lw_unit_st == OwnedState.CONFLICT:
-                raise self.die(f"{p.lw_unit_file} was not written by CST: move it away, then run apply again.")
+                raise self.die(f"{self.lw_unit_file} was not written by CST: move it away, then run apply again.")
             if self.lw_prog_st == OwnedState.CONFLICT:
                 raise self.die(f"{p.lw_prog} was not written by CST: move it away, then run apply again.")
 
@@ -498,6 +506,7 @@ class Change(Checks):
         (its `written:` lines), not what plan saw, decides the daemon-reload and the restart: a file
         that changed after plan (a git pull meanwhile) is still taken up."""
         p, unit = self.p, LDAC_UNIT
+        self.lw_remove_stale()
         if self.lw_prog_st not in (OwnedState.OK, OwnedState.ADOPT):
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
         r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch", output=OutputMode.CAPTURE)
@@ -507,7 +516,7 @@ class Change(Checks):
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
         said = self.checked(
-            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", Component.BLUETOOTH_LDAC],
+            ["text", "--home", p.home, self.lw_unit_file, "0644", "--component", Component.BLUETOOTH_LDAC],
             input_text=render_unit(self.c.device, self.c.ldac_rate),
         )
         self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
@@ -531,29 +540,96 @@ class Change(Checks):
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
 
+    def lw_remove_stale(self) -> None:
+        """An older CST's copies of the watcher's unit (lw_stale: recorded where the user manager does not
+        read units) removed through the installer, which forgets them in the record too; a file there
+        that CST did not write is left alone and only forgotten, with a warning, and so is another path to
+        the current unit file (only its record line goes). The manager does not read their folder now:
+        no disable and no reload, but the enable link a manager that read it made is removed with the
+        copy (lw_remove_older). With --check: only said."""
+        current = self.lw_unit_file
+        for path in self.lw_stale:
+            kind = watcher_unit.copy_kind(self.m.files, path, current)
+            if kind == OlderCopy.SAME:
+                # The live unit file by another path: removing it would remove the unit.
+                if self.o.check:
+                    self.out(f"would forget {path} (the same file as {current})\n")
+                else:
+                    self.checked(["forget-text", "--home", self.p.home, path])
+                    self.out(f"forgotten: {path} (the same file as {current})\n")
+            elif kind == OlderCopy.FOREIGN:
+                if self.o.check:
+                    self.out(f"would forget {path} (not written by CST: left alone)\n")
+                    continue
+                self.checked(["forget-text", "--home", self.p.home, path])
+                self.err(f"WARNING: {path} was not written by CST: left alone (forgotten from the install record)\n")
+            else:
+                self.lw_remove_older(path)
+
+    def lw_remove_older(self, path: str) -> None:
+        """The enable link a manager that read the folder of an older CST's copy at path made beside it,
+        then that copy, through the installer (with --check: only said). The link goes first: the record
+        lists only the copy, so a run stopped between the two leaves the copy and its record line, and
+        the next run finds both again. A link that cannot be removed (other than one gone already) stops
+        the run with the copy kept."""
+        link = watcher_unit.enable_link(self.m.files, path)
+        if self.o.check:
+            if link is not None:
+                self.out(f"would remove {link} (its enable link)\n")
+            self.out(f"would remove {path} (an older CST's copy)\n")
+            return
+        if link is not None:
+            try:
+                removed = self.m.files.remove_file(link)
+            except OSError as e:
+                raise self.die(f"cannot remove {link}, the enable link of {path}: {e.strerror or e} (both kept)") from e
+            if removed:
+                self.out(f"removed:   {link} (its enable link)\n")
+        said = self.checked(["remove-text", "--home", self.p.home, path])
+        self.out(f"{said.rstrip(chr(10))} (an older CST's copy)\n" if said else f"forgotten: {path}\n")
+
     def lw_remove(self) -> None:
-        """The watcher stopped, disabled and removed, if CST installed it (with --check: only said)."""
+        """The watcher stopped, disabled and removed, if CST installed it (with --check: only said). Its
+        program stays while the recorded copies of its unit do (lw_keeps_prog: one of them may be the
+        unit the manager runs, which would then start a missing program), and one line says so."""
         p, unit = self.p, LDAC_UNIT
-        if not self.lw_ours_present():
-            self.out("unchanged: not installed\n")
+        self.lw_remove_stale()
+        keep_prog = self.lw_keeps_prog()
+        if not self.lw_removes():
+            if keep_prog:
+                self.lw_kept_report()
+            else:
+                self.out("unchanged: not installed\n")
             if self.lw_unit_st == OwnedState.CONFLICT:
-                self.err(f"WARNING: {p.lw_unit_file} was not written by CST: left alone\n")
+                self.err(f"WARNING: {self.lw_unit_file} was not written by CST: left alone\n")
             if self.lw_prog_st == OwnedState.CONFLICT:
                 self.err(f"WARNING: {p.lw_prog} was not written by CST: left alone\n")
             return
         if self.o.check:
-            self.out(f"would stop, disable and remove {unit} and {p.lw_prog}\n")
+            self.out(f"would stop, disable and remove {unit}{'' if keep_prog else f' and {p.lw_prog}'}\n")
+            if keep_prog:
+                self.lw_kept_report()
             return
         if self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE):
             self.out(self.m.user_systemd.disable(UnitName(unit), now=True, output=OutputMode.STDOUT).stdout)
-            self.checked(["remove-text", "--home", p.home, p.lw_unit_file])
-            self.out(f"removed:   {p.lw_unit_file} (stopped and disabled)\n")
+            self.checked(["remove-text", "--home", p.home, self.lw_unit_file])
+            self.out(f"removed:   {self.lw_unit_file} (stopped and disabled)\n")
             self._must_result(self.m.user_systemd.daemon_reload_result(output=OutputMode.INHERIT))
-        if self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
+        if keep_prog:
+            self.lw_kept_report()
+        elif self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
             self.checked(["remove", "--home", p.home, "bluetooth/bt-ldac-watch"])
             self.m.files.remove_empty_dir(os.path.dirname(p.lw_prog))
             self.out(f"removed:   {p.lw_prog}\n")
         self.lw_active = ""
+
+    def lw_kept_report(self) -> None:
+        """The one line of the watcher's program and the recorded copies of its unit kept (lw_kept)."""
+        what = f"{self.p.lw_prog} and {', '.join(self.lw_kept)}"
+        if self.o.check:
+            self.out(f"would keep {what}: {LW_KEPT_WHY}\n")
+        else:
+            self.err(f"WARNING: kept {what}: {LW_KEPT_WHY}\n")
 
     # ---- revert ----------------------------------------------------------------------------
     def oldest_backup(self) -> str | None:
@@ -575,7 +651,7 @@ class Change(Checks):
         wp, le = self.revert_files()
         self.out(f"== LDAC rate watcher: {LDAC_UNIT}\n")
         self.lw_plan()
-        lw = self.lw_ours_present()
+        lw = self.lw_removes() or bool(self.lw_stale)
         self.lw_remove()
         bt = changed_mc or self.bt_owed
         restart = bt or wp or le or self.wp_owed  # a bluetoothd restart takes WirePlumber's endpoints

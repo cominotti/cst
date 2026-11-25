@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """systemd units: their files as CST writes them (header comment lines, then sections), the answer
 of `systemctl show` (parse_show_props, parse_show_units), the question of every loaded unit of a glob
-(show_units_argv), and systemd's ActiveState words (ActiveState).
+(show_units_argv) and of a property of the manager itself (show_manager_value_argv), the folder a user
+manager reads the user's own units from (user_unit_dir; named_user_unit_dir when it must have said so), and systemd's ActiveState words (ActiveState).
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])
 
@@ -21,7 +22,13 @@ MASK_TARGET = "/dev/null"
 # every user manager reads (root writes it), and a user's own, relative to the home.
 SYSTEM_UNIT_DIR: Final = "/etc/systemd/system"
 GLOBAL_USER_UNIT_DIR: Final = "/etc/systemd/user"
-USER_UNIT_DIR_REL: Final = ".config/systemd/user"
+CONFIG_UNIT_DIR_REL: Final = "systemd/user"  # below the user's config folder ($XDG_CONFIG_HOME or ~/.config)
+USER_UNIT_DIR_REL: Final = f".config/{CONFIG_UNIT_DIR_REL}"  # systemd's default, relative to the home
+# A manager's own property: the folders it loads unit files from, highest priority first.
+UNIT_PATH_PROP: Final = "UnitPath"
+# Folders of systemd's own and the system's, never the user's own: where a UnitPath split in the wrong place
+# (a folder with a space) could land.
+_SYSTEM_UNIT_ROOTS: Final = ("/etc/", "/run/", "/usr/")  # not /var/: homes live in /var/home on Fedora Atomic
 
 
 def parse_show_props(text: str) -> dict[str, str]:
@@ -43,6 +50,38 @@ def show_units_argv(head: Sequence[str], pattern: str, props: Sequence[str]) -> 
     it; a caller that runs systemctl through another runner (cst doctor's host) builds it here, so both ask
     the same question."""
     return [*head, "show", f"--state={LoadState.LOADED}", *(a for p in props for a in ("-p", p)), pattern]
+
+
+def show_manager_value_argv(head: Sequence[str], prop: str) -> list[str]:
+    """`HEAD... show -p PROP --value`: a property of the manager itself (no unit named), such as its
+    UnitPath. SystemctlAdapter.show_value(None, PROP) runs it; a caller that runs systemctl through
+    another runner (cst doctor's host) builds it here, so both ask the same question."""
+    return [*head, "show", "-p", prop, "--value"]
+
+
+def named_user_unit_dir(unit_path: str | None) -> str | None:
+    """The folder a user manager names for the user's own unit files in its UnitPath (the answer of
+    show -p UnitPath --value: absolute folders, space separated): the first entry that ends in
+    /systemd/user, which is $XDG_CONFIG_HOME/systemd/user only when the manager itself has that variable
+    (one set in a shell, in environment.d or with set-environment does not move it), else
+    ~/.config/systemd/user. None when there is no answer (None), no such entry, or the answer cannot be
+    split safely (systemd does not quote the entries: a folder with a space gives a relative piece, or
+    lands on a folder of the system's): the manager has not said where it reads them."""
+    if unit_path is None:
+        return None
+    entries = unit_path.split()
+    if any(not e.startswith("/") for e in entries):
+        return None
+    found = next((e for e in entries if e.endswith("/" + CONFIG_UNIT_DIR_REL)), None)
+    if found is None or found.startswith(_SYSTEM_UNIT_ROOTS):
+        return None
+    return posixpath.normpath(found)
+
+
+def user_unit_dir(unit_path: str | None, home: str) -> str:
+    """The folder a user manager loads the user's own unit files from, by its UnitPath: the one it names
+    (named_user_unit_dir), else HOME/.config/systemd/user, systemd's default."""
+    return named_user_unit_dir(unit_path) or posixpath.join(home, USER_UNIT_DIR_REL)
 
 
 def render_unit_file(header: Sequence[str], sections: Sequence[tuple[str, Sequence[str]]]) -> str:

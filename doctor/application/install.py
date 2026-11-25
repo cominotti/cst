@@ -30,6 +30,7 @@ from doctor.domain import (
     game_dropin_of,
     host_join,
     is_unit_file,
+    needs_user_unit_dir,
     recorded_unit,
     unit_applies,
     unit_exec_paths,
@@ -293,9 +294,12 @@ def _recorded_units(host: DoctorHostPort, installed: InstalledFilesPort) -> dict
     for owner, _, rec in _read_records(host, installed) if reads is None else reads:
         if not isinstance(rec, InstallRecord):
             continue
-        home, config = (host.home, host.config_home) if owner == Owner.USER else ("", "")
+        home = host.home if owner == Owner.USER else ""
         for dest in sorted(rec.files):
-            if (unit := recorded_unit(dest, home, config)) is not None:
+            # The user manager's own folder is asked only for a path no other folder places (and never as root,
+            # who asks no user manager).
+            user_dir = host.user_unit_dir() if host.uid != 0 and needs_user_unit_dir(dest, home) else ""
+            if (unit := recorded_unit(dest, home, user_dir)) is not None:
                 scope, name = unit
                 out.setdefault(scope, {}).setdefault(name, []).append(dest)
     return out
@@ -327,8 +331,8 @@ def _has_game_dropin(host: DoctorHostPort, unit_id: str) -> bool:
 def check_units_loaded(host: DoctorHostPort, *, installed: InstalledFilesPort | None = None) -> Iterator[Result]:
     """The units of the unit files and drop-ins CST installed (its install records) that systemd has loaded
     and not loaded again since a file of them changed: a change stopped before its daemon-reload or reloaded
-    only another user's manager (cst btrfs install reloads only the calling user's), or an edit. No systemctl
-    call for a manager CST installed no unit file or drop-in for."""
+    only another user's manager, or an edit. No systemctl call for a manager CST installed no unit file or
+    drop-in for."""
     if installed is None:
         return
     by_scope = _recorded_units(host, installed)

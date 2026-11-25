@@ -10792,15 +10792,20 @@ EOF
         was (content and mtime); the `revert --yes --no-restart` right after takes a name of its own
         (another -1, or -2 in the same second), leaves the planted files and apply's backup, and puts
         the vendor keys back; a second revert finds them as in the oldest backup and changes nothing.
-        The exact command apply runs, `sudo cp -p --preserve=context --update=none-fail`, onto a name
-        that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the planted file
-        of its second."""
+        The exact command apply runs, `sudo env LC_ALL=C cp -p --preserve=context --update=none-fail`,
+        onto a name that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the
+        planted file of its second. Last, with a sudoers drop-in that keeps no LC_ALL (env_keep and
+        env_check without it) and a shim cp first on sudo's secure_path that logs the LC_ALL it got:
+        `apply` with LC_ALL=C in its environment still gives cp LC_ALL=C (from env), so cp's words
+        are read in the C locale whatever sudoers keeps; before, sudo dropped it and cp got none."""
         c = self.SYSTEMD_CONTAINER
         self.addCleanup(
             exec_bash,
             c,
             """
             set +e
+            rm -f /etc/sudoers.d/zz-e2e180   # first: the sudoers of step 5 must not outlive the test
+            rm -rf /var/tmp/bt180-shim
             runuser -u tester -- env HOME=/home/tester XDG_RUNTIME_DIR=/run/user/1000 \\
                 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \\
                 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1
@@ -10877,9 +10882,34 @@ EOF
             # 4. apply's exact cp onto a name that is there: exit 1, the file left alone.
             f="$(head -n 1 "$w/planted")"
             s="$(stat -c %Y "$f") $(sha256sum <"$f")"
-            rc=0; runuser -u tester -- sudo cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
+            rc=0; runuser -u tester -- sudo env LC_ALL=C cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
             [[ $rc == 1 ]] || { echo "cp onto a backup that is there: exit $rc" >&2; cat "$w/cp.err" >&2; exit 1; }
             [[ "$(stat -c %Y "$f") $(sha256sum <"$f")" == "$s" ]]
+
+            # 5. A sudoers that keeps no LC_ALL: cp still gets the C locale (from env). The shim lives
+            # in /var/tmp: the container's /tmp is noexec, and sudo cannot run a program there.
+            shim=/var/tmp/bt180-shim
+            mkdir -p "$shim"
+            printf '%s
+' '#!/bin/bash' 'echo "LC_ALL=${LC_ALL-unset}" >>/var/tmp/bt180-shim/log' 'exec /usr/bin/cp "$@"' >"$shim/cp"
+            chmod 0755 "$shim/cp"
+            rm -f "$shim/log"
+            printf '%s
+' 'Defaults env_keep -= "LC_ALL"' 'Defaults env_check -= "LC_*"'                 "Defaults secure_path="$shim:/usr/sbin:/usr/bin"" >"$w/zz-e2e180"
+            visudo -cf "$w/zz-e2e180" >/dev/null
+            install -m 0440 -o root -g root "$w/zz-e2e180" /etc/sudoers.d/zz-e2e180
+            # Cannot bite otherwise: sudo now drops the caller's LC_ALL.
+            seen="$(runuser -u tester -- env LC_ALL=C sudo sh -c 'echo "${LC_ALL-unset}"')"
+            [[ "$seen" == unset ]] || { echo "sudo kept LC_ALL=$seen: the drop-in did not take" >&2; exit 1; }
+            rc=0; out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+            show "apply, sudoers without LC_ALL" "$out"
+            if grep -qF "stopped:" <<<"$out"; then exit 1; fi
+            b="$(backup_of "$out")"
+            [[ -n "$b" && -f "$b" ]] || { echo "no backup: $b" >&2; exit 1; }
+            show "shim" "$(cat "$shim/log")"
+            [[ -s "$shim/log" ]] || { echo "the shim cp never ran" >&2; exit 1; }
+            if grep -vqxF "LC_ALL=C" "$shim/log"; then echo "a backup copy ran without LC_ALL=C" >&2; exit 1; fi
+            rm -f /etc/sudoers.d/zz-e2e180
             echo E2E-OK
             """,
         ).stdout
@@ -11437,6 +11467,492 @@ EOF
             rm -f {rec}
             for d in "$(doc ut env)" "$(doc env HOME=/root)"; do
                 if grep -qF 'the install record cannot be read' <<<"$d"; then echo "doctor without a record: $d" >&2; exit 1; fi
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_219_btrfs_alerts_install_reloads_every_running_user_manager(self) -> None:
+        """install_pending_alerts (as `cst btrfs install` and `snapshots setup` run it, the functions
+        taken from btrfs-setup.sh, the real installer, SUDO_USER tester) with two user managers running:
+        tester's and a second account's (e2e219, its user@UID.service started). In each, a transient unit
+        ordered After= cst-pending-alerts.service keeps that unit loaded. The unit's file is given an
+        older text, both managers reload it, and the current text is put back by hand: both managers
+        then say NeedDaemonReload yes ("cannot bite" otherwise). After install_pending_alerts both say
+        no. Before, only SUDO_USER's manager was reloaded and e2e219's kept the old unit. The unit file,
+        the files of btrfs:alerts and root's install record are copied aside and put back."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        unit = "/etc/systemd/user/cst-pending-alerts.service"
+        dests = (
+            '/usr/bin/python3 -I -c \'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import INSTALL_MANIFEST as m; "
+            'print(*(e.dest for e in m if e.component == "btrfs:alerts"), sep=chr(10))\''
+        )
+        if exec_bash(c, "getent passwd e2e219 || getent passwd 1219 || true").stdout.strip():
+            self.skipTest("the account e2e219 or the uid 1219 is taken")
+        exec_bash(
+            c,
+            f"""set -e
+            rm -rf /var/tmp/e2e-219; mkdir -p /var/tmp/e2e-219
+            {dests} >/var/tmp/e2e-219/dests
+            grep -qxF {unit} /var/tmp/e2e-219/dests
+            while read -r f; do
+                if [[ -e "$f" ]]; then echo "$f" >>/var/tmp/e2e-219/there; else echo "$f" >>/var/tmp/e2e-219/missing; fi
+            done </var/tmp/e2e-219/dests
+            if [[ -s /var/tmp/e2e-219/there ]]; then tar -cpf /var/tmp/e2e-219/files.tar -T /var/tmp/e2e-219/there; fi
+            if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-219/rec; fi
+            if [[ -d /var/lib/cst-alerts ]]; then touch /var/tmp/e2e-219/alerts-dir; fi
+            if systemctl --global -q is-enabled cst-pending-alerts.service 2>/dev/null; then touch /var/tmp/e2e-219/enabled; fi""",
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            systemctl --user -M tester@ stop e2e219-hold.service 2>/dev/null
+            systemctl stop user@1219.service user-runtime-dir@1219.service 2>/dev/null
+            userdel -rf e2e219 2>/dev/null
+            [[ -e /var/tmp/e2e-219/enabled ]] || systemctl --global disable cst-pending-alerts.service 2>/dev/null
+            if [[ -s /var/tmp/e2e-219/missing ]]; then xargs -r -d '\\n' rm -f </var/tmp/e2e-219/missing; fi
+            if [[ -e /var/tmp/e2e-219/files.tar ]]; then tar -xpf /var/tmp/e2e-219/files.tar -C /; fi
+            if [[ -e /var/tmp/e2e-219/rec ]]; then cp -p /var/tmp/e2e-219/rec {rec}; else rm -f {rec}; fi
+            [[ -e /var/tmp/e2e-219/alerts-dir ]] || rm -rf /var/lib/cst-alerts
+            systemctl --user -M tester@ daemon-reload
+            rm -rf /var/tmp/e2e-219""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_219 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(ALERTS_DIR|USER_UNIT_DIR|PENDING_UNIT|OLD_ALERTS_DIR|OLD_PENDING_UNIT|OLD_PENDING_READER)=' /opt/cst-rw/btrfs-setup.sh)"
+            SRC=/opt/cst-rw/btrfs
+            fns="check_syntax check_component_syntax remove_old_reader migrate_old_alerts install_pending_alerts reload_user_managers"
+            for f in $fns; do
+                eval "$(sed -n "/^$f() {/,/^}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F $fns >/dev/null
+            target_user=tester
+            unit="$USER_UNIT_DIR/$PENDING_UNIT"
+            install_pending_alerts >/dev/null
+            useradd -m -u 1219 e2e219
+            systemctl start user@1219.service
+            managers="tester@ 1219@"
+            for m in $managers; do
+                systemctl --user -M "$m" daemon-reload
+                systemd-run --user -M "$m" --unit e2e219-hold -p After="$PENDING_UNIT" -p RemainAfterExit=yes /bin/true >/dev/null 2>&1
+            done
+            ndr() { systemctl --user -M "$1" show -P NeedDaemonReload "$PENDING_UNIT"; }
+            cp -p "$unit" /var/tmp/e2e-219/current
+            { cat /var/tmp/e2e-219/current; echo "# e2e219: an older text"; } >"$unit"
+            for m in $managers; do
+                systemctl --user -M "$m" daemon-reload
+                [[ "$(systemctl --user -M "$m" show -P LoadState "$PENDING_UNIT")" == loaded ]] ||
+                    { echo "$PENDING_UNIT is not loaded in $m's manager" >&2; exit 1; }
+                [[ "$(ndr "$m")" == no ]]
+            done
+            sleep 1
+            cat /var/tmp/e2e-219/current >"$unit"
+            for m in $managers; do
+                [[ "$(ndr "$m")" == yes ]] || { echo "cannot bite: $m's manager does not flag $PENDING_UNIT" >&2; exit 1; }
+            done
+            install_pending_alerts >/dev/null
+            for m in $managers; do
+                [[ "$(ndr "$m")" == no ]] || { echo "$m's manager was not reloaded" >&2; exit 1; }
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH, E2ETag.DOCTOR)
+    def test_220_user_units_go_where_the_user_manager_reads_them(self) -> None:
+        """Which folder a user manager loads its own units from, with the real systemd: a unit of one
+        name planted in ~/.config/systemd/user and in an XDG_CONFIG_HOME folder (each with its folder as
+        its Description), then a daemon-reload; the folder of its FragmentPath is the manager's, and it
+        is the first entry of `systemctl --user show -p UnitPath --value` that ends in /systemd/user,
+        while show-environment's XDG_CONFIG_HOME is not always it. (a) tester, XDG_CONFIG_HOME only in
+        the shell: ~/.config/systemd/user, also for a systemctl run with the shell's variable; the
+        manager's environment has none. (b) e2e220, XDG_CONFIG_HOME set for user@1220.service by a
+        drop-in: that folder; show-environment says it too. (c) e2e220, XDG_CONFIG_HOME only in
+        ~/.config/environment.d (the manager restarted): ~/.config/systemd/user, though
+        show-environment names the other folder. (d) tester, `systemctl --user set-environment
+        XDG_CONFIG_HOME=...` and a daemon-reload: ~/.config/systemd/user, though show-environment names
+        the other folder. So CST names the folder after UnitPath (cst_core's user_unit_dir), not after
+        show-environment or the shell. Then cst bluetooth as tester with XDG_CONFIG_HOME in the shell
+        only and an older CST's copy of the watcher's unit recorded under it: apply writes the unit to
+        ~/.config/systemd/user, the manager loads it from there (FragmentPath), enables and starts it,
+        the older copy is removed and forgotten, plan says the unit is up to date, revert removes it
+        (before, apply wrote under the shell's folder and stopped at `systemctl --user enable`). Then cst
+        doctor: tester's names the watcher's unit after a hand edit with no reload, with the shell's
+        XDG_CONFIG_HOME and without it; e2e220's manager reads ~/xdg/systemd/user (XDG_CONFIG_HOME set for
+        user@1220.service), and a drop-in written there through the installer with no reload is named by
+        e2e220's doctor, whose environment has no XDG_CONFIG_HOME (before, it said nothing). tester's
+        manager is never restarted; e2e220's account goes."""
+        c = self.SYSTEMD_CONTAINER
+        if exec_bash(c, "getent passwd e2e220 || getent passwd 1220 || true").stdout.strip():
+            self.skipTest("the account e2e220 or the uid 1220 is taken")
+        planted = (
+            "/home/tester/.config/systemd/user/e2e220p.service /home/tester/xdgA /home/tester/xdgD "
+            "/etc/systemd/system/user@1220.service.d"
+        )
+        if exec_bash(c, f"for f in {planted}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a file of this test already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            systemctl --user -M tester@ unset-environment XDG_CONFIG_HOME
+            systemctl stop user@1220.service user-runtime-dir@1220.service 2>/dev/null
+            rm -rf {planted}
+            systemctl daemon-reload
+            userdel -rf e2e220 2>/dev/null
+            systemctl --user -M tester@ daemon-reload""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            show() { sed "s/^/test_220 $1: /" <<<"$2" >&2; }   # the CI log
+            plant() {  # plant M USER DIR...: e2e220p.service in each DIR, then M's daemon-reload
+                local m="$1" who="$2" d
+                shift 2
+                for d in "$@"; do
+                    runuser -u "$who" -- mkdir -p "$d"
+                    printf '[Unit]\nDescription=%s\n[Service]\nType=oneshot\nExecStart=/bin/true\n' "$d" |
+                        runuser -u "$who" -- tee "$d/e2e220p.service" >/dev/null
+                done
+                systemctl --user -M "$m" daemon-reload
+            }
+            loaded_from() {
+                local f
+                f="$(systemctl --user -M "$1" show -P FragmentPath e2e220p.service)"
+                [[ -n "$f" ]] || { echo "e2e220p.service not loaded in $1's manager" >&2; exit 1; }
+                dirname "$f"
+            }
+            first_unit_dir() { tr ' ' '\n' <<<"$1" | grep -m1 '/systemd/user$' || true; }
+            unit_dir() { first_unit_dir "$(systemctl --user -M "$1" show -p UnitPath --value)"; }
+            env_xdg() { systemctl --user -M "$1" show-environment | sed -n 's/^XDG_CONFIG_HOME=//p'; }
+            same() {  # same SETUP WANT M: the folder loaded from is WANT, and UnitPath's first .../systemd/user
+                local got ud
+                got="$(loaded_from "$3")"
+                ud="$(unit_dir "$3")"
+                show "$1" "loaded from $got; UnitPath's $ud; show-environment's XDG_CONFIG_HOME: $(env_xdg "$3")"
+                [[ "$got" == "$2" ]] || { echo "($1) loaded from $got, not $2" >&2; exit 1; }
+                [[ "$ud" == "$2" ]] || { echo "($1) UnitPath names $ud, not $2" >&2; exit 1; }
+            }
+            T=/home/tester
+            E=/home/e2e220
+            # (a) tester, XDG_CONFIG_HOME in the shell only.
+            plant tester@ tester "$T/.config/systemd/user" "$T/xdgA/systemd/user"
+            same a "$T/.config/systemd/user" tester@
+            [[ -z "$(env_xdg tester@)" ]]
+            shell_up="$(runuser -u tester -- env HOME="$T" XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_CONFIG_HOME="$T/xdgA" \
+                systemctl --user show -p UnitPath --value)"
+            [[ "$(first_unit_dir "$shell_up")" == "$T/.config/systemd/user" ]]
+            # (b) e2e220, XDG_CONFIG_HOME set for its user@.service.
+            useradd -m -u 1220 e2e220
+            mkdir -p /etc/systemd/system/user@1220.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s\n' "$E/xdgB" >/etc/systemd/system/user@1220.service.d/zz-e2e220.conf
+            systemctl daemon-reload
+            systemctl start user@1220.service
+            plant 1220@ e2e220 "$E/.config/systemd/user" "$E/xdgB/systemd/user"
+            same b "$E/xdgB/systemd/user" 1220@
+            [[ "$(env_xdg 1220@)" == "$E/xdgB" ]]
+            # (c) e2e220, XDG_CONFIG_HOME only in environment.d: the manager's environment names it, the
+            # manager reads ~/.config.
+            rm -rf /etc/systemd/system/user@1220.service.d
+            systemctl daemon-reload
+            runuser -u e2e220 -- mkdir -p "$E/.config/environment.d"
+            echo "XDG_CONFIG_HOME=$E/xdgC" | runuser -u e2e220 -- tee "$E/.config/environment.d/50-e2e220.conf" >/dev/null
+            systemctl restart user@1220.service
+            plant 1220@ e2e220 "$E/xdgC/systemd/user"
+            same c "$E/.config/systemd/user" 1220@
+            [[ "$(env_xdg 1220@)" == "$E/xdgC" ]] || { echo "(c) show-environment: $(env_xdg 1220@)" >&2; exit 1; }
+            # (d) tester, set-environment (as a desktop's import-environment does).
+            systemctl --user -M tester@ set-environment XDG_CONFIG_HOME="$T/xdgD"
+            plant tester@ tester "$T/xdgD/systemd/user"
+            same d "$T/.config/systemd/user" tester@
+            [[ "$(env_xdg tester@)" == "$T/xdgD" ]] || { echo "(d) show-environment: $(env_xdg tester@)" >&2; exit 1; }
+            systemctl --user -M tester@ unset-environment XDG_CONFIG_HOME
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Part 2: cst bluetooth as tester with XDG_CONFIG_HOME in the shell only, and an older CST's copy
+        # of the watcher's unit written and recorded under it: apply writes the unit where the manager
+        # reads units (~/.config/systemd/user), which then loads, enables and starts it, and removes the
+        # older copy; plan has nothing left to say of the unit; revert removes it. Before, apply wrote
+        # under $XDG_CONFIG_HOME/systemd/user and stopped at `systemctl --user enable`.
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "if [[ -e /home/tester/.e2e220-unit ]]; then "
+            "mv /home/tester/.e2e220-unit /home/tester/.config/systemd/user/cst-bt-ldac48.service; fi; "
+            "XDG_CONFIG_HOME=/home/tester/xdg220 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
+            "rm -rf /home/tester/xdg220",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_220
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            X="$H/xdg220"
+            unit="$H/.config/systemd/user/cst-bt-ldac48.service"
+            old="$X/systemd/user/cst-bt-ldac48.service"
+            rec="$H/.local/state/cst/installed.json"
+            mkdir -p "$X/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_RATE=48000\nLE_AUDIO=off\n' >"$X/cst/bluetooth.conf"
+            export XDG_CONFIG_HOME="$X"
+            python3 -I -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from bluetooth.domain import render_unit; print(render_unit("00:11:22:33:44:55", "48000"), end="")' |
+                python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old" 0644 --component bluetooth:ldac >/dev/null
+            [[ -f "$old" ]]
+            grep -qF "\"$old\"" "$rec"
+            [[ ! -e "$unit" ]] || { echo "the unit is there already" >&2; exit 1; }
+            step apply apply --yes --no-restart
+            [[ -f "$unit" ]] || { echo "the unit is not in ~/.config/systemd/user" >&2; exit 1; }
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            [[ ! -e "$old" ]]
+            if grep -qF "\"$old\"" "$rec"; then echo "the older copy is still recorded" >&2; exit 1; fi
+            [[ "$(systemctl --user show -P LoadState cst-bt-ldac48.service)" == loaded ]]
+            [[ "$(systemctl --user show -P FragmentPath cst-bt-ldac48.service)" == "$unit" ]]
+            [[ "$(systemctl --user is-enabled cst-bt-ldac48.service)" == enabled ]]
+            systemctl --user is-active --quiet cst-bt-ldac48.service
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan "$out"
+            grep -qE '^  ok +systemd/user/cst-bt-ldac48.service +up to date' <<<"$out"
+            if grep -qF "older CST" <<<"$out"; then echo "plan still names an older copy" >&2; exit 1; fi
+            # Part 3 (doctor): a hand edit of the unit and no reload; tester's doctor names it with the
+            # shell's XDG_CONFIG_HOME and without it (as `sudo cst status` steps down).
+            cp -p "$unit" "$H/.e2e220-unit"
+            echo "# e2e220: a hand edit" >>"$unit"
+            [[ "$(systemctl --user show -P NeedDaemonReload cst-bt-ldac48.service)" == yes ]] ||
+                { echo "cannot bite: cst-bt-ldac48.service not flagged" >&2; exit 1; }
+            doc() { "$@" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true; }
+            for how in with without; do
+                if [[ $how == with ]]; then d="$(doc env)"; else d="$(doc env -u XDG_CONFIG_HOME)"; fi
+                grep -qF "cst-bt-ldac48.service: systemd has not loaded its files as they are on disk (CST installed $unit)" <<<"$d" ||
+                    { echo "doctor $how XDG_CONFIG_HOME did not name the unit: $d" >&2; exit 1; }
+            done
+            mv "$H/.e2e220-unit" "$unit"
+            systemctl --user daemon-reload
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show revert "$out"
+            [[ ! -e "$unit" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Part 3, e2e220: its manager has XDG_CONFIG_HOME=~/xdg (a drop-in of user@1220.service), so it reads
+        # ~/xdg/systemd/user. A drop-in written there through the installer for a running unit, and no
+        # reload: e2e220's doctor, whose environment has no XDG_CONFIG_HOME, warns for it. Before, doctor
+        # placed a user unit by the shell's XDG_CONFIG_HOME and said nothing.
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            E=/home/e2e220
+            X="$E/xdg"
+            dropin="$X/systemd/user/e2e220d.service.d/10-cst.conf"
+            ue() {
+                runuser -u e2e220 -- env HOME="$E" USER=e2e220 LOGNAME=e2e220 XDG_RUNTIME_DIR=/run/user/1220 \
+                    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1220/bus "$@"
+            }
+            rm -f "$E/.config/environment.d/50-e2e220.conf"
+            mkdir -p /etc/systemd/system/user@1220.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s\n' "$X" >/etc/systemd/system/user@1220.service.d/zz-e2e220.conf
+            systemctl daemon-reload
+            systemctl restart user@1220.service
+            ue mkdir -p "$X/systemd/user"
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' |
+                ue tee "$X/systemd/user/e2e220d.service" >/dev/null
+            ue systemctl --user daemon-reload
+            ue systemctl --user start e2e220d.service
+            [[ "$(ue systemctl --user show -P FragmentPath e2e220d.service)" == "$X/systemd/user/e2e220d.service" ]]
+            printf '[Service]\nEnvironment=E2E220=1\n' |
+                ue /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py text "$dropin" 0644 --home "$E" \
+                    --component toolchains:auto --keep-state >/dev/null
+            [[ "$(ue systemctl --user show -P NeedDaemonReload e2e220d.service)" == yes ]] ||
+                { echo "cannot bite: e2e220d.service not flagged" >&2; exit 1; }
+            d="$(ue env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true)"
+            w="$(grep -A1 -F "e2e220d.service: systemd has not loaded its files as they are on disk (CST installed $dropin)" <<<"$d" || true)"
+            grep -qE '^ *WARN' <<<"$w" && grep -qF 'fix: systemctl --user daemon-reload' <<<"$w" ||
+                { echo "e2e220's doctor did not warn: $d" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_222_older_copies_of_the_watchers_unit(self) -> None:
+        """cst bluetooth as tester with XDG_CONFIG_HOME in the shell only (tester's manager reads
+        ~/.config/systemd/user), and the copies of the LDAC watcher's unit an older CST left, written and
+        recorded through the real installer. (1) An older copy under the shell's folder with the enable link
+        a manager that read it made (default.target.wants): plan shows both removals, apply removes both, and
+        the unit goes to ~/.config/systemd/user, loaded, enabled and active. (2) The live unit recorded once
+        more through a link to ~/.config (~/cfg222): plan shows "forget" for that path, apply drops only its
+        record line and leaves the unit file (same inode and mtime) running, with no restart. (3) The manager's
+        UnitPath question failing (a systemctl on PATH that refuses it, everything else the real one) and an
+        older copy recorded under the shell's folder again: plan and revert --check name no removal of it,
+        revert removes the unit in ~/.config and keeps that copy and its record line; with the real systemctl
+        the next revert removes it. (4) A link of the unit's name in the older copy's wants folder to a unit of
+        tester's own elsewhere (~/mine222), not to the copy: plan and revert --check name no removal of it, and
+        apply and revert remove the copy and leave the link and that unit as they are. After each apply (with its
+        restarts), plan exits 0 with nothing to do: a second run changes nothing. Before: apply left the
+        enable link; apply removed the live unit through the link and wrote it again; revert removed the copy
+        with no answer to say where the manager reads units."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "XDG_CONFIG_HOME=/home/tester/xdg222 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
+            "rm -rf /home/tester/xdg222 /home/tester/cfg222 /home/tester/bin222 /home/tester/mine222",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_222
+            trap 'echo "test_222 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            X="$H/xdg222"
+            lw=cst-bt-ldac48.service
+            unit="$H/.config/systemd/user/$lw"
+            old="$X/systemd/user/$lw"
+            link="$X/systemd/user/default.target.wants/$lw"
+            alias="$H/cfg222/systemd/user/$lw"
+            rec="$H/.local/state/cst/installed.json"
+            recorded() { grep -qF "\"$1\"" "$rec"; }
+            settled() {  # settled LABEL: plan exits 0 with no row of a change (a second run changes nothing)
+                local rc=0 p
+                p="$(bt plan 2>&1)" || rc=$?
+                show "$1" "$p"
+                if [[ $rc != 0 ]] || ! grep -qxF "Nothing to do." <<<"$p" ||
+                    grep -qE '^  (remove|forget|write|update|adopt|set|restart|enable|CONFLICT) ' <<<"$p"; then
+                    echo "$TEST $1: plan exits $rc, or names a change" >&2
+                    return 1
+                fi
+            }
+            plant() {  # plant DEST: the watcher's unit written and recorded there by the real installer
+                python3 -I -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from bluetooth.domain import render_unit; print(render_unit("00:11:22:33:44:55", "48000"), end="")' |
+                    python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$1" 0644 --component bluetooth:ldac >/dev/null
+                recorded "$1"
+            }
+            mkdir -p "$X/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_RATE=48000\nLE_AUDIO=off\n' >"$X/cst/bluetooth.conf"
+            export XDG_CONFIG_HOME="$X"
+            [[ ! -e "$unit" ]] || { echo "the unit is there already" >&2; exit 1; }
+            # (1) An older copy and its enable link.
+            plant "$old"
+            mkdir -p "$(dirname "$link")"
+            ln -s "$old" "$link"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan1 "$out"
+            [[ $rc == 10 ]]
+            grep -qE "^  remove +~/xdg222/systemd/user/$lw +an older CST's copy" <<<"$out"
+            grep -qE "^  remove +~/xdg222/systemd/user/default.target.wants/$lw +the enable link" <<<"$out"
+            step apply1 apply --yes
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            grep -qF "removed:   $link (its enable link)" <<<"$out"
+            [[ ! -e "$old" && ! -L "$link" ]]
+            if recorded "$old"; then echo "the older copy is still recorded" >&2; exit 1; fi
+            [[ "$(systemctl --user show -P FragmentPath "$lw")" == "$unit" ]]
+            [[ "$(systemctl --user is-enabled "$lw")" == enabled ]]
+            systemctl --user is-active --quiet "$lw"
+            settled settled1
+            # (2) The live unit recorded once more through a link to ~/.config.
+            ln -s .config "$H/cfg222"
+            plant "$alias"
+            before="$(stat -c '%i %Y' "$unit")"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan2 "$out"
+            [[ $rc == 10 ]]
+            grep -qE "^  forget +~/cfg222/systemd/user/$lw +the same file as the unit's" <<<"$out"
+            step apply2 apply --yes --no-restart
+            grep -qF "forgotten: $alias (the same file as $unit)" <<<"$out"
+            if grep -qE "^(removed|restarted): " <<<"$out"; then echo "apply2 removed or restarted the unit" >&2; exit 1; fi
+            [[ "$(stat -c '%i %Y' "$unit")" == "$before" ]]
+            if recorded "$alias"; then echo "the other path is still recorded" >&2; exit 1; fi
+            recorded "$unit"
+            settled settled2
+            rm "$H/cfg222"
+            # (3) No answer to UnitPath: the recorded copies are kept.
+            plant "$old"
+            mkdir -p "$H/bin222"
+            printf '#!/bin/bash\nfor a; do [[ $a == UnitPath ]] && exit 1; done\nexec /usr/bin/systemctl "$@"\n' >"$H/bin222/systemctl"
+            chmod +x "$H/bin222/systemctl"
+            if PATH="$H/bin222:$PATH" systemctl --user show -p UnitPath --value >/dev/null; then
+                echo "cannot bite: the UnitPath question did not fail" >&2
+                exit 1
+            fi
+            rc=0; out="$(PATH="$H/bin222:$PATH" bt plan 2>&1)" || rc=$?
+            show plan3 "$out"
+            if grep -qF "older CST" <<<"$out"; then echo "plan3 names the copy as an older one" >&2; exit 1; fi
+            out="$(PATH="$H/bin222:$PATH" bt revert --check 2>&1)" || true
+            show check3 "$out"
+            if grep -qF "would remove $old" <<<"$out"; then echo "revert --check would remove the copy" >&2; exit 1; fi
+            out="$(PATH="$H/bin222:$PATH" bt revert --yes --no-restart 2>&1)"
+            show revert3 "$out"
+            [[ ! -e "$unit" && -f "$old" ]]
+            recorded "$old"
+            # the kept copy's program is kept with it, and one line says so
+            [[ -f "$H/.local/lib/cst/bt-ldac-watch" ]] ||
+                { echo "revert3 removed the watcher's program while it kept $old" >&2; exit 1; }
+            grep -qF "WARNING: kept " <<<"$out"
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show revert4 "$out"
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            [[ ! -e "$old" ]]
+            # (4) A link of the unit's name in the older copy's wants folder to a unit of tester's own
+            # elsewhere, not to the copy: plan, revert --check, apply and revert remove the copy and leave
+            # the link and that unit as they are.
+            mine="$H/mine222/$lw"
+            mkdir -p "$H/mine222"
+            printf '[Unit]\nDescription=mine\n' >"$mine"
+            for cmd in apply revert; do
+                plant "$old"
+                mkdir -p "$(dirname "$link")"
+                ln -sfn "$mine" "$link"
+                out="$(bt plan 2>&1)" || true
+                show "plan4 $cmd" "$out"
+                grep -qE "^  remove +~/xdg222/systemd/user/$lw +an older CST's copy" <<<"$out"
+                if grep -qF default.target.wants <<<"$out"; then echo "plan4 names the link to tester's unit" >&2; exit 1; fi
+                out="$(bt revert --check 2>&1)" || true
+                show "check4 $cmd" "$out"
+                grep -qF "would remove $old (an older CST's copy)" <<<"$out"
+                if grep -qF "$link" <<<"$out"; then echo "revert --check names the link to tester's unit" >&2; exit 1; fi
+                if [[ $cmd == apply ]]; then
+                    step apply4 apply --yes
+                else
+                    out="$(bt revert --yes --no-restart 2>&1)"
+                    show revert5 "$out"
+                fi
+                grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+                if grep -qF "$link" <<<"$out"; then echo "$cmd names the link to tester's unit" >&2; exit 1; fi
+                [[ ! -e "$old" && "$(readlink "$link")" == "$mine" ]]
+                [[ "$(cat "$mine")" == "$(printf '[Unit]\nDescription=mine')" ]]
+                if [[ $cmd == apply ]]; then settled settled4; fi
             done
             echo E2E-OK
             """,

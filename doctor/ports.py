@@ -26,8 +26,6 @@ class DoctorHostPort(Protocol):
     state_home: ViewPath
     # The home folder of the user it runs as, on the host (where that user's install record is).
     home: HostPath
-    # That user's XDG_CONFIG_HOME, on the host ("" when it is not set).
-    config_home: HostPath
 
     def path(self, p: HostPath) -> ViewPath:
         """Map an absolute host path to this process's view (e.g. /run/host)."""
@@ -35,6 +33,11 @@ class DoctorHostPort(Protocol):
 
     def run(self, cmd: list[str], timeout: float = 60, *, locale_c: bool = False) -> tuple[int, str, str]:
         """Run a read-only query command on the host (with LC_ALL=C when locale_c); return (rc, stdout, stderr)."""
+        ...
+
+    def user_unit_dir(self) -> HostPath:
+        """The folder the user's manager loads the user's own unit files from, by its UnitPath (cst_core's
+        user_unit_dir: ~/.config/systemd/user when it cannot be asked); asked once, on first use."""
         ...
 
     def virsh(self, *, read_only: bool) -> VirshPort:

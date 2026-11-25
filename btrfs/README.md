@@ -732,6 +732,13 @@ login**:
    On a computer with several desktop users this means: whoever sees it live
    first "uses it up", and the others do not get it at their login.
 
+`cst btrfs install` (and `cst btrfs snapshots setup`) writes the user unit
+`/etc/systemd/user/cst-pending-alerts.service` and then reloads every user
+manager that is running (each `user@UID.service`, root's too), so every user
+already logged in gets the new unit at once, not only the one who ran the
+install. Each reload is a best try and prints nothing; when the managers
+cannot be listed, only the calling user's (`SUDO_USER`) is reloaded.
+
 **Coming from f44-tools.** Older versions of this repository were called
 f44-tools, and these parts had other names: `/usr/local/bin/f44-pending-alerts`,
 the user unit `f44-pending-alerts.service`, the folder `/var/lib/f44-alerts/`
