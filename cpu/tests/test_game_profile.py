@@ -3844,6 +3844,25 @@ class GameProfilePowerTest(GameProfileCase):
         self.run_profile("off")
         self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
 
+    def test_a_cpu_whose_cpuidle_folder_goes_meanwhile_does_not_stop_on(self) -> None:
+        # r36.1: CPU 0 taken offline between the power step's isdir and its listdir of cpuidle. 'on' ends in
+        # success with its records (the old adapter's listdir raised, 'on' failed and cpu-game.service with it,
+        # so its ExecStop never undid what 'on' had set).
+        gone = os.path.join(self.paths.sys_cpu, "cpu0", "cpuidle")
+
+        class Vanishing(GameSysfsFiles):
+            @override
+            def is_dir(self, path: str) -> bool:
+                return path == gone or super().is_dir(path)
+
+        p_cores = dataclasses.replace(self.settings, p_cores="0")
+        with self.ports(power=Vanishing()):
+            out, _ = self.run_profile("on", p_cores)  # asserts exit 0
+        self.assertIn(f"prop sys user@{UID}.service MemoryLow", self.read(self.state))
+        self.assertIn("<5>game-profile: on: ", out)
+        self.run_profile("off", p_cores)
+        self.assertFalse(os.path.exists(self.state))
+
     def test_card0_is_a_gpu_card(self) -> None:
         # The DRM node card0 (number 0) is a card like card1: on a machine whose only GPU is card0,
         # its connected display picks it and on keeps it out of runtime suspend.
