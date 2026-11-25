@@ -47,7 +47,7 @@ from btrfs.cache.domain import (
     unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
-from btrfs.cache.domain.systemd_view import fstab_lines_unread, systemd_behind_fstab
+from btrfs.cache.domain.systemd_view import catch_up_words, fstab_lines_unread, systemd_behind_fstab
 from btrfs.cache.ports import (
     CacheAccountsPort,
     CacheFoldersPort,
@@ -273,31 +273,13 @@ def _catch_up_reload(
 ) -> tuple[str | None, list[str]]:
     """For a run that writes no /etc/fstab: daemon-reload when systemd has not loaded /etc/fstab as it is
     on disk (an earlier run stopped between its write and its reload), or when systemctl cannot say:
-    (why the reload failed, or None; the lines to add). A run with nothing pending reloads nothing. When
-    systemctl cannot say and the reload fails too, no systemd answers (a rescue shell, a PID 1 that does
-    not answer on D-Bus): nothing points to it being behind, so a warning line, and the run goes on (a
-    detach still unmounts)."""
+    (why the reload failed, or None; the lines to add), worded by catch_up_words. A run with nothing
+    pending reloads nothing; a failed reload when systemctl cannot say is a warning, and the run goes on
+    (a detach still unmounts)."""
     behind = _fstab_behind(snap, m, mounting)
     if behind is False:
         return None, []
-    why = m.systemd.daemon_reload()
-    if why is not None and behind is None:
-        warning = (
-            f"warning: {why}; systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk "
-            "either (run systemctl daemon-reload once it works)"
-        )
-        return None, [warning]
-    if why is not None:
-        return (
-            f"{why}; {FSTAB_PATH} is as asked, systemd has not loaded it (run systemctl daemon-reload once it works)",
-            [],
-        )
-    said = (
-        f"systemd had not loaded {FSTAB_PATH} as it is on disk (an earlier run stopped)"
-        if behind
-        else f"systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk"
-    )
-    return None, [f"reloaded: {said}"]
+    return catch_up_words(behind=behind, reload_error=m.systemd.daemon_reload())
 
 
 def _attach_fstab(snap: CacheMountSnapshot) -> tuple[str, str]:
