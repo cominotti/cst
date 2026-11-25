@@ -3423,6 +3423,22 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
         )
         self.assertNotIn("any VM backup of its tags", msg)
 
+    def test_a_good_answer_whose_index_cannot_be_written_is_named_by_the_stop(self) -> None:
+        # The OSError replaced the stop, and nothing named the good snapshot.
+        with mock.patch.object(
+            FakeNasStore, "write_index", autospec=True, side_effect=OSError(28, "No space left on device")
+        ):
+            msg, store, _restic, _cmds = self._run(0)
+        self.assertEqual((store.written, store.torn), ([], []))
+        self.assertEqual(
+            msg,
+            f"stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is a backup, but the index could "
+            "not be written ([Errno 28] No space left on device); the snapshot stays in the repository: the next NAS "
+            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept "
+            f"as a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore "
+            'it by its ID: vm/README.md, section "Restore from the NAS")',
+        )
+
     def test_a_shut_off_vm_started_during_the_read_has_its_snapshot_recorded(self) -> None:
         msg, store, restic, _cmds = self._run(0, live=False, started=True)
         self.assertEqual([(e["snapshot"], e["why"]) for e in store.torn], [(SNAP_ID, "state changed")])

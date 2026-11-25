@@ -641,7 +641,10 @@ snapshot ID of VM is a backup: indexed (the retention runs at the next
 backup)": no retention and no listing then, nothing forgotten. A stop that
 comes after the merge back of a good read (while the retention, a listing or
 the index's write runs) ends the run the same way: the snapshot is indexed
-first, with the same words, and nothing more is forgotten or listed. If the merge
+first, with the same words, and nothing more is forgotten or listed. If the
+index cannot be written then (a full disk, say), the stop says so instead,
+names the snapshot as a backup and gives the commands that keep or forget
+it. If the merge
 back fails, the snapshot is not indexed, as without a stop (above). After a
 stop that ended restic, a snapshot whose check could not be done at all (an
 error of libvirt or of a file read, not a change it found) is recorded as
@@ -1163,7 +1166,7 @@ removal and the check of a VM still shut off, in-process; a stop after a
 read whose check passed, live or shut off, carried or held, indexes the
 snapshot after the merge back and names it in the stop, with no listing,
 forget or retention, and indexes nothing when the merge back fails; the
-index refusing it puts its words in the stop; a check that could not be
+index refusing it, or failing to be written, puts its words in the stop; a check that could not be
 done records the snapshot as torn only after a stop that ended restic, the
 check's error kept in the stop's context; `NasStopAfterTheMergeBackTest`: a
 stop after a good read's merge back, in the retention, the index's listing

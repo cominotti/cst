@@ -603,6 +603,11 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
         p.store.write_index(nas_index(p.store.read_index(), entry, None))
     except IndexRefused as e:
         return Stop(f"{stop}; {_not_indexed(snap, vm, e)}")
+    except OSError as e:
+        return Stop(
+            f"{stop}; the restic snapshot {snap[:8]} of {vm} is a backup, but the index could not be written ({e}); "
+            f"{_kept_unindexed(snap)}"
+        )
     return Stop(
         f"{stop}; restic snapshot {snap[:8]} of {vm} is a backup: indexed (the retention runs at the next backup)"
     )
@@ -610,12 +615,16 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
 
 def _not_indexed(snap: str, vm: str, e: IndexRefused) -> str:
     """What a NAS backup the index could not take says of its snapshot."""
-    kept = (
+    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", _kept_unindexed(snap), e)
+
+
+def _kept_unindexed(snap: str) -> str:
+    """Where a NAS backup left out of the index stays, what the next runs do with it, and how to keep it."""
+    return (
         "the snapshot stays in the repository: the next NAS backups may name it as a snapshot no record names, "
         f"and their retention waits for it until it is kept as a backup (restic tag --add {ADOPTED_TAG} {snap}) or "
         f'forgotten (restic forget {snap}) (restore it by its ID: vm/README.md, section "Restore from the NAS")'
     )
-    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e)
 
 
 def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) -> Refused | None:
