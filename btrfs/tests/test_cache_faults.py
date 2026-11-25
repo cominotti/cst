@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Exhaustive fault injection on `cst btrfs cache attach` and `detach` (tests/fault_injection.py).
+"""Exhaustive fault injection on `cst btrfs cache attach` and `detach` (tests/fault_injection.py), over CacheWorld.
 
-The command runs in process (run_cache_mount_cli, under a test root as test_cache runs it). Its
-mutating calls go through a FaultPlan: the folder and file calls by patching the names
-btrfs/cache/adapters.py calls (ensure_dir and write_atomic: the folders, the CACHEDIR.TAG, the
-/etc/fstab write and its put-back) and LocalFileSystemAdapter.remove_file (the put-back when there
-was no /etc/fstab), the commands through FaultyRunner over FakeMountRunner (mount --bind, umount,
-systemctl daemon-reload; findmnt only reads). FakeMountRunner keeps the mount table. os.fsync is
-stubbed.
+attach and detach (btrfs/cache/application.py) run here over CacheWorld (btrfs/tests/fakes.py), the
+in-memory fakes of their ports, through CacheMounts.run: argv parsed as the command line parses it, the
+returned lines read instead of stdout and stderr (every error path returns its ERROR line last). Every
+mutating call is a point of a FaultPlan: each private folder made, the CACHEDIR.TAG written, each mount
+--bind and umount, the /etc/fstab write and put-back (or its removal when there was none) and each
+systemctl daemon-reload (not findmnt, systemctl show or the reads of the probe). The world keeps the
+mount table and what systemd has loaded of /etc/fstab. btrfs/tests/test_cache_ports.py keeps the fakes
+equal to the real adapters; the command line's own part (help, refusals, sudo, ERROR lines to stderr)
+is test_cache.py's.
 
 Start states: an attach from nothing, from no /etc/fstab at all, and after an attach killed after
 its first mount; a detach of both binds, and after a detach killed after its first umount (the
@@ -24,46 +26,36 @@ each later point of that run (a run that dies, or fails again, while it rolls ba
   ROLLBACK INCOMPLETE (the folders and the tag an attach made may stay: btrfs/README.md 9.4);
 - I4: no traceback, and the same command again with no fault returns 0 and reaches the target; a
   third run says "nothing to do" and runs no mount, umount or reload;
-- I5: exit 0 means systemd has loaded /etc/fstab as it is on disk (FakeMountRunner's view of it).
+- I5: exit 0 means systemd has loaded /etc/fstab as it is on disk (CacheWorld's view of it).
   A run that left systemd behind (killed between its /etc/fstab write and its daemon-reload, or a
   reload that failed) is followed by a run again that runs exactly one daemon-reload; any other run
   again runs at most one.
 
 One class per start state (a work unit of tests/run_unit.py), one method per mode family, the case
-counts pinned.
+counts pinned. ProtocolFaultTest stages single faults that once needed a patch of the adapters' names.
 """
 
 from __future__ import annotations
 
-from collections.abc import Generator, Sequence
-import contextlib
 from dataclasses import dataclass
-import functools
-import io
+import errno
 import os
-import shutil
-import tempfile
 from typing import ClassVar, override
 import unittest
-from unittest import mock
 
-from btrfs.cache import adapters as cache_adapters
-from btrfs.cache.cli import run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,
     SCRATCHPAD_BASE,
     CacheMountKind,
     CacheMountUser,
     build_user_bindings,
+    parse_cache_mount_args,
     parse_managed_fstab_entries,
     plan_attach_fstab,
     plan_detach_fstab,
 )
-from btrfs.tests.fakes import CacheTestCtx, FakeMountRunner
-from cst_core.adapters.files import LocalFileSystemAdapter
-from cst_core.adapters.runtime import ManagedCliEnv
-from tests.fault_injection import Fault, FaultMode, FaultPlan, FaultyRunner, Killed, cut_points, every_fault, stub_fsync
-from tests.repo_files import REPO
+from btrfs.tests.fakes import MOUNT_DENIED, RELOAD_FAILED, UMOUNT_BUSY, CacheWorld
+from tests.fault_injection import Fault, FaultMode, Killed, cut_points, every_fault, no_space
 
 USER = CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")
 BINDINGS = build_user_bindings(USER)
@@ -96,17 +88,36 @@ DETACH_FULL = Start(DETACH, ATTACHED_FSTAB, BOTH, points=4, fail_then_later=6)
 DETACH_HALF_DONE = Start(DETACH, BASE_FSTAB, (BOTH[1],), points=1, fail_then_later=0)
 
 
-def read(path: str) -> str | None:
-    try:
-        with open(path, encoding="utf-8", errors="surrogateescape") as fh:
-            return fh.read()
-    except FileNotFoundError:
-        return None
+def cache_world(fstab: str | None, mounted: tuple[str, ...] = ()) -> CacheWorld:
+    """The machine the matrix starts from: danilo's account, the two bases mounted, both sources made,
+    /etc/fstab as given and the binds of mounted in place."""
+    w = CacheWorld()
+    w.add_user(USER.name, USER.uid, USER.home)
+    w.caller = USER.name
+    for b in BINDINGS:
+        w.mkdirs(b.source)
+    w.put_fstab(fstab)
+    w.table.add_mount("/dev/mapper/cache", CACHE_BASE, fsroot="/cache")
+    w.table.add_mount("/dev/mapper/cache", SCRATCHPAD_BASE, fsroot="/scratchpad")
+    for b in BINDINGS:
+        if b.target in mounted:
+            w.mount_bind(b.source, b.target)
+    return w
 
 
-def reads(argv: Sequence[str]) -> bool:
-    """findmnt and systemctl show (which units systemd loaded) only read."""
-    return list(argv[:1]) == ["findmnt"] or list(argv[:2]) == ["systemctl", "show"]
+def run_cache(world: CacheWorld, argv: list[str]) -> tuple[int, list[str]]:
+    """One command over the world's ports: (exit, its lines)."""
+    return world.service().run(parse_cache_mount_args(argv), "cst btrfs cache")
+
+
+def binds(world: CacheWorld) -> set[str]:
+    """The targets whose top mount is the user's bind from its source."""
+    tops = {str(m["target"]): str(m["fsroot"]) for m in world.table.mounts}
+    return {b.target for b in BINDINGS if tops.get(b.target) == f"/{b.kind}/{USER.name}"}
+
+
+def mounts(world: CacheWorld) -> list[tuple[str, str]]:
+    return sorted((str(m["target"]), str(m["source"])) for m in world.table.mounts)
 
 
 class CacheFaultBase(unittest.TestCase):
@@ -116,94 +127,24 @@ class CacheFaultBase(unittest.TestCase):
 
     @override
     def setUp(self) -> None:
-        stub_fsync(self)
-        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cache-faults-"))
-        self.addCleanup(shutil.rmtree, self.tmp)
-        self.fstab = os.path.join(self.tmp, "etc", "fstab")
-        self.entry = os.path.join(REPO, "btrfs", "btrfs-cache")
-        self.plan = FaultPlan()
+        self.world = self.fresh()
 
     # ---- the fixture ------------------------------------------------------
 
-    def fresh(self) -> FakeMountRunner:
-        """The start state on disk and in the mount table."""
-        s = self.start
-        for top in ("etc", "var"):
-            shutil.rmtree(os.path.join(self.tmp, top), ignore_errors=True)
-        for d in ("etc", "var/mnt/cache/danilo", "var/mnt/scratchpad/danilo", "var/home/danilo"):
-            os.makedirs(os.path.join(self.tmp, d))
-        with open(os.path.join(self.tmp, "etc", "passwd"), "w", encoding="utf-8") as fh:
-            fh.write("root:x:0:0:root:/root:/bin/bash\ndanilo:x:1000:1000:Danilo:/var/home/danilo:/bin/bash\n")
-        if s.fstab is not None:
-            with open(self.fstab, "w", encoding="utf-8") as fh:
-                fh.write(s.fstab)
-        model = FakeMountRunner(self.tmp)
-        model.add_mount("/dev/mapper/cache", CACHE_BASE, fsroot="/cache")
-        model.add_mount("/dev/mapper/cache", SCRATCHPAD_BASE, fsroot="/scratchpad")
-        for b in BINDINGS:
-            if b.target in s.mounted:
-                os.makedirs(os.path.join(self.tmp, b.target.lstrip("/")))
-                model.run(["mount", "--bind", self.tmp + b.source, self.tmp + b.target])
-        model.calls.clear()
-        return model
+    def fresh(self) -> CacheWorld:
+        """The start state."""
+        self.world = cache_world(self.start.fstab, self.start.mounted)
+        return self.world
 
-    @contextlib.contextmanager
-    def faulty_files(self) -> Generator[None]:
-        """The adapter's own file calls through the plan while the block runs."""
-        plan = self.plan
-        real_ensure, real_write = cache_adapters.ensure_dir, cache_adapters.write_atomic
-        real_remove = LocalFileSystemAdapter.remove_file
-
-        def ensure_dir(path: str, mode: int, *, relabel: bool = False) -> None:
-            plan.step(
-                f"ensure_dir {path.removeprefix(self.tmp)}", functools.partial(real_ensure, path, mode, relabel=relabel)
-            )
-
-        def write_atomic(path: str, data: str | bytes, **kw: object) -> None:
-            plan.step(f"write_atomic {os.path.basename(path)}", functools.partial(real_write, path, data, **kw))
-
-        def remove_file(fs: LocalFileSystemAdapter, path: str) -> bool:
-            return plan.step(f"remove_file {os.path.basename(path)}", functools.partial(real_remove, fs, path))
-
-        with (
-            mock.patch.object(cache_adapters, "ensure_dir", ensure_dir),
-            mock.patch.object(cache_adapters, "write_atomic", write_atomic),
-            mock.patch.object(LocalFileSystemAdapter, "remove_file", remove_file),
-        ):
-            yield
-
-    def name(self, argv: Sequence[str]) -> str:
-        return " ".join(a.removeprefix(self.tmp) for a in argv)
-
-    def run_once(self, model: FakeMountRunner, *faults: Fault) -> tuple[int, list[str]] | None:
-        """One run of the start's command with these faults: (exit, its stderr lines); None when killed."""
-        self.plan.arm(*faults)
-        out, err = io.StringIO(), io.StringIO()
-        runner = FaultyRunner(self.plan, model, reads=reads, name=self.name)
-        deps = ManagedCliEnv(
-            entry_file=self.entry,
-            env={"CST_BTRFS_CACHE_ROOT": self.tmp, "USER": USER.name},
-            out=out,
-            err=err,
-            ctx=CacheTestCtx(),
-            runner=runner,
-        )
-        with self.faulty_files():
-            try:
-                rc = run_cache_mount_cli([self.start.action], deps=deps)
-            except Killed:
-                return None
-        return rc, (out.getvalue() + err.getvalue()).splitlines()
+    def run_once(self, *faults: Fault) -> tuple[int, list[str]] | None:
+        """One run of the start's command with these faults: (exit, its lines); None when killed."""
+        self.world.plan.arm(*faults)
+        try:
+            return run_cache(self.world, [self.start.action])
+        except Killed:
+            return None
 
     # ---- what the state is --------------------------------------------------
-
-    def binds(self, model: FakeMountRunner) -> set[str]:
-        """The targets whose top mount is the user's bind from its source."""
-        tops = {str(m["target"]): str(m["fsroot"]) for m in model.mounts}
-        return {b.target for b in BINDINGS if tops.get(b.target) == f"/{b.kind}/{USER.name}"}
-
-    def mounts(self, model: FakeMountRunner) -> list[tuple[str, str]]:
-        return sorted((str(m["target"]), str(m["source"])) for m in model.mounts)
 
     def target_fstab(self) -> str:
         cur = self.start.fstab or ""
@@ -211,59 +152,58 @@ class CacheFaultBase(unittest.TestCase):
             return plan_attach_fstab(cur, BINDINGS)
         return plan_detach_fstab(cur, USER.name, {CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD})
 
-    def assert_target(self, model: FakeMountRunner, when: str) -> None:
+    def assert_target(self, when: str) -> None:
         want = set(BOTH) if self.start.action == ATTACH else set()
-        self.assertEqual(self.binds(model), want, f"{when}: the binds")
-        self.assertEqual(read(self.fstab), self.target_fstab(), f"{when}: /etc/fstab")
+        self.assertEqual(binds(self.world), want, f"{when}: the binds")
+        self.assertEqual(self.world.fstab, self.target_fstab(), f"{when}: /etc/fstab")
 
-    def assert_no_line_without_its_bind(self, model: FakeMountRunner, when: str) -> None:
-        managed = parse_managed_fstab_entries(read(self.fstab) or "")
+    def assert_no_line_without_its_bind(self, when: str) -> None:
+        managed = parse_managed_fstab_entries(self.world.fstab or "")
         lines = {e.target for e in managed if e.user == USER.name}
-        self.assertLessEqual(lines, self.binds(model), f"{when}: a line in /etc/fstab for a bind not mounted")
+        self.assertLessEqual(lines, binds(self.world), f"{when}: a line in /etc/fstab for a bind not mounted")
 
     # ---- the checks ---------------------------------------------------------
 
     def check(self, *faults: Fault) -> None:
         when = f"{faults}"
-        model = self.fresh()
-        start_mounts, start_fstab = self.mounts(model), read(self.fstab)
-        result = self.run_once(model, *faults)
+        w = self.fresh()
+        start_mounts, start_fstab = mounts(w), w.fstab
+        result = self.run_once(*faults)
         incomplete = result is not None and result[0] != 0 and bool(result[1]) and INCOMPLETE in result[1][-1]
         if not incomplete or self.start.action == DETACH:
-            self.assert_no_line_without_its_bind(model, when)
+            self.assert_no_line_without_its_bind(when)
         if result is not None:
             rc, lines = result
             if rc == 0:
-                self.assert_target(model, f"{when}: exit 0")
-                self.assertTrue(model.view_current(), f"{when}: exit 0, systemd has not loaded /etc/fstab: {lines}")
+                self.assert_target(f"{when}: exit 0")
+                self.assertTrue(w.view_current(), f"{when}: exit 0, systemd has not loaded /etc/fstab: {lines}")
             elif not incomplete:
-                self.assertEqual(self.mounts(model), start_mounts, f"{when}: exit {rc}: the mounts: {lines}")
-                self.assertEqual(read(self.fstab), start_fstab, f"{when}: exit {rc}: /etc/fstab: {lines}")
-        behind, reloads = not model.view_current(), model.reloads
-        again = self.run_once(model)
+                self.assertEqual(mounts(w), start_mounts, f"{when}: exit {rc}: the mounts: {lines}")
+                self.assertEqual(w.fstab, start_fstab, f"{when}: exit {rc}: /etc/fstab: {lines}")
+        behind, reloads = not w.view_current(), w.reloads
+        again = self.run_once()
         self.assertEqual((again or (None, []))[0], 0, f"{when}: the run again: {again}")
-        self.assert_target(model, f"{when}: the run again")
-        self.assertTrue(model.view_current(), f"{when}: the run again, systemd has not loaded /etc/fstab: {again}")
-        ran = model.reloads - reloads
+        self.assert_target(f"{when}: the run again")
+        self.assertTrue(w.view_current(), f"{when}: the run again, systemd has not loaded /etc/fstab: {again}")
+        ran = w.reloads - reloads
         if behind:
             self.assertEqual(ran, 1, f"{when}: the run again after systemd was left behind")
         self.assertLessEqual(ran, 1, f"{when}: the run again reloaded {ran} times")
-        model.calls.clear()
-        third = self.run_once(model) or (None, [])
+        w.calls.clear()
+        third = self.run_once() or (None, [])
         self.assertEqual(third[0], 0, f"{when}: the third run: {third}")
         self.assertIn("nothing to do", "\n".join(third[1]), f"{when}: the third run")
-        changing = [c for c in model.calls if not reads(c)]
-        self.assertEqual(changing, [], f"{when}: the third run changed something")
+        self.assertEqual(w.commands(), [], f"{when}: the third run changed something")
 
     def points(self, *faults: Fault) -> list[str]:
         """The mutating calls of one run from the start state with these faults."""
-        model = self.fresh()
+        self.fresh()
         if not faults:
-            calls = cut_points(self.plan, functools.partial(self.run_once, model))
-            self.assert_target(model, "no fault")
+            calls = cut_points(self.world.plan, self.run_once)
+            self.assert_target("no fault")
             return calls
-        self.run_once(model, *faults)
-        return list(self.plan.calls)
+        self.run_once(*faults)
+        return list(self.world.plan.calls)
 
     def every(self, mode: FaultMode) -> None:
         calls = self.points()
@@ -387,3 +327,129 @@ class DetachHalfDoneFaultTest(CacheFaultBase):
 
     def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
         self.every_failure_then(FaultMode.FAIL)
+
+
+class ProtocolFaultTest(unittest.TestCase):
+    """Single faults staged in the world (fail() or the plan) that test_cache.py once staged by patching
+    the adapters' names; the assertions as they were."""
+
+    @override
+    def setUp(self) -> None:
+        self.world = cache_world(BASE_FSTAB)
+
+    def _run(self, argv: list[str]) -> tuple[int, list[str]]:
+        return run_cache(self.world, argv)
+
+    def _mounted(self) -> list[str]:
+        return [str(m["target"]) for m in self.world.table.mounts if str(m["target"]).startswith("/var/home/")]
+
+    def test_a_link_put_in_place_of_a_folder_after_the_probe_fails_cleanly(self) -> None:
+        # The private folder's O_NOFOLLOW open refuses a link put there after the probe (ENOTDIR: the
+        # adapter's half, that the link's target keeps its mode when the link comes after the folder
+        # check, is the test of the same name in test_cache.py).
+        before = self.world.fstab
+        self.world.fail("folder /var/mnt/cache/danilo", OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)))
+        rc, lines = self._run(["attach"])
+        self.assertEqual(rc, 1, lines)
+        self.assertIn("ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache:", lines[-1])
+        self.assertEqual(self.world.commands(), [])
+        self.assertEqual(self.world.fstab, before)
+
+    def test_a_folder_that_cannot_be_made_is_an_error_not_a_traceback(self) -> None:
+        self.world.fail("folder /var/mnt/cache/danilo", PermissionError(13, "Permission denied"))
+        rc, lines = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache: Permission denied", lines
+        )
+        self.assertFalse(any(c.startswith("mount ") for c in self.world.calls))
+
+    def test_a_bind_and_an_fstab_not_undone_are_both_named(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        self.world.fail("umount /var/home/danilo/Scratchpad", UMOUNT_BUSY)  # after .cache's umount
+        self.world.fail("mount --bind /var/mnt/cache/danilo /var/home/danilo/.cache", MOUNT_DENIED)  # mounting it again
+        self.world.fail_at("fstab write", 2, no_space())  # the put-back, detach's second write there
+        rc, lines = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: umount /var/home/danilo/Scratchpad failed: umount: target is busy; ROLLBACK INCOMPLETE "
+            "(mount --bind /var/mnt/cache/danilo /var/home/danilo/.cache failed: mount: permission denied; "
+            "cannot put /etc/fstab back: No space left on device)",
+            lines,
+        )
+
+    def test_a_fstab_that_cannot_be_put_back_after_a_busy_umount_is_rollback_incomplete(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        self.world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY)
+        self.world.fail_at("fstab write", 2, no_space())  # the put-back, detach's second write there
+        rc, lines = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: umount /var/home/danilo/.cache failed: umount: target is busy; "
+            "ROLLBACK INCOMPLETE (cannot put /etc/fstab back: No space left on device)",
+            lines,
+        )
+        self.assertFalse(any("restored." in line for line in lines))
+        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+
+    def test_a_failed_reload_after_putting_the_lines_back_is_rollback_incomplete(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        attached = self.world.fstab
+        self.world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY)
+        self.world.fail_at("systemctl daemon-reload", 2, RELOAD_FAILED)  # the one after the put-back
+        rc, lines = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: umount /var/home/danilo/.cache failed: umount: target is busy; "
+            "ROLLBACK INCOMPLETE (systemctl daemon-reload failed: Failed to reload daemon)",
+            lines,
+        )
+        self.assertEqual(self.world.fstab, attached)
+
+
+class CacheWorldStagingTest(unittest.TestCase):
+    """How the world's staged faults combine at one point."""
+
+    def test_a_one_shot_fault_keeps_the_failure_armed_before_it(self) -> None:
+        world = CacheWorld()
+        world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY)  # every call
+        world.fail_at("umount /var/home/danilo/.cache", 2, RELOAD_FAILED)
+        answers = [
+            world.step("umount /var/home/danilo/.cache", lambda: "unmounted", lambda err: str(err.strerror))
+            for _ in range(4)
+        ]
+        self.assertEqual(
+            answers,
+            ["umount: target is busy", "Failed to reload daemon", "umount: target is busy", "umount: target is busy"],
+        )
+
+    def test_a_one_shot_fault_uses_up_one_call_of_a_counted_failure(self) -> None:
+        busy, reload, unmounted = "umount: target is busy", "Failed to reload daemon", "unmounted"
+        # without the fail_at: busy, busy, unmounted, unmounted; the other calls answer as they would
+        for n, expected in (
+            (1, [reload, busy, unmounted, unmounted]),
+            (2, [busy, reload, unmounted, unmounted]),
+            (3, [busy, busy, reload, unmounted]),
+        ):
+            with self.subTest(n=n):
+                world = CacheWorld()
+                world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY, times=2)
+                world.fail_at("umount /var/home/danilo/.cache", n, RELOAD_FAILED)
+                answers = [
+                    world.step("umount /var/home/danilo/.cache", lambda: unmounted, lambda err: str(err.strerror))
+                    for _ in range(4)
+                ]
+                self.assertEqual(answers, expected)
+
+    def test_a_one_shot_fault_the_plan_failed_first_uses_up_nothing(self) -> None:
+        world = CacheWorld()
+        world.plan.arm((FaultMode.FAIL, 1))  # the plan's own failure, before the call runs
+        world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY, times=2)
+        world.fail_at("umount /var/home/danilo/.cache", 1, RELOAD_FAILED)
+        answers = [
+            world.step("umount /var/home/danilo/.cache", lambda: "unmounted", lambda err: str(err.strerror))
+            for _ in range(4)
+        ]
+        self.assertEqual(
+            answers, ["No space left on device", "umount: target is busy", "umount: target is busy", "unmounted"]
+        )

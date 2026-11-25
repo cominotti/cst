@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-import contextlib
-import errno
 import io
 import json
 import os
@@ -780,35 +778,6 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertNotIn("restored.", err)
         self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
 
-    def _second_fstab_write_fails(self) -> contextlib.AbstractContextManager[object]:
-        """detach's put-back of /etc/fstab (its second write there) fails with ENOSPC."""
-        fstab = os.path.join(self.tmp, "etc", "fstab")
-        real_write = cache_adapters.write_atomic
-        writes: list[str] = []
-
-        def write_atomic(path: str, data: str | bytes, *, mode: int) -> None:
-            if path == fstab:
-                writes.append(path)
-                if len(writes) == 2:
-                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-            real_write(path, data, mode=mode)
-
-        return unittest.mock.patch.object(cache_adapters, "write_atomic", side_effect=write_atomic)
-
-    def test_a_bind_and_an_fstab_not_undone_are_both_named(self) -> None:
-        self.assertEqual(self._run(["attach"])[0], 0)
-        self.runner.umount_fails.add("/var/home/danilo/Scratchpad")  # after .cache's umount
-        self.runner.mount_fails.add("/var/home/danilo/.cache")  # mounting it again fails
-        with self._second_fstab_write_fails():
-            rc, _, err = self._run(["detach"])
-        self.assertEqual(rc, 1)
-        self.assertIn(
-            "ERROR: umount /var/home/danilo/Scratchpad failed: umount: target is busy; ROLLBACK INCOMPLETE "
-            "(mount --bind /var/mnt/cache/danilo /var/home/danilo/.cache failed: mount: permission denied; "
-            "cannot put /etc/fstab back: No space left on device)",
-            err,
-        )
-
     def test_a_bind_not_mounted_again_gets_no_line_back(self) -> None:
         # The put-back after a busy umount wrote every line back, also .cache's, whose bind could not
         # be mounted again: the next boot mounted a bind detach had dropped.
@@ -832,16 +801,6 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(rc_again, 0, err_again)
         self.assertEqual(self._mounted(), [])
         self.assertNotIn("user=danilo", self._fstab())
-
-    def test_a_folder_that_cannot_be_made_is_an_error_not_a_traceback(self) -> None:
-        with unittest.mock.patch.object(
-            cache_adapters, "ensure_dir", side_effect=PermissionError(13, "Permission denied")
-        ):
-            rc, out, err = self._run(["attach"])
-        self.assertEqual(rc, 1)
-        self.assertIn("ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache: Permission denied", err)
-        self.assertNotIn("Traceback", out + err)
-        self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
 
     def test_detach_keeps_a_mount_cst_did_not_make(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
@@ -951,44 +910,6 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(rc_again, 0, err_again)
         self.assertEqual(self._mounted(), [])
         self.assertNotIn("user=danilo", self._fstab())
-
-    def test_a_fstab_that_cannot_be_put_back_after_a_busy_umount_is_rollback_incomplete(self) -> None:
-        self.assertEqual(self._run(["attach"])[0], 0)
-        self.runner.umount_fails.add("/var/home/danilo/.cache")
-        with self._second_fstab_write_fails():
-            rc, _, err = self._run(["detach"])
-        self.assertEqual(rc, 1)
-        self.assertIn(
-            "ERROR: umount /var/home/danilo/.cache failed: umount: target is busy; "
-            "ROLLBACK INCOMPLETE (cannot put /etc/fstab back: No space left on device)",
-            err,
-        )
-        self.assertNotIn("restored.", err)
-        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
-
-    def test_a_failed_reload_after_putting_the_lines_back_is_rollback_incomplete(self) -> None:
-        self.assertEqual(self._run(["attach"])[0], 0)
-        attached = self._fstab()
-        self.runner.umount_fails.add("/var/home/danilo/.cache")
-        real_run = self.runner.run
-        reloads: list[int] = []
-
-        def run(argv: Sequence[str], **kwargs: object) -> CommandResult:
-            if list(argv)[-1:] == ["daemon-reload"]:
-                reloads.append(1)
-                if len(reloads) == 2:
-                    return CommandResult(1, "", "Failed to reload daemon")
-            return real_run(argv, **kwargs)
-
-        with unittest.mock.patch.object(self.runner, "run", side_effect=run):
-            rc, _, err = self._run(["detach"])
-        self.assertEqual(rc, 1)
-        self.assertIn(
-            "ERROR: umount /var/home/danilo/.cache failed: umount: target is busy; "
-            "ROLLBACK INCOMPLETE (systemctl daemon-reload failed: Failed to reload daemon)",
-            err,
-        )
-        self.assertEqual(self._fstab(), attached)
 
     # ---- F-C2: a run killed between its /etc/fstab write and its daemon-reload ------------------
     def _reloads(self) -> int:

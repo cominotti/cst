@@ -180,19 +180,19 @@ run (recovery), and at the end (the same command again converges).
 - Wrap each mutating call: subclass the real adapter and send each method
   through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
   send each mutating method of an in-memory fake of a use case's ports
-  through it (`ScrubWorld` and `IocostWorld` in `btrfs/tests/fakes.py`,
-  which `btrfs/tests/test_scrub_limit_faults.py` and
-  `btrfs/tests/test_iocost_faults.py` drive; a contract test runs the same
-  body on the fake and on the real adapter, so the fake cannot drift:
-  `btrfs/tests/test_scrub_limit_ports.py`, `btrfs/tests/test_iocost_ports.py`),
-  patch the names an adapter module calls (`ensure_dir`, `write_atomic`:
-  `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
+  through it (`ScrubWorld`, `IocostWorld` and `CacheWorld` in `btrfs/tests/fakes.py`,
+  which `btrfs/tests/test_scrub_limit_faults.py`,
+  `btrfs/tests/test_iocost_faults.py` and `btrfs/tests/test_cache_faults.py` drive;
+  a contract test runs the same body on the fake and on the real adapter, so the
+  fake cannot drift: `btrfs/tests/test_scrub_limit_ports.py`,
+  `btrfs/tests/test_iocost_ports.py`, `btrfs/tests/test_cache_ports.py`),
+  put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
   `os` as it is: `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
   whose errors the code does not handle: a failure armed there does not
   fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
-  `reads` naming the commands that only read (`btrfs/tests/test_cache_faults.py`).
+  `reads` naming the commands that only read (`bluetooth/tests/test_setup_faults.py`).
 - Model the outside state the invariants need in the fake under it: what
   systemd has loaded and whether it needs a reload, the install record,
   the service, what a daemon read at its last start. When the usual fake
@@ -752,9 +752,10 @@ not derive from it.
   the circuit breaker, over generated policies, zones, timelines and clocks.
 - `mbt_profiles.py`: the profiles and the seeding themselves.
 - `mbt_cache_rollback.py`: `cst btrfs cache` attach and detach for two
-  users and the three kind selections, through the unit tests' fake
-  findmnt, mount and systemctl (`btrfs/tests/fakes.py`), with a bind mount
-  or the daemon-reload failing: `/etc/fstab` names exactly the mounted
+  users and the three kind selections, over the in-memory fakes of its
+  ports (`CacheWorld` in `btrfs/tests/fakes.py`: /etc/fstab, the mount
+  table and what systemd has loaded of /etc/fstab), with a bind mount,
+  an umount or the daemon-reload failing: `/etc/fstab` names exactly the mounted
   binds, a failed command leaves `/etc/fstab` and the mounts as they were,
   and the same command with no fault exits 0.
 - `mbt_scrub_rollback.py`: `cst btrfs scrub-limit` set and off from four
@@ -853,12 +854,12 @@ depend on `TMPDIR`. A machine over adapters that write through
 `write_atomic` fsyncs every file, many times slower on the btrfs home
 than on tmpfs (the pilot measured about 20 times; see
 [Test performance on a workstation](#test-performance-on-a-workstation)).
-The cache machine writes real files under a temporary
-folder; the bulk machine too, and it runs `cp` there. The scrub-limit and
-iocost machines run over in-memory port fakes, so they cover neither how
+The bulk machine writes real files under a temporary
+folder, and it runs `cp` there. The scrub-limit, iocost and cache
+machines run over in-memory port fakes, so they cover neither how
 the adapters write their files (modes, fsync, relabel) nor the commands
 they run: the ports' contract tests (`btrfs/tests/test_scrub_limit_ports.py`,
-`btrfs/tests/test_iocost_ports.py`) do. The game profile's machine runs
+`btrfs/tests/test_iocost_ports.py`, `btrfs/tests/test_cache_ports.py`) do. The game profile's machine runs
 over its real adapters, and its contract test
 (`cpu/tests/test_game_ports.py`) checks that each failure a `Faulty*`
 adapter stages has the shape the real one gives, and pins what the real
