@@ -111,7 +111,7 @@ _LONG_OPTIONS_WITH_ARGUMENT: Final = frozenset({"--check-hash-based-pycs"})
 # (; | & ( ), or a quote no word closes). In a command inside quotes (bash -c "python3 x.py"; echo "ok"), that
 # quote opens no quoted part of a word: it closes the quotes python3 is in, and ends the command. Inside double
 # quotes an escaped one (bash -c "python3 \"x.py\"") is the inner shell's quote: \"...\" is a quoted part of a
-# word, and the word loses the backslashes the outer shell removes (_DOUBLE_QUOTE_ESCAPE).
+# word, and the word loses the backslashes the outer shell removes (_unescape_double_quoted).
 _REDIRECT: Final = "redirect"
 _WORD: Final = "word"
 _END: Final = "end"
@@ -507,6 +507,11 @@ def python_program(text: str, inside: str = "") -> tuple[ProgramKind, str] | Non
     return None
 
 
+def _unescape_double_quoted(text: str) -> str:
+    """Text inside double quotes as the shell passes it on: without the backslash of \\" \\\\ \\$ and \\`."""
+    return _DOUBLE_QUOTE_ESCAPE.sub(r"\1", text)
+
+
 def _command_words(text: str, inside: str = "") -> list[str]:
     """The words of the shell command text starts, without their quotes, up to what ends it (; | & ( ),
     a quote no word closes, or the quote `inside` that closes the quotes the command is in: _SHELL_TOKENS).
@@ -523,7 +528,7 @@ def _command_words(text: str, inside: str = "") -> list[str]:
         else:
             word = group(token, _WORD)
             if inside == _DOUBLE_QUOTE:
-                word = _DOUBLE_QUOTE_ESCAPE.sub(r"\1", word)
+                word = _unescape_double_quoted(word)
             words.append(word.translate(_UNQUOTE))
     return words
 
@@ -602,7 +607,7 @@ def _is_command_at(before: str, base: int) -> bool:
             return False
         inner = before[start:]
         if opener == _DOUBLE_QUOTE:
-            inner = _DOUBLE_QUOTE_ESCAPE.sub(r"\1", inner)
+            inner = _unescape_double_quoted(inner)
         return _is_command_at(inner, 0)
     return not _text_command(before[start:])
 
@@ -623,10 +628,9 @@ def _shell_code(outer: str, base: int) -> bool:
     words = [w.translate(_UNQUOTE) for w in outer[start:].split()]
     if not words or _SHELL_CODE_OPTION.fullmatch(words[-1]) is None:
         return False
-    for at, word in enumerate(words[:-1]):
-        if posixpath.basename(word) in _SHELLS and _only_options(words[at + 1 : -1]):
-            return True
-    return False
+    return any(
+        posixpath.basename(word) in _SHELLS and _only_options(words[at + 1 : -1]) for at, word in enumerate(words[:-1])
+    )
 
 
 def _only_options(words: Sequence[str]) -> bool:
