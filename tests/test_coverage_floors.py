@@ -9,7 +9,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+from collections.abc import Mapping
 import os
+import shutil
 import subprocess
 import tempfile
 from typing import override
@@ -20,6 +22,7 @@ from tests import coverage_floors
 from tests.coverage_floors import COVERAGE_FLOORS, floor_problems, layer_counts, percentages
 from tests.repo_files import REPO
 from tests.test_workflow_audit import INVOWKFILE, task_script
+from tests.xdg_cache import NO_CACHE_BASE
 
 
 def summary(lines: int, covered_lines: int, branches: int = 0, covered_branches: int = 0) -> dict[str, object]:
@@ -131,8 +134,8 @@ class CoverageTaskOutTest(unittest.TestCase):
         os.makedirs(self.repo)
         os.makedirs(self.outside)
 
-    def run_task(self, out: str) -> subprocess.CompletedProcess[str]:
-        env = {"PATH": "/usr/bin:/bin", "HOME": self.tmp, "INVOWK_FLAG_OUT": out}
+    def run_task(self, out: str, environ: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        env = {"PATH": "/usr/bin:/bin", "HOME": self.tmp, "INVOWK_FLAG_OUT": out, **(environ or {})}
         return subprocess.run(
             ["bash", "-c", self.script],
             cwd=self.repo,
@@ -174,6 +177,47 @@ class CoverageTaskOutTest(unittest.TestCase):
         # It went on to the tools, which this scratch checkout does not have.
         self.assertIn("tests/uv-dev", r.stderr)
         self.assertNotEqual(r.returncode, 0)
+
+    def checkout_module(self, text: str) -> None:
+        """Give the scratch checkout the tests package with this text as its xdg_cache.py."""
+        os.makedirs(os.path.join(self.repo, "tests"))
+        shutil.copyfile(os.path.join(REPO, "tests", "__init__.py"), os.path.join(self.repo, "tests", "__init__.py"))
+        with open(os.path.join(self.repo, "tests", "xdg_cache.py"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_the_default_folder_is_under_the_dev_tools_cache_folder(self) -> None:
+        # Without --out: tests/xdg_cache.py's cache_base, so a relative or empty XDG_CACHE_HOME is ignored.
+        with open(os.path.join(REPO, "tests", "xdg_cache.py"), encoding="utf-8") as fh:
+            self.checkout_module(fh.read())
+        xdg = os.path.join(self.outside, "xdg")
+        home_cache = os.path.join(self.tmp, ".cache")
+        for environ, base in (
+            ({"XDG_CACHE_HOME": xdg}, xdg),
+            ({"XDG_CACHE_HOME": "rel"}, home_cache),
+            ({"XDG_CACHE_HOME": ""}, home_cache),
+            ({}, home_cache),
+        ):
+            with self.subTest(environ=environ):
+                folder = os.path.join(base, "cst-coverage")
+                shutil.rmtree(folder, ignore_errors=True)
+                r = self.run_task("", environ)
+                self.assertNotIn("--out must be", r.stderr)
+                self.assertEqual(len(os.listdir(folder)), 1)
+                self.assertEqual(os.listdir(self.repo), ["tests"])
+                # It went on to the tools, which this scratch checkout does not have.
+                self.assertIn("tests/uv-dev", r.stderr)
+                self.assertNotEqual(r.returncode, 0)
+
+    def test_no_cache_folder_stops_before_anything_is_made(self) -> None:
+        # The real cache_base gives None only for a user with no absolute home in the password database, which
+        # a test cannot arrange: the scratch checkout's xdg_cache.py stands in for it.
+        self.checkout_module(f"NO_CACHE_BASE = {NO_CACHE_BASE!r}\n\n\ndef cache_base(environ):\n    return None\n")
+        r = self.run_task("", {"XDG_CACHE_HOME": "rel"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"test coverage: {NO_CACHE_BASE}", r.stderr)
+        self.assertNotIn("tests/uv-dev", r.stderr)
+        self.assertEqual(os.listdir(self.repo), ["tests"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, ".cache")))
 
 
 if __name__ == "__main__":

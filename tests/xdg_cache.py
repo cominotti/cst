@@ -2,8 +2,8 @@
 """The user's cache folder, as the dev tools under tests/ find it.
 
 tests/run_unit.py (its durations file), tests/mbt/profiles.py (Hypothesis's folder), tests/quint/cst-quint
-(its tools) and tests/mutation/cst-mutation (its output folder) use it; tests/uv-dev, a bash script, follows
-the same rule.
+(its tools), tests/mutation/cst-mutation (its output folder) and the coverage task of invowkfile.cue (its
+default folder) use it; tests/uv-dev, a bash script, follows the same rule.
 
 Standard library only, and Python 3.12 code: the tools that import it run on /usr/bin/python3 without uv,
 some on CI's runner host (3.12).

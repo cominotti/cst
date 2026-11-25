@@ -261,7 +261,8 @@ would end up in every snapshot unless it is marked as a cache (below). `tests/uv
 where `<key>` is the first 12 hex digits of the SHA-1 of the checkout's
 physical path (`pwd -P`): one environment per checkout or worktree. The
 cache folder, here and for every dev tool (`tests/uv-dev`, `tests/run_unit.py`'s
-durations file, the mbt profiles, `cst-mutation`, `cst-quint`), follows one
+durations file, the mbt profiles, `cst-mutation`, `cst-quint`, the default
+folder of `invowk cmd test coverage`), follows one
 rule (`tests/xdg_cache.py`, and the same in `tests/uv-dev`'s bash): an
 absolute `XDG_CACHE_HOME`; else `.cache` under an absolute `HOME`; else
 under the home folder of the password database, when it is absolute. A relative `XDG_CACHE_HOME`
@@ -622,7 +623,8 @@ the same Fedora 45 image and as the same user as the fast gates, and
 uploads the reports as the `nightly-coverage-report` artifact.
 
 `--out DIR` (absolute, outside the checkout; by default a new folder under
-`${XDG_CACHE_HOME:-~/.cache}/cst-coverage/`) receives `report.txt` (per
+`${XDG_CACHE_HOME:-~/.cache}/cst-coverage/`, the cache folder of
+`tests/xdg_cache.py`) receives `report.txt` (per
 file), `coverage.json`, `html/index.html` (each file with the lines no
 test ran), `floors.txt` and coverage.py's data file. A relative folder, or
 one inside the checkout (also through a symlink), is refused before
