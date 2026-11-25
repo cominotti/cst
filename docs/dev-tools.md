@@ -623,8 +623,9 @@ the same Fedora 45 image and as the same user as the fast gates, and
 uploads the reports as the `nightly-coverage-report` artifact.
 
 `--out DIR` (absolute, outside the checkout; by default a new folder under
-`${XDG_CACHE_HOME:-~/.cache}/cst-coverage/`, the cache folder of
-`tests/xdg_cache.py`) receives `report.txt` (per
+`cst-coverage/` in the cache folder `tests/xdg_cache.py` finds:
+`$XDG_CACHE_HOME` only when it is absolute, else `.cache` in the home
+folder; with none, the task stops) receives `report.txt` (per
 file), `coverage.json`, `html/index.html` (each file with the lines no
 test ran), `floors.txt` and coverage.py's data file. A relative folder, or
 one inside the checkout (also through a symlink), is refused before
