@@ -155,7 +155,7 @@ def _dir_is_nonempty(path: str) -> bool:
 def _ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
     """The folder at host_path (created 0700, and labelled as root, when missing), then made 0700 and
     the user's through a descriptor opened without following a link: a link put there after the
-    probe fails (ELOOP) instead of having its target changed."""
+    probe fails (ENOTDIR, as O_NOFOLLOW with O_DIRECTORY gives) instead of having its target changed."""
     ensure_dir(host_path, DIR_MODE_PRIVATE, relabel=True)
     fd = os.open(host_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
