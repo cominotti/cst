@@ -2570,6 +2570,27 @@ class OutcomeRecordTest(Base):
             ),
         )
 
+    def test_status_reads_the_record_as_cst_doctor_does(self) -> None:
+        # A byte that is not UTF-8 in a damaged record: U+FFFD, as cst doctor decodes it (status said it
+        # could not read the record while doctor showed it).
+        self.fs.set(self.vols, nocow=True)
+        os.makedirs(os.path.dirname(self.outcome))
+        with open(self.outcome, "wb") as f:
+            f.write(b'{"v": 1, "outcome": "gave-up", "at": 1700000000, "volumes": "v", "reason": "bad \xff byte"}')
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        _rc, out = self.call(self.cli.status)
+        self.assertIn(
+            f"  migration gave up {when}: bad \N{REPLACEMENT CHARACTER} byte; run cst btrfs install to try again\n", out
+        )
+        # Its folder a file: no record there, for doctor too.
+        os.remove(self.outcome)
+        os.rmdir(os.path.dirname(self.outcome))
+        with open(os.path.dirname(self.outcome), "w") as f:
+            f.write("in the way\n")
+        self.assertEqual(
+            self.call(self.cli.status), (0, f"{self.vols}: new volumes NOCOW; 0 of 0 volume(s) fully NOCOW\n")
+        )
+
     def test_a_new_request_removes_the_record(self) -> None:
         self.fs.set(self.vols, nocow=True)
         self.volume("cow")

@@ -2455,6 +2455,14 @@ class DockerNocowOutcomeTest(Scratch):
             ["  info   Docker volumes NOCOW: cannot tell whether a migration is scheduled (Permission denied)"],
         )
 
+    def test_a_record_whose_folder_is_a_file_is_none(self) -> None:
+        # No record can be there, as the helper's status reads it (doctor said it could not read it).
+        shutil.rmtree(self.state_dir)
+        with open(self.state_dir, "w") as f:
+            f.write("in the way\n")
+        lines = self.lines(self.run_tool().stdout)
+        self.assertEqual([ln for ln in lines if "outcome" in ln or "scheduled" in ln], [], lines)
+
     def test_a_record_it_cannot_read_or_of_a_newer_cst_is_info(self) -> None:
         path = "/var/lib/docker-volumes-nocow/outcome"
         for text in (

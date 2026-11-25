@@ -27,11 +27,10 @@ from btrfs.docker_volumes_nocow.domain import (
     daemon_args,
     is_stored_postponed,
     oldest_first,
-    outcome_unreadable,
     parse_outcome,
     service_wait_reason,
 )
-from cst_core.adapters.files import CounterFile, write_atomic
+from cst_core.adapters.files import CounterFile, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
@@ -327,14 +326,10 @@ class NocowStateFiles:
             os.remove(self.paths.postponed)
 
     def read_outcome(self) -> OutcomeRead:
-        try:
-            with open(self.paths.outcome, encoding="utf-8") as f:
-                text = f.read()
-        except FileNotFoundError:
-            return parse_outcome(None, self.paths.outcome)
-        except OSError, ValueError:  # a folder in its place, no permission, bytes that are not UTF-8
-            return outcome_unreadable(self.paths.outcome)
-        return parse_outcome(text, self.paths.outcome)
+        # One open tells a file that is not there (None) from one there that cannot be read (a folder in
+        # its place, no permission: "", which no record parses as); bytes that are not UTF-8 become
+        # U+FFFD, as cst doctor reads the record.
+        return parse_outcome(read_text(self.paths.outcome, unreadable=""), self.paths.outcome)
 
     def write_outcome(self, record: OutcomeRecord) -> None:
         # write_atomic creates a missing folder 0755, whatever the umask (sudo keeps the user's).

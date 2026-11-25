@@ -69,7 +69,7 @@ def _nocow_outcome(host: DoctorHostPort) -> OutcomeRead:
     try:
         with host.open_text(host.path(NOCOW_OUTCOME)) as f:
             text = f.read(65536)
-    except FileNotFoundError:
+    except FileNotFoundError, NotADirectoryError:  # none there (its folder may be a file), as the helper reads it
         return parse_outcome(None, NOCOW_OUTCOME)
     except OSError, ValueError:
         return outcome_unreadable(NOCOW_OUTCOME)
