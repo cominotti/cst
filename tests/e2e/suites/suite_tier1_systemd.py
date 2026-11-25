@@ -9139,14 +9139,16 @@ echo E2E-OK
         call): the set-property works, and game.intended's last record of that setting is still the one 'on'
         wrote before the set (machine.slice CPUWeight 10 10). When machine.slice's CPUWeight then drifts, the
         next tick with the real systemctl sets it again, and 'off' gives machine.slice its own CPUWeight back.
-        The old 'on' added a record with an empty form after the set, which won: no tick saw that drift."""
+        The old 'on' added a record with an empty form after the set, which won: no tick saw that drift. The
+        wrapper notes each call in /var/tmp/e2e-210-ran, and the test checks it refused the read-back, so a
+        wrapper that never ran cannot pass it."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
             """
             printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
             python3 -I -B /opt/cst-rw/cpu/game-profile off || true
-            rm -rf /var/tmp/e2e-210-bin
+            rm -rf /var/tmp/e2e-210-bin /var/tmp/e2e-210-ran
             rm -f /etc/cpu-setup/cpu-setup.conf
             if [[ -e /tmp/e2e-210-conf.bak ]]; then mv /tmp/e2e-210-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rmdir /etc/cpu-setup 2>/dev/null || true
@@ -9171,12 +9173,17 @@ echo E2E-OK
             [[ "$own" != 10 ]] || { echo "the test cannot bite: machine.slice CPUWeight is already 10" >&2; exit 1; }
             install -d /var/tmp/e2e-210-bin  # not /tmp: noexec here, and a PATH entry there is skipped
             real=$(command -v systemctl)
-            printf '#!/bin/bash\nif [[ "$*" == "show -P CPUWeight machine.slice" ]]; then echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
+            rm -f /var/tmp/e2e-210-ran
+            # The wrapper notes each call it sees, so a wrapper that never ran (a noexec folder, a PATH the code
+            # fixes itself) fails the test instead of passing it on the old code too.
+            printf '#!/bin/bash\necho "$*" >>/var/tmp/e2e-210-ran\nif [[ "$*" == "show -P CPUWeight machine.slice" ]]; then echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
                 "$real" >/var/tmp/e2e-210-bin/systemctl
             chmod 0755 /var/tmp/e2e-210-bin/systemctl
             touch /run/cpu-setup/manual
             got=$(PATH=/var/tmp/e2e-210-bin:$PATH gp on 2>&1)
             [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || { echo "on did not set it: $got" >&2; exit 1; }
+            grep -qxF 'show -P CPUWeight machine.slice' /var/tmp/e2e-210-ran \
+                || { echo "the wrapper did not refuse the read-back; it saw: $(cat /var/tmp/e2e-210-ran 2>&1)" >&2; exit 1; }
             last=$(grep '^prop sys machine\.slice CPUWeight ' "$intended" | tail -n 1)
             [[ "$last" == 'prop sys machine.slice CPUWeight 10 10' ]] \
                 || { echo "game.intended:" >&2; cat "$intended" >&2; exit 1; }
@@ -9187,7 +9194,7 @@ echo E2E-OK
             gp off >/dev/null
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
                 || { echo "machine.slice CPUWeight after off: $(systemctl show -P CPUWeight machine.slice)" >&2; exit 1; }
-            rm -rf /var/tmp/e2e-210-bin
+            rm -rf /var/tmp/e2e-210-bin /var/tmp/e2e-210-ran
             echo E2E-OK
             """,
         ).stdout
