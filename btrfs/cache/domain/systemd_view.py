@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """What systemd has loaded of /etc/fstab, from the mount units it lists: whether a cache attach or detach
 left it behind (an earlier run stopped between its /etc/fstab write and its daemon-reload), for attach,
-plan, status and cst doctor. Pure: the caller asks `systemctl show -p MOUNT_UNIT_PROPS '*.mount'`."""
+plan, status and cst doctor. Pure: the caller asks `systemctl show --state=loaded -p MOUNT_UNIT_PROPS
+'*.mount'` (every mount unit systemd has loaded, active or not)."""
 
 from __future__ import annotations
 
@@ -14,7 +15,8 @@ from cst_core.domain.text import YES_WORDS
 from cst_core.domain.units import LoadState
 
 MOUNT_UNIT_PROPS: Final = ("Id", "LoadState", "SourcePath", "NeedDaemonReload", "Where")
-"""What systemd_behind_fstab reads of each loaded mount unit (systemctl show -p ... '*.mount')."""
+"""What systemd_behind_fstab reads of each loaded mount unit, active or not (systemctl show --state=loaded
+-p ... '*.mount')."""
 
 
 def _loaded_units(units: Sequence[Mapping[str, str]]) -> list[Mapping[str, str]]:
