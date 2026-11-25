@@ -581,6 +581,20 @@ def nas_out_of_range(settings: Mapping[str, str], now: int) -> tuple[str, ...]:
     return tuple(bad)
 
 
+def nas_unreadable(settings: Mapping[str, str]) -> tuple[str, ...]:
+    """The NAS settings whose number the run cannot compute (guard_number's NOT_A_NUMBER or
+    BAD_NUMBER: abc, 1 x, 08, a no-break space, or an operator _Arith does not read although bash
+    would compute it: 1<<8, ~5), in DEFAULTS' order: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS
+    and NAS_CHECK_EVERY_DAYS as "VALUE * 86400" (as due() puts them in)."""
+    bad: list[str] = []
+    for key in DEFAULTS:
+        if key == "NAS_STALE_DAYS" or key in _NAS_DAY_KEYS:
+            expr = settings[key] if key == "NAS_STALE_DAYS" else f"{settings[key]} * {DAY}"
+            if not isinstance(guard_number(expr), int):
+                bad.append(key)
+    return tuple(bad)
+
+
 def restic_line(line: str) -> str:
     """restic's output in the journal format: errors and warnings at level 4, the rest at 6."""
     if re.match(r"Fatal|[Ee]rror|[Ww]arning", line):

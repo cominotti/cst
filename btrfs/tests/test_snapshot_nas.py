@@ -844,14 +844,90 @@ class MaintenanceTest(Base):
 
     def test_a_last_prune_bash_cannot_read_is_not_due_before_its_interval_is_read(self) -> None:
         # bash failed on NOW - 08 first, so a name in NAS_PRUNE_EVERY_DAYS was never read: no prune, and
-        # the run goes on (the runtime read the interval first and stopped).
+        # the run goes on (the runtime read the interval first and stopped). The name is a number the
+        # run cannot compute: its line at the start, and exit 1 at the end.
         self.known_repository()
         self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="x")
         self.write(self.state_file("nas-last-prune"), "08\n")
-        rc, _, err = self.nas()
-        self.assertEqual(rc, 0, err)
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(lines[0], self.unreadable_line("NAS_PRUNE_EVERY_DAYS", "x"))
         self.assertEqual(self.restic_commands()[3:], ["backup", "forget", "check", "snapshots"])
         self.assertNotIn("--prune", self.restic_calls()[4])
+
+    def unreadable_line(self, key: str, value: str) -> str:
+        left_out = {
+            "NAS_STALE_DAYS": "no alert for a stale NAS backup",
+            "NAS_PRUNE_EVERY_DAYS": "no prune (forget runs without --prune)",
+            "NAS_CHECK_EVERY_DAYS": "no repository check",
+        }[key]
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        return log(
+            3,
+            f"{key}={value!r} in {conf}: not a number CST's arithmetic reads: {left_out} until it is fixed; "
+            "the NAS run ends with an error after its backup and forget",
+        )
+
+    def test_a_nas_number_the_arithmetic_cannot_compute_ends_the_run_after_its_backup_and_forget(self) -> None:
+        # bash stopped at a name (set -u: abc, 1 x) and the old runtime where it read the number; at an
+        # error (~5, 1<<8: operators _Arith does not read, a no-break space) the comparison was false and
+        # the run went on with exit 0: no prune, no check or no stale alert ever, without a word naming
+        # the setting. Now each gets a line at the start, the run does what does not depend on it (the
+        # backup, forget), leaves out what it governs, and ends with exit 1.
+        self.known_repository()
+        for key in ("NAS_STALE_DAYS", "NAS_PRUNE_EVERY_DAYS", "NAS_CHECK_EVERY_DAYS"):
+            for value in ("1 x", "~5", "1<<8", "abc", "7\xa0"):
+                with self.subTest(key=key, value=value):
+                    self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", **{key: value})
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(self.state_file("nas-done-home"))
+                    self.days_ago("nas-last-prune", 7)
+                    self.days_ago("nas-last-check", 30)
+                    rc, lines, err = self.nas()
+                    self.assertEqual(rc, 1, err)
+                    self.assertEqual(lines[0], self.unreadable_line(key, value))
+                    self.assertNotIn("not a number", err)
+                    commands = self.restic_commands()
+                    want = ["backup", "forget", "check", "snapshots"]
+                    if key == "NAS_CHECK_EVERY_DAYS":
+                        want.remove("check")
+                    self.assertEqual(commands[3:], want)
+                    forget = self.restic_calls()[4]
+                    self.assertEqual("--prune" in forget, key != "NAS_PRUNE_EVERY_DAYS", forget)
+                    self.assertGreater(int(self.read_state("nas-last-ok")), time.time() - 120)
+        # With the values fixed, the same run prunes and checks and ends with exit 0 (cannot bite otherwise).
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="7", NAS_CHECK_EVERY_DAYS="30")
+        os.remove(self.state_file("nas-done-home"))
+        self.days_ago("nas-last-prune", 7)
+        self.days_ago("nas-last-check", 30)
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertFalse([ln for ln in lines if "CST's arithmetic" in ln], lines)
+        self.assertEqual(self.restic_commands()[3:], ["backup", "forget", "check", "snapshots"])
+        self.assertIn("--prune", self.restic_calls()[4])
+
+    def stale_days_unreadable(self, nas_path: str, body: str) -> None:
+        """A stale backup and NAS_STALE_DAYS="1 x": the line, no alert (the run cannot say when the
+        backup is stale), exit 1. With NAS_STALE_DAYS=7 the alert comes (cannot bite otherwise)."""
+        self.days_ago("nas-last-ok", 8)
+        self.conf(NAS_ENABLED="1", NAS_PATH=nas_path, NAS_STALE_DAYS="1 x")
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(lines[0], self.unreadable_line("NAS_STALE_DAYS", "1 x"))
+        self.assertEqual(self.notified(), [])
+        self.assertEqual(self.calls("restic"), [])
+        self.conf(NAS_ENABLED="1", NAS_PATH=nas_path, NAS_STALE_DAYS="7")
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertFalse([ln for ln in lines if "CST's arithmetic" in ln], lines)
+        self.assertEqual(self.notified(), [self.stale(body)])
+
+    def test_an_unreadable_stale_days_on_an_unreachable_nas(self) -> None:
+        self.machine(sftp_rc=255)
+        self.stale_days_unreadable("/volume1/restic", "The NAS was unreachable at the last attempts.")
+
+    def test_an_unreadable_stale_days_when_not_configured(self) -> None:
+        self.stale_days_unreadable("", "The NAS backup is not configured completely.")
 
     def test_settings_of_the_maintenance(self) -> None:
         self.conf(

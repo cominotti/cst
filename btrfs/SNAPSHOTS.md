@@ -1403,6 +1403,21 @@ a number past 2**63 - 1 (bash would wrap it): not wrapped; ignored`) and uses
 the default of that setting. Before, `NAS_CHECK_EVERY_DAYS=4611686018427387904`
 wrapped to 0 days, a check at every run.
 
+A NAS number the run cannot compute at all (`abc`, `1 x`, `08`, a
+no-break space, or an operator CST's arithmetic does not read although bash
+would: `1<<8`, `~5`) in `NAS_STALE_DAYS`, `NAS_PRUNE_EVERY_DAYS` or
+`NAS_CHECK_EVERY_DAYS` gets a line at the start of the run that names the
+setting and its value (`NAS_PRUNE_EVERY_DAYS='1 x' in ...snapshots.conf: not
+a number CST's arithmetic reads: no prune (forget runs without --prune)
+until it is fixed; ...`), whether this run would read it or not. The run
+still does what does not depend on it: the backup, and `forget` with the
+retention. It leaves out what the setting governs (the prune, the
+repository check, or the alert for a stale backup), and it ends with exit 1,
+so the `btrfs-snapshot-nas` service shows as failed until the line is
+fixed. Before, a name stopped the run where it read the number, and any
+other such value made that comparison false without a word: no prune, no
+check or no stale alert, ever.
+
 ### The VM backups share this repository
 
 `cst vm backup --nas` (and its weekly timer) stores the libvirt VM in the
