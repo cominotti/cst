@@ -551,11 +551,18 @@ class FaultPoints:
             return self.plan.step(point, effect, failed)
         armed = err
 
-        def fails() -> T:
+        def answers() -> None:
             self.failing[point] = (armed, None if left is None else left - 1)
             self.answered.append(point)
-            if failed is None:
-                raise armed
+
+        if failed is None:
+            # The failure is recorded inside the plan's step and raised only after it returned, so a KILL
+            # armed at this call fires after the failure was recorded, as at any other call.
+            self.plan.step(point, answers)
+            raise armed
+
+        def fails() -> T:
+            answers()
             return failed(armed)
 
         return self.plan.step(point, fails, failed)

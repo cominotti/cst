@@ -447,3 +447,27 @@ class ScrubWorldFailTest(unittest.TestCase):
         self.assertEqual(world.plan.calls, ["drop-in text"])
         self.assertEqual(world.reload_timeouts, [])  # a dead process asks for no reload
         self.assertEqual(world.failing["systemctl daemon-reload"][1], 1)  # still armed: it never ran
+
+    def test_a_kill_armed_at_a_call_failed_by_fail_without_a_callback_fires(self) -> None:
+        # "settings replace" reports a failure by raising (no `failed` callback): the failure is recorded,
+        # its effect never runs, and the kill armed at that call still fires.
+        world = ScrubWorld()
+        world.plan.arm((FaultMode.KILL, 1))
+        world.fail("settings replace", OSError(errno.EIO, "Input/output error"), times=1)
+        ran: list[str] = []
+        with self.assertRaises(Killed):
+            world.step("settings replace", lambda: ran.append("replaced"))
+        self.assertEqual(ran, [])
+        self.assertEqual(world.answered, ["settings replace"])
+        self.assertEqual(world.plan.calls, ["settings replace"])
+        self.assertEqual(world.failing["settings replace"][1], 0)  # used up
+
+    def test_a_call_failed_by_fail_without_a_callback_raises_its_error(self) -> None:
+        world = ScrubWorld()
+        world.fail("settings replace", OSError(errno.EIO, "Input/output error"), times=1)
+        with self.assertRaises(OSError) as caught:
+            world.step("settings replace", lambda: None)
+        self.assertEqual(caught.exception.errno, errno.EIO)
+        self.assertEqual(world.answered, ["settings replace"])
+        world.step("settings replace", lambda: None)  # used up: the next call runs
+        self.assertEqual(world.answered, ["settings replace"])
