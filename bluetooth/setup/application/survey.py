@@ -474,10 +474,10 @@ class Survey:
         self.lw_active = u.is_active(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
         if self.lw_want:
             want = (OwnedState.OK, OwnedState.OK, "enabled", ActiveState.ACTIVE)
-            done = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) == want
-            self.lw_change = not done or bool(self.lw_stale)
+            ours_change = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) != want
         else:
-            self.lw_change = self.lw_ours_present() or bool(self.lw_stale)
+            ours_change = self.lw_ours_present()
+        self.lw_change = ours_change or bool(self.lw_stale)
 
     @cached_property
     def lw_unit_file(self) -> str:
@@ -634,8 +634,7 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
-        for row in watcher_unit.stale_rows(self.m.files, self.lw_stale, self.tilde):
-            self.item(*row)
+        self._lw_stale_report()
         if self.lw_enabled != EnablementState.ENABLED or self.lw_active != ActiveState.ACTIVE:
             why = (
                 f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it"
@@ -659,6 +658,10 @@ class Survey:
             self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
         if self.lw_prog_st == OwnedState.CONFLICT:
             self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
+        self._lw_stale_report()
+
+    def _lw_stale_report(self) -> None:
+        """The rows of an older CST's copies of the watcher's unit (watcher_unit.stale_rows)."""
         for row in watcher_unit.stale_rows(self.m.files, self.lw_stale, self.tilde):
             self.item(*row)
 
