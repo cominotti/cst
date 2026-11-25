@@ -21,6 +21,7 @@ from cpu.game.domain.leftovers import (
     LEFTOVER_DROPINS_TEXT,
     Entry,
     UserSide,
+    entry_key,
     leftover_entries,
     leftovers_text,
     newer_leftovers,
@@ -106,7 +107,7 @@ def undo_entries(
             elif profile.undo_record(rec, reload, say=say):
                 continue
             else:
-                user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
+                user = (uid or profile.uid(say=say) or None) if of_user_manager(rec) else None
             failed.append((user, rec))
     finally:
         profile.s = settings
@@ -140,12 +141,6 @@ def user_side(profile: GameProfile, uid: str | None, *, say: bool) -> UserSide:
     return UserSide.OWN if profile.act_for(uid, say=say) else UserSide.ORPHAN
 
 
-def _key(entry: Entry) -> Entry | Record:
-    """What tells two entries apart for keep and the retry's lines: a reload due by its manager and uid, a
-    record by itself (the uid a failed undo is kept for may differ from the one it was read with)."""
-    return entry if reload_of(entry[1]) is not None else entry[1]
-
-
 def _write_leftovers(profile: GameProfile, entries: Sequence[Entry]) -> None:
     """game.leftovers holds the entries (an OSError when it cannot be written: the caller decides)."""
     write_atomic(profile.paths.leftovers, leftovers_text(entries), mode=0o644, durable=False, relabel=False)
@@ -164,30 +159,31 @@ def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | 
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
         return 0
-    held: set[Entry | Record] = set()
+    acting = profile.uid() or None  # what an entry of no user is for (entry_key)
+    held: set[Entry] = set()
     if kept is not None:
         try:
             _write_leftovers(profile, failed)
         except OSError:
-            still = {_key(e) for e in failed}
-            if all(_key(e) in still for e in kept):
-                held = {_key(e) for e in kept}
+            still = {entry_key(e, acting) for e in failed}
+            if all(entry_key(e, acting) in still for e in kept):
+                held = {entry_key(e, acting) for e in kept}
             else:
                 with contextlib.suppress(OSError):
                     os.unlink(path)
         else:
-            held = {_key(e) for e in failed}
+            held = {entry_key(e, acting) for e in failed}
     who = "off: " if off else ""
     for uid, rec in failed:
         what = undo_text(rec, profile.paths.epp, uid=uid)
         due = reload_of(rec) is not None
-        if _key((uid, rec)) not in held:
+        if entry_key((uid, rec), acting) not in held:
             profile.log(3, f"{who}could not keep {what} in {path}: " + ("not done" if due else "not undone"))
         elif off and due:
             profile.log(4, f"off: {what} failed: kept in {path} for the next off and tick")
         elif off:
             profile.log(4, f"off: could not undo {what}: kept in {path} for the next off and tick")
-    return sum(1 for e in failed if _key(e) in held)
+    return sum(1 for e in failed if entry_key(e, acting) in held)
 
 
 def user_manager_gone(profile: GameProfile, uid: str) -> bool:
@@ -308,9 +304,10 @@ def retry_kept(profile: GameProfile, *, say: bool) -> None:
         failed, dropped, skipped = undo_pass(profile, kept, kept, say=say)
         if dropins:
             profile.log(4, LEFTOVER_DROPINS_TEXT)
-        still = {_key(e) for e in failed} | dropped | skipped
+        acting = profile.uid() or None  # what an entry of no user is for (entry_key)
+        still = {entry_key(e, acting) for e in [*failed, *((None, r) for r in dropped)]} | skipped
         for uid, rec in kept:
-            if _key((uid, rec)) in still:
+            if entry_key((uid, rec), acting) in still:
                 continue
             what = undo_text(rec, profile.paths.epp, uid=uid)
             done = "ran" if reload_of(rec) is not None else "undid"

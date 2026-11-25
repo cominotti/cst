@@ -8394,6 +8394,72 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_209_cpu_game_profile_off_keeps_another_uid_s_entry_of_the_same_record(self) -> None:
+        """The real game profile with the real system and user managers. An earlier 'off' kept a new override of
+        user.slice's CPUWeight for uid U of e2e209, whose account is then gone while its user manager still runs
+        (game.leftovers "user U" / "prop usr user.slice CPUWeight new -"). tester's own 'on' records the same
+        text, and tester's 'off' undoes tester's and keeps U's entry, said kept. The old 'off' took U's entry
+        for a record of tester's game.state and dropped it: no entry and no warning were left for U's manager."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            for u in $(cat /tmp/e2e-209-uids 2>/dev/null); do
+                systemctl stop "user@$u.service" "user-runtime-dir@$u.service" 2>/dev/null || true
+            done
+            userdel -rf e2e209 2>/dev/null || true
+            rm -rf /home/e2e209 /tmp/e2e-209-uids
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-209-conf.bak ]]; then mv /tmp/e2e-209-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-209-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            # tester's user.slice has no override of its own: 'on' records a new one.
+            rm -f "/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf"
+            systemctl --user -M tester@ daemon-reload
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            useradd -m e2e209
+            ub=$(id -u e2e209)
+            echo "$ub" >>/tmp/e2e-209-uids
+            systemctl start "user@$ub.service"
+            userdel -f e2e209
+            if getent passwd "$ub" >/dev/null; then echo "uid $ub still has an account" >&2; exit 1; fi
+            test -d "/run/user/$ub/systemd"
+            want=$(printf '%s\n' 'cst-game-leftovers 2' "user $ub" 'prop usr user.slice CPUWeight new -')
+            printf '%s\n' "$want" >"$lo"
+            touch /run/cpu-setup/manual
+            gp on >/dev/null
+            grep -qx 'prop usr user.slice CPUWeight new -' "$st" || { echo "game.state:" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]]
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            test ! -e "$st"
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$tw" ]] \
+                || { echo "tester's user.slice CPUWeight after off: not $tw: $got" >&2; exit 1; }
+            [[ "$(cat "$lo" 2>/dev/null)" == "$want" ]] || { echo "game.leftovers: $(cat "$lo" 2>&1): $got" >&2; exit 1; }
+            grep -qF "off: could not undo user.slice CPUWeight (its runtime override): kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS)
     def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
         """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose

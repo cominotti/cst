@@ -106,15 +106,27 @@ def newer_leftovers(path: str, text: str) -> str | None:
     return LEFTOVERS_FORMAT.newer_text(path, found) if found > LEFTOVERS_FORMAT.version else None
 
 
-def merged_entries(kept: Sequence[Entry], state_recs: Sequence[Record], *, owner: str | None = None) -> list[Entry]:
+def entry_key(entry: Entry, acting: str | None) -> Entry:
+    """What tells two entries apart: the record with the uid it is for, an entry of the user manager that names
+    no uid being for the user acted for (acting: that user's uid, None for none). Two users' entries of one
+    record are two entries."""
+    uid, rec = entry
+    return (acting, rec) if uid is None and of_user_manager(rec) else entry
+
+
+def merged_entries(
+    kept: Sequence[Entry], state_recs: Sequence[Record], *, owner: str | None = None, acting: str | None = None
+) -> list[Entry]:
     """What 'off' undoes, in file order (it undoes the last first): the kept entries (older than any record of
     this game.state, its reload-due entries left out), then game.state's records, those of the user manager
-    for the uid owner (None: the user 'off' acts for). A kept record that is a record of this game.state too is dropped: an 'off' killed after it
-    wrote game.leftovers and before it removed game.state left both, and undoing it once keeps a property
-    touched twice ending at its oldest value."""
-    mine = set(state_recs)
-    old = [e for e in kept if e[1] not in mine and reload_of(e[1]) is None]
-    return old + [(owner if of_user_manager(r) else None, r) for r in state_recs]
+    for the uid owner (None: the user 'off' acts for, whose uid is acting). A kept entry that is an entry of
+    this game.state too, for the same uid (entry_key), is dropped: an 'off' killed after it wrote
+    game.leftovers and before it removed game.state left both, and undoing it once keeps a property touched
+    twice ending at its oldest value. Another uid's entry of the same record is kept."""
+    mine = [(owner if of_user_manager(r) else None, r) for r in state_recs]
+    keys = {entry_key(e, acting) for e in mine}
+    old = [e for e in kept if entry_key(e, acting) not in keys and reload_of(e[1]) is None]
+    return old + mine
 
 
 class UserSide(StrEnum):

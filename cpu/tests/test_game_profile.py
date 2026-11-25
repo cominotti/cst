@@ -57,6 +57,7 @@ from cpu.game.domain import (
 )
 from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
 from cpu.game.domain.leftovers import (
+    entry_key,
     leftover_entries,
     leftovers_text,
     merged_entries,
@@ -2621,6 +2622,21 @@ class LeftoversFormatTest(unittest.TestCase):
             merged_entries([(None, old), (None, both)], [both, mine]), [(None, old), (None, both), (None, mine)]
         )
 
+    def test_the_undo_order_keeps_another_uid_s_entry_of_a_record_of_this_game_state(self) -> None:
+        # A user manager's record has the same text for every user: a kept entry of it is dropped only when it is
+        # for the uid game.state's records are for (acting, for an entry that names none), never another uid's.
+        rec = ("prop", "usr", "user.slice", "CPUWeight", "new", "-")
+        self.assertEqual(merged_entries([("1001", rec)], [rec], acting="1000"), [("1001", rec), (None, rec)])
+        self.assertEqual(merged_entries([("1000", rec)], [rec], acting="1000"), [(None, rec)])
+        self.assertEqual(merged_entries([(None, rec)], [rec], acting="1000"), [(None, rec)])
+        # game.state's records for a uid 'off' does not act for (owner): that uid's kept entry is the duplicate.
+        self.assertEqual(
+            merged_entries([("1001", rec), ("1000", rec)], [rec], owner="1001", acting="1000"),
+            [("1000", rec), ("1001", rec)],
+        )
+        self.assertEqual(entry_key((None, rec), "1000"), ("1000", rec))
+        self.assertEqual(entry_key((None, ("reload", "sys")), "1000"), (None, ("reload", "sys")))
+
     def test_the_words(self) -> None:
         def epp(cpu: str) -> str:
             return f"/cpu{cpu}/epp"
@@ -2928,6 +2944,39 @@ class LeftoversTest(GameProfileCase):
         self.assertIn("undid e2e.slice MemoryLow (its runtime override), kept in", out.getvalue())
         self.assertFalse(os.path.exists(self.paths.leftovers))
         self.assertEqual(p.s.target_user, "nobody-here")
+
+    def test_off_keeps_another_uid_s_entry_of_the_same_record_as_game_state_s(self) -> None:
+        # uid 1001's account is gone while its user manager runs: an earlier 'off' kept its new override of
+        # user.slice's CPUWeight under its uid. USER's own 'on' records the same text. USER's 'off' undoes its own
+        # and keeps 1001's (the old 'off' dropped it as a record of this game.state: no entry, no warning).
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        kept = "cst-game-leftovers 2\nuser 1001\nprop usr user.slice CPUWeight new -\n"
+        self.write(self.paths.leftovers, kept)
+        self.run_profile("on")
+        self.assertIn("prop usr user.slice CPUWeight new -\n", self.read(self.state))
+        p, out = self.accounts_profile(USER)
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(self.ctrl("usr", "user.slice", "CPUWeight")))  # USER's undone
+        self.assertEqual(self.read(self.paths.leftovers), kept)
+        self.assertIn("off: could not undo user.slice CPUWeight (its runtime override): kept in", out.getvalue())
+
+    def test_a_retry_says_one_user_s_entry_undone_when_another_s_of_the_same_record_is_kept(self) -> None:
+        # Two kept entries of one record, USER's and uid 1001's (no account now, its user manager runs). USER's is
+        # undone and said so; 1001's is kept (the old retry took both for one entry: no line for USER's).
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        mine = self.ctrl("usr", "user.slice", "CPUWeight")
+        self.write(mine, "[Slice]\nCPUWeight=idle\n")
+        rec = "prop usr user.slice CPUWeight new -\n"
+        self.write(self.paths.leftovers, f"cst-game-leftovers 2\nuser {UID}\n{rec}user 1001\n{rec}")
+        self.no_game()
+        p, out = self.accounts_profile(USER)
+        self.assertEqual(p.tick(), 0)
+        self.assertFalse(os.path.exists(mine))
+        self.assertIn(
+            f"undid user.slice CPUWeight (its runtime override), kept in {self.paths.leftovers} by an earlier off",
+            out.getvalue(),
+        )
+        self.assertEqual(self.read(self.paths.leftovers), f"cst-game-leftovers 2\nuser 1001\n{rec}")
 
     def foreign_state(self) -> str:
         """A game.state of an 'on' for uid 1001 (another uid than USER's), with records of its user manager; USER

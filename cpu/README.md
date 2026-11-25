@@ -941,7 +941,11 @@ no `game.state` and the tick log `<5>undid ..., kept in
 /run/cpu-setup/game.leftovers by an earlier off` for each one done now: one
 that works now, and also one whose unit or folder is gone (below), which had
 nothing left to set. An `off` with a `game.state` undoes the kept records
-with its own and names only those that fail again. A user manager's record keeps the user it was for (every
+with its own and names only those that fail again (a kept record that is
+also one of its `game.state`, for the same user, is undone once: an `off`
+killed before it removed `game.state` left both; another user's entry of
+the same text, such as `prop usr user.slice CPUWeight new -`, stays its own
+entry, which versions before 2026-11 dropped as a duplicate). A user manager's record keeps the user it was for (every
 entry of the file is under a user line: `user UID`, or `user -` for none), so it is undone for that user whatever
 `TARGET_USER` says later, and never in another user's manager: when no
 account has that uid any more, the record stays kept while that uid's user

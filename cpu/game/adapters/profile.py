@@ -559,7 +559,9 @@ class GameProfile:
         if said is not None:
             self.log(*said)
         kept = read_kept(self, say=True)
-        failed, _dropped, _skipped = undo_pass(self, merged_entries(kept or [], recs, owner=owner), kept, say=True)
+        acting = (self.uid(say=True) or None) if bool(kept) else None  # the uid an entry of no user is for
+        entries = merged_entries(kept or [], recs, owner=owner, acting=acting)
+        failed, _dropped, _skipped = undo_pass(self, entries, kept, say=True)
         held = keep(self, failed, kept)
         for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
