@@ -99,6 +99,14 @@ def format_bytes_decimal(n: float) -> str:
     return f"{val} B"
 
 
+# The ASCII blanks str.strip() removes, apart from the separators U+001C-U+001F: space, tab, newline,
+# carriage return, form feed, vertical tab. str.strip() with no argument also removes U+0085, U+00A0
+# (no-break space), U+3000 (ideographic space) and other Unicode blanks, which neither bash nor systemd
+# treats as blanks. A word read from a settings file or argv is trimmed of these only
+# (cst_core.domain.text.strip_ascii_blanks).
+ASCII_BLANKS: Final = " \t\n\r\f\v"
+
+
 def _whole_number(digits: str) -> int | None:
     """int(DIGITS), or None for more digits than int() reads (sys.get_int_max_str_digits)."""
     try:
@@ -162,7 +170,7 @@ class ByteSize:
         letter lower() would fold to an ASCII one (the Kelvin sign K) is no size."""
         m = None
         if spec.isascii():
-            t = spec.strip().lower()
+            t = spec.strip(ASCII_BLANKS).lower()  # not U+001C-U+001F, which str.strip() also drops
             if re.fullmatch(r"0+(?:\.0*)?|off|none|no", t, re.ASCII):
                 return cls(0)
             m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?", t, re.ASCII)
@@ -233,21 +241,24 @@ class CpuSet:
 
     @classmethod
     def parse(cls, spec: str) -> Self:
-        """Parse a CPU range specification such as '0-3,6' into a CpuSet."""
-        cleaned = spec.strip()
+        """Parse a CPU range specification such as '0-3,6' into a CpuSet. ASCII blanks around the list and
+        around each element are dropped; a no-break space or another Unicode blank is an invalid element
+        (systemd's AllowedCPUs= refuses it too)."""
+        cleaned = spec.strip(ASCII_BLANKS)
         if not cleaned:
             raise DomainValidationError("CpuSet specification must not be empty")
         selected: set[int] = set()
         for part in cleaned.split(","):
-            token = part.strip()
+            token = part.strip(ASCII_BLANKS)
             if not token:
                 raise DomainValidationError(f"invalid empty range element in {spec!r}")
             if "-" in token:
                 selected.update(_parse_range(token, spec))
             else:
-                if not _is_index(token):
+                index = parse_whole_number(token)
+                if index is None:
                     raise DomainValidationError(f"invalid CPU index {token!r} in {spec!r}")
-                selected.add(int(token))
+                selected.add(index)
         return cls(frozenset(selected))
 
     def sorted_cpus(self) -> tuple[int, ...]:
@@ -255,18 +266,15 @@ class CpuSet:
         return tuple(sorted(self.cpus))
 
 
-def _is_index(text: str) -> bool:
-    """A CPU index as the kernel writes one: ASCII digits only (str.isdigit also takes "²", which int() refuses)."""
-    return text.isascii() and text.isdigit()
-
-
 def _parse_range(token: str, spec: str) -> range:
     """The CPUs of one "a-b" element (token) of the list spec; DomainValidationError when token is
-    not two indices around one dash, or when the range descends."""
+    not two indices around one dash, or when the range descends. An index is what parse_whole_number
+    reads: ASCII digits (str.isdigit also takes "²", which int() refuses) within int()'s digit limit."""
     start_s, sep, end_s = token.partition("-")
-    if not sep or "-" in end_s or not _is_index(start_s) or not _is_index(end_s):
+    start = parse_whole_number(start_s) if sep and "-" not in end_s else None
+    end = parse_whole_number(end_s) if start is not None else None
+    if start is None or end is None:
         raise DomainValidationError(f"invalid CPU range {token!r} in {spec!r}")
-    start, end = int(start_s), int(end_s)
     if start > end:
         raise DomainValidationError(f"descending CPU range {token!r} in {spec!r}")
     return range(start, end + 1)

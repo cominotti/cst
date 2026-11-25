@@ -147,6 +147,18 @@ class StatusMathTest(unittest.TestCase):
     def test_kv_skips_non_numbers(self) -> None:
         self.assertEqual(parse_kv("zswpout 5\nbad x\nshort\n"), {"zswpout": 5})
 
+    def test_kv_and_meminfo_take_ascii_digits_within_the_digit_limit(self) -> None:
+        # int() also read "+5", "1_0" and digits of another script ("\N{ARABIC-INDIC DIGIT THREE}" as
+        # 3), and raised ValueError past 4300 digits: none of them is a number of the kernel's files.
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        huge = "1" * 5000
+        for bad in ("+5", "1_0", three, huge):
+            with self.subTest(bad=bad[:12]):
+                self.assertEqual(parse_kv(f"zswpout {bad}\nnr -5\npswpin 7\n"), {"nr": -5, "pswpin": 7})
+        for bad in (three, huge, "\N{SUPERSCRIPT TWO}"):
+            with self.subTest(meminfo=bad[:12]):
+                self.assertEqual(parse_meminfo(f"MemTotal: {bad} kB\nZswap:  10 kB\n"), {"Zswap": 10240})
+
     def test_sysfs_size_is_ascii_digits_within_the_digit_limit(self) -> None:
         # The partition's size from sysfs: "2048" sectors is 1 MiB; a digit int() refuses ("²"), one of
         # another script ("٣", which int() reads as 3) or more digits than int() reads is no number.
@@ -216,6 +228,10 @@ class StatusMathTest(unittest.TestCase):
             ({"max_pool_percent": "20"}, 20 * gib),
             ({"max_pool_percent": "20", "accept_threshold_percent": "?"}, 20 * gib),
             ({"accept_threshold_percent": "90"}, None),
+            # Not ASCII digits: no number, as for a value that is not there.
+            ({"max_pool_percent": "\N{ARABIC-INDIC DIGIT TWO}\N{ARABIC-INDIC DIGIT ZERO}"}, None),
+            ({"max_pool_percent": "+20"}, None),
+            ({"max_pool_percent": "20", "accept_threshold_percent": "\N{ARABIC-INDIC DIGIT NINE}0"}, 20 * gib),
         ):
             with self.subTest(params=params):
                 s = zswap_summary(meminfo, {}, params)
@@ -1555,6 +1571,8 @@ class SwapSettingsFileTest(unittest.TestCase):
             "SWAP_PARTUUID=0a1b2c3d-02\n": "SWAP_SIZE_BYTES=: the partition's exact size",
             "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=128G\n": "SWAP_SIZE_BYTES=128G",
             "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=0\n": "SWAP_SIZE_BYTES=0",
+            # More digits than int() reads: the same problem line, not a ValueError.
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=" + "1" * 5000 + "\n": "SWAP_SIZE_BYTES=111",
             "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME='a b'\n": "SWAP_NAME=a b",
             "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME=../x\n": "SWAP_NAME=../x",
             "SWAP_SIZE_BYTES=4096\n": "SWAP_SIZE_BYTES is set, SWAP_PARTUUID is not",

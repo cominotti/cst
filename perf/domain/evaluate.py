@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Final
 
-from cst_core.domain.text import group
+from cst_core.domain.text import group, strip_ascii_blanks
 from cst_core.domain.values import CpuSet, format_bytes_human, format_cpulist
 from cpu.power.domain import boot_cstate_limit_us
 from perf.domain.axis import (
@@ -428,7 +428,7 @@ def _eval_cpu_cstates(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
     # value is cpu-power's 200 us; its error is cpu-power's to report.
     limit_us, _ = boot_cstate_limit_us(
         cpu.cstate_setting,
-        explicit=bool(cpu.cstate_setting.strip()),
+        explicit=bool(strip_ascii_blanks(cpu.cstate_setting)),  # as cpu-power reads it
         cpuidle_driver=cpu.cpuidle_driver or "",
     )
     worst_deep = None if limit_us is None else _worst_enabled_deep_cstate(cpu.idle_states, limit_us)

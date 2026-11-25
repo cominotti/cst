@@ -564,7 +564,10 @@ def parse_cpu_stat_seconds(text: str) -> float | None:
         k, _, v = line.partition(" ")
         usec = parse_whole_number(v.strip()) if k == "usage_usec" else None  # ASCII digits within int()'s limit
         if usec is not None:
-            return usec / 1e6
+            try:
+                return usec / 1e6
+            except OverflowError:  # more than about 308 digits: too large for a float, no number either
+                continue
     return None
 
 

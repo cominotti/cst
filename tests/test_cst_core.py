@@ -43,7 +43,9 @@ from cst_core.domain.dispatch import (
 )
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
 from cst_core.domain.plan import PlanItem
+from cst_core.domain.text import strip_ascii_blanks
 from cst_core.domain.values import (
+    ASCII_BLANKS,
     ByteSize,
     CpuSet,
     DomainValidationError,
@@ -89,6 +91,30 @@ class FakeRunner:
         if check and res.returncode != 0:
             raise RuntimeError(f"command failed: {cmd}")
         return res
+
+
+class AsciiBlanksTest(unittest.TestCase):
+    def test_only_ascii_blanks_are_trimmed(self) -> None:
+        # Space, tab, newline, carriage return, form feed and vertical tab; not the Unicode blanks
+        # str.strip() also removes (no-break space, ideographic space, NEL) nor the separators
+        # U+001C-U+001F, which bash and systemd keep in a word.
+        self.assertEqual(ASCII_BLANKS, " \t\n\r\f\v")
+        self.assertEqual(strip_ascii_blanks("  off\t\r\n"), "off")
+        self.assertEqual(strip_ascii_blanks("\f\voff \v"), "off")
+        self.assertEqual(strip_ascii_blanks(""), "")
+        self.assertEqual(strip_ascii_blanks(" \t "), "")
+        for kept in (
+            "\N{NO-BREAK SPACE}off",
+            "off\N{IDEOGRAPHIC SPACE}",
+            "\x1foff",
+            "off\x1c",
+            "off\x85",
+            "\N{LINE SEPARATOR}off",
+        ):
+            with self.subTest(kept=kept):
+                self.assertEqual(strip_ascii_blanks(kept), kept)
+                self.assertNotEqual(kept.strip(), kept)  # what str.strip() would have trimmed
+        self.assertEqual(strip_ascii_blanks(" \N{NO-BREAK SPACE}off\t"), "\N{NO-BREAK SPACE}off")
 
 
 class ValueObjectsTest(unittest.TestCase):
@@ -141,6 +167,15 @@ class ValueObjectsTest(unittest.TestCase):
         self.assertEqual(ByteSize.parse_iec("OFF"), ByteSize(0))
         self.assertEqual(Duration.parse_float("3S"), 3.0)
         self.assertEqual(Duration.parse(" 2h "), Duration(7200))
+
+    def test_a_size_is_trimmed_of_ascii_blanks_only(self) -> None:
+        # str.strip() also dropped the separators U+001C-U+001F, which are no blanks to bash or systemd
+        # (strip_ascii_blanks): "\x1foff" was 0, no cap. ASCII blanks around a size are still dropped.
+        for spec in ("\x1foff", "\x1f150G", "150G\x1c", "\x1d0", "\x1enone"):
+            with self.subTest(spec=spec), self.assertRaisesRegex(DomainValidationError, "is not a size"):
+                ByteSize.parse_iec(spec)
+        self.assertEqual(ByteSize.parse_iec("\t\r\f\v150G \n"), ByteSize(150 * 2**30))
+        self.assertEqual(ByteSize.parse_iec(" off\v"), ByteSize(0))
 
     def test_a_whole_number_is_ascii_digits_only(self) -> None:
         for text, want in (("0", 0), ("060", 60), ("300", 300)):
@@ -237,6 +272,19 @@ class ValueObjectsTest(unittest.TestCase):
         for bad in ("", " , ", "3-1", "a-b", "0-1-2", "cpu0", "²", "0-²", "٣"):
             with self.subTest(bad=bad), self.assertRaises(DomainValidationError):
                 CpuSet.parse(bad)
+        # ASCII blanks around the list and an element are dropped; a no-break space or an ideographic
+        # space is an invalid element, as systemd's AllowedCPUs= reads it (str.strip() dropped them).
+        self.assertEqual(CpuSet.parse(" 0-3, 6\n").cpus, frozenset({0, 1, 2, 3, 6}))
+        for bad in ("12-23\N{NO-BREAK SPACE}", "0-3,\N{IDEOGRAPHIC SPACE}6", "\N{NO-BREAK SPACE}1", "1\x1c"):
+            with self.subTest(blank=bad), self.assertRaises(DomainValidationError):
+                CpuSet.parse(bad)
+        # An index past int()'s digit limit (4300 digits) is an invalid index or range too, not the
+        # plain ValueError int() raises: callers that catch only DomainValidationError (cpu irq's
+        # BUILD_CPUS, cpu power's topology) would see a traceback.
+        for huge in ("1" * 5000, "0-" + "1" * 5000, "1" * 5000 + "-1"):
+            with self.subTest(huge=huge[:12]), self.assertRaises(DomainValidationError) as cm:
+                CpuSet.parse(huge)
+            self.assertIs(type(cm.exception), DomainValidationError)
         with self.assertRaises(DomainValidationError):
             CpuSet(frozenset())
         with self.assertRaises(DomainValidationError):

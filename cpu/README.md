@@ -357,7 +357,9 @@ is replaced and no longer stops `vm-pin` or `cpu-watch`.
 The game profile, `vm-pin` and `cst doctor` read this file as bash reads
 it when it sources it (cst_core's settings reader) (`BUILD_CPUS='12-23' # E-cores` is `12-23` for all of
 them). Keep to plain `KEY=value` lines: quote a value with blanks in single
-quotes. A line bash would read differently, or that it would run as a
+quotes. Blanks around a word or a CPU list are spaces and tabs; a no-break
+space is part of the value (`BUILD_CPUS='12-23<no-break space>'` is an
+invalid list, as systemd would read it). A line bash would read differently, or that it would run as a
 command (`BUILD_CPUS = 12-23`, a `$` or a backtick outside single quotes),
 sets nothing for `vm-pin`: `plan` and `status` print it with its line
 number, `apply` refuses to start, and `cst doctor` warns. The game profile

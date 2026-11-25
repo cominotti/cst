@@ -2289,6 +2289,16 @@ class PackageTest(unittest.TestCase):
             numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
             self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 3, 6])
 
+    def test_a_vm_conf_number_with_a_no_break_space_uses_the_default(self) -> None:
+        # The reader of a file only Python reads trims ASCII blanks only: the no-break space stays in the
+        # value, which is then no whole number in ASCII digits (str.strip() used to drop it: 8).
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "vm.conf")
+            with open(conf, "w", encoding="utf-8") as f:
+                f.write("VM_NAS_KEEP_WEEKLY=\N{NO-BREAK SPACE}8\nVM_NAS_KEEP_MONTHLY = 5\t\n")
+            numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY")
+            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 5])
+
     def test_every_no_word_turns_a_knob_off_and_anything_else_leaves_it_on(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "vm.conf")

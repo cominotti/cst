@@ -15,14 +15,23 @@ nas-enabled-at), and the alerts.
 Run with: invowk cmd test module btrfs.tests.test_snapshot_nas
 """
 
+import contextlib
+import io
 import json
 import os
 import signal
+import subprocess
+import tempfile
 import time
 from typing import override
 import unittest
+from unittest import mock
 
+from btrfs.snapshot_runtime.adapters.hourly import RunStopped
+from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
+from btrfs.snapshot_runtime.adapters.nas import Nas
 from btrfs.tests.snapshot_fakes import SCRIPT, RuntimeTest, log, read
+from cst_core.adapters.runner import SubprocessCommandRunner
 
 ALIAS = "btrfs-setup-nas"
 REPO_ID = "ab" * 32
@@ -595,6 +604,97 @@ class LeftoverMountTest(Base):
                 self.assertFalse(os.path.exists(self.path("run/btrfs-snapshot/pinned")))
 
 
+class DueTest(unittest.TestCase):
+    """Nas.due against the old bash's due() (git show 1fdafd7a^:btrfs/btrfs-snapshot, lines 1109-1115),
+    copied below with $(date +%s) replaced by a fixed NOW, case by case: due, not due, or the run
+    stopped (set -u: a name). One bash process; each case in a subshell, so a stop ends only its case."""
+
+    NOW = 1764000000
+    BASH = """set -Euo pipefail
+NOW="$1"
+due() {
+    local last
+    last="$(cat "$1" 2>/dev/null)" || return 0
+    [[ "${last}" =~ ^[0-9]+$ ]] || return 0
+    (( NOW - last >= $2 * 86400 ))
+}
+while IFS= read -r -d '' last && IFS= read -r -d '' days; do
+    printf '%s' "${last}" > "$3"
+    ( if due "$3" "${days}"; then echo due; else echo notdue; fi ) 2>/dev/null || echo stop
+done < "$2"
+"""
+    LASTS = (
+        str(NOW - 1000),
+        "0",
+        str(2**63),
+        str(2**64 - 1),
+        "99999999999999999999",
+        "1" * 5000,
+        "9" * 4301,
+        "08",
+        "0777",
+        "\N{ARABIC-INDIC DIGIT THREE}",
+        "",
+        " 1",
+    )
+    DAYS = (
+        "7",
+        "0",
+        "1",
+        "106751991167300",
+        "213503982334601",
+        "08",
+        "x",
+        "9223372036854775807",
+        "1+1",
+        "",
+        "3-1",
+        "(1+1)",
+        "1 + 1",
+        " 7 ",
+        "-1",
+        "2#1",
+        "1*2",
+        "x+1",
+        "1+x",
+    )
+
+    def test_due_decides_as_the_old_bash(self) -> None:
+        cases = [(last, days) for last in self.LASTS for days in self.DAYS]
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = os.path.join(tmp, "pairs")
+            with open(pairs, "w", encoding="utf-8") as f:
+                f.write("".join(f"{last}\0{days}\0" for last, days in cases))
+            r = subprocess.run(
+                ["/usr/bin/bash", "-c", self.BASH, "_", str(self.NOW), pairs, os.path.join(tmp, "bash-last")],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                check=True,
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+                timeout=120,
+            )
+            bash = r.stdout.splitlines()
+            self.assertEqual(len(bash), len(cases))
+            m = SnapshotRun({"CST_SNAPSHOT_ROOT": tmp}, SubprocessCommandRunner())
+            nas = Nas(m)
+            path = os.path.join(tmp, "nas-last-prune")
+            for (last, days), want in zip(cases, bash, strict=True):
+                with self.subTest(last=last[:24], digits=len(last), days=days):
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(last)
+                    m.settings["NAS_PRUNE_EVERY_DAYS"] = days
+                    with (
+                        mock.patch.object(SnapshotRun, "now", return_value=self.NOW),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        try:
+                            got = "due" if nas.due(path, "NAS_PRUNE_EVERY_DAYS") else "notdue"
+                        except RunStopped:
+                            got = "stop"
+                    self.assertEqual(got, want)
+
+
 class MaintenanceTest(Base):
     def known_repository(self) -> None:
         """The records are of this repository (else the run starts them over)."""
@@ -613,6 +713,27 @@ class MaintenanceTest(Base):
         # The snapshot is in the repository now: no backup, the maintenance all the same.
         self.assertEqual(self.restic_commands()[3:], ["forget", "check", "snapshots"])
         self.assertIn("--prune", self.restic_calls()[3])
+
+    def test_an_interval_is_put_into_the_arithmetic_as_text(self) -> None:
+        # bash's (( NOW - last >= DAYS * 86400 )) took DAYS as text: "1+1" is 1 + 86400 seconds, so a
+        # prune 1.5 days old is due (the runtime read 2 days: not due).
+        self.known_repository()
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="1+1")
+        self.days_ago("nas-last-prune", 1.5)
+        rc, _, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--prune", self.restic_calls()[4])
+
+    def test_a_last_prune_bash_cannot_read_is_not_due_before_its_interval_is_read(self) -> None:
+        # bash failed on NOW - 08 first, so a name in NAS_PRUNE_EVERY_DAYS was never read: no prune, and
+        # the run goes on (the runtime read the interval first and stopped).
+        self.known_repository()
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="x")
+        self.write(self.state_file("nas-last-prune"), "08\n")
+        rc, _, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.restic_commands()[3:], ["backup", "forget", "check", "snapshots"])
+        self.assertNotIn("--prune", self.restic_calls()[4])
 
     def test_settings_of_the_maintenance(self) -> None:
         self.conf(

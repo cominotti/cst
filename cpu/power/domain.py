@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from cst_core.domain.text import DRY_RUN_LINE, HELP_WORDS, enum_member
+from cst_core.domain.text import DRY_RUN_LINE, HELP_WORDS, enum_member, strip_ascii_blanks
 from cpu.game.domain import parse_cstate_limit_us
 
 DEFAULT_CPU_CSTATE_US: Final = 200
@@ -61,8 +61,9 @@ class GpuPmMode(StrEnum):
 
 
 def parse_gpu_pm_mode(raw: str) -> tuple[GpuPmMode, str | None]:
-    """Parse `GPU_PM_MODE`; blank uses `'always'`, invalid returns `('always', error)`."""
-    cleaned = raw.strip().lower()
+    """Parse `GPU_PM_MODE`; blank uses `'always'`, invalid returns `('always', error)`. ASCII blanks around
+    the word are dropped; a no-break space is part of it."""
+    cleaned = strip_ascii_blanks(raw).lower()
     if not cleaned:
         return GpuPmMode.ALWAYS, None
     member = enum_member(GpuPmMode, cleaned)

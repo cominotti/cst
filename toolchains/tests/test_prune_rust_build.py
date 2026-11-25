@@ -234,6 +234,28 @@ class SettingsTest(Base):
             with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration", msg=bad):
                 p(bad)
 
+    def test_off_and_yes_no_words_take_ascii_blanks_only(self) -> None:
+        # A no-break space or an ideographic space around the word is part of it, as bash and systemd
+        # read a word: "\N{NO-BREAK SPACE}off" is no off word (and no duration), "yes\N{IDEOGRAPHIC SPACE}"
+        # no yes. ASCII blanks around it are still dropped.
+        self.assertEqual(tcd_common.parse_off_or_duration(" off\t"), 0)
+        self.assertEqual(tcd_common.parse_off_or_duration("NONE\r"), 0)
+        self.assertTrue(tcd_common.parse_bool("YES\r"))
+        self.assertFalse(tcd_common.parse_bool(" no\t"))
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration"):
+            tcd_common.parse_off_or_duration("\N{NO-BREAK SPACE}off")
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration"):
+            tcd_common.parse_off_or_duration("off\N{IDEOGRAPHIC SPACE}")
+        for word in ("yes\N{IDEOGRAPHIC SPACE}", "\N{NO-BREAK SPACE}no"):
+            with self.subTest(word=word), self.assertRaisesRegex(tcd_common.ConfigError, "is not yes or no"):
+                tcd_common.parse_bool(word)
+        # A separator U+001F before off is part of the word for a size as for a duration: one file no
+        # longer takes "\x1foff" as no cap for RUST_BUILD_MAX_TOTAL and refuses it one line below.
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a size"):
+            tcd_common.parse_size("\x1foff")
+        with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration"):
+            tcd_common.parse_off_or_duration("\x1foff")
+
     def test_sizes(self) -> None:
         p = tcd_common.parse_size
         self.assertEqual(p("150G"), 150 << 30)
@@ -297,6 +319,10 @@ class SettingsTest(Base):
             "ORPHANS=maybe\n",
             "INCREMENTAL_IDLE=1h\n",
             "INCREMENTAL_IDLE=6\n",
+            # A no-break space is part of the word, as bash and systemd read it: no off, no yes.
+            "INCREMENTAL_IDLE=\N{NO-BREAK SPACE}off\n",
+            "ORPHANS=yes\N{NO-BREAK SPACE}\n",
+            "MAX_IDLE\N{NO-BREAK SPACE}= 3d\n",
         ):
             self.write_conf(text)
             with self.assertRaises(tcd_common.ConfigError, msg=text):
@@ -314,6 +340,12 @@ class SettingsTest(Base):
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 1)
         self.assertIn("shorter than RUST_BUILD_MIN_KEEP", out)
+        self.assertTrue(self.present("aa/0123456789abcd"))
+        # An off word with a no-break space stops the run too (the reader used to trim it: the rule off).
+        self.write_conf("INCREMENTAL_IDLE=\N{NO-BREAK SPACE}off\n")
+        rc, out = self.run_main("prune", "apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("is not a duration", out)
         self.assertTrue(self.present("aa/0123456789abcd"))
 
 

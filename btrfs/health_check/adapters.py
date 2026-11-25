@@ -32,6 +32,7 @@ from btrfs.health_check.domain import (
     awk_int,
     bash_div,
     bash_int,
+    bash_wrap,
     controller,
     disks_of,
     has_missing,
@@ -227,7 +228,10 @@ def _sysfs_number(m: Probe, p: str) -> int:
 def allocation_problems(m: Probe, mnt: str, uuid: str, alloc: str, least: int | None) -> list[str]:
     """Metadata room, the automatic reclaim's knobs and its error counts (sysfs)."""
     problems: list[str] = []
-    meta_free = _sysfs_number(m, f"{alloc}/metadata/total_bytes") - _sysfs_number(m, f"{alloc}/metadata/bytes_used")
+    # bash's $(( total - used )): 64-bit, wrapping, as each value bash_int read.
+    meta_free = bash_wrap(
+        _sysfs_number(m, f"{alloc}/metadata/total_bytes") - _sysfs_number(m, f"{alloc}/metadata/bytes_used")
+    )
     found = metadata_problem(mnt, meta_free, _sysfs_number(m, f"{alloc}/global_rsv_size"), least)
     if found is not None:
         problems.append(found)
@@ -261,10 +265,12 @@ def _reclaim_error_problems(m: Probe, mnt: str, uuid: str, alloc: str) -> list[s
         seen_boot, seen = read_fields((m.text(seen_file) or "").split("\n")[0], 2)
         if seen_boot != boot_id or not seen.isascii() or not seen.isdigit():
             seen = "0"
-        count, seen_count = bash_int(errs), bash_int(seen)  # None: bash's arithmetic fails on it (08)
+        # bash's (( errs > seen )) and $(( errs - seen )): 64-bit, wrapping. None: bash's arithmetic fails
+        # on it (08).
+        count, seen_count = bash_int(errs), bash_int(seen)
         if count is not None and seen_count is not None and count > seen_count:
             problems.append(
-                f"btrfs {mnt}: automatic {kind} reclaim failed {count - seen_count} time(s) since the last check "
+                f"btrfs {mnt}: automatic {kind} reclaim failed {bash_wrap(count - seen_count)} time(s) since the last check "
                 f"(reclaim_errors={errs}) - see 'journalctl -k -g BTRFS'"
             )
         replace_state(seen_file, f"{boot_id} {errs}\n")
@@ -499,7 +505,13 @@ def snapshot_problems(m: Probe) -> list[str]:
         or os.path.exists(m.path("/etc/btrfs-setup/bulk-at-boot"))
     )
     last_n = bash_int(last)
-    if not quiet and last_n is not None and now() - last_n > SNAPSHOT_MAX_AGE and now() - awake > SNAPSHOT_GRACE:
+    # bash's (( $(date +%s) - last > 3 * 3600 )): 64-bit, wrapping (a last of 2**63 is -2**63 there).
+    if (
+        not quiet
+        and last_n is not None
+        and bash_wrap(now() - last_n) > SNAPSHOT_MAX_AGE
+        and now() - awake > SNAPSHOT_GRACE
+    ):
         problems.append("snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'")
     _log_stale_nas(m, snap)
     return problems
