@@ -10377,6 +10377,48 @@ echo test_111-ok
         ).stdout
         self.assertIn("test_111-ok", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_263_snapshots_status_names_a_nas_number_a_run_cannot_compute(self) -> None:
+        """cst btrfs snapshots status as root with the NAS backup on and NAS_PRUNE_EVERY_DAYS='1 x': its NAS
+        part names the number with the NAS run's words (btrfs-snapshot nas-numbers) and status exits 0;
+        with 7, no such line."""
+        d = "/var/tmp/e2e-snapshot-nas-numbers"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_263 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf}
+rm -rf "$d"
+install -d -m 0700 "$d"
+install -d -m 0755 /etc/btrfs-setup
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+line="  NAS_PRUNE_EVERY_DAYS='1 x' in $conf: not a number CST's arithmetic reads: no prune (forget runs without --prune) until it is fixed; each NAS run ends with an error"
+for value in "1 x" 7; do
+    printf '%s
+' "HOME_DIR='/home/tester'" NAS_ENABLED=1 "NAS_PATH='/volume1/backup'"         "NAS_PRUNE_EVERY_DAYS='$value'" >"$conf"
+    rc=0; SUDO_USER=tester /opt/cst-rw/cst btrfs snapshots status >"$d/out" 2>"$d/err" || rc=$?
+    cat "$d/out" "$d/err"
+    [ "$rc" = 0 ]
+    grep -q "^NAS backup (restic): sftp:btrfs-setup-nas:/volume1/backup " "$d/out"
+    if [ "$value" = 7 ]; then
+        test "$(grep -c NAS_PRUNE_EVERY_DAYS "$d/out")" = 0
+    else
+        grep -qxF "$line" "$d/out"
+    fi
+done
+echo test_263-ok
+""",
+        ).stdout
+        self.assertIn("test_263-ok", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
         """The installed forms of the two Python ports, under real systemd: btrfs-health-check and

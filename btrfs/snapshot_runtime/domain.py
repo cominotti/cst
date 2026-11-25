@@ -582,6 +582,24 @@ def nas_unreadable(settings: Mapping[str, str]) -> tuple[str, ...]:
     )
 
 
+# What a NAS run leaves out while the NAS number it needs cannot be computed (nas_unreadable_lines).
+_LEFT_OUT: Final = {
+    "NAS_STALE_DAYS": "no alert for a stale NAS backup",
+    "NAS_PRUNE_EVERY_DAYS": "no prune (forget runs without --prune)",
+    "NAS_CHECK_EVERY_DAYS": "no repository check",
+}
+
+
+def nas_unreadable_lines(settings: Mapping[str, str], conf: str, keys: Sequence[str], *, ends: str) -> list[str]:
+    """A line for each of KEYS (nas_unreadable's, of settings, read from the file conf): its value, and what
+    a NAS run leaves out until it is fixed; ends: how the line ends (the run's own words, or status')."""
+    return [
+        f"{key}={settings[key]!r} in {conf}: not a number CST's arithmetic reads: {_LEFT_OUT[key]} "
+        f"until it is fixed; {ends}"
+        for key in keys
+    ]
+
+
 def restic_line(line: str) -> str:
     """restic's output in the journal format: errors and warnings at level 4, the rest at 6."""
     if re.match(r"Fatal|[Ee]rror|[Ww]arning", line):

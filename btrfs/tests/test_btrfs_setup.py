@@ -967,6 +967,24 @@ class SnapshotsConfTest(unittest.TestCase):
         self.assertIn(f"<4>btrfs-snapshot: {self.conf} line 2: touch '{ran}': not a KEY=VALUE line; ignored", r.stderr)
         self.assertIn(f"<4>btrfs-snapshot: {self.conf} line 3: NAS_PATH=", r.stderr)
 
+    def test_snap_nas_numbers_names_a_nas_number_a_run_cannot_compute(self) -> None:
+        # cst btrfs snapshots status prints it in its NAS part (snap_status); a run of it fails nothing.
+        for value, want in (
+            (
+                "1 x",
+                (
+                    "  NAS_PRUNE_EVERY_DAYS='1 x' in {conf}: not a number CST's arithmetic reads: no prune "
+                    "(forget runs without --prune) until it is fixed; each NAS run ends with an error\n"
+                ),
+            ),
+            ("7", ""),
+        ):
+            with self.subTest(value=value):
+                with open(self.conf, "w", encoding="utf-8") as f:
+                    f.write(f"NAS_ENABLED=1\nNAS_PRUNE_EVERY_DAYS='{value}'\n")
+                r = self.run_bash("snap_nas_numbers")
+                self.assertEqual((r.stdout, r.stderr), (want.format(conf=self.conf), ""))
+
     def test_snap_conf_read_sets_only_the_keys_asked_from_plain_lines(self) -> None:
         with open(self.conf, "w", encoding="utf-8") as f:
             f.write("NAS_ENABLED=1 # on\nexport NAS_PATH='/volume1/b c'\nNAS_USER=old\\ name\nHOME_DIR='/x'\nPATH=/x\n")

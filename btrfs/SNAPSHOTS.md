@@ -1420,7 +1420,10 @@ so the `btrfs-snapshot-nas` service shows as failed until the line is
 fixed. A run that only stops at "not configured completely" or at an
 unreachable NAS names it too and ends with exit 1; a run skipped because
 another one holds the NAS lock names nothing and ends with exit 0, as
-before. Before, a name stopped the run where it read the number, and any
+before. `cst btrfs snapshots status` names it too, in its NAS part, with
+the same words and the tail `each NAS run ends with an error` (it reads
+`snapshots.conf` through `btrfs-snapshot nas-numbers`, which reads only that
+file and creates nothing). Before, a name stopped the run where it read the number, and any
 other such value made that comparison false without a word: no prune, no
 check or no stale alert, ever.
 

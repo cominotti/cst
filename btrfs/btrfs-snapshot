@@ -79,7 +79,9 @@
 
 set -Euo pipefail
 
-# hourly, nas, list, caches, prune, purge and configure are the Python runtime's (btrfs-snapshot-runtime,
+# hourly, nas, list, caches, prune, purge and configure, and the internal
+# nas-numbers FILE (for cst btrfs snapshots status: a line for each NAS number
+# of FILE a NAS run cannot compute; it reads FILE only), are the Python runtime's (btrfs-snapshot-runtime,
 # next to this file; installed beside it): handed over at once, with the
 # command line, before anything here runs. CST_LC_CTYPE: the caller's
 # LC_CTYPE ("" when unset), which Python changes at start under a C locale.
@@ -88,7 +90,7 @@ set -Euo pipefail
 # whatever it got: the runtime's commands then get it ignored too, as they did
 # from this bash.
 case "${1:-}" in
-    hourly|nas|list|caches|prune|purge|configure)
+    hourly|nas|list|caches|prune|purge|configure|nas-numbers)
         pipe_ignored=""
         [[ -n "$(trap -p PIPE)" ]] && pipe_ignored=1
         CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" CST_SIGPIPE_IGNORED="${pipe_ignored}" exec /usr/bin/python3 -I -B \
