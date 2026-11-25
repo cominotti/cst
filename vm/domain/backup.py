@@ -368,6 +368,17 @@ class StopAfterSnapshot(Stop):
         self.summary = summary
 
 
+class StopAfterBackup(Stop):
+    """A stop that waited through, or ended restic after, a read whose check passed: the snapshot is a
+    backup (snap, with its consistency), which the run indexes after the merge back before the stop
+    ends it."""
+
+    def __init__(self, message: str, snap: str, consistency: str) -> None:
+        super().__init__(message)
+        self.snap = snap
+        self.consistency = consistency
+
+
 def copied_kind(src: str, tpm_dir: str, *, big: bool) -> str:
     """What a copied source is in the manifest: a disk (big), the TPM folder or the UEFI variables."""
     if big:

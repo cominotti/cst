@@ -44,7 +44,10 @@
 //
 // From restic's answer with a snapshot on, the stops are held (_ResticAnswer: the staging folder's
 // removal, the shut-off VM's check) until the torn snapshot's record is written or the check is done:
-// a stop there comes as the held stopIn of "after" and "record", never between two steps.
+// a stop there comes as the held stopIn of "after" and "record", never between two steps. Such a stop
+// (or a carried one) after a read whose check passed (checked) ends the run only once the merge back is
+// done and the snapshot is indexed (index_stop). Not modelled: a check after the read that raises (an
+// error of libvirt or of a file read: unit tests).
 //
 // Known gap, stated in the properties: a torn snapshot restic committed is in the repository,
 // neither recorded nor named, after a kill before its record (SIGKILL, power loss: nothing more
@@ -105,6 +108,7 @@ module nas {
     listOk: bool,              // the index's listing was read
     stopped: bool,             // this run had its stop
     heldStop: bool,            // a stop that came after restic's answer, raised once the record or the check is done
+    checked: bool,             // that stop came after a read whose check passed (a backup): indexed before the stop
     end: str,                  // "", "ok", "refused", "stopped", "killed"
     // ghosts: not on the machine, for the properties
     unmerged: Set[(str, int)], // an overlay that holds writes its image lacks
@@ -131,6 +135,7 @@ module nas {
     keepBad: bool,             // a retention forgot a kept snapshot
     indexBad: bool,            // an index entry dropped without a readable listing, or a torn one indexed
     mixedIndexed: bool,        // a snapshot indexed whose read was not consistent
+    checkedLost: bool,         // a run ended by a stop after a checked read without its snapshot in the index
     skipped: bool,             // the retention was skipped (a recorded torn snapshot not forgotten)
     stops: int,
     guest: int,
@@ -181,7 +186,9 @@ module nas {
     ...st, pc: "idle", end: end, gap: 0,
     mode: "", quiesce: false, keep: false, attempt: 0, overlaid: Set(), failure: "none", snap: 0,
     unrecorded: false, problems: false, how: TSET.mapBy(_ => ""), todo: [], ids: [], ci: 0, done: false,
-    kept: false, listOk: false, stopped: false, heldStop: false, started: false, made: false, skipped: false,
+    kept: false, listOk: false, stopped: false, heldStop: false, checked: false, started: false, made: false,
+    skipped: false,
+    checkedLost: st.checkedLost or (end == "stopped" and st.checked and not(st.index.contains(st.snap))),
     unreachableBad: st.unreachableBad or (st.readyFailed and st.made), readyFailed: false,
     lostKill: if (end == "killed" and st.gap != 0) st.lostKill.union(Set(st.gap)) else st.lostKill,
     killed: if (end == "killed") st.killed.union(Set(st.r)) else st.killed,
@@ -190,6 +197,7 @@ module nas {
   // failure raised again, else the retention and the index.
   def settle(st: State): State =
     if (st.problems or st.failure == "uncertain") { ...st, pc: "alert" }
+    else if (st.failure == "stop" and st.checked) { ...st, pc: "index_stop" }
     else if (st.failure == "stop") finish(st, "stopped")
     else if (st.failure == "refused") finish(st, "refused")
     else { ...st, pc: "retry" }
@@ -205,12 +213,12 @@ module nas {
       record: Set(), index: Set(),
       r: 0, pc: "idle", mode: "", quiesce: false, keep: false, attempt: 0, overlaid: Set(),
       failure: "none", snap: 0, unrecorded: false, problems: false, how: TSET.mapBy(_ => ""), todo: [],
-      ids: [], ci: 0, done: false, kept: false, listOk: false, stopped: false, heldStop: false, end: "",
+      ids: [], ci: 0, done: false, kept: false, listOk: false, stopped: false, heldStop: false, checked: false, end: "",
       unmerged: Set(), stale: Set(), pending: Set(), noted: Set(), alerted: Set(), told: Set(), named: Set(),
       lostKill: Set(), lostStop: Set(), gap: 0, killed: Set(), started: false, made: false,
       readyFailed: false, unreachableBad: false, lostOverlay: false, stacked: false, goodBad: false, goodBadFull: false,
       goodBadAll: false, strayCounted: false,
-      keepBad: false, indexBad: false, mixedIndexed: false, skipped: false,
+      keepBad: false, indexBad: false, mixedIndexed: false, checkedLost: false, skipped: false,
       stops: 0, guest: 0, kills: 0, user: 0,
     },
     step' = lbl("~init", "", ""),
@@ -227,7 +235,7 @@ module nas {
       ...s, r: s.r + 1, mode: if (s.vm == SHUTOFF) "shutoff" else "live", quiesce: quiesce, keep: keep,
       attempt: if (quiesce) 1 else 2, overlaid: Set(), failure: "none", snap: 0, unrecorded: false,
       problems: false, how: TSET.mapBy(_ => ""), todo: [], ids: [], ci: 0, done: false, kept: false,
-      listOk: false, stopped: false, heldStop: false, end: "", gap: 0, started: false, made: false, readyFailed: false,
+      listOk: false, stopped: false, heldStop: false, checked: false, end: "", gap: 0, started: false, made: false, readyFailed: false,
       skipped: false,
       // libvirt's late switch comes before the next run (the settle window is minutes, a run a week)
       pending: Set(),
@@ -344,7 +352,7 @@ module nas {
       not(carried) or (not(s.stopped) and s.stops < MAX_STOPS),
       s' = if (outcome == "fail") toMerge(s, "refused")
            else if (outcome == "incomplete" or outcome == "stopped_after_commit") { ...held, pc: "record" }
-           else if (s.mode == "live") toMerge(held, if (carried) "stop" else "none")
+           else if (s.mode == "live") toMerge({ ...held, checked: carried }, if (carried) "stop" else "none")
            else { ...held, pc: "after" },
       step' = lbl("restic_backup", "", outcome),
     }
@@ -362,7 +370,7 @@ module nas {
       not(stopIn) or (not(s.stopped) and s.stops < MAX_STOPS),
       if (s.started) all { s' = { ...st, pc: "record" }, step' = { ...lbl("check_after", "", "changed"), stop: stopIn } }
       else all {
-        s' = toMerge(st, if (st.heldStop) "stop" else "none"),
+        s' = toMerge({ ...st, checked: st.heldStop }, if (st.heldStop) "stop" else "none"),
         step' = { ...lbl("check_after", "", "same"), stop: stopIn },
       },
     }
@@ -628,6 +636,19 @@ module nas {
     }
   }
 
+  // nas_run, the stops ignored (and this run's stop already came): after a stop that came once the read
+  // was checked, all merged back, the snapshot is indexed with no listing (the other entries stay), then
+  // the stop ends the run; no retention, nothing forgotten.
+  action indexStop = all {
+    s.pc == "index_stop",
+    s' = finish({
+      ...s, index: s.index.union(Set(s.snap)),
+      indexBad: s.indexBad or kindOf(s, s.snap) == TORN,
+      mixedIndexed: s.mixedIndexed or kindOf(s, s.snap) != GOOD,
+    }, "stopped"),
+    step' = { ...lblId("write_index", s.snap, "stopped"), ctx: s.mode },
+  }
+
   // ---- the environment ---------------------------------------------------------------------------
   // A stop (SIGTERM, SIGINT, SIGHUP) between two steps, outside a held block: not in the merge back
   // (the stops ignored), nor in the drop of the stray files (held: the snapshot's stopIn), nor from
@@ -720,14 +741,14 @@ module nas {
   action step_ = any {
     startRun, preflight, ready, snapshot, drop, backup, after, record, forget, dropTorn,
     merge, domstate, commit, check, remove, alert, retry, retryForget, retryDrop, strays, alertStrays, retention,
-    index, write, stop, kill, guest, lateSwitch, user,
+    index, write, indexStop, stop, kill, guest, lateSwitch, user,
   }
   // The protocol alone (no stop, kill, guest or user): the checked-in traces that need several runs
   // to reach a witness (a torn snapshot recorded, then retried) are walks of it, each step one of step_'s.
   action step_calm = any {
     startRun, preflight, ready, snapshot, drop, backup, after, record, forget, dropTorn,
     merge, domstate, commit, check, remove, alert, retry, retryForget, retryDrop, strays, alertStrays, retention,
-    index, write,
+    index, write, indexStop,
   }
 
   // ---- properties ----------------------------------------------------------------------------------
@@ -772,6 +793,9 @@ module nas {
   val keepKept = not(s.keepBad)
   // A snapshot is indexed (a backup) only when its read was consistent.
   val consistentRead = not(s.mixedIndexed)
+  // A run that a stop ended after its read was checked (a backup), with every disk merged back, has its
+  // snapshot in the index: the next run's check of the snapshots no record names does not name it.
+  val checkedIndexed = not(s.checkedLost)
   // After an index write with a listing read, every index entry names a snapshot in the repository.
   val indexInRepo = (step.name == "write_index" and s.listOk) implies s.index.forall(i => ids(s).contains(i))
 
@@ -795,7 +819,9 @@ module nas {
   val wKilledRefused = step.name == "preflight" and step.outcome == "refused" and s.killed != Set()
   val wStartedDuringRead = step.name == "check_after" and step.outcome == "changed"
   val wLateSwitch = step.name == "~late_switch"
-  val wIndexed = step.name == "write_index"
+  val wIndexed = step.name == "write_index" and step.outcome == "ok"
+  val wStoppedIndexed = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "shutoff"
+  val wStoppedIndexedLive = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "live"
   val wShutOffSame = step.name == "check_after" and step.outcome == "same"
   val wReadyFailed = step.name == "restic_ready" and step.outcome == "fail"
   val wBackupFailed = step.name == "restic_backup" and step.outcome == "fail"
@@ -838,6 +864,8 @@ module nas {
   val neverStartedDuringRead = not(wStartedDuringRead)
   val neverLateSwitch = not(wLateSwitch)
   val neverIndexed = not(wIndexed)
+  val neverStoppedIndexed = not(wStoppedIndexed)
+  val neverStoppedIndexedLive = not(wStoppedIndexedLive)
   val neverShutOffSame = not(wShutOffSame)
   val neverReadyFailed = not(wReadyFailed)
   val neverBackupFailed = not(wBackupFailed)

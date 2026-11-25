@@ -923,6 +923,9 @@ elif step == "whys":  # the record at argv[2]: what tore each entry
         print(*(e["why"] for e in json.load(f)["torn"]))
 elif step == "retagged":  # restic snapshots --json: the full ID of each snapshot whose original is argv[2]
     print(*(s["id"] for s in json.load(sys.stdin) if s.get("original") == sys.argv[2]))
+elif step == "indexed":  # the index at argv[2]: the IDs of its NAS backups, sorted
+    with open(sys.argv[2]) as f:
+        print(*sorted(e["snapshot"] for e in json.load(f)["backups"] if e.get("mode") == "nas"))
 elif step == "index":  # argv: the index, the repository, the VM, then the IDs of its NAS backups
     path, repo, vm = sys.argv[2:5]
     backups = [
@@ -943,9 +946,9 @@ else:
     repo = p.settings.nas_repo()
     if step == "retry":
         nas.retention_after_torn(cfg, p, vm, repo)
-    elif step == "stopped":  # restic's read of the folder argv[3] for a live run, as nas_run makes it
+    elif step in ("stopped", "stopped_ok"):  # restic's read of the folder argv[3] for a live run, as nas_run makes it
         from vm.domain import DomainParts
-        from vm.domain.backup import NasRun, Stop, nas_manifest
+        from vm.domain.backup import NasRun, Stop, StopAfterBackup, nas_index_entry, nas_manifest
         p.signals.catch_stops()
         src = sys.argv[3]
         run = NasRun(
@@ -956,6 +959,9 @@ else:
         )
         try:
             nas._nas_restic_read(cfg, p, run, repo, nas_manifest(run, [], "crash-consistent", None))
+        except StopAfterBackup as e:  # stopped_ok: then nas_run's index of it, after the (empty) merge back
+            entry = nas_index_entry(run, repo, e.snap, e.consistency, None)
+            print(f"stop: {nas._index_stopped_backup(p, vm, e, entry) if step == 'stopped_ok' else e}")
         except Stop as e:
             print(f"stop: {e}")
         else:
@@ -5518,6 +5524,63 @@ EOF
             if grep -qx snapshots "$w/restic.log"; then exit 1; fi
             grep -qx forget "$w/restic.log"
             [[ "$(wc -l <"$w/alerts.log")" == 2 ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_204_a_stop_after_a_good_read_indexes_its_snapshot_with_the_real_restic(self) -> None:
+        """A stop that comes after restic ended on its own with a snapshot (a carried stop, exit 0), against
+        the real restic over SFTP: test_200's wrapper, but it exits 0 on the SIGTERM cst vm sends it on its
+        stop. The read was checked (a live run's), so the snapshot is a backup: cst vm's read raises the stop
+        as StopAfterBackup and nas_run's index step (with its real store and lock) indexes it, then the stop
+        names it indexed; the record of torn snapshots stays empty and restic still lists the snapshot. The
+        next run's check of the snapshots no record names then names nothing, and its retention runs."""
+        w = "/var/tmp/e2e-vm-stopped-ok"
+        nas_dir = "/srv/backup/e2e-vm-stopped-ok"
+        prelude = self._vm_torn_prelude("test_204", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
+            cat >"$w/notify" <<'EOF'
+#!/bin/sh
+printf '%s\\n' "$*" >>"$ALERTS_LOG"
+EOF
+            chmod 755 "$w/notify"
+            export CST_VM_NOTIFY="$w/notify" CST_VM_ALERTS="$w/alerts" ALERTS_LOG="$w/alerts.log"
+            export CST_VM_NAS_STAGE="$w/stage" REAL_RESTIC="$(command -v restic)"
+            mkdir -p "$w/bin"
+            cat >"$w/bin/restic" <<'EOF'
+#!/bin/bash
+# restic backup to its end, then a stop to cst vm; the stop cst vm sends back ends this wrapper with 0.
+if [ "$1" = backup ]; then
+    "$REAL_RESTIC" "$@" || exit
+    trap 'exit 0' TERM
+    kill -TERM "$PPID"
+    sleep 5 </dev/null >/dev/null 2>&1 &
+    wait $!
+    exit 3
+fi
+exec "$REAL_RESTIC" "$@"
+EOF
+            chmod 755 "$w/bin/restic"
+            PATH="$w/bin:$PATH" timeout 120 python3 -I -B -c "$DRIVER" stopped_ok e2evm "$w/payload" >"$w/stopped.out"
+            cat "$w/stopped.out" >&2
+            made="$(d indexed "$CST_VM_INDEX")"
+            [[ ${#made} == 64 ]]
+            grep -qxF "stop: stopped by signal SIGTERM; restic snapshot ${made:0:8} of e2evm is a backup: indexed (the retention runs at the next backup)" \
+                "$w/stopped.out"
+            if [ -e "$CST_VM_TORN" ]; then [[ "$(d entries "$CST_VM_TORN")" == 1 ]]; fi
+            [[ "$(listed)" == "$made" ]]
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
+            [[ ! -e "$w/alerts.log" ]]
+            [[ "$(listed)" == "$made" ]]
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},

@@ -111,6 +111,7 @@ SPEC_CALLS: Final = frozenset(
         ("restic_snapshots", OK),
         ("restic_snapshots", FAIL),
         ("write_index", OK),
+        ("write_index", "stopped"),  # a stop after a checked read: its snapshot indexed after the merge back
     }
 )
 
@@ -309,6 +310,7 @@ class Recorder:
         self.merged = False  # the merge back is over: forget and drop_torn are retry_torn's
         self.index_reads = 0  # the index read after the merge back: the check of the strays, then the index's step
         self.after_backup = False
+        self.checking = False  # in the shut-off VM's check after the read: one step of the spec (its fingerprints too)
         self.committed = False  # the merge back's domstate said the VM is alive
         self.listing = ""  # the outcome of the recorded listing of a pair
 
@@ -330,8 +332,10 @@ class Recorder:
                     pass  # a decision of the code without a call (~no_torn, ~no_drop)
 
     def port(self) -> None:
-        """Any port call: the environment acts first; a kill or a stop that came is raised here."""
-        if not self.started or self.holding:
+        """Any port call: the environment acts first; a kill or a stop that came is raised here. Not in the
+        rest of the shut-off VM's check after the read (its managed-save look, its fingerprints): the spec's
+        one step, which the next recorded call ends."""
+        if not self.started or self.holding or self.checking:
             return
         self.environment()
         if self.killed:
@@ -345,6 +349,7 @@ class Recorder:
 
     def call(self, name: str, target: str = "", ident: int = 0) -> Step:
         """A recorded call: the spec's next step must be it; its outcome is the answer."""
+        self.checking = False
         if name == "restic_ready":
             self.preflight(OK)
         self.port()
@@ -665,6 +670,7 @@ class Virsh:
                 return 1, "", "error: failed to get domain state"
         elif rec.after_backup:
             rec.call("check_after")
+            rec.checking = True
         else:
             rec.port()
         return 0, DOMSTATE[self.world.vm] + "\n", ""

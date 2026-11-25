@@ -1238,7 +1238,8 @@ forget, the record's entry dropped), the merge back (`find_overlays`,
 `domstate`, `blockcommit` per disk, the two `domblklist` listings, the
 overlay's removal, the alert), `retry_torn`, the check of the snapshots no
 record names (`unaccounted`: the listing and its alert), the retention and
-the index.
+the index, or, after a stop that came once the read was checked, the index
+of that backup alone before the stop ends the run.
 Between any two steps the environment can stop the run (SIGTERM, Ctrl-C:
 it ends the run before the read, is the read's failure during it, waits for
 the end of a held block, is ignored during the merge back and its alert,
@@ -1269,12 +1270,12 @@ settled answer can switch some disks only), and a shut-off VM with four
 runs, one kill and one step of the user and no stop or guest event
 (`nas_strays`: a backup indexed, a snapshot the kill left that no record
 names, the run that names it, the user adopting or forgetting it, and a
-quiet run); `KEEP = 2`. Together about 8.8 million distinct states in
-about 3 minutes, each run of TLC at most about 2 GB: `nas_live1` 5.88
-million states, depth 47, 49 s, 1.7 GiB; `nas_live2` 966 thousand, depth
-35, 20 s; `nas_shutoff` 550 thousand, depth 34, 17 s; `nas_mixed` 319
-thousand, depth 33, 16 s; `nas_partial` 1.03 million, depth 35, 19 s, 1.4
-GiB; `nas_strays` 24 thousand, depth 40, 16 s (measured on a workstation;
+quiet run); `KEEP = 2`. Together about 9.0 million distinct states in
+about 3 minutes, each run of TLC at most about 2 GB: `nas_live1` 5.93
+million states, depth 47, 54 s, 1.7 GiB; `nas_live2` 998 thousand, depth
+35, 21 s; `nas_shutoff` 613 thousand, depth 34, 17 s; `nas_mixed` 330
+thousand, depth 33, 18 s; `nas_partial` 1.06 million, depth 35, 25 s, 1.6
+GiB; `nas_strays` 24 thousand, depth 40, 17 s (measured on a workstation;
 each instance far under `TLC_TIMEOUT`).
 
 **The properties:**
@@ -1318,6 +1319,10 @@ each instance far under `TLC_TIMEOUT`).
   cannot see (older than the oldest indexed one, or any while no listed
   snapshot is indexed) or one the user adopted is in the repository. A
   kill's torn snapshot is excused no more: the next run names it.
+- `checkedIndexed`: a run that a stop ended after its read was checked
+  (the shut-off VM's check passed, or a running VM's read of its snapshot),
+  with every disk merged back, has its snapshot in the index, so the next
+  run's check of the snapshots no record names does not name a backup.
 
 **Known gaps.** A torn snapshot restic committed can stay in the repository,
 neither recorded nor named, after a kill before its record (nothing more
@@ -1342,6 +1347,11 @@ changed (`restic tag` saves it under a new id, with `original`) is not
 modelled: the unit tests and tier 1's `test_203` cover it. Its gap: a
 stray older than every indexed snapshot of the VM (its first runs, or after
 the index was moved aside) is not seen, which `goodKeptAll` states.
+
+A check after the read that raises (an error of libvirt or of a file read,
+not a change it found) is not modelled: after a stop that ended restic its
+snapshot is recorded as torn, else the error ends the run; the unit tests
+cover both.
 
 **What the checker found.** Two paths lost the alert of a snapshot whose
 outcome stayed unclear (fixed with the spec, in the same pull request): a
@@ -1368,7 +1378,9 @@ listing shows the image (`noOverlayLost`), the retention before
 index dropping entries on a listing that failed (`indexClean`), the
 two old paths of the fix (`mergedOrAlerted`), and the retention without the
 check of the snapshots no record names (`strayNotCounted` and
-`goodKeptAll`, on `nas_strays` and `nas_shutoff`).
+`goodKeptAll`, on `nas_strays` and `nas_shutoff`), and the run a stop
+ends after a checked read without indexing it, as before the index of such a
+backup (`checkedIndexed`, on `nas_shutoff`).
 
 **The replay.** `vm/tests/test_vm_nas_replay.py`, in the unit suite,
 replays the checked-in traces of the NAS spec
@@ -1389,7 +1401,10 @@ answer on) at the end of the outermost one (the fakes count the blocks
 entered); one during the merge back is dropped. The hold from restic's
 answer on holds only the stops, so the environment still acts at each port
 call in it; the snapshot's and the record's blocks freeze it, except before
-each stray file's drop, a step of the spec of its own. A stop that
+each stray file's drop, a step of the spec of its own, and so does the rest
+of the shut-off VM's check after the read once its `domstate` is
+recorded (its managed-save look and its fingerprints are of that one step),
+until the next recorded call. A stop that
 ended restic after its snapshot (`StopAfterSnapshot`) is carried and
 raised after the record or the check, as the code does. A kill makes that call and every later
 one raise, so the World stays as the kill left it; the guest and a late
@@ -1410,7 +1425,8 @@ trace the simulator finds (seed 7, 40 steps) to each witness of the spec
 one alerted, each recovery kind, a failed commit, a disk put back beside
 an alerted one (`nas_live2`, two disks), a listing that failed, a
 backup restic refused, a VM state that could not be read, a
-torn snapshot forgotten or not, a good run indexed, ...), three from
+torn snapshot forgotten or not, a backup indexed after a stop (shut off and
+running), a good run indexed, ...), three from
 `step_calm`, the steps of `step_` without the environment's: a torn
 snapshot recorded by one run and retried by the next, the retention
 skipped for it, and the retry's listing that failed, which a walk of
@@ -1421,7 +1437,7 @@ reaches it (`neverStrayAdoptedQuiet` and `neverStrayForgottenQuiet` fail
 on `nas_strays`), but no walk of the simulator does within its bounds, so
 the replay of the user's adopt and forget is not exercised by a checked-in
 trace; the unit tests and tier 1's `test_203` cover that convergence.
-`TRACE_JOBS` in `tests/quint/cst-quint` lists them; about 800 KB in
+`TRACE_JOBS` in `tests/quint/cst-quint` lists them; about 870 KB in
 all, and the replay takes a fraction of a second. Planted reorders of
 `vm/application/nas.py` fail it: an overlay removed before the definition
 is checked, the retention before `retry_torn`, the forget before the

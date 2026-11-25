@@ -170,6 +170,7 @@ NAS_PROPERTIES: Final = (
     "indexInRepo",
     "strayNotCounted",
     "goodKeptAll",
+    "checkedIndexed",
 )
 NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial", "nas_strays")
 CHECKS: Final[tuple[Check, ...]] = (
@@ -232,6 +233,8 @@ NAS_WITNESSES: Final = (
     ("stop_after_commit_recorded", "nas_shutoff", "neverStopAfterCommitRecorded"),
     ("stop_answered", "nas_shutoff", "neverStopAnswered"),
     ("stop_held_check", "nas_shutoff", "neverStopHeldCheck"),
+    ("stopped_indexed", "nas_shutoff", "neverStoppedIndexed"),
+    ("stopped_indexed_live", "nas_mixed", "neverStoppedIndexedLive"),
     ("started_during_read", "nas_shutoff", "neverStartedDuringRead"),
     ("shut_off_same", "nas_shutoff", "neverShutOffSame"),
     ("torn_forget_failed", "nas_shutoff", "neverTornForgetFailed"),
