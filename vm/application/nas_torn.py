@@ -4,7 +4,7 @@ vm-nas-torn.json when restic cannot forget it now, the torn ones of earlier runs
 retention, and the retention. Part of `cst vm backup --nas` (vm.application.nas, whose NasBackup it
 reaches the machine through)."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import re
 from typing import TYPE_CHECKING
 
@@ -61,7 +61,9 @@ def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = 
     return data if list_of(data, is_restic_snapshot) else None
 
 
-def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -> str | None:
+def forget_torn(
+    cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry, *, release: Callable[[], None] | None = None
+) -> str | None:
     """Forget a restic snapshot that is no backup (incomplete, or not consistent). None when restic
     forgot it; else the words that name the snapshot left in the repository and how to forget it.
 
@@ -69,7 +71,8 @@ def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -
     until the record is written (its lock: TORN_LOCK_TIMEOUT at most), so a stop then or while forget
     waits for the repository's lock leaves it recorded, and the next NAS backup of the VM forgets it
     before its retention could count it as a backup. A stop after a record that failed says which
-    snapshot is left, neither recorded nor forgotten."""
+    snapshot is left, neither recorded nor forgotten. release runs right after the record, before the
+    forget: the stop it raises (one that came before, and waited) leaves the forget to the next run."""
     snap, vm = entry["snapshot"], entry["vm"]
     unrecorded: str | None = None
     try:
@@ -78,6 +81,16 @@ def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -
                 p.store.record_torn(entry)
             except (OSError, Refused) as e:
                 unrecorded = str(e)
+        if release is not None:
+            try:
+                release()
+            except Stop as e:
+                if unrecorded is not None:
+                    raise
+                raise Stop(
+                    f"{e}; restic snapshot {snap[:8]} is no backup: recorded in {cfg.paths.torn}, the next NAS "
+                    f"backup of {vm} forgets it before its retention"
+                ) from None
         failed = forget_snapshot(p, nas, snap)
     except Stop as e:
         if unrecorded is None:

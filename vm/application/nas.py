@@ -4,7 +4,7 @@ merged back (blockcommit) whatever happens, and its retention. Moved from vm/cli
 reaches the machine through the ports of vm/ports.py (NasBackup)."""
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os.path
 
 from cst_core.domain.errors import ExitStatus, Refused, ResticExit
@@ -49,6 +49,8 @@ from vm.domain.backup import (
     NasRun,
     CopiedFile,
     ResticSummary,
+    Stop,
+    StopAfterSnapshot,
     Uncertain,
     manifest_text,
     nas_done_lines,
@@ -359,16 +361,45 @@ def _nas_read(
         {"source": src, "kind": k, "allocated": store.sizes(src)[0], "apparent": store.sizes(src)[1]}
         for src, k in run.sources
     ]
-    snap, summary = _nas_restic_backup(cfg, p, run, nas, nas_manifest(run, files, consistency, keep), keep=keep)
-    _nas_check_after_read(cfg, p, run, nas, snap)
-    return consistency, snap, summary
+    answer = _nas_restic_read(cfg, p, run, nas, nas_manifest(run, files, consistency, keep))
+    return consistency, answer.snap, answer.summary
+
+
+def _nas_restic_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, manifest: Manifest) -> _ResticAnswer:
+    """restic's read of the sources (with manifest staged) and the check after it: restic's answer. A
+    stop that ended restic once restic had written its snapshot (StopAfterSnapshot) is raised once that
+    snapshot is recorded as torn (forget_torn, before its forget) or, when it is a backup, once the check
+    after the read is done."""
+    answer = _ResticAnswer()
+    _nas_restic_backup(cfg, p, run, nas, manifest, answer=answer)
+    _nas_check_after_read(cfg, p, run, nas, answer)
+    answer.release()
+    return answer
+
+
+@dataclass(slots=True)
+class _ResticAnswer:
+    """restic's answer to the backup: its snapshot ("" none) and summary, and a stop that ended restic
+    after it had written the snapshot (carried), raised by release once the snapshot is recorded or
+    checked."""
+
+    snap: str = ""
+    summary: ResticSummary = field(default_factory=ResticSummary)
+    carried: Stop | None = None
+
+    def release(self) -> None:
+        if self.carried is not None:
+            stop, self.carried = self.carried, None
+            raise stop
 
 
 def _nas_restic_backup(
-    cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, manifest: Manifest, *, keep: str | None
-) -> tuple[str, ResticSummary]:
-    """restic backup of the sources and the staged definition and manifest, tagged nas_tags(vm, keep):
-    (its snapshot, its summary); Refused (an incomplete snapshot forgotten) when it is no backup."""
+    cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, manifest: Manifest, *, answer: _ResticAnswer
+) -> None:
+    """restic backup of the sources and the staged definition and manifest, tagged with the manifest's
+    tags: its snapshot and summary into answer; Refused (an incomplete snapshot forgotten) when it is no
+    backup. A stop that ended restic after its snapshot is carried in answer, and the snapshot goes on as
+    restic's answer: a torn one (restic did not end on its own) is recorded, then the stop raised."""
     store, out = p.store, p.out
     stage = store.stage(run.vm, run.xml_text, manifest_text(manifest))
     paths = [src for src, _ in run.sources] + [stage]
@@ -378,44 +409,49 @@ def _nas_restic_backup(
         out.say(
             f"  reading {src} ({k}, {format_bytes_gib_mib(a, mib_decimals=1)} allocated, {format_bytes_gib_mib(s, mib_decimals=1)} apparent)"
         )
-    tags = ",".join(nas_tags(run.vm, keep))
+    tags = ",".join(nas_tags(run.vm, manifest.get("keep")))
     try:
-        rc, summary = p.restic.backup(
+        rc, answer.summary = p.restic.backup(
             nas["env"],
             ["backup", "--json", "--host", nas["host"], "--tag", tags, "--retry-lock", RETRY_LOCK, *paths],
             timeout,
             out,
         )
+    except StopAfterSnapshot as e:
+        rc, answer.summary, answer.carried = e.rc, e.summary, e
     finally:
         store.unstage(stage)
-    snap = str(summary.get("snapshot_id") or "")
+    answer.snap = snap = str(answer.summary.get("snapshot_id") or "")
     if rc != 0 or not snap:
-        # incomplete (rc 3): not a backup
-        left = forget_torn(cfg, p, nas, torn_entry(nas, snap, run.vm, run.stamp, "incomplete")) if snap else None
+        # incomplete (rc 3), or restic stopped after its snapshot: not a backup
+        why = "incomplete" if answer.carried is None else "stopped"
+        entry = torn_entry(nas, snap, run.vm, run.stamp, why)
+        left = forget_torn(cfg, p, nas, entry, release=answer.release) if snap else None
         raise Refused(
             f"restic backup failed: {restic_failure_why(rc)}; no backup recorded{'' if left is None else f'; {left}'}"
         )
-    return snap, summary
 
 
-def _nas_check_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, snap: str) -> None:
+def _nas_check_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, answer: _ResticAnswer) -> None:
     """After restic's read: a note for each file read live that changed meanwhile; for a shut-off VM,
     Refused (its snapshot forgotten) when the VM was started or a source changed meanwhile."""
     if run.live:
         _nas_note_changed(p.store, run)
         return
-    vm = run.vm
+    vm, snap = run.vm, answer.snap
     try:
         check_shut_off(p.commands, vm)
     except Refused as e:
-        left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, run.stamp, "state changed"))
+        entry = torn_entry(nas, snap, vm, run.stamp, "state changed")
+        left = forget_torn(cfg, p, nas, entry, release=answer.release)
         raise Refused(
             f"the VM's state changed during the backup, the copy is not consistent "
             f"({left or f'restic snapshot {snap[:8]} forgotten'}): {e}"
         ) from None
     changed = [src for src, _ in run.sources if fingerprint_or_none(p.store, src) != run.before[src]]
     if changed:
-        left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, run.stamp, "changed during the read"))
+        entry = torn_entry(nas, snap, vm, run.stamp, "changed during the read")
+        left = forget_torn(cfg, p, nas, entry, release=answer.release)
         raise Refused(
             "changed during the backup (the VM was started?), the copy is not consistent "
             f"({left or f'restic snapshot {snap[:8]} forgotten'}): {', '.join(changed)}"

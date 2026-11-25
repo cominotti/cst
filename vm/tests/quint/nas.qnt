@@ -34,11 +34,15 @@
 // (restic's monthly buckets are not modelled). libvirt's late switch after a snapshot that timed out
 // comes before the next run starts.
 //
+// A stop that ended restic once it had committed its snapshot carries the snapshot's id
+// (Restic.backup reads restic's summary first: StopAfterSnapshot): a torn one is recorded, then the
+// stop is the read's failure. Assumed, not modelled: restic ended between saving its snapshot and
+// printing its summary (the id is then unknown to the code).
+//
 // Known gaps, stated in the properties: a torn snapshot restic committed is in the repository,
 // neither recorded nor named, after a kill before its record (SIGKILL, power loss: nothing more
-// runs), after a stop that ended restic once it had committed (Restic.backup drops the summary and
-// its id: H1), and after a stop between restic's answer and forget_torn's held record (H2: the
-// staging folder's removal, the shut-off VM's check). tornHandled and goodKept allow these;
+// runs), and after a stop between restic's answer and forget_torn's held record (H2: the staging
+// folder's removal, the shut-off VM's check). tornHandled and goodKept allow these;
 // tornHandledFull and goodKeptFull (not in cst-quint's checks) allow the kill only, and TLC shows
 // their counterexamples (docs/dev-tools.md).
 module nas {
@@ -94,6 +98,7 @@ module nas {
     kept: bool,                // retry_torn: an entry kept (the retention waits)
     listOk: bool,              // the index's listing was read
     stopped: bool,             // this run had its stop
+    heldStop: bool,            // a stop that came after restic's answer, raised once the record or the check is done
     end: str,                  // "", "ok", "refused", "stopped", "killed"
     // ghosts: not on the machine, for the properties
     unmerged: Set[(str, int)], // an overlay that holds writes its image lacks
@@ -157,7 +162,7 @@ module nas {
     ...st, pc: "idle", end: end, gap: 0,
     mode: "", quiesce: false, keep: false, attempt: 0, overlaid: Set(), failure: "none", snap: 0,
     unrecorded: false, problems: false, how: TSET.mapBy(_ => ""), todo: [], ids: [], ci: 0, done: false,
-    kept: false, listOk: false, stopped: false, started: false, made: false, skipped: false,
+    kept: false, listOk: false, stopped: false, heldStop: false, started: false, made: false, skipped: false,
     unreachableBad: st.unreachableBad or (st.readyFailed and st.made), readyFailed: false,
     lostKill: if (end == "killed" and st.gap != 0) st.lostKill.union(Set(st.gap)) else st.lostKill,
     killed: if (end == "killed") st.killed.union(Set(st.r)) else st.killed,
@@ -181,7 +186,7 @@ module nas {
       record: Set(), index: Set(),
       r: 0, pc: "idle", mode: "", quiesce: false, keep: false, attempt: 0, overlaid: Set(),
       failure: "none", snap: 0, unrecorded: false, problems: false, how: TSET.mapBy(_ => ""), todo: [],
-      ids: [], ci: 0, done: false, kept: false, listOk: false, stopped: false, end: "",
+      ids: [], ci: 0, done: false, kept: false, listOk: false, stopped: false, heldStop: false, end: "",
       unmerged: Set(), stale: Set(), pending: Set(), noted: Set(), alerted: Set(), told: Set(),
       lostKill: Set(), lostStop: Set(), gap: 0, killed: Set(), started: false, made: false,
       readyFailed: false, unreachableBad: false, lostOverlay: false, stacked: false, goodBad: false, goodBadFull: false,
@@ -202,7 +207,7 @@ module nas {
       ...s, r: s.r + 1, mode: if (s.vm == SHUTOFF) "shutoff" else "live", quiesce: quiesce, keep: keep,
       attempt: if (quiesce) 1 else 2, overlaid: Set(), failure: "none", snap: 0, unrecorded: false,
       problems: false, how: TSET.mapBy(_ => ""), todo: [], ids: [], ci: 0, done: false, kept: false,
-      listOk: false, stopped: false, end: "", gap: 0, started: false, made: false, readyFailed: false,
+      listOk: false, stopped: false, heldStop: false, end: "", gap: 0, started: false, made: false, readyFailed: false,
       skipped: false,
       // libvirt's late switch comes before the next run (the settle window is minutes, a run a week)
       pending: Set(),
@@ -293,49 +298,53 @@ module nas {
   }
 
   // _nas_restic_backup: restic backup; an incomplete snapshot (an id, exit 3) goes through
-  // forget_torn; no id refuses. A stop after restic committed its snapshot ends restic, and the id
-  // is lost to the code (Restic.backup raises the stop, the summary dropped).
+  // forget_torn; no id refuses. A stop while restic runs ends it; once restic had committed its
+  // snapshot, the stop carries the id (StopAfterSnapshot): with restic's exit status not 0 after the
+  // stop (stopped_after_commit) the snapshot is torn and recorded, then the stop is raised (no forget:
+  // the next run's); restic had exited 0 (stopped_answered): a shut-off VM's check runs first.
   action backup = all {
     s.pc == "backup",
-    nondet outcome = Set("ok", "incomplete", "fail", "stopped_after_commit").oneOf()
+    nondet outcome = Set("ok", "incomplete", "fail", "stopped_after_commit", "stopped_answered").oneOf()
     val r = s.r
+    val carried = Set("stopped_after_commit", "stopped_answered").contains(outcome)
     val read = if (s.mode == "live") { if (s.overlaid == TSET) GOOD else MIXED } else { if (s.started) TORN else GOOD }
-    val kind = if (outcome == "incomplete") TORN else read
-    val st = { ...s, repo: s.repo.union(Set({ id: r, kind: kind, keep: s.keep })), gap: if (kind == TORN) r else 0 }
+    val kind = if (outcome == "incomplete" or outcome == "stopped_after_commit") TORN else read
+    val st = { ...s, repo: s.repo.union(Set({ id: r, kind: kind, keep: s.keep })), gap: if (kind == TORN) r else 0, snap: r }
+    val held = if (carried) { ...st, stopped: true, stops: s.stops + 1, heldStop: true } else st
     all {
-      outcome != "stopped_after_commit" or (not(s.stopped) and s.stops < MAX_STOPS),
-      s' = if (outcome == "ok") { if (s.mode == "live") toMerge({ ...st, snap: r }, "none") else { ...st, snap: r, pc: "after" } }
-           else if (outcome == "incomplete") { ...st, snap: r, pc: "record" }
-           else if (outcome == "fail") toMerge(s, "refused")
-           // H1: the id is lost to the code; a torn one stays in the repository, neither recorded nor named
-           else toMerge({ ...st, stopped: true, stops: s.stops + 1, gap: 0,
-                          lostStop: if (kind == TORN) s.lostStop.union(Set(r)) else s.lostStop }, "stop"),
+      not(carried) or (not(s.stopped) and s.stops < MAX_STOPS),
+      s' = if (outcome == "fail") toMerge(s, "refused")
+           else if (outcome == "incomplete" or outcome == "stopped_after_commit") { ...held, pc: "record" }
+           else if (s.mode == "live") toMerge(held, if (carried) "stop" else "none")
+           else { ...held, pc: "after" },
       step' = lbl("restic_backup", "", outcome),
     }
   }
 
-  // _nas_check_after_read, shut-off VM: started meanwhile, or a source changed: its snapshot through forget_torn.
+  // _nas_check_after_read, shut-off VM: started meanwhile, or a source changed: its snapshot through
+  // forget_torn; else a stop held since restic's answer is the read's failure.
   action after = all {
     s.pc == "after",
     if (s.started) all { s' = { ...s, pc: "record" }, step' = lbl("check_after", "", "changed") }
-    else all { s' = toMerge(s, "none"), step' = lbl("check_after", "", "same") },
+    else all { s' = toMerge(s, if (s.heldStop) "stop" else "none"), step' = lbl("check_after", "", "same") },
   }
 
   // forget_torn: the record first (the stops held: a stop then waits for it), restic forget of the
   // one id, then the record's entry dropped. Each failure is said; a stop after a record that failed
-  // names the snapshot.
+  // names the snapshot. A stop held since restic's answer is raised right after the record.
   action record = all {
     s.pc == "record",
     nondet ok = Set(true, false).oneOf()
     nondet stopIn = Set(false, true).oneOf()
     val st = if (ok) { ...s, record: s.record.union(Set(s.snap)), gap: 0 } else { ...s, unrecorded: true }
     val st2 = if (stopIn) { ...st, stopped: true, stops: s.stops + 1 } else st
+    val stops = stopIn or s.heldStop
     all {
       not(stopIn) or (not(s.stopped) and s.stops < MAX_STOPS),
-      s' = if (stopIn and not(ok)) toMerge({ ...st2, told: st2.told.union(Set(s.snap)), gap: 0 }, "stop") // PS3
-           else if (stopIn) toMerge(st2, "stop")
+      s' = if (stops and not(ok)) toMerge({ ...st2, told: st2.told.union(Set(s.snap)), gap: 0 }, "stop") // PS3
+           else if (stops) toMerge(st2, "stop")
            else { ...st2, pc: "forget" },
-      step' = { ...lbl("record_torn", "", if (ok) "ok" else "fail"), id: s.snap, stop: stopIn },
+      step' = { ...lbl("record_torn", "", if (ok) "ok" else "fail"), id: s.snap, stop: stopIn, ctx: if (s.heldStop) "stop" else "" },
     }
   }
   action forget = all {
@@ -703,8 +712,11 @@ module nas {
   val wReadyFailed = step.name == "restic_ready" and step.outcome == "fail"
   val wListingsUnreadable = step.name == "domblklist" and step.outcome == "unreadable"
   val wLiveListingUnreadable = step.name == "domblklist" and step.outcome == "live_unreadable"
+  val wInactiveListingUnreadable = step.name == "domblklist" and step.outcome == "inactive_unreadable"
   val wRemoveFailed = step.name == "remove_overlay" and step.outcome == "fail"
   val wStopAfterCommit = step.name == "restic_backup" and step.outcome == "stopped_after_commit"
+  val wStopAfterCommitRecorded = step.name == "record_torn" and step.ctx == "stop" and step.outcome == "ok"
+  val wStopAnswered = step.name == "restic_backup" and step.outcome == "stopped_answered"
   val wRetentionFailed = step.name == "retention" and step.outcome == "fail"
   val wTornForgetFailed = step.name == "forget" and step.outcome == "fail" and step.target == ""
   val wTornDropFailed = step.name == "drop_torn" and step.outcome == "fail" and step.target == ""
@@ -729,8 +741,11 @@ module nas {
   val neverReadyFailed = not(wReadyFailed)
   val neverListingsUnreadable = not(wListingsUnreadable)
   val neverLiveListingUnreadable = not(wLiveListingUnreadable)
+  val neverInactiveListingUnreadable = not(wInactiveListingUnreadable)
   val neverRemoveFailed = not(wRemoveFailed)
   val neverStopAfterCommit = not(wStopAfterCommit)
+  val neverStopAfterCommitRecorded = not(wStopAfterCommitRecorded)
+  val neverStopAnswered = not(wStopAnswered)
   val neverRetentionFailed = not(wRetentionFailed)
   val neverTornForgetFailed = not(wTornForgetFailed)
   val neverTornDropFailed = not(wTornDropFailed)

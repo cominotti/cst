@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 import json
 import os
 import re
+import signal
 from typing import Final, override
 import unittest
 
@@ -79,6 +80,9 @@ KINDS: Final = (
 )
 # The outcome of the merge back's check: (the live listing fails, the --inactive one fails).
 UNREADABLE: Final = {"unreadable": (True, True), "live_unreadable": (True, False), "inactive_unreadable": (False, True)}
+# restic's exit status of each outcome of restic_backup that a stop ended once restic had written its
+# snapshot: terminated by the stop, or exited 0 just before it.
+STOPPED_AFTER_SNAPSHOT: Final = {"stopped_after_commit": -signal.SIGTERM, "stopped_answered": 0}
 # Every (label, outcome) of a recorded call in the spec's checked instances: the checked-in traces
 # replay each at least once.
 SPEC_CALLS: Final = frozenset(
@@ -89,7 +93,7 @@ SPEC_CALLS: Final = frozenset(
         ("restic_ready", FAIL),
         *(("snapshot", o) for o in ("ok", "fail_none", "fail_in_place", "timeout_all", "timeout_some")),
         ("drop_overlay", ""),
-        *(("restic_backup", o) for o in ("ok", "incomplete", FAIL, "stopped_after_commit")),
+        *(("restic_backup", o) for o in ("ok", "incomplete", FAIL, "stopped_after_commit", "stopped_answered")),
         ("check_after", "same"),
         ("check_after", "changed"),
         *(
@@ -531,13 +535,16 @@ class Restic(FakeNasRestic):
         if outcome == FAIL:
             return 1, {}
         self.world.repo[self.run_number] = vm_domain.KEEP_TAG in tags
-        if outcome == "stopped_after_commit":
-            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
         summary: vm_domain_backup.ResticSummary = {
             "snapshot_id": snap_id(self.run_number),
             "total_bytes_processed": 1024,
             "data_added": 512,
         }
+        if outcome in STOPPED_AFTER_SNAPSHOT:
+            # The stop ended restic once it had written its snapshot: Restic.backup carries the id.
+            raise vm_domain_backup.StopAfterSnapshot(
+                "stopped by signal SIGTERM", STOPPED_AFTER_SNAPSHOT[outcome], summary
+            )
         return (3 if outcome == "incomplete" else 0), summary
 
 

@@ -615,7 +615,15 @@ forget, its ID goes into `/var/lib/cst/vm-nas-torn.json` (0644, with the
 VM, the repository, the host, the time and what tore it; a stop waits until
 the record is written, so a stop then or while `restic forget` waits for
 the repository's lock leaves it there), and it leaves the record once
-restic forgot it. When the forget fails, the message
+restic forgot it. A stop that ends restic after restic saved its snapshot
+(it printed the snapshot's ID, but had not ended on its own) still gets the
+ID from restic's last lines: the snapshot counts as torn and is recorded
+(what tore it: "stopped"), and the stop is raised right after the record.
+After a stop nothing is forgotten (the next NAS backup forgets it), so the
+stop stays short for the merge back. A stop that comes when restic has
+just ended on its own is raised once the check of a shut-off VM is done.
+The one instant not covered: restic ended between saving its snapshot and
+printing its ID. When the forget fails, the message
 adds "recorded in /var/lib/cst/vm-nas-torn.json: the next NAS backup of VM
 forgets it before its retention". If the record cannot be written either,
 the message says so (a stop's message too): then forget it by hand before
@@ -1046,7 +1054,9 @@ disks, qcow2 overlays, no space for `--full`, reflink not possible), the
 modes of the folders and files, that the index holds no secrets, that
 removed backups leave the index, and `list` and `status`.
 
-For the NAS backup (`test_vm_nas.py`): virsh and restic are stateful fakes
+For the NAS backup (`test_vm_nas.py`; `ResticBackupStopTest`: a stop while
+restic runs keeps the snapshot's ID from restic's lines, kept or still in
+the pipe): virsh and restic are stateful fakes
 (the VM's disk sources live in a JSON file, so `domblklist` shows what the
 snapshot and the merge did). The tests check the snapshot's arguments, the
 quiesce attempt and its fallback (agent missing, disconnected, failing,
@@ -1076,7 +1086,9 @@ scratch file through `CST_VM_TORN`): a torn snapshot restic does not forget
 is recorded (once, 0644, atomically), one it forgets leaves no entry, a
 record that cannot be written or updated is said, a stop while forget waits
 or while the record waits for its lock leaves the entry, a stop after a
-record that failed names the snapshot left; the next run forgets a recorded snapshot restic lists with
+record that failed names the snapshot left, a stop that ends restic after
+it printed its snapshot leaves that snapshot recorded and forgets nothing
+(or names it when the record fails); the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
 when that forget fails, a listing fails, an ID is ambiguous or its listed
 snapshot lacks a tag, drops one restic no longer lists without forgetting

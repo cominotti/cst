@@ -1245,10 +1245,12 @@ about 1.5 minutes and under 2 GB (`nas_live1`: 6.2 million, 44 s).
 
 **Known gaps.** A torn snapshot restic committed can stay in the repository,
 neither recorded nor named: after a kill before its record (nothing more
-runs), after a stop that ended restic once it had committed
-(`Restic.backup` drops the summary, and with it the id), and after a stop
-between restic's answer and `forget_torn`'s held record (the staging
-folder's removal, the shut-off VM's check). `tornHandled` and `goodKept`
+runs), and after a stop between restic's answer and `forget_torn`'s held
+record (the staging folder's removal, the shut-off VM's check). A stop that
+ended restic once it had committed carries the snapshot's id
+(`StopAfterSnapshot`: `Restic.backup` reads it from restic's last lines),
+so the snapshot is recorded; assumed, not modelled: restic ended between
+saving its snapshot and printing its summary. `tornHandled` and `goodKept`
 state these gaps; `tornHandledFull` and `goodKeptFull` in the spec (not
 checked by `cst-quint`) allow the kill only, and TLC shows their
 counterexamples (`--invariant tornHandledFull` on `nas_shutoff`, through
