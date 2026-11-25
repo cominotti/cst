@@ -1123,6 +1123,19 @@ planted copy of the spec that removes the flag before the counter violates
 `attemptsMatch`, and one that saves the counter after the rewrite violates
 `boundedTries`.
 
+The owner accepted (2026-11-24) two things the spec shows here, and both stay
+as they are. The bound is per round, not per request: a stop between the
+counter's removal and the flag's starts the count over, while removing the
+flag first would leave a counter that a later request inherits, so that
+request would give up too early. And `mark()` may run while a rewrite is
+between its two renames: the volume then has no `_data`, so `mark()` does
+not see its data and may remove the counter while the flag stays. Nothing is
+lost: the next boot's recovery puts the original back as `_data`, and the
+request (the flag) is still there, so that boot migrates it, with its count
+started over. Closing either gap would need a lock or a journal shared by
+install and the boot, for a case that costs at most `GIVE_UP_AFTER` more
+rewrites.
+
 **Where `sync()` may go.** The copy is synced before `rename(_data,
 old)`. Moving the sync to just after that rename (still before
 `rename(new, _data)`) is safe, and the checker says so: a power loss before
