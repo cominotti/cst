@@ -151,8 +151,9 @@ class IocostApplyFaultTest(unittest.TestCase):
 
 class IocostManagedSaveFailureTest(unittest.TestCase):
     """A failed save of the managed-devices file is an ERROR line (moved from test_iocost.py, where it
-    patched the adapters' write_atomic, ensure_dir and _save_managed_devnos): on the lifecycle tests'
-    machine, an NVMe disk to enable beside a vendor's line, an HDD and a loop device, no udevd."""
+    patched the adapters' write_atomic and ensure_dir and their save of the managed-devices file): on the
+    lifecycle tests' machine, an NVMe disk to enable beside a vendor's line, an HDD and a loop device, no
+    udevd."""
 
     @override
     def setUp(self) -> None:
