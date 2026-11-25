@@ -3984,6 +3984,68 @@ class NasStopHeldFromAnswerTest(unittest.TestCase):
                 self.assertEqual([c[0] for c in restic.calls], ["cat"], "restic_ready only")
 
 
+class NasStopAfterTheMergeBackTest(unittest.TestCase):
+    """A stop after a good read's merge back (in the retention, the index's listing or its write) ends the
+    run only once the snapshot is indexed, with no listing: else the next run names that backup as a
+    snapshot no record names."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a = "/img/a.qcow2"
+
+    def _run(self, where: str) -> tuple[BaseException, FakeNasStore, list[list[str]], FakeNasOut]:
+        """nas_run of a running VM whose good read is merged back, a stop coming where: "retention" (its
+        restic forget), "listing" (the index's restic snapshots) or "write" (the index's first write);
+        (what ended the run, the store, restic's calls, the output)."""
+        signals = _PendingStops()
+        port, _commands, store, _signals, _alerts = self._make_backup(
+            [("vda", self.disk_a)], on_virsh=lambda *_: None, signals=signals
+        )
+        port = dataclasses.replace(port, settings=_KeepSettings())
+        restic = port.restic
+        assert isinstance(restic, FakeNasRestic)
+        out = port.out
+        assert isinstance(out, FakeNasOut)
+        run, write = restic.run, store.write_index
+
+        def restic_run(env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+            answer = run(env, args, timeout)
+            if (where == "retention" and "--keep-weekly" in args) or (where == "listing" and args[0] == "snapshots"):
+                signals.stop_now()
+            return answer
+
+        def write_index(entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+            if where == "write" and not store.written:
+                store.written.append([])  # the first write started, cut short by the stop
+                signals.stop_now()
+            write(entries)
+
+        with (
+            mock.patch.object(restic, "run", side_effect=restic_run),
+            mock.patch.object(store, "write_index", side_effect=write_index),
+            self.assertRaises(BaseException) as ctx,
+        ):
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, _NAS_REPO, quiesce=False, live=True)
+        return ctx.exception, store, restic.calls, out
+
+    def test_the_backup_is_indexed_before_the_stop_ends_the_run(self) -> None:
+        for where in ("retention", "listing", "write"):
+            with self.subTest(where=where):
+                stop, store, calls, _out = self._run(where)
+                self.assertIsInstance(stop, vm_domain_backup.Stop)
+                self.assertEqual(str(stop), STOPPED_INDEXED)
+                self.assertEqual(_written(store)[-1], [(SNAP_ID, "crash-consistent")])
+                self.assertEqual(store.torn, [])
+                retention = [c for c in calls if "--keep-weekly" in c]
+                self.assertEqual(len(retention), 1, "the retention ran once, before the stop")
+                self.assertEqual([c for c in calls if c[0] == "forget" and c not in retention], [], "nothing forgotten")
+
+    def test_a_stop_in_the_retention_lists_nothing_more(self) -> None:
+        _stop, _store, calls, out = self._run("retention")
+        self.assertEqual([c[0] for c in calls].count("snapshots"), 0, "no listing after the stop")
+        self.assertNotIn("Done:", " ".join(out.lines))
+
+
 class _LingeringTimer(threading.Timer):
     """A Timer whose thread goes on a while after cancel(), as a thread can under load."""
 

@@ -276,9 +276,22 @@ def nas_run(
         f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
         f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
     )
-    retention_after_torn(cfg, p, vm, nas, made=snap)
-    refused = _index_nas_backup(p, vm, nas, nas_index_entry(run, nas, snap, consistency, keep))
-    for line in nas_done_lines(run.notes, snap, vm, consistency, keep):
+    _nas_after_read(cfg, p, run, nas, nas_index_entry(run, nas, snap, consistency, keep))
+
+
+def _nas_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, entry: IndexEntry) -> None:
+    """After a good read, all merged back (entry: its index entry): the retention (retention_after_torn),
+    the index, the notes and how to restore it. A stop before the index is written (in the retention, a
+    listing or the write) ends the run only once the snapshot is indexed, with no listing
+    (_index_stopped_backup): else the next run names that backup as a snapshot no record names."""
+    snap, vm = entry["snapshot"], run.vm
+    try:
+        retention_after_torn(cfg, p, vm, nas, made=snap)
+        refused = _index_nas_backup(p, vm, nas, entry)
+    except Stop as e:
+        with p.signals.ignored():
+            raise _index_stopped_backup(p, vm, e, entry) from None
+    for line in nas_done_lines(run.notes, snap, vm, entry["consistency"], entry["keep"]):
         p.out.say(line)
     if refused is not None:
         raise refused
@@ -580,9 +593,10 @@ def _add_overlay_files(p: NasBackup, run: NasRun) -> None:
     run.overlaid.update({t: spec for t, spec in run.specs.items() if p.store.lexists(spec[1])})
 
 
-def _index_stopped_backup(p: NasBackup, vm: str, stop: StopAfterBackup, entry: IndexEntry) -> Stop:
-    """The index with the backup a stop came after (no listing: its other entries stay as they are);
-    the stop to raise, which says so, or that the index is not this cst vm's."""
+def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) -> Stop:
+    """The index with the backup a stop came after (a stop held through its checked read, or one after
+    the merge back; no listing: its other entries stay as they are); the stop to raise, which says so,
+    or that the index is not this cst vm's."""
     snap = entry["snapshot"]
     try:
         p.store.write_index(nas_index(p.store.read_index(), entry, None))

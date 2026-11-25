@@ -1322,7 +1322,9 @@ each instance far under `TLC_TIMEOUT`).
 - `checkedIndexed`: a run that a stop ended after its read was checked
   (the shut-off VM's check passed, or a running VM's read of its snapshot),
   with every disk merged back, has its snapshot in the index, so the next
-  run's check of the snapshots no record names does not name a backup.
+  run's check of the snapshots no record names does not name a backup; the
+  same for a stop after a good read's merge back (in the retention, a
+  listing or the index's write).
 
 **Known gaps.** A torn snapshot restic committed can stay in the repository,
 neither recorded nor named, after a kill before its record (nothing more
@@ -1425,8 +1427,8 @@ trace the simulator finds (seed 7, 40 steps) to each witness of the spec
 one alerted, each recovery kind, a failed commit, a disk put back beside
 an alerted one (`nas_live2`, two disks), a listing that failed, a
 backup restic refused, a VM state that could not be read, a
-torn snapshot forgotten or not, a backup indexed after a stop (shut off and
-running), a good run indexed, ...), three from
+torn snapshot forgotten or not, a backup indexed after a stop (shut off,
+running, and after the merge back), a good run indexed, ...), three from
 `step_calm`, the steps of `step_` without the environment's: a torn
 snapshot recorded by one run and retried by the next, the retention
 skipped for it, and the retry's listing that failed, which a walk of
@@ -1437,7 +1439,7 @@ reaches it (`neverStrayAdoptedQuiet` and `neverStrayForgottenQuiet` fail
 on `nas_strays`), but no walk of the simulator does within its bounds, so
 the replay of the user's adopt and forget is not exercised by a checked-in
 trace; the unit tests and tier 1's `test_203` cover that convergence.
-`TRACE_JOBS` in `tests/quint/cst-quint` lists them; about 870 KB in
+`TRACE_JOBS` in `tests/quint/cst-quint` lists them; about 900 KB in
 all, and the replay takes a fraction of a second. Planted reorders of
 `vm/application/nas.py` fail it: an overlay removed before the definition
 is checked, the retention before `retry_torn`, the forget before the

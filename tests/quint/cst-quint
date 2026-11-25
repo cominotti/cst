@@ -235,6 +235,7 @@ NAS_WITNESSES: Final = (
     ("stop_held_check", "nas_shutoff", "neverStopHeldCheck"),
     ("stopped_indexed", "nas_shutoff", "neverStoppedIndexed"),
     ("stopped_indexed_live", "nas_mixed", "neverStoppedIndexedLive"),
+    ("stopped_indexed_post", "nas_shutoff", "neverStoppedIndexedPost"),
     ("started_during_read", "nas_shutoff", "neverStartedDuringRead"),
     ("shut_off_same", "nas_shutoff", "neverShutOffSame"),
     ("torn_forget_failed", "nas_shutoff", "neverTornForgetFailed"),

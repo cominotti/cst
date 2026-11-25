@@ -18,7 +18,7 @@
 // during the read (snapshot, restic, the check after it, forget_torn) it is the read's failure, and
 // the overlays are merged back first; inside signals_held (the snapshot call, the torn record) it
 // waits for the block's end; during the merge back the stops are ignored; after it (retention,
-// index) it ends the run. A kill (SIGKILL, power loss) ends the run where it is: nothing more is
+// index) it ends the run, once the good read's snapshot is indexed (index_stop). A kill (SIGKILL, power loss) ends the run where it is: nothing more is
 // called, no alert.
 //
 // Abstraction: one VM, one host, one repository. A disk's source is 0 (its image) or r (the overlay
@@ -638,7 +638,8 @@ module nas {
 
   // nas_run, the stops ignored (and this run's stop already came): after a stop that came once the read
   // was checked, all merged back, the snapshot is indexed with no listing (the other entries stay), then
-  // the stop ends the run; no retention, nothing forgotten.
+  // the stop ends the run; no retention, nothing forgotten. The same after a stop that came after the
+  // merge back of a good read, before its index was written (ctx "post"): no more retention or listing.
   action indexStop = all {
     s.pc == "index_stop",
     s' = finish({
@@ -646,7 +647,7 @@ module nas {
       indexBad: s.indexBad or kindOf(s, s.snap) == TORN,
       mixedIndexed: s.mixedIndexed or kindOf(s, s.snap) != GOOD,
     }, "stopped"),
-    step' = { ...lblId("write_index", s.snap, "stopped"), ctx: s.mode },
+    step' = { ...lblId("write_index", s.snap, "stopped"), ctx: if (s.heldStop) s.mode else "post" },
   }
 
   // ---- the environment ---------------------------------------------------------------------------
@@ -667,6 +668,9 @@ module nas {
              val named = s.pc == "forget" and s.unrecorded
              toMerge(if (named) { ...st, told: st.told.union(Set(s.snap)), gap: 0 } else st, "stop")
            }
+           // after a good read's merge back (the retention, the listings, the index's write): its
+           // snapshot is indexed with no listing before the stop ends the run (_nas_after_read)
+           else if (POST.contains(s.pc)) { ...st, pc: "index_stop", checked: true, listOk: false }
            else finish(st, "stopped"),
       step' = lbl("~stop", "", s.pc),
     }
@@ -822,6 +826,7 @@ module nas {
   val wIndexed = step.name == "write_index" and step.outcome == "ok"
   val wStoppedIndexed = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "shutoff"
   val wStoppedIndexedLive = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "live"
+  val wStoppedIndexedPost = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "post"
   val wShutOffSame = step.name == "check_after" and step.outcome == "same"
   val wReadyFailed = step.name == "restic_ready" and step.outcome == "fail"
   val wBackupFailed = step.name == "restic_backup" and step.outcome == "fail"
@@ -866,6 +871,7 @@ module nas {
   val neverIndexed = not(wIndexed)
   val neverStoppedIndexed = not(wStoppedIndexed)
   val neverStoppedIndexedLive = not(wStoppedIndexedLive)
+  val neverStoppedIndexedPost = not(wStoppedIndexedPost)
   val neverShutOffSame = not(wShutOffSame)
   val neverReadyFailed = not(wReadyFailed)
   val neverBackupFailed = not(wBackupFailed)

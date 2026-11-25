@@ -946,6 +946,22 @@ else:
     repo = p.settings.nas_repo()
     if step == "retry":
         nas.retention_after_torn(cfg, p, vm, repo)
+    elif step == "after_read":  # nas_run's steps after a shut-off run's good read of snapshot argv[3], merged back
+        from vm.domain import DomainParts
+        from vm.domain.backup import NasRun, Stop, nas_index_entry
+        p.signals.catch_stops()
+        run = NasRun(
+            vm=vm, live=False, quiesce=False, xml_text="<domain/>",
+            parts=DomainParts(uuid="e2e", disks=[], nvram="", tpm=False, skipped=[], problems=[]),
+            notes=[], sources=[], epoch=1795000000.0, stamp="20261124T000000Z", specs={}, others=[],
+            agent="none", versions={}, deployment=None,
+        )
+        try:
+            nas._nas_after_read(cfg, p, run, repo, nas_index_entry(run, repo, sys.argv[3], "shut-off", None))
+        except Stop as e:
+            print(f"stop: {e}")
+        else:
+            print("no stop")
     elif step in ("stopped", "stopped_ok"):  # restic's read of the folder argv[3] for a live run, as nas_run makes it
         from vm.domain import DomainParts
         from vm.domain.backup import NasRun, Stop, StopAfterBackup, nas_index_entry, nas_manifest
@@ -5581,6 +5597,62 @@ EOF
             grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
             [[ ! -e "$w/alerts.log" ]]
             [[ "$(listed)" == "$made" ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_221_a_stop_in_the_retention_after_a_good_read_indexes_its_snapshot_with_the_real_restic(self) -> None:
+        """A stop after a good read's merge back, against the real restic over SFTP: nas_run's steps after
+        the read (_nas_after_read, with cst vm's real stop signals, store and lock) through a wrapper that
+        sends cst vm a SIGTERM when the retention's restic forget starts, and then waits. The stop ends the
+        retention; the snapshot is indexed before the stop ends the run, which names it indexed; nothing is
+        forgotten. The next run's check of the snapshots no record names then names nothing (the index has
+        an older backup, so it compares), and its retention runs."""
+        w = "/var/tmp/e2e-vm-stopped-post"
+        nas_dir = "/srv/backup/e2e-vm-stopped-post"
+        prelude = self._vm_torn_prelude("test_221", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
+            cat >"$w/notify" <<'EOF'
+#!/bin/sh
+printf '%s\\n' "$*" >>"$ALERTS_LOG"
+EOF
+            chmod 755 "$w/notify"
+            export CST_VM_NOTIFY="$w/notify" CST_VM_ALERTS="$w/alerts" ALERTS_LOG="$w/alerts.log"
+            export REAL_RESTIC="$(command -v restic)"
+            mkdir -p "$w/bin"
+            cat >"$w/bin/restic" <<'EOF'
+#!/bin/bash
+# The retention's restic forget: a stop to cst vm, then wait (the stop ends this wrapper).
+if [ "$1" = forget ] && [[ " $* " == *" --keep-weekly "* ]]; then
+    kill -TERM "$PPID"
+    sleep 5 </dev/null >/dev/null 2>&1 &
+    wait $!
+    exit 3
+fi
+exec "$REAL_RESTIC" "$@"
+EOF
+            chmod 755 "$w/bin/restic"
+            good="$(snap cst-vm,vm:e2evm)"
+            d index "$CST_VM_INDEX" "$RESTIC_REPOSITORY" e2evm "$good"
+            made="$(snap cst-vm,vm:e2evm)"
+            PATH="$w/bin:$PATH" timeout 120 python3 -I -B -c "$DRIVER" after_read e2evm "$made" >"$w/stopped.out"
+            cat "$w/stopped.out" >&2
+            grep -qxF "stop: stopped by signal SIGTERM; restic snapshot ${made:0:8} of e2evm is a backup: indexed (the retention runs at the next backup)" \\
+                "$w/stopped.out"
+            if grep -qF "Done:" "$w/stopped.out"; then exit 1; fi
+            [[ "$(d indexed "$CST_VM_INDEX")" == "$(printf '%s\\n' "$good" "$made" | sort | xargs)" ]]
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$made" | sort | xargs)" ]]
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
+            [[ ! -e "$w/alerts.log" ]]
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},

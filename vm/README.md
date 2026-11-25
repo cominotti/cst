@@ -635,7 +635,10 @@ restic has just ended on its own. When the snapshot is a backup (the check
 of a shut-off VM passed, or the read of a running VM's snapshot), it is
 indexed after the merge back, and then the stop ends the run with "restic
 snapshot ID of VM is a backup: indexed (the retention runs at the next
-backup)": no retention and no listing then, nothing forgotten. If the merge
+backup)": no retention and no listing then, nothing forgotten. A stop that
+comes after the merge back of a good read (while the retention, a listing or
+the index's write runs) ends the run the same way: the snapshot is indexed
+first, with the same words, and nothing more is forgotten or listed. If the merge
 back fails, the snapshot is not indexed, as without a stop (above). After a
 stop that ended restic, a snapshot whose check could not be done at all (an
 error of libvirt or of a file read, not a change it found) is recorded as
@@ -1159,7 +1162,10 @@ snapshot after the merge back and names it in the stop, with no listing,
 forget or retention, and indexes nothing when the merge back fails; the
 index refusing it puts its words in the stop; a check that could not be
 done records the snapshot as torn only after a stop that ended restic, the
-check's error kept in the stop's context; `ResticBackupAnsweredTest`
+check's error kept in the stop's context; `NasStopAfterTheMergeBackTest`: a
+stop after a good read's merge back, in the retention, the index's listing
+or its write, indexes the snapshot before it ends the run, with nothing
+listed or forgotten after it; `ResticBackupAnsweredTest`
 the call that starts the hold, once restic exited with its snapshot); the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
 when that forget fails, a listing fails, an ID is ambiguous or its listed
@@ -1182,7 +1188,10 @@ forgotten, and no listing with the index moved aside. Tier 1's `test_200` stops 
 real restic read once restic printed its snapshot (the snapshot is recorded
 and named, and the next retry forgets it), `test_204` stops it once restic
 ended on its own (exit 0: the snapshot is indexed, the record stays empty,
-and the next retry names nothing and runs the retention), and `test_151` runs the
+and the next retry names nothing and runs the retention), `test_221` stops
+the retention's restic forget after a good read (the snapshot is indexed
+first, nothing is forgotten, and the next retry names nothing and runs the
+retention), and `test_151` runs the
 torn-snapshot retry, the retention after it and `forget_torn` against the
 real restic over SFTP to its NAS container (restic's own `snapshots --json`,
 a short recorded ID, the record and its lock as root). No E2E test runs a
@@ -1208,8 +1217,8 @@ consistent read is indexed (`consistentRead`), also without `--atomic`
 is newer than the oldest indexed one (`strayNotCounted`), and never lets a
 torn snapshot take a good one's place but one the check cannot see (older
 than every indexed backup) or the user adopted (`goodKeptAll`); a run a
-stop ended after a checked read, all merged back, has its snapshot in the
-index (`checkedIndexed`); six
+stop ended after a checked read, or after a good read's merge back, all
+merged back, has its snapshot in the index (`checkedIndexed`); six
 instances, `nas_strays` the one with four runs where the user adopts or
 forgets a named snapshot. Its traces are replayed against the real code
 (`vm/tests/test_vm_nas_replay.py`, in the unit suite), so a change of order
