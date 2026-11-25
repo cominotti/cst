@@ -63,6 +63,7 @@ from cst_core.domain.units import (
     UNIT_PATH_PROP,
     named_user_unit_dir,
     show_manager_value_argv,
+    user_manager_head,
     user_unit_dir,
 )
 from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
@@ -813,6 +814,18 @@ class AdaptersTest(unittest.TestCase):
             show_manager_value_argv(["systemctl", "--user"], "UnitPath"),
             ["systemctl", "--user", "show", "-p", "UnitPath", "--value"],
         )
+
+    def test_user_manager_head(self) -> None:
+        self.assertEqual(user_manager_head("tester"), ["systemctl", "--user", "-M", "tester@"])
+        self.assertEqual(user_manager_head(""), ["systemctl", "--user", "-M", "@"])  # as given: no name checked
+        self.assertEqual(user_manager_head("a b"), ["systemctl", "--user", "-M", "a b@"])  # one argument
+        self.assertEqual(
+            show_manager_value_argv(user_manager_head("tester"), "UnitPath"),
+            ["systemctl", "--user", "-M", "tester@", "show", "-p", "UnitPath", "--value"],
+        )
+        first, second = user_manager_head("tester"), user_manager_head("tester")
+        first.append("daemon-reload")
+        self.assertEqual(second, ["systemctl", "--user", "-M", "tester@"])  # a new list each time
 
     def test_systemctl_adapter_user_scope(self) -> None:
         unit = UnitName("cst-toolchains-prune.timer")
