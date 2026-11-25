@@ -8059,6 +8059,116 @@ echo E2E-OK
         )
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_205_cpu_game_profile_off_undoes_a_user_manager_record_only_in_the_recorded_uids_manager(self) -> None:
+        """'off' with the real system and user managers, after 'on' for another account than TARGET_USER names
+        now (G7). (a) 'on' for e2e205a, whose user manager is then stopped (a logout: user@UID.service and its
+        runtime folder go), TARGET_USER tester: 'off' says that manager is not running and drops its records,
+        leaves tester's user.slice CPUWeight and its user.control override as they were, and keeps nothing.
+        The old 'off' ran set-property and daemon-reload into the stopped manager. (b) 'on' for e2e205b, whose
+        account is then removed while its user manager still runs: 'off' keeps its records in game.leftovers
+        under its uid, never undone in tester's manager (the old 'off' dropped them as undone); a tick keeps
+        them, and once that manager is stopped the next tick drops them."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            for u in $(cat /tmp/e2e-205-uids 2>/dev/null); do
+                systemctl stop "user@$u.service" "user-runtime-dir@$u.service" 2>/dev/null || true
+            done
+            userdel -rf e2e205a 2>/dev/null || true
+            userdel -rf e2e205b 2>/dev/null || true
+            rm -rf /home/e2e205b /tmp/e2e-205-uids
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-205-conf.bak ]]; then mv /tmp/e2e-205-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-205-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            conf() { printf '%s\n' "TARGET_USER='$1'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf; }
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            tov=/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            # As tester: a folder root made there would keep tester's manager from writing its own overrides.
+            runuser -u tester -- mkdir -p "$(dirname "$tov")"
+            runuser -u tester -- sh -c 'printf "[Slice]\nCPUWeight=%s\n" "$1" >"$2"' sh "$tw" "$tov"
+            tsum=$(sha256sum "$tov")
+            logout() {
+                systemctl stop "user@$1.service" "user-runtime-dir@$1.service"
+                test ! -e "/run/user/$1/systemd" || { echo "uid $1's runtime folder is still there" >&2; exit 1; }
+            }
+            tester_untouched() {
+                [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$tw" ]] \
+                    || { echo "tester's user.slice CPUWeight changed: $1" >&2; exit 1; }
+                [[ "$(sha256sum "$tov")" == "$tsum" ]] || { echo "tester's override changed: $1" >&2; exit 1; }
+            }
+            # (a) The recorded uid's user manager is not running.
+            useradd -m e2e205a
+            ua=$(id -u e2e205a)
+            echo "$ua" >>/tmp/e2e-205-uids
+            systemctl start "user@$ua.service"
+            conf e2e205a
+            touch /run/cpu-setup/manual
+            gp on >/dev/null
+            [[ "$(systemctl --user -M e2e205a@ show -P CPUWeight user.slice)" == idle ]]
+            grep -qF "prop sys user@$ua.service MemoryLow" "$st"
+            conf tester
+            logout "$ua"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "off: the user manager of uid $ua, the user 'on' acted for, is not running: " <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            if grep -qF "undoing for" <<<"$got"; then echo "off acted for the stopped manager: $got" >&2; exit 1; fi
+            test ! -e "$st"
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(a)"
+            # (b) No account has the recorded uid now, its user manager still runs: kept under its uid.
+            useradd -m e2e205b
+            ub=$(id -u e2e205b)
+            echo "$ub" >>/tmp/e2e-205-uids
+            systemctl start "user@$ub.service"
+            conf e2e205b
+            touch /run/cpu-setup/manual
+            gp on >/dev/null
+            conf tester
+            userdel -f e2e205b
+            if getent passwd "$ub" >/dev/null; then echo "uid $ub still has an account" >&2; exit 1; fi
+            test -d "/run/user/$ub/systemd"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "off: no account has uid $ub, the user 'on' acted for, now, and its user manager still runs" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "kept in $lo for the next off and tick" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            test ! -e "$st"
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 1' ]] || { cat "$lo" >&2; exit 1; }
+            grep -qx "user $ub" "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            grep -qx 'prop usr user.slice CPUWeight new -' "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(b) off"
+            sum=$(sha256sum "$lo")
+            gp tick >/dev/null
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "the tick changed game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(b) tick"
+            logout "$ub"
+            gp tick >/dev/null
+            test ! -e "$lo" || { echo "game.leftovers after the logout:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(b) tick after the logout"
+            rm -f "$tov"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS)
     def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
         """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose

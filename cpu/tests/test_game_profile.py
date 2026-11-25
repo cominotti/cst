@@ -202,6 +202,8 @@ def game_scratch(tmp: str) -> GameScratch:
     # The user manager's cgroup folder (uid 999999), as cgroupfs shows it.
     ucg = os.path.join(paths.cgroot, "user.slice", f"user-{UID}.slice", f"user@{UID}.service")
     os.makedirs(ucg)
+    # The user manager runs: its runtime folder is there (FakeSystemd writes its runtime overrides into it).
+    os.makedirs(os.path.join(paths.run_user, UID, "systemd"))
     systemd = FakeSystemd(t)
     # The baseline as systemd shows it before the profile.
     systemd.set_now("sys", "machine.slice", CPUWeight="50", IOWeight="50")
@@ -2611,8 +2613,9 @@ class LeftoversTest(GameProfileCase):
 
     def test_each_user_manager_an_override_was_removed_in_gets_its_daemon_reload(self) -> None:
         # 'off' undoes game.state's new overrides of USER's manager, and a kept record of another user's
-        # (uid 1001), left by an earlier failed 'off' for that user: USER's manager gets its daemon-reload,
-        # not the manager of the user acted for last.
+        # (uid 1001, whose manager runs), left by an earlier failed 'off' for that user: USER's manager gets
+        # its daemon-reload, not the manager of the user acted for last.
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
         self.run_profile("on")
         self.assertIn("prop usr user.slice CPUWeight new -\n", self.read(self.state))
         self.write(
@@ -2688,9 +2691,9 @@ class LeftoversTest(GameProfileCase):
         self.assertEqual(self.sets(self.systemd.actions), [])
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
-    def test_off_drops_game_state_s_user_manager_records_of_a_uid_no_account_has(self) -> None:
-        # 'on' acted for uid 1001, whose account is gone now; TARGET_USER is USER (another uid). Its user
-        # manager's records are not undone in USER's manager, nor kept for USER's uid: dropped, said once.
+    def foreign_state(self) -> str:
+        """A game.state of an 'on' for uid 1001 (another uid than USER's), with records of its user manager; USER
+        has a runtime override of user.slice's CPUWeight of its own. The user.slice record's override path."""
         self.write(
             self.state,
             "prop sys user@1001.service MemoryLow existed 0\n"
@@ -2699,6 +2702,13 @@ class LeftoversTest(GameProfileCase):
         )
         user_override = self.ctrl("usr", "user.slice", "CPUWeight")  # USER's own override
         self.write(user_override, "[Slice]\nCPUWeight=30\n")
+        return user_override
+
+    def test_off_drops_game_state_s_user_manager_records_of_a_uid_no_account_has(self) -> None:
+        # 'on' acted for uid 1001, whose account is gone now, and so is its user manager (no runtime folder);
+        # TARGET_USER is USER (another uid). Its user manager's records are not undone in USER's manager, nor
+        # kept for USER's uid: what they held went with that manager, dropped, said once.
+        user_override = self.foreign_state()
         self.systemd.fail_set.add(("usr", "app.slice"))
         p, out = self.accounts_profile(USER)
         self.systemd.actions = []
@@ -2711,11 +2721,74 @@ class LeftoversTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.paths.leftovers))
         self.assertEqual(out.getvalue().count("dropped"), 1, out.getvalue())
         self.assertIn(
-            "<4>game-profile: off: no account has uid 1001, the user 'on' acted for, now: 2 setting(s) of its user"
-            " manager dropped, not undone in another user's\n",
+            "<4>game-profile: off: the user manager of uid 1001, the user 'on' acted for, is not running: 2"
+            " setting(s) of it went with it, dropped\n",
             out.getvalue(),
         )
         self.assertFalse(os.path.exists(self.state))
+
+    def test_off_calls_no_stopped_user_manager_of_the_recorded_uid(self) -> None:
+        # G7: 'on' acted for uid 1001 ("other", an account), whose user manager is not running now (a logout):
+        # 'off' undoes the system manager's records and drops the user manager's, with one line; it calls
+        # neither that manager (the old 'off' ran set-property and daemon-reload into it) nor USER's.
+        user_override = self.foreign_state()
+        p, out = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        self.assertEqual(
+            self.sets(self.systemd.actions), [f"{SYS} set-property --runtime user@1001.service MemoryLow=0"]
+        )
+        self.assertIn(
+            "<4>game-profile: off: the user manager of uid 1001, the user 'on' acted for, is not running: 2"
+            " setting(s) of it went with it, dropped\n",
+            out.getvalue(),
+        )
+        self.assertNotIn("undoing for", out.getvalue())
+        self.assertTrue(os.path.exists(user_override))
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_off_keeps_the_records_of_a_uid_no_account_has_while_its_manager_runs(self) -> None:
+        # G7: no account has uid 1001 now, but its user manager still runs (its runtime folder is there): its
+        # records stay live there, so 'off' keeps them in game.leftovers under that uid, never undone in USER's
+        # manager (the old 'off' dropped them as if undone). A tick once that manager is gone drops them.
+        user_override = self.foreign_state()
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        p, out = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        left = self.paths.leftovers
+        self.assertEqual(
+            self.read(left),
+            "cst-game-leftovers 1\nuser 1001\nprop usr user.slice CPUWeight new -\n"
+            "prop usr app.slice CPUWeight existed 100\n",
+        )
+        said = out.getvalue()
+        self.assertIn(
+            "<5>game-profile: off: no account has uid 1001, the user 'on' acted for, now, and its user manager still"
+            " runs: its 2 setting(s) are not undone in another user's manager\n",
+            said,
+        )
+        self.assertIn(f"<4>game-profile: off: could not undo app.slice CPUWeight=100: kept in {left}", said)
+        self.assertTrue(said.endswith(f"restored, except 2 setting(s) kept in {left}\n"), said)
+        self.assertTrue(os.path.exists(user_override))
+        self.assertFalse(os.path.exists(self.state))
+        # A tick while off keeps them while that manager runs, and drops them once it is gone.
+        self.no_game()
+        p, _ = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        self.assertTrue(os.path.exists(left))
+        shutil.rmtree(os.path.join(self.paths.run_user, "1001"))
+        p, _ = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        self.assertFalse(os.path.exists(left))
+        self.assertTrue(os.path.exists(user_override))
 
     def test_a_transient_unit_that_is_gone_is_no_leftover(self) -> None:
         # A Docker scope with an override of its own before the game, which ended before 'off'.

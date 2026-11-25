@@ -838,11 +838,28 @@ so if `on` stops halfway, `off` can still undo what was done. `on` sets the
 memory chain (7.1) first, `user@<uid>.service` before its parents, so the
 first line of `game.state` names the user it acts for, whatever step `on`
 stopped at (`off` acts for that user, 6.2, and so do the watchdog's `tick`
-and `state`, also when `TARGET_USER` names another user now). When no
-account has that uid any more, `off` never undoes the user manager's records
-of `game.state` in another user's manager, nor keeps them for one: it drops
-them, said in one line (`<4>off: no account has uid UID, the user 'on' acted
-for, now: N setting(s) of its user manager dropped, ...`). When the line
+and `state`, also when `TARGET_USER` names another user now). The user
+manager's records of `game.state` are undone only in the manager of that
+uid, never in another user's (`TARGET_USER`'s):
+
+- that uid's user manager runs (`/run/user/UID/systemd` is there) and an
+  account has the uid: undone there;
+- that manager is not running (a logout took its runtime folder, and its
+  runtime overrides with it): nothing is left to undo there, so `off` calls
+  no `systemctl --user` for it and drops its records, in one line
+  (`<4>off: the user manager of uid UID, the user 'on' acted for, is not
+  running: N setting(s) of it went with it, dropped`). Versions before
+  2026-11 ran `set-property` and `daemon-reload` into the stopped manager;
+- no account has the uid any more but its manager still runs (the account
+  was removed during the game): the settings are still live there and no
+  name reaches that manager, so `off` says so (`<5>off: no account has uid
+  UID, the user 'on' acted for, now, and its user manager still runs: its N
+  setting(s) are not undone in another user's manager`) and keeps the
+  records in `game.leftovers` under that uid (below), done once that
+  manager is gone. Versions before 2026-11 dropped them as if undone.
+
+With no such record (an `on` that died before its first record), the user
+manager's side is `TARGET_USER`'s, as before. When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to
 /run/cpu-setup/game.state`; it carries on with the rest and still exits 0,

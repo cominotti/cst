@@ -9,6 +9,7 @@ with no game.state and another TARGET_USER.
 """
 
 from collections.abc import Callable, Sequence
+from enum import StrEnum
 from typing import Final
 
 from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format
@@ -74,13 +75,43 @@ def newer_leftovers(path: str, text: str) -> str | None:
     return LEFTOVERS_FORMAT.newer_text(path, found) if found > LEFTOVERS_FORMAT.version else None
 
 
-def merged_entries(kept: Sequence[Entry], state_recs: Sequence[Record]) -> list[Entry]:
+def merged_entries(kept: Sequence[Entry], state_recs: Sequence[Record], *, owner: str | None = None) -> list[Entry]:
     """What 'off' undoes, in file order (it undoes the last first): the kept entries (older than any record of
-    this game.state), then game.state's records. A kept record that is a record of this game.state too is
-    dropped: an 'off' killed after it wrote game.leftovers and before it removed game.state left both, and
-    undoing it once keeps a property touched twice ending at its oldest value."""
+    this game.state), then game.state's records, those of the user manager for the uid owner (None: the user
+    'off' acts for). A kept record that is a record of this game.state too is dropped: an 'off' killed after it
+    wrote game.leftovers and before it removed game.state left both, and undoing it once keeps a property
+    touched twice ending at its oldest value."""
     mine = set(state_recs)
-    return [e for e in kept if e[1] not in mine] + [(None, r) for r in state_recs]
+    return [e for e in kept if e[1] not in mine] + [(owner if of_user_manager(r) else None, r) for r in state_recs]
+
+
+class UserSide(StrEnum):
+    """Where 'off' undoes game.state's records of the user manager, for the uid game.state records (the user
+    'on' acted for: state_uid)."""
+
+    OWN = "own"  # in that uid's manager, which runs (or TARGET_USER's, when game.state records no uid)
+    GONE = "gone"  # that manager is not running: what it held went with it
+    ORPHAN = "orphan"  # no account has the uid now and its manager still runs: kept, never undone in another's
+
+
+def user_side_text(side: UserSide, uid: str, count: int) -> tuple[int, str] | None:
+    """The journal line (priority, text) of an 'off' whose game.state holds count records of the user manager
+    of uid that it does not undo there (side GONE or ORPHAN); None for none."""
+    if not count:
+        return None
+    match side:
+        case UserSide.GONE:
+            return 4, (
+                f"off: the user manager of uid {uid}, the user 'on' acted for, is not running: {count} setting(s)"
+                " of it went with it, dropped"
+            )
+        case UserSide.ORPHAN:
+            return 5, (
+                f"off: no account has uid {uid}, the user 'on' acted for, now, and its user manager still runs:"
+                f" its {count} setting(s) are not undone in another user's manager"
+            )
+        case UserSide.OWN:
+            return None
 
 
 def undo_text(rec: Record, epp: Callable[[str], str], *, short: bool = False) -> str:

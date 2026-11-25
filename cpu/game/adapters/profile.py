@@ -33,10 +33,10 @@ from cpu.game.adapters.host import (
 )
 from cpu.game.adapters.boxes import set_again
 from cpu.game.adapters.drift import repair_drift
-from cpu.game.adapters.leftovers import Reloads, drop_unowned, keep, read_kept, retry_kept, undo_entries, unit_gone
+from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_entries, unit_gone, user_side
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
-from cpu.game.domain.leftovers import merged_entries, off_text
+from cpu.game.domain.leftovers import UserSide, merged_entries, of_user_manager, off_text, user_side_text
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -531,10 +531,14 @@ class GameProfile:
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
         recs = records(text)
-        if not self.user_from_state(recs):
-            recs = drop_unowned(self, recs)
+        uid = state_uid(recs)
+        side = user_side(self, uid, say=True)  # a user manager's record only in the manager of its uid
+        owner = None if side == UserSide.OWN else uid
+        said = None if owner is None else user_side_text(side, owner, sum(map(of_user_manager, recs)))
+        if said is not None:
+            self.log(*said)
         kept = read_kept(self, say=True)
-        failed, _dropped = undo_entries(self, merged_entries(kept or [], recs), reload, say=True)
+        failed, _dropped = undo_entries(self, merged_entries(kept or [], recs, owner=owner), reload, say=True)
         self.reload_managers(reload)
         held = keep(self, failed, kept)
         for f in (p.state, p.intended, p.manual, p.drift_warned):

@@ -16,9 +16,10 @@ from typing import TYPE_CHECKING
 
 from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.domain.units import LoadState
-from cpu.game.domain import Manager, PropUndo, Record, show_values, state_uid, state_undo, transient_unit
+from cpu.game.domain import Manager, PropUndo, Record, show_values, state_undo, transient_unit
 from cpu.game.domain.leftovers import (
     Entry,
+    UserSide,
     leftover_entries,
     leftovers_text,
     newer_leftovers,
@@ -75,13 +76,14 @@ def undo_entries(
     the user manager for the user its entry names; the ones whose undo failed, in their order, each with the
     uid it was for (keep says them), and the records dropped undone (no_user_manager). An entry whose uid no
     account has now is never undone in another user's manager: it is done when that uid's user manager is
-    gone, else kept. say: see GameProfile.undo_record ('off' says it; the tick does not)."""
+    gone, else kept. An entry of a uid whose user manager is not running is done: what it held went with it.
+    say: see GameProfile.undo_record ('off' says it; the tick does not)."""
     failed: list[Entry] = []
     dropped: set[Record] = set()
     for uid, rec in reversed(entries):
+        if uid is not None and user_manager_gone(profile, uid):
+            continue
         if uid is not None and not profile.act_for(uid, say=False):
-            if user_manager_gone(profile, uid):
-                continue
             user: str | None = uid
         elif uid is None and no_user_manager(profile, rec, say=say):
             who = "off: " if say else ""
@@ -108,18 +110,17 @@ def no_user_manager(profile: GameProfile, rec: Record, *, say: bool) -> bool:
     return isinstance(undo, PropUndo) and undo.mgr == "usr" and undo.mode == "new" and not profile.uid(say=say)
 
 
-def drop_unowned(profile: GameProfile, recs: Sequence[Record]) -> list[Record]:
-    """game.state's records without those of the user manager, for an 'off' when no account has the uid it
-    names: they are never undone in another user's manager (TARGET_USER's), nor kept for it; said in one
-    warning."""
-    mine = [r for r in recs if not of_user_manager(r)]
-    if len(mine) < len(recs):
-        profile.log(
-            4,
-            f"off: no account has uid {state_uid(recs)}, the user 'on' acted for, now: "
-            f"{len(recs) - len(mine)} setting(s) of its user manager dropped, not undone in another user's",
-        )
-    return mine
+def user_side(profile: GameProfile, uid: str | None, *, say: bool) -> UserSide:
+    """Where game.state's records of the user manager are undone, for the uid it records (None: none, they are
+    TARGET_USER's, as before): in that uid's manager when it runs and an account has the uid (the profile acts
+    for that user from now on: act_for, say its line); GONE when that manager is not running (no runtime folder:
+    its runtime overrides went with it); ORPHAN when it runs but no account has the uid now (no name to reach
+    it by: never undone in TARGET_USER's manager instead)."""
+    if uid is None:
+        return UserSide.OWN
+    if user_manager_gone(profile, uid):
+        return UserSide.GONE
+    return UserSide.OWN if profile.act_for(uid, say=say) else UserSide.ORPHAN
 
 
 def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | None, *, off: bool = True) -> int:
