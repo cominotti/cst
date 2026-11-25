@@ -23,7 +23,6 @@ from vm.application.backup import (
 )
 from vm.application.nas_torn import forget_torn, nas_snapshot_ids, retention_after_torn
 from vm.domain import (
-    ADOPTED_TAG,
     LIVE_STATES,
     NAS_DEFAULTS,
     OVERLAY_MARK,
@@ -57,6 +56,7 @@ from vm.domain.backup import (
     StopAfterBackup,
     StopAfterSnapshot,
     Uncertain,
+    kept_unindexed_text,
     manifest_text,
     nas_done_lines,
     nas_index,
@@ -612,7 +612,7 @@ def _nas_not_merged_back(
     if isinstance(failure, StopAfterBackup):  # a good read: its snapshot named, with what keeps it
         msg += (
             f"\n(the backup itself: {failure}; the restic snapshot {failure.snap[:8]} of {run.vm} is a backup, its "
-            f"read checked, but it is not in the index: {_kept_unindexed(failure.snap)})"
+            f"read checked, but it is not in the index: {kept_unindexed_text(failure.snap)})"
         )
     elif failure is not None and not isinstance(failure, Uncertain):
         msg += f"\n(the backup itself: {failure})"
@@ -649,7 +649,7 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
 
 def _not_indexed(snap: str, vm: str, e: IndexRefused) -> str:
     """What a NAS backup the index could not take says of its snapshot."""
-    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", _kept_unindexed(snap), e)
+    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept_unindexed_text(snap), e)
 
 
 def _index_write_failed(snap: str, vm: str, e: OSError) -> str:
@@ -657,16 +657,7 @@ def _index_write_failed(snap: str, vm: str, e: OSError) -> str:
     or not (write_atomic can fail at the folder's fsync, after the rename)."""
     return (
         f"the restic snapshot {snap[:8]} of {vm} is a backup, but writing the index failed ({e}): the index may "
-        f"not name it; {_kept_unindexed(snap)}"
-    )
-
-
-def _kept_unindexed(snap: str) -> str:
-    """Where a NAS backup left out of the index stays, what the next runs do with it, and how to keep it."""
-    return (
-        "the snapshot stays in the repository: the next NAS backups may name it as a snapshot no record names, "
-        f"and their retention waits for it until it is kept as a backup (restic tag --add {ADOPTED_TAG} {snap}) or "
-        f'forgotten (restic forget {snap}) (restore it by its ID: vm/README.md, section "Restore from the NAS")'
+        f"not name it; {kept_unindexed_text(snap)}"
     )
 
 

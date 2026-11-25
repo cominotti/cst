@@ -131,6 +131,15 @@ def not_indexed_text(backup: str, kept: str, e: IndexRefused) -> str:
     )
 
 
+def kept_unindexed_text(snap: str) -> str:
+    """Where a NAS backup left out of the index stays, what the next runs do with it, and how to keep it."""
+    return (
+        "the snapshot stays in the repository: the next NAS backups may name it as a snapshot no record names, "
+        f"and their retention waits for it until it is kept as a backup (restic tag --add {ADOPTED_TAG} {snap}) or "
+        f'forgotten (restic forget {snap}) (restore it by its ID: vm/README.md, section "Restore from the NAS")'
+    )
+
+
 def stored_list(data: object) -> list[object] | None:
     """The "backups" list of a parsed index, each entry as stored; None when data is not an object
     with one (NO_BACKUPS_LIST). cst vm's stored_backups and cst doctor read the index with it."""
