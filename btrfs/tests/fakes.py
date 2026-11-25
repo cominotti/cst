@@ -5,12 +5,19 @@
 - docker-volumes-nocow (test_docker_volumes_nocow and its fault tests): FakeSystem, the inode-flag
   ioctls, getxattr, the commands, os.sync and the fake cp; Crash, which its copy_into raises; the
   flag bits NOCOW and OTHER; entries, carries_flags and tree, to walk and compare a folder;
+- systemd (scrub-limit's and iocost's fakes): SystemdState, what systemd has loaded of one unit
+  (its files' text at the last reload that worked, whether they changed since) and whether the unit
+  is enabled and active; one model, not a copy per package;
 - scrub-limit (test_scrub_limit, test_scrub_limit_ports): ScrubFakeRunner, the installer and
   systemctl; RecordingInstallerRunner, the installer's text, remove-text and mark through the real
   InstallService and one install record; SystemdModel, the same and what systemd has loaded of the
   drop-in; core_text, a generated text of btrfs:core; (its fault tests, tests/mbt/mbt_scrub_rollback
   and test_scrub_limit_ports) ScrubWorld and FakeScrubSettings, FakeScrubDropin, FakeScrubSystemd and
   FakeScrubSysfs over it, the in-memory fakes of btrfs/scrub_limit/ports.py;
+- iocost (its fault tests, test_iocost_ports and tests/mbt/mbt_iocost_apply): IocostWorld and
+  FakeQosControl, FakeManagedDevices, FakeIocostSysfs, FakeUdev, FakeIocostSystemd,
+  FakeIocostInstaller, FakeIocostUninstall and FakeIocostLock over it, the in-memory fakes of
+  btrfs/iocost/ports.py; IOCOST_ENTRIES, btrfs:iocost's manifest entries;
 - cache (test_cache): FakeMountRunner, findmnt, mount and umount over a list of mounts;
   CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry.
 
@@ -31,17 +38,37 @@ import stat
 import struct
 import subprocess
 import sys
-from typing import override
+from typing import Final, override
 
 from btrfs.cache.domain import FINDMNT_COLUMNS
+from btrfs.iocost.application import Iocost
+from btrfs.iocost.domain import (
+    IOCOST_COMPONENT_LOCK_NAME,
+    IOCOST_LOCK,
+    IOCOST_MANAGED_FILE,
+    IOCOST_QOS_PATH,
+    IOCOST_SERVICE,
+    USEC_INITIALIZED_PROP,
+    BlockDisk,
+    UdevProperties,
+)
 from btrfs.scrub_limit.application import ScrubLimit
 from btrfs.scrub_limit.domain import SCRUB_CONF_PATH, SCRUB_DROPIN_PATH
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
-from cst_core.application.install import InstallService, Placement
-from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
+from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
+from cst_core.domain.install import (
+    INSTALL_MANIFEST,
+    ArtifactKind,
+    Component,
+    GeneratedKind,
+    InstallReportWord,
+    Owner,
+    select_entries,
+)
 from cst_core.domain.record import ComponentState
-from cst_core.ports import CommandFault, CommandResult
+from cst_core.installer import NAME as INSTALLER_NAME
+from cst_core.ports import CommandFault, CommandResult, WriteFailed
 from tests.fault_injection import FaultPlan
 from tests.test_install import MemoryTarget
 from tests.test_install_record import MemoryRecord
@@ -316,6 +343,29 @@ class FakeSystem:
         return n
 
 
+# ---- systemd (scrub-limit and iocost) -------------------------------------
+
+
+class SystemdState:
+    """What systemd has of one unit, for the fakes of every package that reloads it: the text of its
+    files at the last daemon-reload that worked (loaded), whether a write or a removal of them came since
+    (dirty: what NeedDaemonReload follows), and whether the unit is enabled and active."""
+
+    def __init__(self, *, loaded: str | None = None, dirty: bool = False) -> None:
+        self.loaded = loaded
+        self.dirty = dirty
+        self.enabled = False
+        self.active = False
+
+    def changed(self) -> None:
+        """A write or a removal of the unit's files: systemd is behind until the next reload."""
+        self.dirty = True
+
+    def reloaded(self, text: str | None) -> None:
+        """A daemon-reload that worked: systemd has text, as the files are now."""
+        self.loaded, self.dirty = text, False
+
+
 # ---- scrub-limit ---------------------------------------------------------
 
 
@@ -434,8 +484,18 @@ class SystemdModel(RecordingInstallerRunner):
     def __init__(self, dropin: str, record: str, *, loaded: str | None = None, behind: bool = False) -> None:
         super().__init__(record)
         self.dropin = dropin
-        self.loaded = loaded
-        self.dirty = behind  # a write or a removal of the drop-in since the last reload that worked
+        # dirty: a write or a removal of the drop-in since the last reload that worked
+        self.systemd = SystemdState(loaded=loaded, dirty=behind)
+
+    @property
+    def loaded(self) -> str | None:
+        """The drop-in's text at the last daemon-reload that worked."""
+        return self.systemd.loaded
+
+    @property
+    def dirty(self) -> bool:
+        """A write or a removal of the drop-in since the last reload that worked."""
+        return self.systemd.dirty
 
     @override
     def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
@@ -443,13 +503,47 @@ class SystemdModel(RecordingInstallerRunner):
         self.need_daemon_reload = "yes\n" if self.dirty else "no\n"
         r = super().run(argv, input_text=input_text, **kw)
         if "installer.py" in " ".join(cmd) and r.stdout.startswith(("written:", "removed:")):
-            self.dirty = True
+            self.systemd.changed()
         if cmd == ["systemctl", "daemon-reload"] and r.returncode == 0:
-            self.loaded, self.dirty = read(self.dropin), False
+            self.systemd.reloaded(read(self.dropin))
         return r
 
 
-class ScrubWorld:
+class FaultPoints:
+    """Every mutating call of a world's port fakes as one named point: recorded in calls, then run through
+    plan (tests/fault_injection.py) and failed by fail() when one is armed there; answered lists the
+    points where an armed fail() answered (so a test can tell a fault that fired from one that did not)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []  # every mutating call, by its point name
+        self.plan = FaultPlan()
+        self.failing: dict[str, tuple[OSError, int | None]] = {}
+        self.answered: list[str] = []
+
+    def fail(self, point: str, err: OSError, *, times: int | None = None) -> None:
+        """The next times calls of point fail with err (None: every one)."""
+        self.failing[point] = (err, times)
+
+    def step[T](self, point: str, effect: Callable[[], T], failed: Callable[[OSError], T] | None = None) -> T:
+        """One mutating call: recorded, then run through plan, its effect failed by fail() when one is armed
+        there (so plan records it too, and a process the plan has killed runs it no more)."""
+        self.calls.append(point)
+        err, left = self.failing.get(point, (None, 0))
+        if err is None or left == 0:
+            return self.plan.step(point, effect, failed)
+        armed = err
+
+        def fails() -> T:
+            self.failing[point] = (armed, None if left is None else left - 1)
+            self.answered.append(point)
+            if failed is None:
+                raise armed
+            return failed(armed)
+
+        return self.plan.step(point, fails, failed)
+
+
+class ScrubWorld(FaultPoints):
     """What scrub-limit's ports see, in memory, for the use cases of btrfs/scrub_limit/application.py:
     snapshots.conf and its folder, the drop-in (in an in-memory install target, written and removed
     through the real InstallService with an in-memory install record, as installer.py text --keep-state and
@@ -473,6 +567,7 @@ class ScrubWorld:
         dropin_path: str = SCRUB_DROPIN_PATH,
         record: str = "/var/lib/cst/installed.json",
     ) -> None:
+        super().__init__()
         self.conf_path = conf_path
         self.dropin_path = dropin_path
         self.record = record
@@ -481,18 +576,32 @@ class ScrubWorld:
         self.conf_unreadable = False
         self.dropin_folder = False
         self.dropin_unreadable = False
-        self.loaded: str | None = None
-        self.dirty = False
+        self.systemd = SystemdState()  # what systemd has loaded of the drop-in (loaded, dirty)
         self.show_fails = False  # systemctl cannot say whether systemd loaded the files
         self.live: tuple[str, ...] = ()  # sysfs's lines (ScrubSysfsPort)
         self.reload_timeouts: list[float | None] = []  # the time limit of each daemon-reload asked for
-        self.calls: list[str] = []  # every mutating call, by its point name
         self.built_for: list[bool] = []  # the read_only of each use case build() gave
-        self.plan = FaultPlan()
-        self.failing: dict[str, tuple[OSError, int | None]] = {}
         self.target = MemoryTarget()
         self.records = MemoryRecord()
         self.svc = InstallService(self.target, lambda _e: b"", record=self.records)
+
+    @property
+    def loaded(self) -> str | None:
+        """The drop-in's text at the last daemon-reload that worked."""
+        return self.systemd.loaded
+
+    @loaded.setter
+    def loaded(self, text: str | None) -> None:
+        self.systemd.loaded = text
+
+    @property
+    def dirty(self) -> bool:
+        """A write or a removal of the drop-in since the last reload that worked."""
+        return self.systemd.dirty
+
+    @dirty.setter
+    def dirty(self, behind: bool) -> None:
+        self.systemd.dirty = behind
 
     @property
     def dropin(self) -> str | None:
@@ -530,27 +639,6 @@ class ScrubWorld:
             self.svc.put(core_text(self.dropin_path, self.record), self.dropin.encode(), as_root=False)
         if done:
             self.svc.mark(self.record, Component.BTRFS_CORE.value)
-
-    def fail(self, point: str, err: OSError, *, times: int | None = None) -> None:
-        """The next times calls of point fail with err (None: every one)."""
-        self.failing[point] = (err, times)
-
-    def step[T](self, point: str, effect: Callable[[], T], failed: Callable[[OSError], T] | None = None) -> T:
-        """One mutating call: recorded, then run through plan, its effect failed by fail() when one is armed
-        there (so plan records it too, and a process the plan has killed runs it no more)."""
-        self.calls.append(point)
-        err, left = self.failing.get(point, (None, 0))
-        if err is None or left == 0:
-            return self.plan.step(point, effect, failed)
-        armed = err
-
-        def fails() -> T:
-            self.failing[point] = (armed, None if left is None else left - 1)
-            if failed is None:
-                raise armed
-            return failed(armed)
-
-        return self.plan.step(point, fails, failed)
 
     def build(self) -> Callable[[bool], ScrubLimit]:
         """What run_scrub_limit_cli's build takes: this world's use cases, whatever read_only it is asked
@@ -654,7 +742,8 @@ class FakeScrubDropin:
             place = core_text(w.dropin_path, w.record)
             written = w.svc.put(place, text.encode(), as_root=False, keep_state=True)
             w.dropin_folder = True
-            w.dirty = w.dirty or written
+            if written:
+                w.systemd.changed()
             word = InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED
             return 0, [word.line(w.dropin_path)], ""
 
@@ -665,7 +754,8 @@ class FakeScrubDropin:
 
         def remove_text() -> tuple[int, list[str], str]:
             lines = list(w.svc.remove([core_text(w.dropin_path, w.record)]))
-            w.dirty = w.dirty or bool(lines)
+            if lines:
+                w.systemd.changed()
             return 0, lines, ""
 
         return w.step("drop-in remove-text", remove_text, _installer_failed)
@@ -697,7 +787,7 @@ class FakeScrubSystemd:
 
         def reload() -> CommandResult:
             w.reload_timeouts.append(timeout)
-            w.loaded, w.dirty = w.dropin, False
+            w.systemd.reloaded(w.dropin)
             return CommandResult(0, "", "", argv=argv)
 
         def failed(err: OSError) -> CommandResult:
@@ -715,6 +805,415 @@ class FakeScrubSysfs:
 
     def live_limits(self) -> tuple[str, ...]:
         return self.world.live
+
+
+# ---- iocost --------------------------------------------------------------
+
+IOCOST_ENTRIES: Final = tuple(select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST))
+UDEV_PROCESSED: Final = UdevProperties({USEC_INITIALIZED_PROP: "1234"})  # udev processed it, no hwdb solution
+
+
+class IocostWorld(FaultPoints):
+    """What iocost's ports see, in memory, for the use cases of btrfs/iocost/application.py: the kernel's
+    io.cost.qos (one line per device, a write replacing its device's line), the cgroup controllers,
+    io.cost.model and the block disks, udev's answer for each disk and whether udevd runs, the
+    managed-devices set (or a folder at its path), btrfs:iocost's files in an in-memory install target and
+    its state in an in-memory install record (installed, marked and removed through the real
+    InstallService, as installer.py install and mark and the in-process removal do; release: the CST whose
+    payload an install writes, so a new one rewrites every file), what systemd has loaded of the unit
+    (SystemdState, shared with scrub-limit's fakes), the rule as udev loaded it, and the two locks.
+
+    Every mutating call is one point (FaultPoints): "installer install", "installer mark done",
+    "managed save", "qos MAJ:MIN ..." (the line), "systemd daemon-reload", "systemd enable --now",
+    "systemd disable --now", "udev reload-rules", "uninstall mark pending|done" and "uninstall remove". A
+    failed command is an exit 1 with the error on stderr; a failed save, write, mark or removal raises it.
+    The fakes check the locks as the protocol must hold them (an AssertionError names the call): the
+    io.cost.qos lock at every io.cost.qos write and save of the managed set; the component lock at every
+    install, mark and removal of btrfs:iocost and at enable --now, which also needs the io.cost.qos lock
+    free (the service it starts takes it). Reads are not points; each read gives a new object, never the
+    one the world holds, so a use case that compares by identity is caught."""
+
+    def __init__(self, *, install_root: str = "") -> None:
+        super().__init__()
+        self.qos_path = IOCOST_QOS_PATH
+        self.managed_path = IOCOST_MANAGED_FILE
+        self.lock_paths = {
+            "qos": IOCOST_LOCK,
+            "component": posixpath.join(posixpath.dirname(IOCOST_LOCK), IOCOST_COMPONENT_LOCK_NAME),
+        }
+        self.qos: dict[str, str] | None = {}  # MAJ:MIN -> its line; None: no io.cost.qos (no blk-iocost)
+        self.qos_refusal: OSError | None = None  # the kernel refuses every write with it
+        self.controllers: str | None = "cpuset cpu io memory pids"
+        self.model = ""
+        self.disks: list[BlockDisk] = []
+        self.udev_answers: dict[str, UdevProperties] = {}  # by disk name; UDEV_PROCESSED by default
+        self.udevd = True
+        self.managed: set[str] = set()
+        self.managed_folder = False  # a folder where the managed-devices file belongs
+        self.systemd = SystemdState()  # loaded: the unit file's text at its last daemon-reload that worked
+        self.show_fails = False  # systemctl cannot say what the unit is
+        self.udev_loaded: str | None = None  # the rule's text as udev loaded it at its last reload
+        self.installer_available = True
+        self.plan_answer: list[str] | None = []  # the installer plan's changes (None: it cannot tell)
+        self.release = 0
+        self.target = MemoryTarget()
+        self.records = MemoryRecord()
+        self.req = InstallRequest(root=install_root, as_root=True)
+        self.record = record_file(Owner.ROOT, None, install_root)
+        self.svc = InstallService(self.target, lambda e: f"{e.dest} {self.release}\n".encode(), record=self.records)
+        self.held = {"qos": False, "component": False}
+        self.busy: set[str] = set()  # the locks another run holds
+        self.lock_errors: dict[str, OSError] = {}  # the locks whose folder or file cannot be made
+        self.events: list[str] = []  # what worked, in order: install, reload, enable, udev, mark, disable, ...
+        self.before_mark: Callable[[], None] | None = None  # runs before a mark done of btrfs:iocost
+
+    # ---- the files ---------------------------------------------------------------------------------
+    def dest_path(self, dest: str) -> str:
+        """Where btrfs:iocost's file dest is in the target (under the install root)."""
+        entry = next(e for e in IOCOST_ENTRIES if e.dest == dest)
+        return self.svc.placement(entry, self.req).path
+
+    @property
+    def unit_path(self) -> str:
+        return self.dest_path(next(e.dest for e in IOCOST_ENTRIES if e.kind == ArtifactKind.UNIT))
+
+    @property
+    def rule_path(self) -> str:
+        return self.dest_path(next(e.dest for e in IOCOST_ENTRIES if e.dest.endswith(".rules")))
+
+    def file(self, path: str) -> str | None:
+        """A file's text in the target (None: not there)."""
+        held = self.target.files.get(path)
+        return None if held is None else held[0].decode()
+
+    def in_place(self) -> list[str]:
+        """btrfs:iocost's destinations whose file is in the target."""
+        return [e.dest for e in IOCOST_ENTRIES if self.dest_path(e.dest) in self.target.files]
+
+    def state(self) -> ComponentState | None:
+        """btrfs:iocost's state in the install record (None: no record, or none for it)."""
+        rec = self.records.read(self.record)
+        return None if rec is None else rec.components.get(Component.BTRFS_IOCOST.value)
+
+    def recorded(self) -> set[str]:
+        """The destinations the install record lists for btrfs:iocost."""
+        rec = self.records.read(self.record)
+        return (
+            set() if rec is None else {d for d, f in rec.files.items() if f.component == Component.BTRFS_IOCOST.value}
+        )
+
+    def qos_text(self) -> str | None:
+        """io.cost.qos as the kernel shows it (None: not there)."""
+        return None if self.qos is None else "".join(f"{line}\n" for line in self.qos.values())
+
+    # ---- start states ------------------------------------------------------------------------------
+    def put_disk(
+        self, name: str, devno: str, *, rotational: bool = False, scheduler: str = "none", model: str = ""
+    ) -> None:
+        """A whole block disk the scan finds."""
+        self.disks.append(BlockDisk(name=name, devno=devno, rotational=rotational, scheduler=scheduler, model=model))
+
+    def install(self, *, done: bool) -> None:
+        """btrfs:iocost as an apply leaves it: its files and their lines, systemd reloaded, the service
+        enabled and the rule loaded (done), or still pending with the service off."""
+        list(self.svc.install(IOCOST_ENTRIES, self.req))
+        self.systemd.reloaded(self.file(self.unit_path))
+        if done:
+            self.svc.mark(self.record, Component.BTRFS_IOCOST.value)
+            self.systemd.enabled = self.systemd.active = True
+            self.udev_loaded = self.file(self.rule_path)
+
+    # ---- the locks the fakes check -----------------------------------------------------------------
+    def holds(self, lock: str, what: str) -> None:
+        if not self.held[lock]:
+            raise AssertionError(f"{what} without the {lock} lock")
+
+    def service(self) -> Iocost:
+        """The use cases over this world's ports."""
+        return Iocost(
+            sysfs=FakeIocostSysfs(self),
+            qos=FakeQosControl(self),
+            managed=FakeManagedDevices(self),
+            udev=FakeUdev(self),
+            systemd=FakeIocostSystemd(self),
+            installer=FakeIocostInstaller(self),
+            qos_lock=FakeIocostLock(self, "qos"),
+            component_lock=FakeIocostLock(self, "component"),
+            uninstall=FakeIocostUninstall(self),
+        )
+
+
+def _command_failed(argv: tuple[str, ...]) -> Callable[[OSError], CommandResult]:
+    def failed(err: OSError) -> CommandResult:
+        return CommandResult(1, "", f"{err.strerror}\n", argv=argv)
+
+    return failed
+
+
+def _installer_failed_lines(err: OSError) -> tuple[int, list[str]]:
+    return 1, [err.strerror or str(err)]
+
+
+class FakeQosControl:
+    """QosControlPort over an IocostWorld."""
+
+    def __init__(self, world: IocostWorld) -> None:
+        self.world = world
+
+    @property
+    def path(self) -> str:
+        return self.world.qos_path
+
+    def read(self) -> str | None:
+        return self.world.qos_text()
+
+    def write(self, line: str) -> None:
+        w = self.world
+        w.holds("qos", f"io.cost.qos <- {line!r}")
+        if w.qos is None:
+            raise AssertionError(f"io.cost.qos <- {line!r} with no io.cost.qos (the kernel has none to write)")
+
+        def merged() -> None:
+            if w.qos_refusal is not None:
+                w.events.append("qos failed")
+                raise w.qos_refusal
+            assert w.qos is not None
+            w.qos[line.split(maxsplit=1)[0]] = line
+
+        w.step(f"qos {line}", merged)
+
+
+class FakeManagedDevices:
+    """ManagedDevicesPort over an IocostWorld: a folder at its path cannot be written or removed (EISDIR)."""
+
+    def __init__(self, world: IocostWorld) -> None:
+        self.world = world
+
+    @property
+    def path(self) -> str:
+        return self.world.managed_path
+
+    def read(self) -> frozenset[str]:
+        w = self.world
+        return frozenset() if w.managed_folder else frozenset(list(w.managed))
+
+    def save(self, devnos: frozenset[str]) -> None:
+        w = self.world
+        w.holds("qos", "the managed-devices file's save")
+
+        def saved() -> None:
+            if w.managed_folder:
+                raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR))
+            w.managed = set(devnos)
+
+        w.step("managed save", saved)
+
+
+class FakeIocostSysfs:
+    """IocostSysfsPort over an IocostWorld."""
+
+    def __init__(self, world: IocostWorld) -> None:
+        self.world = world
+
+    def disks(self) -> tuple[BlockDisk, ...]:
+        return tuple(self.world.disks)
+
+    def io_controller(self) -> bool | None:
+        ctrl = self.world.controllers
+        return None if ctrl is None else "io" in ctrl.split()
+
+    def model(self) -> str:
+        return self.world.model.strip()
+
+
+class FakeUdev:
+    """UdevPort over an IocostWorld."""
+
+    def __init__(self, world: IocostWorld) -> None:
+        self.world = world
+
+    def running(self) -> bool:
+        return self.world.udevd
+
+    def rule_installed(self) -> bool:
+        w = self.world
+        return w.rule_path in w.target.files
+
+    def properties(self, name: str) -> UdevProperties:
+        answer = self.world.udev_answers.get(name, UDEV_PROCESSED)
+        return UdevProperties(None if answer.props is None else dict(answer.props), answer.error)
+
+    def reload_rules(self) -> CommandResult:
+        w = self.world
+        argv = ("udevadm", "control", "--reload-rules")
+
+        def reload() -> CommandResult:
+            w.udev_loaded = w.file(w.rule_path)
+            w.events.append("udev")
+            return CommandResult(0, "", "", argv=argv)
+
+        return w.step("udev reload-rules", reload, _command_failed(argv))
+
+
+class FakeIocostSystemd:
+    """IocostSystemdPort over an IocostWorld: the unit is loaded while its file is in the target."""
+
+    def __init__(self, world: IocostWorld) -> None:
+        self.world = world
+
+    def probe(self) -> tuple[bool, str, str]:
+        w = self.world
+        if w.show_fails:
+            return False, "unknown", "unknown"
+        s = w.systemd
+        return (
+            w.unit_path in w.target.files,
+            "active" if s.active else "inactive",
+            "enabled" if s.enabled else "disabled",
+        )
+
+    def daemon_reload(self) -> CommandResult:
+        w = self.world
+        argv = ("systemctl", "daemon-reload")
+
+        def reload() -> CommandResult:
+            w.systemd.reloaded(w.file(w.unit_path))
+            w.events.append("reload")
+            return CommandResult(0, "", "", argv=argv)
+
+        return w.step("systemd daemon-reload", reload, _command_failed(argv))
+
+    def enable_now(self) -> CommandResult:
+        w = self.world
+        argv = ("systemctl", "enable", "--now", IOCOST_SERVICE)
+        w.holds("component", "enable --now")
+        if w.held["qos"]:
+            raise AssertionError("enable --now while this run holds the io.cost.qos lock the service takes")
+
+        def enable() -> CommandResult:
+            if w.unit_path not in w.target.files:
+                return CommandResult(
+                    1, "", f"Failed to enable unit: Unit file {IOCOST_SERVICE} does not exist\n", argv=argv
+                )
+            w.systemd.enabled = w.systemd.active = True
+            w.events.append("enable")
+            return CommandResult(0, "", "", argv=argv)
+
+        return w.step("systemd enable --now", enable, _command_failed(argv))
+
+    def disable_now(self) -> CommandResult:
+        w = self.world
+        argv = ("systemctl", "disable", "--now", IOCOST_SERVICE)
+        w.holds("component", "disable --now")
+
+        def disable() -> CommandResult:
+            w.systemd.enabled = w.systemd.active = False
+            w.events.append("disable")
+            return CommandResult(0, "", "", argv=argv)
+
+        return w.step("systemd disable --now", disable, _command_failed(argv))
+
+
+class FakeIocostInstaller:
+    """IocostInstallerPort over an IocostWorld: install and mark through its InstallService, as
+    installer.py does (its report lines, its error line on a failure)."""
+
+    def __init__(self, world: IocostWorld) -> None:
+        self.world = world
+
+    def available(self) -> bool:
+        return self.world.installer_available
+
+    def install(self) -> tuple[int, list[str]]:
+        w = self.world
+        w.holds("component", "the installer's install")
+
+        def install() -> tuple[int, list[str]]:
+            lines: list[str] = []
+            try:
+                lines.extend(w.svc.install(IOCOST_ENTRIES, w.req))
+            except (WriteFailed, InstallRefused) as e:
+                w.events.append("install failed")
+                return 1, [*lines, f"{INSTALLER_NAME}: {e}"]
+            if any(not line.startswith(InstallReportWord.UNCHANGED) for line in lines):
+                w.systemd.changed()
+            w.events.append("install")
+            return 0, lines
+
+        return w.step("installer install", install, _installer_failed_lines)
+
+    def mark_done(self) -> tuple[int, list[str]]:
+        w = self.world
+        w.holds("component", "the installer's mark done")
+
+        def mark() -> tuple[int, list[str]]:
+            if w.before_mark is not None:
+                w.before_mark()
+            w.svc.mark(w.record, Component.BTRFS_IOCOST.value)
+            w.events.append("mark")
+            return 0, []
+
+        return w.step("installer mark done", mark, _installer_failed_lines)
+
+    def changes(self) -> tuple[str, ...] | None:
+        answer = self.world.plan_answer
+        return None if answer is None else tuple(answer)
+
+
+class FakeIocostUninstall:
+    """IocostUninstallPort over an IocostWorld's InstallService (its target's fail_on fails a removal)."""
+
+    def __init__(self, world: IocostWorld) -> None:
+        self.world = world
+
+    @property
+    def record_path(self) -> str:
+        return self.world.record
+
+    def mark(self, state: ComponentState) -> ComponentState | None:
+        w = self.world
+        w.holds("component", f"the uninstall's mark {state}")
+        return w.step(f"uninstall mark {state}", lambda: w.svc.mark(w.record, Component.BTRFS_IOCOST.value, state))
+
+    def remove(self) -> list[str]:
+        w = self.world
+        w.holds("component", "the uninstall's removal")
+
+        def remove() -> list[str]:
+            lines = list(w.svc.remove([w.svc.placement(e, w.req) for e in IOCOST_ENTRIES]))
+            if lines:
+                w.systemd.changed()
+            return lines
+
+        return w.step("uninstall remove", remove)
+
+
+class FakeIocostLock:
+    """IocostLockPort over an IocostWorld: busy, another run holds it; lock_errors, its folder or file
+    cannot be made. A run never takes a lock it already holds."""
+
+    def __init__(self, world: IocostWorld, name: str) -> None:
+        self.world = world
+        self.name = name
+
+    @property
+    def path(self) -> str:
+        return self.world.lock_paths[self.name]
+
+    def take(self) -> bool:
+        w = self.world
+        err = w.lock_errors.get(self.name)
+        if err is not None:
+            raise err
+        if self.name in w.busy:
+            return False
+        if w.held[self.name]:
+            raise AssertionError(f"the {self.name} lock taken twice")
+        w.held[self.name] = True
+        return True
+
+    def release(self) -> None:
+        self.world.held[self.name] = False
 
 
 # ---- cache ---------------------------------------------------------------

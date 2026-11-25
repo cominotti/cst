@@ -57,6 +57,7 @@ from cpu.game.domain import (
 )
 from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
 from cpu.game.domain.leftovers import (
+    entry_key,
     leftover_entries,
     leftovers_text,
     merged_entries,
@@ -94,6 +95,8 @@ class FakeSystemd:
         self.not_loaded: set[tuple[str, str]] = set()
         self.units: dict[str, list[str]] = {"sys": [], "usr": []}
         self.active: set[str] = set()
+        self.fail_reload: set[str] = set()  # daemon-reload fails: "sys", or the name of a user's manager
+        self.fail_show: set[tuple[str, str, str]] = set()  # show -P PROP UNIT of that manager fails
 
     def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
         self.actions.append(" ".join(argv))
@@ -117,6 +120,8 @@ class FakeSystemd:
             )
         if sub == "is-active":
             return CommandResult(0 if args[1] in self.active else 3, "", "")
+        if sub == "daemon-reload" and (argv[3].removesuffix("@") if mgr == "usr" else "sys") in self.fail_reload:
+            return CommandResult(1, "", "Failed to reload daemon")
         return CommandResult(0, "", "")
 
     def _set(self, mgr: str, unit: str, settings: Sequence[str]) -> CommandResult:
@@ -132,6 +137,8 @@ class FakeSystemd:
         return CommandResult(0, "", "")
 
     def _show(self, mgr: str, args: Sequence[str]) -> CommandResult:
+        if args[0] == "-P" and (mgr, args[2], args[1]) in self.fail_show:
+            return CommandResult(1, "", "Failed to get properties: Connection timed out")
         if args[0] == "-P":
             return CommandResult(0, self.now(mgr, args[2], args[1]) + "\n", "")
         props: list[str] = []
@@ -202,6 +209,8 @@ def game_scratch(tmp: str) -> GameScratch:
     # The user manager's cgroup folder (uid 999999), as cgroupfs shows it.
     ucg = os.path.join(paths.cgroot, "user.slice", f"user-{UID}.slice", f"user@{UID}.service")
     os.makedirs(ucg)
+    # The user manager runs: its runtime folder is there (FakeSystemd writes its runtime overrides into it).
+    os.makedirs(os.path.join(paths.run_user, UID, "systemd"))
     systemd = FakeSystemd(t)
     # The baseline as systemd shows it before the profile.
     systemd.set_now("sys", "machine.slice", CPUWeight="50", IOWeight="50")
@@ -281,6 +290,26 @@ class GameProfileCase(unittest.TestCase):
 
 
 class PureRulesTest(unittest.TestCase):
+    def test_the_last_record_of_a_setting_in_game_intended_wins_at_its_place(self) -> None:
+        one_each = "cst-game-intended 1\nprop sys a.slice CPUWeight 10 10\ncgw /cg/cpuset.cpus 1-2 1-2\n"
+        self.assertEqual(
+            intended_records(one_each),
+            [("prop", "sys", "a.slice", "CPUWeight", "10", "10"), ("cgw", "/cg/cpuset.cpus", "1-2", "1-2")],
+        )  # a file with one record per setting (every one before G1) reads as before
+        text = (
+            one_each + "prop sys b.slice CPUWeight 5 5\nprop usr a.slice CPUWeight 7 7\n"
+            "prop sys a.slice CPUWeight 10 x\ncgw /cg/cpuset.cpus 1-2 3\n"
+        )
+        self.assertEqual(
+            intended_records(text),
+            [
+                ("prop", "sys", "b.slice", "CPUWeight", "5", "5"),
+                ("prop", "usr", "a.slice", "CPUWeight", "7", "7"),
+                ("prop", "sys", "a.slice", "CPUWeight", "10", "x"),
+                ("cgw", "/cg/cpuset.cpus", "1-2", "3"),
+            ],
+        )
+
     def test_unit_name_valid(self) -> None:
         for name in (
             "lushtext.slice",
@@ -632,12 +661,80 @@ class GameProfileOnOffTest(GameProfileCase):
         _, actions = self.run_profile("off")
         self.assertFalse(os.path.exists(self.ctrl("sys", "docker-a.scope", "AllowedCPUs")))
 
-    def test_a_failed_set_property_is_logged_and_records_no_intended_value(self) -> None:
+    def test_a_failed_set_property_is_logged_and_records_the_intended_value_the_tick_sets(self) -> None:
+        # G1: game.intended holds what 'on' sets before its set-property, as systemd will show it, so a
+        # fixed unit whose set-property failed is a drift the next tick sets (the old 'on' recorded nothing
+        # for it, and nothing set it again until 'off').
         self.systemd.fail_set.add(("sys", "machine.slice"))
         out, _ = self.run_profile("on")
         self.assertIn("<4>game-profile: machine.slice: could not set AllowedCPUs=12-23 CPUWeight=10 IOWeight=10\n", out)
-        self.assertNotIn("machine.slice", self.read(self.intended))
+        intended = self.read(self.intended)
+        for rec in ("AllowedCPUs 12-23 12-23", "CPUWeight 10 10", "IOWeight 10 10"):
+            self.assertEqual(intended.count(f"prop sys machine.slice {rec}\n"), 1, intended)
         self.assertIn("prop sys machine.slice CPUWeight new -", self.read(self.state))
+        self.systemd.fail_set.clear()
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(
+            sorted(a for a in self.sets(actions) if "machine.slice" in a),
+            [
+                f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23",
+                f"{SYS} set-property --runtime machine.slice CPUWeight=10",
+                f"{SYS} set-property --runtime machine.slice IOWeight=10",
+            ],
+        )
+        self.assertIn("drift: machine.slice CPUWeight was '50' instead of '10'", out)
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "10")
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+        self.assertEqual(self.read(self.intended), intended)  # each repair showed what the record says
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))  # 'off' undoes it
+
+    def test_a_set_property_that_keeps_failing_is_said_once_per_boot(self) -> None:
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        self.run_profile("on")
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick")
+        self.assertIn(
+            "<4>game-profile: drift: machine.slice CPUWeight is '50' instead of '10': could not set it again", out
+        )
+        self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=10", actions)
+        out, actions = self.run_profile("tick")
+        self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=10", actions)  # tried again
+        self.assertNotIn("could not set it again", out)  # said once per boot
+
+    def test_a_value_systemd_shows_in_another_form_gets_a_second_record(self) -> None:
+        # 16384M: the prediction is its bytes; the fake systemd shows it as given. 'on' writes the prediction,
+        # then what systemd shows after the set; the last record of a setting wins, so no drift.
+        settings = dataclasses.replace(self.settings, game_memory_low="16384M")
+        self.run_profile("on", settings)
+        intended = self.read(self.intended)
+        self.assertIn(
+            f"prop sys user@{UID}.service MemoryLow 16384M 17179869184\n"
+            f"prop sys user@{UID}.service MemoryLow 16384M 16384M\n",
+            intended,
+        )
+        self.assertEqual(intended.count("prop sys machine.slice CPUWeight "), 1)  # shown as predicted: one
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [])
+        self.assertNotIn("drift", out)
+
+    def test_a_repair_that_systemd_shows_in_another_form_records_that_form_once(self) -> None:
+        # The memory chain's leaf failed in 'on': game.intended holds only the prediction (bytes); the tick's
+        # set shows 16384M: that form is recorded, and the next tick sets nothing.
+        settings = dataclasses.replace(self.settings, game_memory_low="16384M")
+        self.systemd.fail_set.add(("sys", f"user@{UID}.service"))
+        self.run_profile("on", settings)
+        self.systemd.fail_set.clear()
+        self.write(self.manual, "")
+        _, actions = self.run_profile("tick", settings)
+        self.assertIn(f"{SYS} set-property --runtime user@{UID}.service MemoryLow=16384M", self.sets(actions))
+        self.assertTrue(self.read(self.intended).endswith(f"prop sys user@{UID}.service MemoryLow 16384M 16384M\n"))
+        out, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [])
+        self.assertNotIn("drift", out)
 
     def test_the_lock_keeps_actions_apart(self) -> None:
         p, out = self.profile()
@@ -677,6 +774,22 @@ class GameProfileDriftTest(GameProfileCase):
         # game.state keeps the format off() reads: six fields at most.
         for line in self.read(self.state).splitlines():
             self.assertLessEqual(len(line.split()), 6, line)
+
+    def test_a_read_back_that_fails_after_a_set_keeps_the_value_as_systemd_will_show_it(self) -> None:
+        # 'on' sets machine.slice's CPUWeight, then `systemctl show -P` cannot answer for it (a busy manager):
+        # game.intended keeps the value as systemd will show it, so the tick still sees the drift a daemon-reload
+        # makes later. The old setp added a record with an empty form after it, which won, and no drift of that
+        # setting was ever seen.
+        self.systemd.fail_show.add(("sys", "machine.slice", "CPUWeight"))
+        self.run_profile("on")
+        self.systemd.fail_show.clear()
+        recs = [r for r in intended_records(self.read(self.intended)) if r[2:4] == ("machine.slice", "CPUWeight")]
+        self.assertEqual(recs, [("prop", "sys", "machine.slice", "CPUWeight", "10", "10")])
+        self.write(self.manual, "")
+        self.set_now("sys", "machine.slice", CPUWeight="50")
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=10", actions)
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "10")
 
     def test_tick_repairs_drift_without_touching_the_state_and_off_restores(self) -> None:
         # IOWeight had a runtime override of its own before the profile.
@@ -1577,6 +1690,74 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.state))
 
 
+class TickForARecordedUidWithoutAccountTest(GameProfileCase):
+    """G7, the tick and 'state': with game.state of a uid no account has now and a TARGET_USER that names another
+    account, the user manager's side is left alone: no setting and no record in TARGET_USER's manager (it is
+    another user's), no drift compared there; said once per boot. The system manager's side still runs."""
+
+    STEAM = "app-flatpak-com.valvesoftware.Steam-7.scope"
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.run_profile("on")  # for USER, uid UID
+        self.write(self.manual, "")
+        self.systemd.units["usr"] = [self.STEAM]  # a game started after 'on'
+        self.set_now("usr", "user.slice", CPUWeight="30")  # drifted: game.intended holds idle
+        self.systemd.units["sys"] = ["docker-1.scope"]  # a container started after 'on'
+        self.set_now("sys", "docker-1.scope", Slice="system.slice", AllowedCPUs="0-23")
+
+    def other_profile(self) -> tuple[GameProfile, io.StringIO]:
+        """TARGET_USER other (uid 1001, an account); no account has UID, the uid 'on' acted for, now."""
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            dataclasses.replace(self.settings, target_user="other"),
+            self.systemd,
+            uid_of=lambda u: {"other": "1001"}.get(u, ""),
+            name_of=lambda uid: {"1001": "other"}.get(uid, ""),
+            out=out,
+        )
+        self.systemd.actions = []
+        return p, out
+
+    def test_the_tick_sets_nothing_in_another_user_s_manager_and_says_why_once(self) -> None:
+        state = self.read(self.state)
+        said: list[str] = []
+        for _ in range(2):
+            p, out = self.other_profile()
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(p.tick(), 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual([a for a in self.sets(self.systemd.actions) if "--user" in a], [])
+            said.append(out.getvalue())
+        self.assertEqual(self.now("usr", "user.slice", "CPUWeight"), "30")
+        self.assertNotIn(self.STEAM, self.read(self.state))
+        self.assertIn("prop sys docker-1.scope AllowedCPUs new -\n", self.read(self.state))  # system side
+        self.assertEqual(self.read(self.state).replace("prop sys docker-1.scope AllowedCPUs new -\n", ""), state)
+        self.assertIn(
+            "<4>game-profile: profile on, its user manager's side not handled: no account has uid"
+            f" {UID}, the user 'on' acted for (fix it; said once per boot)\n",
+            said[0],
+        )
+        self.assertNotIn("not handled", said[1])  # said once per boot
+        self.assertNotIn("drift: user.slice", said[0] + said[1])
+
+    def test_state_compares_no_drift_in_another_user_s_manager(self) -> None:
+        p, out = self.other_profile()
+        self.assertEqual(p.state(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a and "LoadState" in a], [])
+        self.assertNotIn("DRIFT: user.slice", out.getvalue())
+        # It says so: the user manager's settings were not compared (the old 'state' said every setting held).
+        self.assertNotIn("every setting the profile made still holds", out.getvalue())
+        self.assertIn(
+            "  drift: none in the system manager's settings and the files\n"
+            f"  drift: the user manager's settings not checked (no account has uid {UID}, the user 'on' acted for)\n",
+            out.getvalue(),
+        )
+
+
 class OnTargetUserWithoutAccountTest(GameProfileCase):
     """'on' with a TARGET_USER that names no account: refused before it changes anything (it would set
     user@.service and user-.slice, and the user manager of no one)."""
@@ -2253,14 +2434,15 @@ class HandledBoxSetAgainTest(GameProfileCase):
         self.assertEqual(self.read(self.state), state)
 
     def test_a_slice_next_to_the_game_whose_set_failed_in_on_is_set_again(self) -> None:
-        # Its set-property failed, so game.intended has no line for it and the drift repair cannot see it.
+        # Its set-property failed; game.intended holds what 'on' meant to set (G1), so the drift repair sets it
+        # (once: the box check leaves a setting the drift repair covers to it).
         self.box("e2e.slice")
         state, out, sets = self.failed_then_tick("usr", "e2e.slice")
-        self.assertNotIn("e2e.slice", self.read(self.intended))
+        self.assertIn("prop usr e2e.slice CPUWeight idle idle\n", self.read(self.intended))
         self.assertEqual(sets, [f"{USR} set-property --runtime e2e.slice CPUWeight=idle"])
         self.assertEqual(self.read(self.state), state)
-        self.assertIn("e2e.slice: CPUWeight is '', not 'idle'", out)
-        self.assertNotIn("drift:", out)
+        self.assertIn("drift: e2e.slice CPUWeight was '' instead of 'idle'", out)
+        self.assertNotIn("its set failed", out)
 
     def test_a_steam_scope_a_killed_off_undid_is_set_again_and_off_still_undoes_it(self) -> None:
         self.systemd.units["usr"] = [self.STEAM]
@@ -2306,8 +2488,9 @@ class HandledBoxSetAgainTest(GameProfileCase):
         self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime lushtext.slice CPUWeight=idle"])
         self.assertIn("drift: lushtext.slice CPUWeight was '100'", out)
         self.assertNotIn("its set failed", out)
-        # Not even asked about by the box check: the drift repair's own show is the only one.
-        shows = [a for a in actions if a.startswith(f"{USR} show") and a.endswith(" lushtext.slice")]
+        # Not even asked about by the box check: the drift repair's own show is the only one (beside its
+        # read-back of the value it set, show -P).
+        shows = [a for a in actions if a.startswith(f"{USR} show -p") and a.endswith(" lushtext.slice")]
         self.assertEqual(len(shows), 1, shows)
 
     def test_a_box_that_holds_the_game_by_now_is_left_alone(self) -> None:
@@ -2390,21 +2573,69 @@ class LeftoversFormatTest(unittest.TestCase):
         text = leftovers_text(entries)
         self.assertEqual(
             text,
-            "cst-game-leftovers 1\n"
+            "cst-game-leftovers 2\n"
+            "user -\n"
             "prop sys machine.slice CPUWeight existed 70\n"
             "user 1000\n"
             "prop usr a\\ b.slice CPUWeight existed 50\n"
             "prop usr c.slice CPUWeight new -\n"
             "user 1001\n"
             "prop usr d.slice CPUWeight new -\n"
+            "user -\n"
             "sysfs /sys/x old\n",
         )
         self.assertEqual(leftover_entries(text), entries)
         self.assertIsNone(newer_leftovers("/l", text))
         self.assertEqual(leftover_entries(""), [])
 
+    def test_a_record_of_no_user_after_one_of_a_uid_reads_back_as_no_user_s(self) -> None:
+        # G5: format 1 named a user only when the uid changed to another one, so an entry of no user after one
+        # of uid 1000 read back as 1000's. Format 2 writes "user -" before it.
+        entries: list[tuple[str | None, tuple[str, ...]]] = [
+            ("1000", ("prop", "usr", "a.slice", "CPUWeight", "new", "-")),
+            (None, ("prop", "usr", "b.slice", "CPUWeight", "new", "-")),
+        ]
+        text = leftovers_text(entries)
+        self.assertEqual(
+            text,
+            "cst-game-leftovers 2\nuser 1000\nprop usr a.slice CPUWeight new -\nuser -\nprop usr b.slice CPUWeight new -\n",
+        )
+        self.assertEqual(leftover_entries(text), entries)
+        # A format 1 file reads as before: a user line holds until the next one.
+        old = "cst-game-leftovers 1\nuser 1000\nprop usr a.slice CPUWeight new -\nprop sys m.slice CPUWeight new -\n"
+        self.assertEqual(
+            leftover_entries(old),
+            [
+                ("1000", ("prop", "usr", "a.slice", "CPUWeight", "new", "-")),
+                (None, ("prop", "sys", "m.slice", "CPUWeight", "new", "-")),
+            ],
+        )
+
+    def test_reload_entries_name_their_manager_and_user(self) -> None:
+        entries: list[tuple[str | None, tuple[str, ...]]] = [
+            (None, ("reload", "sys")),
+            ("1000", ("reload", "usr")),
+            ("1001", ("reload", "usr")),
+        ]
+        text = leftovers_text(entries)
+        self.assertEqual(
+            text, "cst-game-leftovers 2\nuser -\nreload sys\nuser 1000\nreload usr\nuser 1001\nreload usr\n"
+        )
+        self.assertEqual(leftover_entries(text), entries)
+        # A user manager's reload with no user: no manager to reload, no entry.
+        self.assertEqual(leftover_entries("cst-game-leftovers 2\nuser -\nreload usr\nreload sys\n"), [entries[0]])
+
+        def epp(cpu: str) -> str:
+            return f"/cpu{cpu}/epp"
+
+        self.assertEqual(undo_text(("reload", "sys"), epp), "the daemon-reload of the system manager")
+        self.assertEqual(
+            undo_text(("reload", "usr"), epp, short=True, uid="1000"), "daemon-reload of uid 1000's user manager"
+        )
+
     def test_a_newer_format_or_a_first_line_with_no_version_is_not_read(self) -> None:
-        self.assertIn("is format 2 of the game-leftovers", newer_leftovers("/l", "cst-game-leftovers 2\n") or "")
+        self.assertIn("is format 3 of the game-leftovers", newer_leftovers("/l", "cst-game-leftovers 3\n") or "")
+        self.assertIsNone(newer_leftovers("/l", "cst-game-leftovers 1\n"))  # format 1 is still read
         self.assertEqual(newer_leftovers("/l", "cst-game-leftovers x\n"), "/l: its first line names no format version")
         self.assertIsNone(newer_leftovers("/l", "prop sys a.slice CPUWeight new -\n"))  # no format line: version 0
 
@@ -2415,6 +2646,21 @@ class LeftoversFormatTest(unittest.TestCase):
         self.assertEqual(
             merged_entries([(None, old), (None, both)], [both, mine]), [(None, old), (None, both), (None, mine)]
         )
+
+    def test_the_undo_order_keeps_another_uid_s_entry_of_a_record_of_this_game_state(self) -> None:
+        # A user manager's record has the same text for every user: a kept entry of it is dropped only when it is
+        # for the uid game.state's records are for (acting, for an entry that names none), never another uid's.
+        rec = ("prop", "usr", "user.slice", "CPUWeight", "new", "-")
+        self.assertEqual(merged_entries([("1001", rec)], [rec], acting="1000"), [("1001", rec), (None, rec)])
+        self.assertEqual(merged_entries([("1000", rec)], [rec], acting="1000"), [(None, rec)])
+        self.assertEqual(merged_entries([(None, rec)], [rec], acting="1000"), [(None, rec)])
+        # game.state's records for a uid 'off' does not act for (owner): that uid's kept entry is the duplicate.
+        self.assertEqual(
+            merged_entries([("1001", rec), ("1000", rec)], [rec], owner="1001", acting="1000"),
+            [("1000", rec), ("1001", rec)],
+        )
+        self.assertEqual(entry_key((None, rec), "1000"), ("1000", rec))
+        self.assertEqual(entry_key((None, ("reload", "sys")), "1000"), (None, ("reload", "sys")))
 
     def test_the_words(self) -> None:
         def epp(cpu: str) -> str:
@@ -2469,7 +2715,7 @@ class LeftoversTest(GameProfileCase):
         )
         for f in (self.state, self.intended, self.manual, self.paths.drift_warned):
             self.assertFalse(os.path.exists(f), f)
-        self.assertEqual(self.read(left), "cst-game-leftovers 1\nprop sys machine.slice CPUWeight existed 70\n")
+        self.assertEqual(self.read(left), "cst-game-leftovers 2\nuser -\nprop sys machine.slice CPUWeight existed 70\n")
         # Every other undo is done: machine.slice's new overrides are gone, the memory chain's too.
         self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "IOWeight")))
         self.assertFalse(os.path.exists(self.ctrl("sys", f"user@{UID}.service", "MemoryLow")))
@@ -2551,7 +2797,7 @@ class LeftoversTest(GameProfileCase):
         self.systemd.fail_set.clear()
         self.assertEqual(
             self.read(self.paths.leftovers),
-            f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n",
+            f"cst-game-leftovers 2\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n",
         )
         # TARGET_USER names another user now: the kept record is still undone for the user it was kept for.
         other = dataclasses.replace(self.settings, target_user="other")
@@ -2611,8 +2857,9 @@ class LeftoversTest(GameProfileCase):
 
     def test_each_user_manager_an_override_was_removed_in_gets_its_daemon_reload(self) -> None:
         # 'off' undoes game.state's new overrides of USER's manager, and a kept record of another user's
-        # (uid 1001), left by an earlier failed 'off' for that user: USER's manager gets its daemon-reload,
-        # not the manager of the user acted for last.
+        # (uid 1001, whose manager runs), left by an earlier failed 'off' for that user: USER's manager gets
+        # its daemon-reload, not the manager of the user acted for last.
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
         self.run_profile("on")
         self.assertIn("prop usr user.slice CPUWeight new -\n", self.read(self.state))
         self.write(
@@ -2676,7 +2923,8 @@ class LeftoversTest(GameProfileCase):
                 self.systemd.actions = []
                 self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
                 self.assertEqual(self.sets(self.systemd.actions), [])
-                self.assertEqual(self.read(self.paths.leftovers), text)
+                # Kept as it is (written back in format 2).
+                self.assertEqual(self.read(self.paths.leftovers), text.replace("leftovers 1", "leftovers 2"))
                 self.assertNotIn("undid", out.getvalue())
                 if action == "off":
                     self.assertIn("off: could not undo app.slice MemoryZSwapWriteback=yes: kept in", out.getvalue())
@@ -2688,9 +2936,76 @@ class LeftoversTest(GameProfileCase):
         self.assertEqual(self.sets(self.systemd.actions), [])
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
-    def test_off_drops_game_state_s_user_manager_records_of_a_uid_no_account_has(self) -> None:
-        # 'on' acted for uid 1001, whose account is gone now; TARGET_USER is USER (another uid). Its user
-        # manager's records are not undone in USER's manager, nor kept for USER's uid: dropped, said once.
+    def test_an_entry_of_no_user_after_one_of_a_uid_is_never_undone_in_that_uid_s_manager(self) -> None:
+        # TARGET_USER names no account. The pass undoes the newest entry first: uid 1001's ("other", an account
+        # whose manager runs), in its own manager. The entry of no user before it is then dropped (no user manager
+        # to undo it in), not undone in other's manager: the old pass still acted for other there, and removed
+        # other's own override of user.slice.
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        own = os.path.join(self.paths.run_user, "1001", "systemd", "user.control", "user.slice.d", "50-CPUWeight.conf")
+        self.write(own, "[Slice]\nCPUWeight=40\n")
+        self.write(
+            self.paths.leftovers,
+            "cst-game-leftovers 2\nuser -\nprop usr user.slice CPUWeight new -\n"
+            "user 1001\nprop usr e2e.slice MemoryLow new -\n",
+        )
+        self.no_game()
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            dataclasses.replace(self.settings, target_user="nobody-here"),
+            self.systemd,
+            uid_of=lambda u: {"other": "1001"}.get(u, ""),
+            name_of=lambda uid: {"1001": "other"}.get(uid, ""),
+            out=out,
+        )
+        self.assertEqual(p.tick(), 0)
+        self.assertTrue(os.path.exists(own))
+        self.assertIn(
+            "could not undo user.slice CPUWeight (its runtime override): TARGET_USER names no account, no user"
+            " manager to undo it in: dropped",
+            out.getvalue(),
+        )
+        self.assertIn("undid e2e.slice MemoryLow (its runtime override), kept in", out.getvalue())
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertEqual(p.s.target_user, "nobody-here")
+
+    def test_off_keeps_another_uid_s_entry_of_the_same_record_as_game_state_s(self) -> None:
+        # uid 1001's account is gone while its user manager runs: an earlier 'off' kept its new override of
+        # user.slice's CPUWeight under its uid. USER's own 'on' records the same text. USER's 'off' undoes its own
+        # and keeps 1001's (the old 'off' dropped it as a record of this game.state: no entry, no warning).
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        kept = "cst-game-leftovers 2\nuser 1001\nprop usr user.slice CPUWeight new -\n"
+        self.write(self.paths.leftovers, kept)
+        self.run_profile("on")
+        self.assertIn("prop usr user.slice CPUWeight new -\n", self.read(self.state))
+        p, out = self.accounts_profile(USER)
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(self.ctrl("usr", "user.slice", "CPUWeight")))  # USER's undone
+        self.assertEqual(self.read(self.paths.leftovers), kept)
+        self.assertIn("off: could not undo user.slice CPUWeight (its runtime override): kept in", out.getvalue())
+
+    def test_a_retry_says_one_user_s_entry_undone_when_another_s_of_the_same_record_is_kept(self) -> None:
+        # Two kept entries of one record, USER's and uid 1001's (no account now, its user manager runs). USER's is
+        # undone and said so; 1001's is kept (the old retry took both for one entry: no line for USER's).
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        mine = self.ctrl("usr", "user.slice", "CPUWeight")
+        self.write(mine, "[Slice]\nCPUWeight=idle\n")
+        rec = "prop usr user.slice CPUWeight new -\n"
+        self.write(self.paths.leftovers, f"cst-game-leftovers 2\nuser {UID}\n{rec}user 1001\n{rec}")
+        self.no_game()
+        p, out = self.accounts_profile(USER)
+        self.assertEqual(p.tick(), 0)
+        self.assertFalse(os.path.exists(mine))
+        self.assertIn(
+            f"undid user.slice CPUWeight (its runtime override), kept in {self.paths.leftovers} by an earlier off",
+            out.getvalue(),
+        )
+        self.assertEqual(self.read(self.paths.leftovers), f"cst-game-leftovers 2\nuser 1001\n{rec}")
+
+    def foreign_state(self) -> str:
+        """A game.state of an 'on' for uid 1001 (another uid than USER's), with records of its user manager; USER
+        has a runtime override of user.slice's CPUWeight of its own. The user.slice record's override path."""
         self.write(
             self.state,
             "prop sys user@1001.service MemoryLow existed 0\n"
@@ -2699,6 +3014,13 @@ class LeftoversTest(GameProfileCase):
         )
         user_override = self.ctrl("usr", "user.slice", "CPUWeight")  # USER's own override
         self.write(user_override, "[Slice]\nCPUWeight=30\n")
+        return user_override
+
+    def test_off_drops_game_state_s_user_manager_records_of_a_uid_no_account_has(self) -> None:
+        # 'on' acted for uid 1001, whose account is gone now, and so is its user manager (no runtime folder);
+        # TARGET_USER is USER (another uid). Its user manager's records are not undone in USER's manager, nor
+        # kept for USER's uid: what they held went with that manager, dropped, said once.
+        user_override = self.foreign_state()
         self.systemd.fail_set.add(("usr", "app.slice"))
         p, out = self.accounts_profile(USER)
         self.systemd.actions = []
@@ -2711,11 +3033,74 @@ class LeftoversTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.paths.leftovers))
         self.assertEqual(out.getvalue().count("dropped"), 1, out.getvalue())
         self.assertIn(
-            "<4>game-profile: off: no account has uid 1001, the user 'on' acted for, now: 2 setting(s) of its user"
-            " manager dropped, not undone in another user's\n",
+            "<4>game-profile: off: the user manager of uid 1001, the user 'on' acted for, is not running: 2"
+            " setting(s) of it went with it, dropped\n",
             out.getvalue(),
         )
         self.assertFalse(os.path.exists(self.state))
+
+    def test_off_calls_no_stopped_user_manager_of_the_recorded_uid(self) -> None:
+        # G7: 'on' acted for uid 1001 ("other", an account), whose user manager is not running now (a logout):
+        # 'off' undoes the system manager's records and drops the user manager's, with one line; it calls
+        # neither that manager (the old 'off' ran set-property and daemon-reload into it) nor USER's.
+        user_override = self.foreign_state()
+        p, out = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        self.assertEqual(
+            self.sets(self.systemd.actions), [f"{SYS} set-property --runtime user@1001.service MemoryLow=0"]
+        )
+        self.assertIn(
+            "<4>game-profile: off: the user manager of uid 1001, the user 'on' acted for, is not running: 2"
+            " setting(s) of it went with it, dropped\n",
+            out.getvalue(),
+        )
+        self.assertNotIn("undoing for", out.getvalue())
+        self.assertTrue(os.path.exists(user_override))
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_off_keeps_the_records_of_a_uid_no_account_has_while_its_manager_runs(self) -> None:
+        # G7: no account has uid 1001 now, but its user manager still runs (its runtime folder is there): its
+        # records stay live there, so 'off' keeps them in game.leftovers under that uid, never undone in USER's
+        # manager (the old 'off' dropped them as if undone). A tick once that manager is gone drops them.
+        user_override = self.foreign_state()
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        p, out = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        left = self.paths.leftovers
+        self.assertEqual(
+            self.read(left),
+            "cst-game-leftovers 2\nuser 1001\nprop usr user.slice CPUWeight new -\n"
+            "prop usr app.slice CPUWeight existed 100\n",
+        )
+        said = out.getvalue()
+        self.assertIn(
+            "<5>game-profile: off: no account has uid 1001, the user 'on' acted for, now, and its user manager still"
+            " runs: its 2 setting(s) are not undone in another user's manager\n",
+            said,
+        )
+        self.assertIn(f"<4>game-profile: off: could not undo app.slice CPUWeight=100: kept in {left}", said)
+        self.assertTrue(said.endswith(f"restored, except 2 setting(s) kept in {left}\n"), said)
+        self.assertTrue(os.path.exists(user_override))
+        self.assertFalse(os.path.exists(self.state))
+        # A tick while off keeps them while that manager runs, and drops them once it is gone.
+        self.no_game()
+        p, _ = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        self.assertTrue(os.path.exists(left))
+        shutil.rmtree(os.path.join(self.paths.run_user, "1001"))
+        p, _ = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+        self.assertFalse(os.path.exists(left))
+        self.assertTrue(os.path.exists(user_override))
 
     def test_a_transient_unit_that_is_gone_is_no_leftover(self) -> None:
         # A Docker scope with an override of its own before the game, which ended before 'off'.
@@ -2767,8 +3152,8 @@ class LeftoversTest(GameProfileCase):
     def test_an_override_that_cannot_be_removed_runs_no_daemon_reload(self) -> None:
         # An 'off' kept machine.slice's IOWeight override, which cannot be removed (a non-empty folder in its
         # place: EISDIR): the ticks that retry it keep it and reload no systemd for it (nothing was removed).
-        text = "cst-game-leftovers 1\nprop sys machine.slice IOWeight new -\n"
-        self.write(self.paths.leftovers, text)
+        self.write(self.paths.leftovers, "cst-game-leftovers 1\nprop sys machine.slice IOWeight new -\n")
+        text = "cst-game-leftovers 2\nuser -\nprop sys machine.slice IOWeight new -\n"  # written back in format 2
         os.makedirs(os.path.join(self.ctrl("sys", "machine.slice", "IOWeight"), "inside"))
         self.no_game()
         for _ in range(2):
@@ -2806,7 +3191,9 @@ class LeftoversTest(GameProfileCase):
         self.write(os.path.join(self.tmp, "plain"), "a file\n")
         self.write(self.paths.leftovers, f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n")
         self.run_profile("tick")
-        self.assertEqual(self.read(self.paths.leftovers), f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n")
+        self.assertEqual(
+            self.read(self.paths.leftovers), f"cst-game-leftovers 2\nuser -\nsysfs {self.tmp}/plain/knob OLD\n"
+        )
 
     def test_a_file_that_cannot_be_written_is_said_lost_and_game_state_still_goes(self) -> None:
         self.prior_machine_weight()
@@ -2961,6 +3348,109 @@ class LeftoversTest(GameProfileCase):
         out, _ = self.run_profile("off")
         self.assertIn("cannot be read (Is a directory): left alone", out)
         self.assertTrue(os.path.isdir(os.path.join(self.paths.leftovers, "inside")))
+
+    def test_a_failed_system_reload_in_off_is_kept_and_run_by_the_next_tick(self) -> None:
+        # G2: the system manager's daemon-reload fails in 'off' (after the drop-ins and its new overrides went):
+        # it is kept as a reload due, said after the file holds it, and the next tick while off runs it. The old
+        # 'off' never read the reload's exit status: the drop-ins' MemoryLow stayed live until a reboot.
+        self.run_profile("on")
+        self.systemd.fail_reload.add("sys")
+        out, _ = self.run_profile("off")
+        self.systemd.fail_reload.clear()
+        left = self.paths.leftovers
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.read(left), "cst-game-leftovers 2\nuser -\nreload sys\n")
+        self.assertIn(
+            f"<4>game-profile: off: the daemon-reload of the system manager failed: kept in {left} for the next off"
+            " and tick\n",
+            out,
+        )
+        self.assertTrue(out.endswith(f"restored, except 1 setting(s) kept in {left}\n"), out)
+        out, _ = self.run_profile("state")
+        self.assertIn("retried by the next off and tick: daemon-reload of the system manager\n", out)
+        self.no_game()
+        out, actions = self.run_profile("tick")
+        self.assertEqual(actions, [f"{SYS} daemon-reload"])
+        self.assertIn(
+            f"<5>game-profile: ran the daemon-reload of the system manager, kept in {left} by an earlier off", out
+        )
+        self.assertFalse(os.path.exists(left))
+        _, actions = self.run_profile("tick")
+        self.assertEqual(actions, [])
+
+    def test_each_user_manager_s_failed_reload_is_kept_for_its_uid(self) -> None:
+        # G4: 'off' undoes USER's new overrides and a kept one of uid 1001 ("other", its manager runs); other's
+        # daemon-reload fails, USER's works: only other's is kept, under its uid; the next off runs it.
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        self.run_profile("on")
+        self.write(self.paths.leftovers, "cst-game-leftovers 1\nuser 1001\nprop usr background.slice CPUWeight new -\n")
+        self.systemd.fail_reload.add("other")
+        p, out = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.systemd.fail_reload.clear()
+        self.assertEqual(
+            self.reloads(self.systemd.actions),
+            [f"{SYS} daemon-reload", f"{USR} daemon-reload", "systemctl --user -M other@ daemon-reload"],
+        )
+        self.assertEqual(self.read(self.paths.leftovers), "cst-game-leftovers 2\nuser 1001\nreload usr\n")
+        self.assertIn("off: the daemon-reload of uid 1001's user manager failed: kept in", out.getvalue())
+        p, out = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual(self.reloads(self.systemd.actions), ["systemctl --user -M other@ daemon-reload"])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        # A reload due in a user manager that is not running any more is done with no call.
+        self.write(self.paths.leftovers, "cst-game-leftovers 2\nuser 1001\nreload usr\n")
+        shutil.rmtree(os.path.join(self.paths.run_user, "1001"))
+        self.no_game()
+        p, out = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.systemd.actions, [])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertNotIn("ran", out.getvalue())
+
+    def test_an_off_killed_after_it_removed_the_dropins_leaves_the_reload_due(self) -> None:
+        # G3: game.state holds no new override of the system manager (its records are of overrides that existed)
+        # and the drop-ins are there; an 'off' killed right after it removed them left their MemoryLow live with
+        # no record. 'off' writes the reload due first, so the next 'off' runs it. The old one ran none.
+        self.write(self.state, f"prop sys user@{UID}.service MemoryLow existed 0\n")
+        p, _ = self.profile()
+        p.write_game_dropins()
+        dropin = os.path.join(self.unit_runtime, f"user@{UID}.service.d", "zz-cst-game.conf")
+        self.assertTrue(os.path.exists(dropin))
+        real = GameProfile.remove_game_dropins
+
+        def dying(profile: GameProfile) -> bool:
+            real(profile)
+            raise _OnDiedError
+
+        with unittest.mock.patch.object(GameProfile, "remove_game_dropins", dying), self.assertRaises(_OnDiedError):
+            p.off()
+        self.assertFalse(os.path.exists(dropin))
+        self.assertTrue(os.path.exists(self.state))
+        self.assertEqual(self.read(self.paths.leftovers), "cst-game-leftovers 2\nuser -\nreload sys\n")
+        out, actions = self.run_profile("off")
+        self.assertIn(f"{SYS} daemon-reload", actions)
+        self.assertNotIn("failed", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_a_reload_due_that_cannot_be_kept_is_said_not_done(self) -> None:
+        # G6: the system manager's reload fails and /run is full: never said kept, said not done once.
+        self.run_profile("on")
+        self.systemd.fail_reload.add("sys")
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+            out, _ = self.run_profile("off")
+        left = self.paths.leftovers
+        self.assertIn(
+            f"<3>game-profile: off: could not keep the daemon-reload of the system manager in {left}: not done\n", out
+        )
+        self.assertNotIn("kept in", out)
+        self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)
+        self.assertFalse(os.path.exists(left))
 
     def test_state_names_them(self) -> None:
         self.failed_off()

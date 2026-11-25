@@ -17,7 +17,7 @@ from typing import Final
 # What a tool says when cache_base finds no folder (each puts its own name first).
 NO_CACHE_BASE: Final = (
     "no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, "
-    "and the password database has no home folder for this user"
+    "and the password database has no absolute home folder for this user"
 )
 
 

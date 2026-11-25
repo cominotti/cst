@@ -33,7 +33,10 @@ Checked:
 - Q6, game.intended: its format line and the drift records GameProfile.setp writes for a fixed
   unit, with systemd showing a generated value right after the set (valid Unicode: systemctl's
   output reaches the profile decoded with U+FFFD), read with intended_records: the six fields
-  exactly, the format line no record, every line readable, newer_intended None.
+  exactly, the last record of each setting (setp writes the predicted one before the set, and a
+  second when systemd shows another form; an empty answer, a show that failed, adds none, so the
+  predicted one stays last), the format line no record, every line readable,
+  newer_intended None.
 """
 
 from collections.abc import Generator, Sequence
@@ -60,6 +63,7 @@ from cpu.game.domain import (
     records,
     unreadable_lines,
 )
+from cpu.game.domain.boxes import shown_form
 from cpu.tests.test_game_profile import UID, FakeSystemd, game_scratch
 from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
@@ -109,7 +113,8 @@ def line_bytes(fields: Sequence[bytes]) -> bytes:
 def state_record(draw: st.DrawFn) -> tuple[bytes, ...]:
     """One record of game.state that 'off' can read (state_undo): a prop record of six fields, or a
     cgw, epp or sysfs record of three; every field after the kind generated."""
-    kind = draw(st.sampled_from([k for k in GameRecordKind if k != GameRecordKind.USER]))  # user: game.leftovers'
+    # user and reload: game.leftovers' only (by their words: the code before reload entries has no RELOAD)
+    kind = draw(st.sampled_from([k for k in GameRecordKind if k.value not in {"user", "reload"}]))
     count = 5 if kind == GameRecordKind.PROP else 2
     return (kind.value.encode(), *draw(st.lists(FIELD_BYTES, min_size=count, max_size=count)))
 
@@ -249,8 +254,11 @@ class GameStateFilesTest(profiles.MbtTestCase):
                 profile.setp(mgr, unit, f"{prop}={value}")
             with open(profile.paths.intended, encoding="utf-8") as fh:
                 text = fh.read()
-            want = [(GameRecordKind.PROP.value, m, u, p, v, shown_value) for m, u, p, v in settings]
-            self.assertEqual(intended_records(text), want)
+            last: dict[tuple[str, str, str], tuple[str, ...]] = {}
+            for m, u, p, v in settings:  # the last record of a setting wins, at its own place
+                last.pop((m, u, p), None)
+                last[m, u, p] = (GameRecordKind.PROP.value, m, u, p, v, shown_value or shown_form(p, v))
+            self.assertEqual(intended_records(text), list(last.values()))
             self.assertEqual(unreadable_lines(text, intended=True), [])
             self.assertIsNone(newer_intended(profile.paths.intended, text))
 

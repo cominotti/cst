@@ -22,8 +22,8 @@
 # found as tests/xdg_cache.py finds it for the Python tools: XDG_CACHE_HOME
 # when it is an absolute path (the XDG spec ignores a relative one), else
 # .cache under HOME when HOME is absolute, else under the home folder of the
-# password database (getent); with none of them it stops (exit 1) before uv
-# runs. `--locked` makes uv
+# password database (getent) when it is absolute; with none of them it stops
+# (exit 1) before uv runs. `--locked` makes uv
 # refuse to run when uv.lock does not match pyproject.toml, and installs
 # exactly the locked versions (hashes checked). See docs/dev-tools.md.
 set -euo pipefail
@@ -53,7 +53,7 @@ else
         home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)" || home=""
     fi
     if [[ "${home}" != /* ]]; then
-        echo "uv-dev: no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, and the password database has no home folder for this user" >&2
+        echo "uv-dev: no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, and the password database has no absolute home folder for this user" >&2
         exit 1
     fi
     cache="${home}/.cache"

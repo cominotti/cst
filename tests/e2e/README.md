@@ -255,6 +255,30 @@ unless the line has an `||` list operator (one in quotes, in `[[ ... ]]` or in
 parentheses handles nothing) or is a one-line function. It does not see a check
 chained to a function (`[[ ... ]] && unchanged`): write those on two lines too.
 
+### Cleanups of the container's files
+
+A tier 1 test whose cleanup is a separate script, registered with
+`addCleanup` before its own script runs, restores the container's own files
+that script writes (`/etc/fstab`, `/etc/crypttab`, the install record
+`/var/lib/cst/installed.json`, `/run/ostree-booted`) as follows; the cleanup
+also runs after a script that stopped early. The script records each
+such file right after it makes its work folder `w`, before any other step:
+`w/NAME.bak` when there is one, `w/no-NAME` when there is none. The cleanup
+puts the copy back, removes the file only with `no-NAME`, and with neither
+leaves it alone: the script stopped before it wrote the file. `rm -rf w` and
+`mkdir -p w/...` go on two lines, so a work folder that cannot be emptied (a
+mount still under it) stops the script instead of leaving the old content in
+place. `file_saved(path, w, name)` and `file_put_back(path, w, name)` in
+`suites/suite_tier1_systemd.py` give the two lines (`fstab_saved(w)` and
+`fstab_put_back(w)` for `/etc/fstab`); `cache_reload_scaffold` and
+`cache_reload_cleanup` (test_177, test_201, test_202), test_157, test_159 and
+test_160 use them. The swap tests are not of this kind: a script built on
+`SWAP_E2E_LIB` saves `/etc/fstab`, `/etc/crypttab` and the install record in
+`swap_setup` and puts them back in
+`swap_cleanup`, its own EXIT trap, so it adds no `file_saved` lines;
+test_171, which also moves `/etc/fstab` aside, puts it back from the same
+trap (`fstab_back`) before `swap_cleanup` runs.
+
 ## Mixed-version tests
 
 The history of this repository was rewritten on 2026-11-18. The commit SHAs in fixture names (`tests/fixtures/legacy/<file>@<sha>`) and the `(#NN)` pull request numbers in older commit subjects refer to the history before that date; the fixtures' contents are what the names describe.

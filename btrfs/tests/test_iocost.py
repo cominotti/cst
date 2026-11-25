@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 import dataclasses
-import errno
 import io
 import os
 import shutil
@@ -16,16 +15,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
-from btrfs.iocost import adapters as iocost_adapters
-from btrfs.iocost.adapters import (
-    IocostPaths,
-    apply_iocost,
-    collect_iocost_snapshot,
-    iocost_paths_for,
-    plan_iocost,
-    revert_iocost,
-    with_udev_properties,
-)
+from btrfs.iocost.adapters import IocostPaths, iocost_paths_for
 from btrfs.iocost.cli import IocostCliDeps, run_iocost_cli
 from btrfs.iocost.domain import (
     IOCOST_QOS_PATH,
@@ -39,6 +29,13 @@ from btrfs.iocost.domain import (
     parse_iocost_args,
     parse_iocost_qos,
     plan_iocost_apply,
+)
+from btrfs.iocost.wiring import (
+    apply_iocost,
+    collect_iocost_snapshot,
+    plan_iocost,
+    revert_iocost,
+    with_udev_properties,
 )
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, program_installer
@@ -1005,74 +1002,8 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertEqual(self.runner.calls, [])
 
     # ---- a failed save of the managed-devices file is an ERROR line --------------------------
-    def test_apply_whose_save_of_the_managed_file_fails_is_an_error_line(self) -> None:
-        managed_dir = os.path.dirname(self.paths.managed_file)
-        real_ensure_dir = iocost_adapters.ensure_dir
-
-        seen: list[str] = []
-
-        def ensure_dir_refusing(path: str, mode: int) -> None:
-            # The two locks live in the same folder: their ensure_dir calls come first and work (a folder
-            # there).
-            seen.append(path)
-            if seen.count(managed_dir) > 2:
-                raise OSError(errno.EROFS, os.strerror(errno.EROFS))
-            real_ensure_dir(path, mode)
-
-        full = mock.patch.object(
-            iocost_adapters, "write_atomic", side_effect=OSError(errno.ENOSPC, "No space left on device")
-        )
-        read_only = mock.patch.object(iocost_adapters, "ensure_dir", ensure_dir_refusing)
-        for patch, reason in ((full, "No space left on device"), (read_only, "Read-only file system")):
-            with self.subTest(reason), patch:
-                self.runner = _FakeRunner()
-                with open(self.paths.qos_path, encoding="utf-8") as fh:
-                    qos_before = fh.read()
-                rc, out = apply_iocost(self.paths, runner=self.runner)
-                self.assertEqual(rc, 1, out)
-                # The save of the devices it is about to enable comes first: no line is written without it.
-                self.assertEqual(
-                    out[-2:],
-                    [f"ERROR: cannot write {self.paths.managed_file}: {reason}", "nothing was written to io.cost.qos"],
-                )
-                self.assertNotIn("set:       ", "\n".join(out))
-                with open(self.paths.qos_path, encoding="utf-8") as fh:
-                    self.assertEqual(fh.read(), qos_before)
-                self.assertEqual(self._installer_words(), ["install"])  # not marked done: still pending
-                self.assertFalse(self._ran("systemctl", "enable"))
-
-    def test_a_save_that_fails_after_the_qos_write_keeps_the_line_cst_s(self) -> None:
-        # The save after the writes fails (the one before them worked): the line apply wrote stays CST's,
-        # so the next apply keeps it as its own and revert resets it.
-        real_save = iocost_adapters._save_managed_devnos
-        saves: list[frozenset[str]] = []
-
-        def second_save_fails(path: str, devnos: frozenset[str]) -> None:
-            saves.append(devnos)
-            if len(saves) == 2:
-                raise OSError(errno.ENOSPC, "No space left on device")
-            real_save(path, devnos)
-
-        with mock.patch.object(iocost_adapters, "_save_managed_devnos", second_save_fails):
-            rc, out = apply_iocost(self.paths, runner=self.runner)
-        self.assertEqual(rc, 1, out)
-        self.assertEqual(out[-1], f"ERROR: cannot write {self.paths.managed_file}: No space left on device")
-        self.assertIn("set:       ", "\n".join(out))
-        self.assertEqual(saves, [frozenset({"259:1"}), frozenset({"259:1"})])
-        with open(self.paths.managed_file, encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "259:1\n")
-        # The kernel's io.cost.qos merges a write by MAJ:MIN (this fixture's file keeps the last line only).
-        self._write(self.paths.qos_path, "259:1 enable=1 ctrl=auto\n259:2 enable=1 ctrl=user rpct=95.00\n")
-        rc, out = apply_iocost(self.paths, runner=self.runner)
-        self.assertEqual(rc, 0, out)
-        self.assertNotIn("259:1 (nvme0n1: pre-existing/vendor", "\n".join(out))
-        self.assertIn("unchanged: 259:1 (nvme0n1: already enable=1 auto)", out)
-        rc, out = revert_iocost(self.paths, runner=self.runner)
-        self.assertEqual(rc, 0, out)
-        self.assertIn(f"reverted:  {self.paths.qos_path} <- '259:1 enable=0 ctrl=auto' (nvme0n1)", out)
-        self.assertIn("kept:      259:2 (nvme1n1: non-CST enable=1 kept)", out)
-        self.assertFalse(os.path.exists(self.paths.managed_file))
-
+    # The save failures of apply are in test_iocost_faults.py (IocostManagedSaveFailureTest, over IocostWorld);
+    # the real save's errors (a folder at its path, a full disk, a folder it cannot make) in test_iocost_ports.py.
     def test_revert_whose_removal_of_the_managed_file_fails_is_an_error_line(self) -> None:
         # A folder where the file belongs: the snapshot reads no device of it, and its removal fails.
         os.makedirs(os.path.join(self.paths.managed_file, "x"))

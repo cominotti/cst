@@ -80,23 +80,38 @@ def check_cpu_settings(host: DoctorHostPort) -> Iterator[Result]:
         )
 
 
-def profile_user(host: DoctorHostPort) -> str:
-    """The user the game profile acts for, as its tick and 'state' ask that user's manager: the one
-    game.state names ('on' records that user's user@UID.service first: state_uid), so a TARGET_USER
-    changed while the profile is on does not move the check to another user; else (no such record,
-    or its uid names no account here) TARGET_USER ("" when not set)."""
-    target = conf_value(host, CPU_CONF, "TARGET_USER") or ""
+def recorded_uid(host: DoctorHostPort) -> str | None:
+    """The uid game.state records ('on' records that user's user@UID.service first: state_uid), None when it
+    records none or cannot be read."""
     try:
         with host.open_text(host.path(GAME_STATE)) as f:
-            uid = state_uid(records(f.read()))
+            return state_uid(records(f.read()))
     except OSError:
-        return target
+        return None
+
+
+def _user_of(host: DoctorHostPort, uid: str | None) -> str:
+    """The name of the account with that uid, else TARGET_USER ("" when not set)."""
+    target = conf_value(host, CPU_CONF, "TARGET_USER") or ""
     return (host.user_name(int(uid)) if uid is not None else "") or target
 
 
+def profile_user(host: DoctorHostPort) -> str:
+    """The user the game profile acts for, as its tick and 'state' ask that user's manager: the one
+    game.state names (recorded_uid), so a TARGET_USER changed while the profile is on does not move the
+    check to another user; else (no such record, or its uid names no account here) TARGET_USER ("" when
+    not set)."""
+    return _user_of(host, recorded_uid(host))
+
+
 def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
-    """(systemctl args for the manager of the user the profile acts for (profile_user), or None, why not)."""
-    target = profile_user(host)
+    """(systemctl args for the manager of the user the profile acts for (profile_user), or None, why not).
+    None when no account has the uid game.state records: as the tick and 'state', the drift of that uid's
+    user manager is not compared in TARGET_USER's, which is another user's."""
+    uid = recorded_uid(host)
+    if uid is not None and not host.user_name(int(uid)):
+        return None, f"no account has uid {uid}, the user 'on' acted for"
+    target = _user_of(host, uid)
     if host.uid == 0:
         if not target:
             return None, f"no TARGET_USER in {CPU_CONF}"
@@ -263,7 +278,7 @@ def check_game_leftovers(host: DoctorHostPort) -> Iterator[Result]:
     if not entries:
         return
     epp = GamePaths().epp
-    what = ", ".join(undo_text(rec, epp, short=True) for _uid, rec in entries)
+    what = ", ".join(undo_text(rec, epp, short=True, uid=uid) for uid, rec in entries)
     message = (
         f"game profile: {len(entries)} setting(s) 'off' could not undo keep the game's value: {what} (kept in "
         f"{GAME_LEFTOVERS}). The next 'off' and the watchdog's tick while the profile is off "
