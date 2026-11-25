@@ -344,8 +344,9 @@ class SystemdPort(Protocol):
         """`systemctl show-environment`: the manager's environment, one KEY=VALUE per line."""
         ...
 
-    def show_value(self, unit: UnitName, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
-        """`systemctl show -p PROP --value unit`: one property's value as systemctl prints it."""
+    def show_value(self, unit: UnitName | None, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        """`systemctl show -p PROP --value unit`: one property's value as systemctl prints it; unit None:
+        a property of the manager itself (`systemctl show -p PROP --value`, such as UnitPath)."""
         ...
 
     def start(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:

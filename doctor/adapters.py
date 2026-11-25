@@ -17,6 +17,7 @@ from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template
 from cst_core.domain.record import InstallRecord
+from cst_core.domain.units import UNIT_PATH_PROP, show_manager_value_argv, user_unit_dir
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
 from vm import adapters as vm_adapters
@@ -57,9 +58,8 @@ class Host:
         )
         # The user's home on the host (the same path in a toolbox).
         self.home = HostPath(env.get("HOME") or _home(self.uid))
-        # The user's XDG config folder when XDG_CONFIG_HOME names one ("" otherwise): cst bluetooth writes
-        # the LDAC watcher's unit under it.
-        self.config_home = HostPath(env.get("XDG_CONFIG_HOME") or "")
+        # The user manager's own unit folder, asked on first use (user_unit_dir).
+        self._user_unit_dir: HostPath | None = None
         # Every command (virsh too) starts from self.env, in doctor's words for a fault.
         self._commands: CommandRunnerPort = SubprocessCommandRunner(self, base_env=env, words=host_words)
 
@@ -159,6 +159,16 @@ class Host:
         flatpak-spawn --env (the host command does not get flatpak-spawn's own)."""
         r = self._commands.run(cmd, timeout=timeout, locale_c=locale_c, on_host=True)
         return r.returncode, r.stdout, r.stderr
+
+    def user_unit_dir(self) -> HostPath:
+        """The folder the user's manager names first for the user's own units (systemctl --user show -p
+        UnitPath --value, through run(): C locale, 20 s), asked once: not the shell's XDG_CONFIG_HOME, which
+        the manager does not read and sudo's step down drops. ~/.config/systemd/user when it cannot be asked."""
+        if self._user_unit_dir is None:
+            argv = show_manager_value_argv(["systemctl", "--user"], UNIT_PATH_PROP)
+            rc, out, _ = self.run(argv, timeout=20, locale_c=True)
+            self._user_unit_dir = HostPath(user_unit_dir(out if rc == 0 else None, self.home))
+        return self._user_unit_dir
 
     def virsh(self, *, read_only: bool) -> VirshPort:
         """virsh on the system connection, through the same commands as run()."""

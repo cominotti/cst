@@ -42,6 +42,7 @@ class StateFormatKey(StrEnum):
     GAME_INTENDED = "game-intended"
     GAME_LEFTOVERS = "game-leftovers"
     DOCKER_NOCOW_OUTCOME = "docker-nocow-outcome"
+    DOCKER_NOCOW_POSTPONED = "docker-nocow-postponed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +145,15 @@ def version_of(data: object, field: str) -> int | None:
 # docker-nocow-outcome: why docker-volumes-nocow left no migration scheduled
 #   (it gave up, or an install could not schedule it), for its status and cst
 #   doctor; written and removed best effort, read by no decision of the helper.
+# docker-nocow-postponed: the boots at which docker-volumes-nocow's boot run
+#   had to wait (Docker running, a daemon.json it cannot read), for its status
+#   and cst doctor. Written by the boot run; removed by the first boot not held
+#   back and by unmark, and, when Docker or dockerd held the boot back, by a
+#   boot with no volumes folder and by one with nothing to do (no flag, and the
+#   folder has +C already), whatever its version (the removal ends the record).
+#   A boot held back by daemon.json is always recorded. A boot run that finds a
+#   newer format and would count itself leaves it as it is and does not count
+#   itself in it.
 _TABLE: Final = r"""
 alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/pending_alerts/domain.py doctor/application/alerts.py | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/adapters/monitor.py | btrfs/stall_report/domain/window.py                | "v" of each record
@@ -158,6 +168,7 @@ game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/a
 game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/application/profile.py  | cpu/game/application/profile.py cpu/game/application/report.py cpu/game/application/drift.py doctor/application/cpu.py | first line "cst-game-intended 1" (none: 0)
 game-leftovers     | /run/cpu-setup/game.leftovers              | 2 | cpu/game/application/leftovers.py | cpu/game/application/leftovers.py cpu/game/application/report.py doctor/application/cpu.py | first line "cst-game-leftovers 2" (none: 0)
 docker-nocow-outcome | /var/lib/docker-volumes-nocow/outcome    | 1 | btrfs/docker_volumes_nocow/adapters.py | btrfs/docker_volumes_nocow/adapters.py doctor/application/docker_nocow.py | "v" (none: 0)
+docker-nocow-postponed | /var/lib/docker-volumes-nocow/postponed | 1 | btrfs/docker_volumes_nocow/adapters.py | btrfs/docker_volumes_nocow/adapters.py doctor/application/docker_nocow.py | "v" (none: 0)
 """
 
 

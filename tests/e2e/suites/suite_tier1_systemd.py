@@ -921,6 +921,21 @@ elif step == "entries":  # the record at argv[2]: its version, then VM=ID per en
 elif step == "whys":  # the record at argv[2]: what tore each entry
     with open(sys.argv[2]) as f:
         print(*(e["why"] for e in json.load(f)["torn"]))
+elif step == "retagged":  # restic snapshots --json: the full ID of each snapshot whose original is argv[2]
+    print(*(s["id"] for s in json.load(sys.stdin) if s.get("original") == sys.argv[2]))
+elif step == "indexed":  # the index at argv[2]: the IDs of its NAS backups, sorted
+    with open(sys.argv[2]) as f:
+        print(*sorted(e["snapshot"] for e in json.load(f)["backups"] if e.get("mode") == "nas"))
+elif step == "index":  # argv: the index, the repository, the VM, then the IDs of its NAS backups
+    path, repo, vm = sys.argv[2:5]
+    backups = [
+        {"vm": vm, "mode": "nas", "snapshot": snap, "repository": repo, "host": "e2ehost", "epoch": 1795000000 + n,
+         "timestamp": "20261124T000000Z", "consistency": "shut-off", "keep": None, "versions": {}, "deployment": None}
+        for n, snap in enumerate(sys.argv[5:])
+    ]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"version": 1, "backups": backups}, f)
 else:
     sys.path.insert(0, "/opt/cst-rw")
     from vm import wiring
@@ -931,9 +946,30 @@ else:
     repo = p.settings.nas_repo()
     if step == "retry":
         nas.retention_after_torn(cfg, p, vm, repo)
-    elif step == "stopped":  # restic's read of the folder argv[3] for a live run, as nas_run makes it
+    elif step == "index_step":  # nas_run's index step for the indexed snapshot argv[3]: its entry again, with the listing
+        entry = {"vm": vm, "mode": "nas", "snapshot": sys.argv[3], "repository": repo["repo"], "host": repo["host"],
+                 "epoch": 1795000000, "timestamp": "20261124T000000Z", "consistency": "shut-off", "keep": None,
+                 "versions": {}, "deployment": None}
+        print(f"index: {nas._index_nas_backup(p, vm, repo, entry)}")
+    elif step == "after_read":  # nas_run's steps after a shut-off run's good read of snapshot argv[3], merged back
         from vm.domain import DomainParts
-        from vm.domain.backup import NasRun, Stop, nas_manifest
+        from vm.domain.backup import NasRun, Stop, nas_index_entry
+        p.signals.catch_stops()
+        run = NasRun(
+            vm=vm, live=False, quiesce=False, xml_text="<domain/>",
+            parts=DomainParts(uuid="e2e", disks=[], nvram="", tpm=False, skipped=[], problems=[]),
+            notes=[], sources=[], epoch=1795000000.0, stamp="20261124T000000Z", specs={}, others=[],
+            agent="none", versions={}, deployment=None,
+        )
+        try:
+            nas._nas_after_read(cfg, p, run, repo, nas_index_entry(run, repo, sys.argv[3], "shut-off", None))
+        except Stop as e:
+            print(f"stop: {e}")
+        else:
+            print("no stop")
+    elif step in ("stopped", "stopped_ok"):  # restic's read of the folder argv[3] for a live run, as nas_run makes it
+        from vm.domain import DomainParts
+        from vm.domain.backup import NasRun, Stop, StopAfterBackup, nas_index_entry, nas_manifest
         p.signals.catch_stops()
         src = sys.argv[3]
         run = NasRun(
@@ -944,6 +980,9 @@ else:
         )
         try:
             nas._nas_restic_read(cfg, p, run, repo, nas_manifest(run, [], "crash-consistent", None))
+        except StopAfterBackup as e:  # stopped_ok: then nas_run's index of it, after the (empty) merge back
+            entry = nas_index_entry(run, repo, e.snap, e.consistency, None)
+            print(f"stop: {nas._index_stopped_backup(p, vm, e, entry) if step == 'stopped_ok' else e}")
         except Stop as e:
             print(f"stop: {e}")
         else:
@@ -5341,7 +5380,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
         their listed IDs, and the retention then keeps the good backup; the other VM's entry and
         snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
-        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
+        run whose forget works) forgets it and leaves the record as it was; and a recorded torn snapshot
+        whose tags a real restic tag changed is forgotten by its new ID. A whole NAS backup needs
         libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
         w = "/var/tmp/e2e-vm-torn"
         nas_dir = "/srv/backup/e2e-vm-torn"
@@ -5370,6 +5410,19 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qx "forget_torn: None" "$w/forget.out"
             [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
             [[ "$(d entries "$CST_VM_TORN")" == "1 e2eother=$other" ]]
+            # A recorded torn snapshot whose tags were changed (a real restic tag: a new ID, the recorded one
+            # its original) is forgotten by its new ID, not dropped as "forgotten already".
+            retagged="$(snap cst-vm,vm:e2evm)"
+            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$retagged"
+            restic tag -q --add cst-keep "$retagged"
+            retagged2="$(restic snapshots --json --no-lock | d retagged "$retagged")"
+            [[ ${#retagged2} == 64 && "$retagged2" != "$retagged" ]]
+            d retry e2evm >"$w/retagged.out"
+            cat "$w/retagged.out" >&2
+            grep -qF "torn restic snapshot ${retagged2:0:8} of an earlier run forgotten" "$w/retagged.out"
+            if grep -qF "forgotten already" "$w/retagged.out"; then exit 1; fi
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
+            [[ "$(d entries "$CST_VM_TORN")" == 1 ]]
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},
@@ -5421,6 +5474,223 @@ EOF
             grep -qF "torn restic snapshot ${torn:0:8} of an earlier run forgotten" "$w/retry.out"
             [[ "$(listed)" == "$good" ]]
             [[ "$(d entries "$CST_VM_TORN")" == 1 ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_203_a_nas_snapshot_no_record_names_is_named_and_not_counted_with_the_real_restic(self) -> None:
+        """The check of the snapshots no record names (retention_after_torn) against the real restic over
+        SFTP: restic's own `snapshots --json` (its time, and the "original" a real `restic tag` sets) and
+        its --host filter. Snapshots of the VM's tags: "old" (made before the index: an older CST's, left
+        alone), "good" and "kept" (indexed; "kept" then retagged by hand, so restic lists it under a new ID,
+        which the index's step then gives the entry: restic finds the snapshot by it only; then retagged
+        again, restic keeping the first ID as its original, so the entry, which keeps that ID too, is no
+        stray and moves to the third ID),
+        one of another host, and "stray" (the newest, in neither the index nor the record). The retry names
+        the stray only, with the commands that forget or adopt it, sends one alert (to a stub, never the
+        container's btrfs-notify) and skips the retention, forgetting nothing; once adopted, the retention
+        runs; a second stray forgotten by hand leaves the next run quiet; with the index moved aside nothing
+        is compared and restic snapshots is not run."""
+        w = "/var/tmp/e2e-vm-strays"
+        nas_dir = "/srv/backup/e2e-vm-strays"
+        prelude = self._vm_torn_prelude("test_203", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
+            cat >"$w/notify" <<'EOF'
+#!/bin/sh
+printf '%s\\n' "$*" >>"$ALERTS_LOG"
+EOF
+            chmod 755 "$w/notify"
+            export CST_VM_NOTIFY="$w/notify" CST_VM_ALERTS="$w/alerts" ALERTS_LOG="$w/alerts.log"
+            all() { restic snapshots --json --no-lock | d ids; }
+            old="$(snap cst-vm,vm:e2evm)"
+            good="$(snap cst-vm,vm:e2evm)"
+            kept="$(snap cst-vm,vm:e2evm)"
+            date +%s%N >"$w/payload/stamp"
+            other="$(restic backup --json --host otherhost --tag cst-vm,vm:e2evm "$w/payload" | d summary)"
+            stray="$(snap cst-vm,vm:e2evm)"
+            d index "$CST_VM_INDEX" "$RESTIC_REPOSITORY" e2evm "$good" "$kept"
+            restic tag -q --add cst-keep "$kept"
+            kept2="$(restic snapshots --json --no-lock | d retagged "$kept")"
+            [[ ${#kept2} == 64 && "$kept2" != "$kept" ]]
+            # restic finds the retagged snapshot by its new ID only; the index's step moves the entry to it.
+            if restic ls -q --no-lock "$kept" >/dev/null 2>&1; then echo "restic found the old ID" >&2; exit 1; fi
+            d index_step e2evm "$good" >"$w/index.out"
+            grep -qx "index: None" "$w/index.out"
+            [[ "$(d indexed "$CST_VM_INDEX")" == "$(printf '%s\\n' "$good" "$kept2" | sort | xargs)" ]]
+            restic ls -q --no-lock "$kept2" >/dev/null
+            # A second restic tag (cst-keep stays: the retention below keeps it): restic keeps the first
+            # ID as the original, not kept2. The retry
+            # (before the index's step) still counts the entry's snapshot, and the step then moves it.
+            restic tag -q --add e2e-second "$kept2"
+            kept3="$(restic snapshots --json --no-lock | d retagged "$kept")"
+            [[ ${#kept3} == 64 && "$kept3" != "$kept2" && "$kept3" != "$kept" ]]
+            before="$(all)"
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            grep -qF "  retention skipped: restic lists 1 snapshot of e2evm that neither the index nor the record of torn snapshots names (each may be torn): ${stray:0:8} (" "$w/retry.out"
+            grep -qF "(restic tag --add cst-adopted $stray)" "$w/retry.out"
+            grep -qF "(restic forget $stray)" "$w/retry.out"
+            for s in "$old" "$good" "$kept" "$kept2" "$kept3" "$other"; do
+                if grep -qF "${s:0:8}" "$w/retry.out"; then echo "named ${s:0:8}" >&2; exit 1; fi
+            done
+            [[ "$(all)" == "$before" ]]
+            d index_step e2evm "$good" >"$w/index2.out"
+            grep -qx "index: None" "$w/index2.out"
+            [[ "$(d indexed "$CST_VM_INDEX")" == "$(printf '%s\\n' "$good" "$kept3" | sort | xargs)" ]]
+            restic ls -q --no-lock "$kept3" >/dev/null
+            [[ "$(wc -l <"$w/alerts.log")" == 1 ]]
+            grep -qF "VM backup: a NAS snapshot no record names" "$w/alerts.log"
+            grep -qF "${stray:0:8}" "$w/alerts.log"
+            restic tag -q --add cst-adopted "$stray"
+            d retry e2evm >"$w/adopted.out"
+            cat "$w/adopted.out" >&2
+            if grep -qF "retention skipped" "$w/adopted.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/adopted.out"
+            stray2="$(snap cst-vm,vm:e2evm)"
+            d retry e2evm >"$w/second.out"
+            cat "$w/second.out" >&2
+            grep -qF "): ${stray2:0:8} (" "$w/second.out"
+            restic forget -q "$stray2"
+            d retry e2evm >"$w/forgotten.out"
+            cat "$w/forgotten.out" >&2
+            if grep -qF "retention skipped" "$w/forgotten.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/forgotten.out"
+            [[ "$(wc -l <"$w/alerts.log")" == 2 ]]
+            snap cst-vm,vm:e2evm >/dev/null
+            mv "$CST_VM_INDEX" "$CST_VM_INDEX.aside"
+            mkdir -p "$w/bin"
+            export RESTIC_LOG="$w/restic.log" REAL_RESTIC="$(command -v restic)"
+            cat >"$w/bin/restic" <<'EOF'
+#!/bin/sh
+echo "$1" >>"$RESTIC_LOG"
+exec "$REAL_RESTIC" "$@"
+EOF
+            chmod 755 "$w/bin/restic"
+            PATH="$w/bin:$PATH" d retry e2evm >"$w/aside.out"
+            cat "$w/aside.out" >&2
+            if grep -qF "retention skipped" "$w/aside.out"; then exit 1; fi
+            if grep -qx snapshots "$w/restic.log"; then exit 1; fi
+            grep -qx forget "$w/restic.log"
+            [[ "$(wc -l <"$w/alerts.log")" == 2 ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_204_a_stop_after_a_good_read_indexes_its_snapshot_with_the_real_restic(self) -> None:
+        """A stop that comes after restic ended on its own with a snapshot (a carried stop, exit 0), against
+        the real restic over SFTP: test_200's wrapper, but it exits 0 on the SIGTERM cst vm sends it on its
+        stop. The read was checked (a live run's), so the snapshot is a backup: cst vm's read raises the stop
+        as StopAfterBackup and nas_run's index step (with its real store and lock) indexes it, then the stop
+        names it indexed; the record of torn snapshots stays empty and restic still lists the snapshot. The
+        next run's check of the snapshots no record names then names nothing, and its retention runs."""
+        w = "/var/tmp/e2e-vm-stopped-ok"
+        nas_dir = "/srv/backup/e2e-vm-stopped-ok"
+        prelude = self._vm_torn_prelude("test_204", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
+            cat >"$w/notify" <<'EOF'
+#!/bin/sh
+printf '%s\\n' "$*" >>"$ALERTS_LOG"
+EOF
+            chmod 755 "$w/notify"
+            export CST_VM_NOTIFY="$w/notify" CST_VM_ALERTS="$w/alerts" ALERTS_LOG="$w/alerts.log"
+            export CST_VM_NAS_STAGE="$w/stage" REAL_RESTIC="$(command -v restic)"
+            mkdir -p "$w/bin"
+            cat >"$w/bin/restic" <<'EOF'
+#!/bin/bash
+# restic backup to its end, then a stop to cst vm; the stop cst vm sends back ends this wrapper with 0.
+if [ "$1" = backup ]; then
+    "$REAL_RESTIC" "$@" || exit
+    trap 'exit 0' TERM
+    kill -TERM "$PPID"
+    sleep 5 </dev/null >/dev/null 2>&1 &
+    wait $!
+    exit 3
+fi
+exec "$REAL_RESTIC" "$@"
+EOF
+            chmod 755 "$w/bin/restic"
+            PATH="$w/bin:$PATH" timeout 120 python3 -I -B -c "$DRIVER" stopped_ok e2evm "$w/payload" >"$w/stopped.out"
+            cat "$w/stopped.out" >&2
+            made="$(d indexed "$CST_VM_INDEX")"
+            [[ ${#made} == 64 ]]
+            grep -qxF "stop: stopped by signal SIGTERM; restic snapshot ${made:0:8} of e2evm is a backup: indexed (the retention runs at the next backup)" \
+                "$w/stopped.out"
+            if [ -e "$CST_VM_TORN" ]; then [[ "$(d entries "$CST_VM_TORN")" == 1 ]]; fi
+            [[ "$(listed)" == "$made" ]]
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
+            [[ ! -e "$w/alerts.log" ]]
+            [[ "$(listed)" == "$made" ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_221_a_stop_in_the_retention_after_a_good_read_indexes_its_snapshot_with_the_real_restic(self) -> None:
+        """A stop after a good read's merge back, against the real restic over SFTP: nas_run's steps after
+        the read (_nas_after_read, with cst vm's real stop signals, store and lock) through a wrapper that
+        sends cst vm a SIGTERM when the retention's restic forget starts, and then waits. The stop ends the
+        retention; the snapshot is indexed before the stop ends the run, which names it indexed; nothing is
+        forgotten. The next run's check of the snapshots no record names then names nothing (the index has
+        an older backup, so it compares), and its retention runs."""
+        w = "/var/tmp/e2e-vm-stopped-post"
+        nas_dir = "/srv/backup/e2e-vm-stopped-post"
+        prelude = self._vm_torn_prelude("test_221", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
+            cat >"$w/notify" <<'EOF'
+#!/bin/sh
+printf '%s\\n' "$*" >>"$ALERTS_LOG"
+EOF
+            chmod 755 "$w/notify"
+            export CST_VM_NOTIFY="$w/notify" CST_VM_ALERTS="$w/alerts" ALERTS_LOG="$w/alerts.log"
+            export REAL_RESTIC="$(command -v restic)"
+            mkdir -p "$w/bin"
+            cat >"$w/bin/restic" <<'EOF'
+#!/bin/bash
+# The retention's restic forget: a stop to cst vm, then wait (the stop ends this wrapper).
+if [ "$1" = forget ] && [[ " $* " == *" --keep-weekly "* ]]; then
+    kill -TERM "$PPID"
+    sleep 5 </dev/null >/dev/null 2>&1 &
+    wait $!
+    exit 3
+fi
+exec "$REAL_RESTIC" "$@"
+EOF
+            chmod 755 "$w/bin/restic"
+            good="$(snap cst-vm,vm:e2evm)"
+            d index "$CST_VM_INDEX" "$RESTIC_REPOSITORY" e2evm "$good"
+            made="$(snap cst-vm,vm:e2evm)"
+            PATH="$w/bin:$PATH" timeout 120 python3 -I -B -c "$DRIVER" after_read e2evm "$made" >"$w/stopped.out"
+            cat "$w/stopped.out" >&2
+            grep -qxF "stop: stopped by signal SIGTERM; restic snapshot ${made:0:8} of e2evm is a backup: indexed (the retention runs at the next backup)" \\
+                "$w/stopped.out"
+            if grep -qF "Done:" "$w/stopped.out"; then exit 1; fi
+            [[ "$(d indexed "$CST_VM_INDEX")" == "$(printf '%s\\n' "$good" "$made" | sort | xargs)" ]]
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$made" | sort | xargs)" ]]
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
+            [[ ! -e "$w/alerts.log" ]]
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},
@@ -5515,7 +5785,7 @@ EOF
             rc=0; out="$($prog mark 2>&1)" || rc=$?
             echo "test_114 mark: rc=$rc $out" >&2
             [[ "$rc" == 2 ]]
-            grep -qF "nothing marked (fix the file, then run it again)" <<<"$out"
+            grep -qF "/etc/docker/daemon.json: not JSON: the migration is requested, and mark sets no +C on the volumes folder: fix the file, and the first boot after that runs it" <<<"$out"
             [[ -e /etc/btrfs-setup/docker-nocow-pending ]] || { echo "mark wrote no request" >&2; exit 1; }
             [[ "$(cat /var/lib/docker-volumes-nocow/attempts)" == 0 ]] || { echo "the old count stayed" >&2; exit 1; }
             printf '{}' >/etc/docker/daemon.json
@@ -5909,6 +6179,115 @@ EOF
                 [[ -z "$d" ]] || {{ echo "doctor warns without the helper: $d" >&2; exit 1; }}
             fi
             rm -f "$state/outcome"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_215_docker_volumes_nocow_postponed_record_is_format_1_and_read_safely(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root) and cst doctor (as tester) on the record of
+        postponed boots, /var/lib/docker-volumes-nocow/postponed. migrate runs with an
+        /etc/docker/daemon.json that is not JSON (it postpones before any btrfs call); status runs with
+        the file naming a data root of the test's own on a tmpfs (status shows the record under its
+        volumes folder's line). The whole cycle of the state file: migrate writes format 1 ("v": 1,
+        mode 0644); a record of format 99 (a newer CST) is left byte for byte, migrate's line, status
+        and doctor name it; a format-1 record whose time no clock can show reads "?" in status and
+        "at an unknown time" in doctor (status stopped with a traceback, doctor's check failed); a file
+        in place of the state folder is no record for doctor (it said "cannot read" at every run); a
+        record of format 0, as the previous version wrote it, is counted on and rewritten as format
+        1."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-215-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /var/tmp/e2e-215-saved /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-215-made-docker ] && rm -rf /etc/docker || true; "
+            "rm -f /var/tmp/e2e-215-made-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_215 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            rec={state}/postponed
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            doctor() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}
+            broken() {{ printf '{{' >/etc/docker/daemon.json; }}
+            fixed() {{ printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json; }}
+            newer="$rec is format 99 of the docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST"
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-215-made-docker; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e {state} ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p {root}/volumes
+            # 1. Written as format 1.
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            echo "test_215 record: $(cat "$rec")" >&2
+            grep -qF '{{"v": 1, "reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown", "boots": 1,' "$rec"
+            [[ "$(stat -c %a "$rec")" == 644 ]]
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 1: $out" >&2
+            grep -qE '^  migration postponed at 1 boot[(]s[)] in a row, last [0-9-]+ [0-9:]+: /etc/docker/daemon.json: not JSON' <<<"$out"
+            # 2. A record of format 99: left as it is, and named.
+            printf '{{"v": 99, "reason": "r", "boots": 5, "first": 1, "last": 2, "boot_id": "b", "new": [1]}}\n' >"$rec"
+            cp -p "$rec" /var/tmp/e2e-215-saved
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate, format 99: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "$newer: left as it is, and this boot is not counted in it" <<<"$out"
+            cmp "$rec" /var/tmp/e2e-215-saved || {{ echo "migrate wrote over a record of a newer format" >&2; exit 1; }}
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 99: $out" >&2
+            grep -qxF "  $newer" <<<"$out"
+            d="$(doctor | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_215 doctor, format 99: $d" >&2
+            grep -qxF "  info   Docker volumes NOCOW: $newer" <<<"$d"
+            # 3. A time no clock can show.
+            printf '{{"v": 1, "reason": "r", "boots": 1, "first": 1, "last": 100000000000000000000, "boot_id": "b"}}\n' >"$rec"
+            rc=0; out="$($prog status 2>&1)" || rc=$?
+            echo "test_215 status, a time past the clock: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            if grep -qF Traceback <<<"$out"; then echo "status stopped with a traceback" >&2; exit 1; fi
+            grep -qxF "  migration postponed at 1 boot(s) in a row, last ?: r" <<<"$out"
+            d="$(doctor)"
+            echo "test_215 doctor, a time past the clock: $(grep -F "Docker volumes NOCOW" <<<"$d" || true)" >&2
+            if grep -qF "check_docker_nocow_postponed: the check itself failed" <<<"$d"; then echo "doctor's check failed" >&2; exit 1; fi
+            grep -qF "info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last at an unknown time: r;" <<<"$d"
+            # 4. A file in place of the state folder: no record.
+            rm -rf {state}
+            printf 'in the way\n' >{state}
+            d="$(doctor | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_215 doctor, the state folder a file: $d" >&2
+            if grep -qF "cannot read $rec" <<<"$d"; then echo "doctor took the file for a record it cannot read" >&2; exit 1; fi
+            rm -f {state}
+            # 5. A record of format 0, as the previous version wrote it: counted on, written as format 1.
+            mkdir -p {state}
+            printf '{{"reason": "r", "boots": 1, "first": 1700000000, "last": 1700000000, "boot_id": "old"}}\n' >"$rec"
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate, format 0: rc=$rc $out; record: $(cat "$rec")" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF '{{"v": 1, "reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown", "boots": 2, "first": 1700000000,' "$rec"
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 0 counted on: $out" >&2
+            grep -qF "  migration postponed at 2 boot(s) in a row, last " <<<"$out"
             echo E2E-OK
             """,
         ).stdout
@@ -10683,15 +11062,20 @@ EOF
         was (content and mtime); the `revert --yes --no-restart` right after takes a name of its own
         (another -1, or -2 in the same second), leaves the planted files and apply's backup, and puts
         the vendor keys back; a second revert finds them as in the oldest backup and changes nothing.
-        The exact command apply runs, `sudo cp -p --preserve=context --update=none-fail`, onto a name
-        that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the planted file
-        of its second."""
+        The exact command apply runs, `sudo env LC_ALL=C cp -p --preserve=context --update=none-fail`,
+        onto a name that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the
+        planted file of its second. Last, with a sudoers drop-in that keeps no LC_ALL (env_keep and
+        env_check without it) and a shim cp first on sudo's secure_path that logs the LC_ALL it got:
+        `apply` with LC_ALL=C in its environment still gives cp LC_ALL=C (from env), so cp's words
+        are read in the C locale whatever sudoers keeps; before, sudo dropped it and cp got none."""
         c = self.SYSTEMD_CONTAINER
         self.addCleanup(
             exec_bash,
             c,
             """
             set +e
+            rm -f /etc/sudoers.d/zz-e2e180   # first: the sudoers of step 5 must not outlive the test
+            rm -rf /var/tmp/bt180-shim
             runuser -u tester -- env HOME=/home/tester XDG_RUNTIME_DIR=/run/user/1000 \\
                 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \\
                 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1
@@ -10768,9 +11152,34 @@ EOF
             # 4. apply's exact cp onto a name that is there: exit 1, the file left alone.
             f="$(head -n 1 "$w/planted")"
             s="$(stat -c %Y "$f") $(sha256sum <"$f")"
-            rc=0; runuser -u tester -- sudo cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
+            rc=0; runuser -u tester -- sudo env LC_ALL=C cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
             [[ $rc == 1 ]] || { echo "cp onto a backup that is there: exit $rc" >&2; cat "$w/cp.err" >&2; exit 1; }
             [[ "$(stat -c %Y "$f") $(sha256sum <"$f")" == "$s" ]]
+
+            # 5. A sudoers that keeps no LC_ALL: cp still gets the C locale (from env). The shim lives
+            # in /var/tmp: the container's /tmp is noexec, and sudo cannot run a program there.
+            shim=/var/tmp/bt180-shim
+            mkdir -p "$shim"
+            printf '%s
+' '#!/bin/bash' 'echo "LC_ALL=${LC_ALL-unset}" >>/var/tmp/bt180-shim/log' 'exec /usr/bin/cp "$@"' >"$shim/cp"
+            chmod 0755 "$shim/cp"
+            rm -f "$shim/log"
+            printf '%s
+' 'Defaults env_keep -= "LC_ALL"' 'Defaults env_check -= "LC_*"'                 "Defaults secure_path="$shim:/usr/sbin:/usr/bin"" >"$w/zz-e2e180"
+            visudo -cf "$w/zz-e2e180" >/dev/null
+            install -m 0440 -o root -g root "$w/zz-e2e180" /etc/sudoers.d/zz-e2e180
+            # Cannot bite otherwise: sudo now drops the caller's LC_ALL.
+            seen="$(runuser -u tester -- env LC_ALL=C sudo sh -c 'echo "${LC_ALL-unset}"')"
+            [[ "$seen" == unset ]] || { echo "sudo kept LC_ALL=$seen: the drop-in did not take" >&2; exit 1; }
+            rc=0; out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+            show "apply, sudoers without LC_ALL" "$out"
+            if grep -qF "stopped:" <<<"$out"; then exit 1; fi
+            b="$(backup_of "$out")"
+            [[ -n "$b" && -f "$b" ]] || { echo "no backup: $b" >&2; exit 1; }
+            show "shim" "$(cat "$shim/log")"
+            [[ -s "$shim/log" ]] || { echo "the shim cp never ran" >&2; exit 1; }
+            if grep -vqxF "LC_ALL=C" "$shim/log"; then echo "a backup copy ran without LC_ALL=C" >&2; exit 1; fi
+            rm -f /etc/sudoers.d/zz-e2e180
             echo E2E-OK
             """,
         ).stdout
@@ -11328,6 +11737,492 @@ EOF
             rm -f {rec}
             for d in "$(doc ut env)" "$(doc env HOME=/root)"; do
                 if grep -qF 'the install record cannot be read' <<<"$d"; then echo "doctor without a record: $d" >&2; exit 1; fi
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_219_btrfs_alerts_install_reloads_every_running_user_manager(self) -> None:
+        """install_pending_alerts (as `cst btrfs install` and `snapshots setup` run it, the functions
+        taken from btrfs-setup.sh, the real installer, SUDO_USER tester) with two user managers running:
+        tester's and a second account's (e2e219, its user@UID.service started). In each, a transient unit
+        ordered After= cst-pending-alerts.service keeps that unit loaded. The unit's file is given an
+        older text, both managers reload it, and the current text is put back by hand: both managers
+        then say NeedDaemonReload yes ("cannot bite" otherwise). After install_pending_alerts both say
+        no. Before, only SUDO_USER's manager was reloaded and e2e219's kept the old unit. The unit file,
+        the files of btrfs:alerts and root's install record are copied aside and put back."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        unit = "/etc/systemd/user/cst-pending-alerts.service"
+        dests = (
+            '/usr/bin/python3 -I -c \'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import INSTALL_MANIFEST as m; "
+            'print(*(e.dest for e in m if e.component == "btrfs:alerts"), sep=chr(10))\''
+        )
+        if exec_bash(c, "getent passwd e2e219 || getent passwd 1219 || true").stdout.strip():
+            self.skipTest("the account e2e219 or the uid 1219 is taken")
+        exec_bash(
+            c,
+            f"""set -e
+            rm -rf /var/tmp/e2e-219; mkdir -p /var/tmp/e2e-219
+            {dests} >/var/tmp/e2e-219/dests
+            grep -qxF {unit} /var/tmp/e2e-219/dests
+            while read -r f; do
+                if [[ -e "$f" ]]; then echo "$f" >>/var/tmp/e2e-219/there; else echo "$f" >>/var/tmp/e2e-219/missing; fi
+            done </var/tmp/e2e-219/dests
+            if [[ -s /var/tmp/e2e-219/there ]]; then tar -cpf /var/tmp/e2e-219/files.tar -T /var/tmp/e2e-219/there; fi
+            if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-219/rec; fi
+            if [[ -d /var/lib/cst-alerts ]]; then touch /var/tmp/e2e-219/alerts-dir; fi
+            if systemctl --global -q is-enabled cst-pending-alerts.service 2>/dev/null; then touch /var/tmp/e2e-219/enabled; fi""",
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            systemctl --user -M tester@ stop e2e219-hold.service 2>/dev/null
+            systemctl stop user@1219.service user-runtime-dir@1219.service 2>/dev/null
+            userdel -rf e2e219 2>/dev/null
+            [[ -e /var/tmp/e2e-219/enabled ]] || systemctl --global disable cst-pending-alerts.service 2>/dev/null
+            if [[ -s /var/tmp/e2e-219/missing ]]; then xargs -r -d '\\n' rm -f </var/tmp/e2e-219/missing; fi
+            if [[ -e /var/tmp/e2e-219/files.tar ]]; then tar -xpf /var/tmp/e2e-219/files.tar -C /; fi
+            if [[ -e /var/tmp/e2e-219/rec ]]; then cp -p /var/tmp/e2e-219/rec {rec}; else rm -f {rec}; fi
+            [[ -e /var/tmp/e2e-219/alerts-dir ]] || rm -rf /var/lib/cst-alerts
+            systemctl --user -M tester@ daemon-reload
+            rm -rf /var/tmp/e2e-219""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_219 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(ALERTS_DIR|USER_UNIT_DIR|PENDING_UNIT|OLD_ALERTS_DIR|OLD_PENDING_UNIT|OLD_PENDING_READER)=' /opt/cst-rw/btrfs-setup.sh)"
+            SRC=/opt/cst-rw/btrfs
+            fns="check_syntax check_component_syntax remove_old_reader migrate_old_alerts install_pending_alerts reload_user_managers"
+            for f in $fns; do
+                eval "$(sed -n "/^$f() {/,/^}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F $fns >/dev/null
+            target_user=tester
+            unit="$USER_UNIT_DIR/$PENDING_UNIT"
+            install_pending_alerts >/dev/null
+            useradd -m -u 1219 e2e219
+            systemctl start user@1219.service
+            managers="tester@ 1219@"
+            for m in $managers; do
+                systemctl --user -M "$m" daemon-reload
+                systemd-run --user -M "$m" --unit e2e219-hold -p After="$PENDING_UNIT" -p RemainAfterExit=yes /bin/true >/dev/null 2>&1
+            done
+            ndr() { systemctl --user -M "$1" show -P NeedDaemonReload "$PENDING_UNIT"; }
+            cp -p "$unit" /var/tmp/e2e-219/current
+            { cat /var/tmp/e2e-219/current; echo "# e2e219: an older text"; } >"$unit"
+            for m in $managers; do
+                systemctl --user -M "$m" daemon-reload
+                [[ "$(systemctl --user -M "$m" show -P LoadState "$PENDING_UNIT")" == loaded ]] ||
+                    { echo "$PENDING_UNIT is not loaded in $m's manager" >&2; exit 1; }
+                [[ "$(ndr "$m")" == no ]]
+            done
+            sleep 1
+            cat /var/tmp/e2e-219/current >"$unit"
+            for m in $managers; do
+                [[ "$(ndr "$m")" == yes ]] || { echo "cannot bite: $m's manager does not flag $PENDING_UNIT" >&2; exit 1; }
+            done
+            install_pending_alerts >/dev/null
+            for m in $managers; do
+                [[ "$(ndr "$m")" == no ]] || { echo "$m's manager was not reloaded" >&2; exit 1; }
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH, E2ETag.DOCTOR)
+    def test_220_user_units_go_where_the_user_manager_reads_them(self) -> None:
+        """Which folder a user manager loads its own units from, with the real systemd: a unit of one
+        name planted in ~/.config/systemd/user and in an XDG_CONFIG_HOME folder (each with its folder as
+        its Description), then a daemon-reload; the folder of its FragmentPath is the manager's, and it
+        is the first entry of `systemctl --user show -p UnitPath --value` that ends in /systemd/user,
+        while show-environment's XDG_CONFIG_HOME is not always it. (a) tester, XDG_CONFIG_HOME only in
+        the shell: ~/.config/systemd/user, also for a systemctl run with the shell's variable; the
+        manager's environment has none. (b) e2e220, XDG_CONFIG_HOME set for user@1220.service by a
+        drop-in: that folder; show-environment says it too. (c) e2e220, XDG_CONFIG_HOME only in
+        ~/.config/environment.d (the manager restarted): ~/.config/systemd/user, though
+        show-environment names the other folder. (d) tester, `systemctl --user set-environment
+        XDG_CONFIG_HOME=...` and a daemon-reload: ~/.config/systemd/user, though show-environment names
+        the other folder. So CST names the folder after UnitPath (cst_core's user_unit_dir), not after
+        show-environment or the shell. Then cst bluetooth as tester with XDG_CONFIG_HOME in the shell
+        only and an older CST's copy of the watcher's unit recorded under it: apply writes the unit to
+        ~/.config/systemd/user, the manager loads it from there (FragmentPath), enables and starts it,
+        the older copy is removed and forgotten, plan says the unit is up to date, revert removes it
+        (before, apply wrote under the shell's folder and stopped at `systemctl --user enable`). Then cst
+        doctor: tester's names the watcher's unit after a hand edit with no reload, with the shell's
+        XDG_CONFIG_HOME and without it; e2e220's manager reads ~/xdg/systemd/user (XDG_CONFIG_HOME set for
+        user@1220.service), and a drop-in written there through the installer with no reload is named by
+        e2e220's doctor, whose environment has no XDG_CONFIG_HOME (before, it said nothing). tester's
+        manager is never restarted; e2e220's account goes."""
+        c = self.SYSTEMD_CONTAINER
+        if exec_bash(c, "getent passwd e2e220 || getent passwd 1220 || true").stdout.strip():
+            self.skipTest("the account e2e220 or the uid 1220 is taken")
+        planted = (
+            "/home/tester/.config/systemd/user/e2e220p.service /home/tester/xdgA /home/tester/xdgD "
+            "/etc/systemd/system/user@1220.service.d"
+        )
+        if exec_bash(c, f"for f in {planted}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a file of this test already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            systemctl --user -M tester@ unset-environment XDG_CONFIG_HOME
+            systemctl stop user@1220.service user-runtime-dir@1220.service 2>/dev/null
+            rm -rf {planted}
+            systemctl daemon-reload
+            userdel -rf e2e220 2>/dev/null
+            systemctl --user -M tester@ daemon-reload""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            show() { sed "s/^/test_220 $1: /" <<<"$2" >&2; }   # the CI log
+            plant() {  # plant M USER DIR...: e2e220p.service in each DIR, then M's daemon-reload
+                local m="$1" who="$2" d
+                shift 2
+                for d in "$@"; do
+                    runuser -u "$who" -- mkdir -p "$d"
+                    printf '[Unit]\nDescription=%s\n[Service]\nType=oneshot\nExecStart=/bin/true\n' "$d" |
+                        runuser -u "$who" -- tee "$d/e2e220p.service" >/dev/null
+                done
+                systemctl --user -M "$m" daemon-reload
+            }
+            loaded_from() {
+                local f
+                f="$(systemctl --user -M "$1" show -P FragmentPath e2e220p.service)"
+                [[ -n "$f" ]] || { echo "e2e220p.service not loaded in $1's manager" >&2; exit 1; }
+                dirname "$f"
+            }
+            first_unit_dir() { tr ' ' '\n' <<<"$1" | grep -m1 '/systemd/user$' || true; }
+            unit_dir() { first_unit_dir "$(systemctl --user -M "$1" show -p UnitPath --value)"; }
+            env_xdg() { systemctl --user -M "$1" show-environment | sed -n 's/^XDG_CONFIG_HOME=//p'; }
+            same() {  # same SETUP WANT M: the folder loaded from is WANT, and UnitPath's first .../systemd/user
+                local got ud
+                got="$(loaded_from "$3")"
+                ud="$(unit_dir "$3")"
+                show "$1" "loaded from $got; UnitPath's $ud; show-environment's XDG_CONFIG_HOME: $(env_xdg "$3")"
+                [[ "$got" == "$2" ]] || { echo "($1) loaded from $got, not $2" >&2; exit 1; }
+                [[ "$ud" == "$2" ]] || { echo "($1) UnitPath names $ud, not $2" >&2; exit 1; }
+            }
+            T=/home/tester
+            E=/home/e2e220
+            # (a) tester, XDG_CONFIG_HOME in the shell only.
+            plant tester@ tester "$T/.config/systemd/user" "$T/xdgA/systemd/user"
+            same a "$T/.config/systemd/user" tester@
+            [[ -z "$(env_xdg tester@)" ]]
+            shell_up="$(runuser -u tester -- env HOME="$T" XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_CONFIG_HOME="$T/xdgA" \
+                systemctl --user show -p UnitPath --value)"
+            [[ "$(first_unit_dir "$shell_up")" == "$T/.config/systemd/user" ]]
+            # (b) e2e220, XDG_CONFIG_HOME set for its user@.service.
+            useradd -m -u 1220 e2e220
+            mkdir -p /etc/systemd/system/user@1220.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s\n' "$E/xdgB" >/etc/systemd/system/user@1220.service.d/zz-e2e220.conf
+            systemctl daemon-reload
+            systemctl start user@1220.service
+            plant 1220@ e2e220 "$E/.config/systemd/user" "$E/xdgB/systemd/user"
+            same b "$E/xdgB/systemd/user" 1220@
+            [[ "$(env_xdg 1220@)" == "$E/xdgB" ]]
+            # (c) e2e220, XDG_CONFIG_HOME only in environment.d: the manager's environment names it, the
+            # manager reads ~/.config.
+            rm -rf /etc/systemd/system/user@1220.service.d
+            systemctl daemon-reload
+            runuser -u e2e220 -- mkdir -p "$E/.config/environment.d"
+            echo "XDG_CONFIG_HOME=$E/xdgC" | runuser -u e2e220 -- tee "$E/.config/environment.d/50-e2e220.conf" >/dev/null
+            systemctl restart user@1220.service
+            plant 1220@ e2e220 "$E/xdgC/systemd/user"
+            same c "$E/.config/systemd/user" 1220@
+            [[ "$(env_xdg 1220@)" == "$E/xdgC" ]] || { echo "(c) show-environment: $(env_xdg 1220@)" >&2; exit 1; }
+            # (d) tester, set-environment (as a desktop's import-environment does).
+            systemctl --user -M tester@ set-environment XDG_CONFIG_HOME="$T/xdgD"
+            plant tester@ tester "$T/xdgD/systemd/user"
+            same d "$T/.config/systemd/user" tester@
+            [[ "$(env_xdg tester@)" == "$T/xdgD" ]] || { echo "(d) show-environment: $(env_xdg tester@)" >&2; exit 1; }
+            systemctl --user -M tester@ unset-environment XDG_CONFIG_HOME
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Part 2: cst bluetooth as tester with XDG_CONFIG_HOME in the shell only, and an older CST's copy
+        # of the watcher's unit written and recorded under it: apply writes the unit where the manager
+        # reads units (~/.config/systemd/user), which then loads, enables and starts it, and removes the
+        # older copy; plan has nothing left to say of the unit; revert removes it. Before, apply wrote
+        # under $XDG_CONFIG_HOME/systemd/user and stopped at `systemctl --user enable`.
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "if [[ -e /home/tester/.e2e220-unit ]]; then "
+            "mv /home/tester/.e2e220-unit /home/tester/.config/systemd/user/cst-bt-ldac48.service; fi; "
+            "XDG_CONFIG_HOME=/home/tester/xdg220 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
+            "rm -rf /home/tester/xdg220",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_220
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            X="$H/xdg220"
+            unit="$H/.config/systemd/user/cst-bt-ldac48.service"
+            old="$X/systemd/user/cst-bt-ldac48.service"
+            rec="$H/.local/state/cst/installed.json"
+            mkdir -p "$X/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_RATE=48000\nLE_AUDIO=off\n' >"$X/cst/bluetooth.conf"
+            export XDG_CONFIG_HOME="$X"
+            python3 -I -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from bluetooth.domain import render_unit; print(render_unit("00:11:22:33:44:55", "48000"), end="")' |
+                python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old" 0644 --component bluetooth:ldac >/dev/null
+            [[ -f "$old" ]]
+            grep -qF "\"$old\"" "$rec"
+            [[ ! -e "$unit" ]] || { echo "the unit is there already" >&2; exit 1; }
+            step apply apply --yes --no-restart
+            [[ -f "$unit" ]] || { echo "the unit is not in ~/.config/systemd/user" >&2; exit 1; }
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            [[ ! -e "$old" ]]
+            if grep -qF "\"$old\"" "$rec"; then echo "the older copy is still recorded" >&2; exit 1; fi
+            [[ "$(systemctl --user show -P LoadState cst-bt-ldac48.service)" == loaded ]]
+            [[ "$(systemctl --user show -P FragmentPath cst-bt-ldac48.service)" == "$unit" ]]
+            [[ "$(systemctl --user is-enabled cst-bt-ldac48.service)" == enabled ]]
+            systemctl --user is-active --quiet cst-bt-ldac48.service
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan "$out"
+            grep -qE '^  ok +systemd/user/cst-bt-ldac48.service +up to date' <<<"$out"
+            if grep -qF "older CST" <<<"$out"; then echo "plan still names an older copy" >&2; exit 1; fi
+            # Part 3 (doctor): a hand edit of the unit and no reload; tester's doctor names it with the
+            # shell's XDG_CONFIG_HOME and without it (as `sudo cst status` steps down).
+            cp -p "$unit" "$H/.e2e220-unit"
+            echo "# e2e220: a hand edit" >>"$unit"
+            [[ "$(systemctl --user show -P NeedDaemonReload cst-bt-ldac48.service)" == yes ]] ||
+                { echo "cannot bite: cst-bt-ldac48.service not flagged" >&2; exit 1; }
+            doc() { "$@" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true; }
+            for how in with without; do
+                if [[ $how == with ]]; then d="$(doc env)"; else d="$(doc env -u XDG_CONFIG_HOME)"; fi
+                grep -qF "cst-bt-ldac48.service: systemd has not loaded its files as they are on disk (CST installed $unit)" <<<"$d" ||
+                    { echo "doctor $how XDG_CONFIG_HOME did not name the unit: $d" >&2; exit 1; }
+            done
+            mv "$H/.e2e220-unit" "$unit"
+            systemctl --user daemon-reload
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show revert "$out"
+            [[ ! -e "$unit" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Part 3, e2e220: its manager has XDG_CONFIG_HOME=~/xdg (a drop-in of user@1220.service), so it reads
+        # ~/xdg/systemd/user. A drop-in written there through the installer for a running unit, and no
+        # reload: e2e220's doctor, whose environment has no XDG_CONFIG_HOME, warns for it. Before, doctor
+        # placed a user unit by the shell's XDG_CONFIG_HOME and said nothing.
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            E=/home/e2e220
+            X="$E/xdg"
+            dropin="$X/systemd/user/e2e220d.service.d/10-cst.conf"
+            ue() {
+                runuser -u e2e220 -- env HOME="$E" USER=e2e220 LOGNAME=e2e220 XDG_RUNTIME_DIR=/run/user/1220 \
+                    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1220/bus "$@"
+            }
+            rm -f "$E/.config/environment.d/50-e2e220.conf"
+            mkdir -p /etc/systemd/system/user@1220.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s\n' "$X" >/etc/systemd/system/user@1220.service.d/zz-e2e220.conf
+            systemctl daemon-reload
+            systemctl restart user@1220.service
+            ue mkdir -p "$X/systemd/user"
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' |
+                ue tee "$X/systemd/user/e2e220d.service" >/dev/null
+            ue systemctl --user daemon-reload
+            ue systemctl --user start e2e220d.service
+            [[ "$(ue systemctl --user show -P FragmentPath e2e220d.service)" == "$X/systemd/user/e2e220d.service" ]]
+            printf '[Service]\nEnvironment=E2E220=1\n' |
+                ue /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py text "$dropin" 0644 --home "$E" \
+                    --component toolchains:auto --keep-state >/dev/null
+            [[ "$(ue systemctl --user show -P NeedDaemonReload e2e220d.service)" == yes ]] ||
+                { echo "cannot bite: e2e220d.service not flagged" >&2; exit 1; }
+            d="$(ue env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true)"
+            w="$(grep -A1 -F "e2e220d.service: systemd has not loaded its files as they are on disk (CST installed $dropin)" <<<"$d" || true)"
+            grep -qE '^ *WARN' <<<"$w" && grep -qF 'fix: systemctl --user daemon-reload' <<<"$w" ||
+                { echo "e2e220's doctor did not warn: $d" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_222_older_copies_of_the_watchers_unit(self) -> None:
+        """cst bluetooth as tester with XDG_CONFIG_HOME in the shell only (tester's manager reads
+        ~/.config/systemd/user), and the copies of the LDAC watcher's unit an older CST left, written and
+        recorded through the real installer. (1) An older copy under the shell's folder with the enable link
+        a manager that read it made (default.target.wants): plan shows both removals, apply removes both, and
+        the unit goes to ~/.config/systemd/user, loaded, enabled and active. (2) The live unit recorded once
+        more through a link to ~/.config (~/cfg222): plan shows "forget" for that path, apply drops only its
+        record line and leaves the unit file (same inode and mtime) running, with no restart. (3) The manager's
+        UnitPath question failing (a systemctl on PATH that refuses it, everything else the real one) and an
+        older copy recorded under the shell's folder again: plan and revert --check name no removal of it,
+        revert removes the unit in ~/.config and keeps that copy and its record line; with the real systemctl
+        the next revert removes it. (4) A link of the unit's name in the older copy's wants folder to a unit of
+        tester's own elsewhere (~/mine222), not to the copy: plan and revert --check name no removal of it, and
+        apply and revert remove the copy and leave the link and that unit as they are. After each apply (with its
+        restarts), plan exits 0 with nothing to do: a second run changes nothing. Before: apply left the
+        enable link; apply removed the live unit through the link and wrote it again; revert removed the copy
+        with no answer to say where the manager reads units."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "XDG_CONFIG_HOME=/home/tester/xdg222 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
+            "rm -rf /home/tester/xdg222 /home/tester/cfg222 /home/tester/bin222 /home/tester/mine222",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_222
+            trap 'echo "test_222 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            X="$H/xdg222"
+            lw=cst-bt-ldac48.service
+            unit="$H/.config/systemd/user/$lw"
+            old="$X/systemd/user/$lw"
+            link="$X/systemd/user/default.target.wants/$lw"
+            alias="$H/cfg222/systemd/user/$lw"
+            rec="$H/.local/state/cst/installed.json"
+            recorded() { grep -qF "\"$1\"" "$rec"; }
+            settled() {  # settled LABEL: plan exits 0 with no row of a change (a second run changes nothing)
+                local rc=0 p
+                p="$(bt plan 2>&1)" || rc=$?
+                show "$1" "$p"
+                if [[ $rc != 0 ]] || ! grep -qxF "Nothing to do." <<<"$p" ||
+                    grep -qE '^  (remove|forget|write|update|adopt|set|restart|enable|CONFLICT) ' <<<"$p"; then
+                    echo "$TEST $1: plan exits $rc, or names a change" >&2
+                    return 1
+                fi
+            }
+            plant() {  # plant DEST: the watcher's unit written and recorded there by the real installer
+                python3 -I -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from bluetooth.domain import render_unit; print(render_unit("00:11:22:33:44:55", "48000"), end="")' |
+                    python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$1" 0644 --component bluetooth:ldac >/dev/null
+                recorded "$1"
+            }
+            mkdir -p "$X/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_RATE=48000\nLE_AUDIO=off\n' >"$X/cst/bluetooth.conf"
+            export XDG_CONFIG_HOME="$X"
+            [[ ! -e "$unit" ]] || { echo "the unit is there already" >&2; exit 1; }
+            # (1) An older copy and its enable link.
+            plant "$old"
+            mkdir -p "$(dirname "$link")"
+            ln -s "$old" "$link"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan1 "$out"
+            [[ $rc == 10 ]]
+            grep -qE "^  remove +~/xdg222/systemd/user/$lw +an older CST's copy" <<<"$out"
+            grep -qE "^  remove +~/xdg222/systemd/user/default.target.wants/$lw +the enable link" <<<"$out"
+            step apply1 apply --yes
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            grep -qF "removed:   $link (its enable link)" <<<"$out"
+            [[ ! -e "$old" && ! -L "$link" ]]
+            if recorded "$old"; then echo "the older copy is still recorded" >&2; exit 1; fi
+            [[ "$(systemctl --user show -P FragmentPath "$lw")" == "$unit" ]]
+            [[ "$(systemctl --user is-enabled "$lw")" == enabled ]]
+            systemctl --user is-active --quiet "$lw"
+            settled settled1
+            # (2) The live unit recorded once more through a link to ~/.config.
+            ln -s .config "$H/cfg222"
+            plant "$alias"
+            before="$(stat -c '%i %Y' "$unit")"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan2 "$out"
+            [[ $rc == 10 ]]
+            grep -qE "^  forget +~/cfg222/systemd/user/$lw +the same file as the unit's" <<<"$out"
+            step apply2 apply --yes --no-restart
+            grep -qF "forgotten: $alias (the same file as $unit)" <<<"$out"
+            if grep -qE "^(removed|restarted): " <<<"$out"; then echo "apply2 removed or restarted the unit" >&2; exit 1; fi
+            [[ "$(stat -c '%i %Y' "$unit")" == "$before" ]]
+            if recorded "$alias"; then echo "the other path is still recorded" >&2; exit 1; fi
+            recorded "$unit"
+            settled settled2
+            rm "$H/cfg222"
+            # (3) No answer to UnitPath: the recorded copies are kept.
+            plant "$old"
+            mkdir -p "$H/bin222"
+            printf '#!/bin/bash\nfor a; do [[ $a == UnitPath ]] && exit 1; done\nexec /usr/bin/systemctl "$@"\n' >"$H/bin222/systemctl"
+            chmod +x "$H/bin222/systemctl"
+            if PATH="$H/bin222:$PATH" systemctl --user show -p UnitPath --value >/dev/null; then
+                echo "cannot bite: the UnitPath question did not fail" >&2
+                exit 1
+            fi
+            rc=0; out="$(PATH="$H/bin222:$PATH" bt plan 2>&1)" || rc=$?
+            show plan3 "$out"
+            if grep -qF "older CST" <<<"$out"; then echo "plan3 names the copy as an older one" >&2; exit 1; fi
+            out="$(PATH="$H/bin222:$PATH" bt revert --check 2>&1)" || true
+            show check3 "$out"
+            if grep -qF "would remove $old" <<<"$out"; then echo "revert --check would remove the copy" >&2; exit 1; fi
+            out="$(PATH="$H/bin222:$PATH" bt revert --yes --no-restart 2>&1)"
+            show revert3 "$out"
+            [[ ! -e "$unit" && -f "$old" ]]
+            recorded "$old"
+            # the kept copy's program is kept with it, and one line says so
+            [[ -f "$H/.local/lib/cst/bt-ldac-watch" ]] ||
+                { echo "revert3 removed the watcher's program while it kept $old" >&2; exit 1; }
+            grep -qF "WARNING: kept " <<<"$out"
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show revert4 "$out"
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            [[ ! -e "$old" ]]
+            # (4) A link of the unit's name in the older copy's wants folder to a unit of tester's own
+            # elsewhere, not to the copy: plan, revert --check, apply and revert remove the copy and leave
+            # the link and that unit as they are.
+            mine="$H/mine222/$lw"
+            mkdir -p "$H/mine222"
+            printf '[Unit]\nDescription=mine\n' >"$mine"
+            for cmd in apply revert; do
+                plant "$old"
+                mkdir -p "$(dirname "$link")"
+                ln -sfn "$mine" "$link"
+                out="$(bt plan 2>&1)" || true
+                show "plan4 $cmd" "$out"
+                grep -qE "^  remove +~/xdg222/systemd/user/$lw +an older CST's copy" <<<"$out"
+                if grep -qF default.target.wants <<<"$out"; then echo "plan4 names the link to tester's unit" >&2; exit 1; fi
+                out="$(bt revert --check 2>&1)" || true
+                show "check4 $cmd" "$out"
+                grep -qF "would remove $old (an older CST's copy)" <<<"$out"
+                if grep -qF "$link" <<<"$out"; then echo "revert --check names the link to tester's unit" >&2; exit 1; fi
+                if [[ $cmd == apply ]]; then
+                    step apply4 apply --yes
+                else
+                    out="$(bt revert --yes --no-restart 2>&1)"
+                    show revert5 "$out"
+                fi
+                grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+                if grep -qF "$link" <<<"$out"; then echo "$cmd names the link to tester's unit" >&2; exit 1; fi
+                [[ ! -e "$old" && "$(readlink "$link")" == "$mine" ]]
+                [[ "$(cat "$mine")" == "$(printf '[Unit]\nDescription=mine')" ]]
+                if [[ $cmd == apply ]]; then settled settled4; fi
             done
             echo E2E-OK
             """,

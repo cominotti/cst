@@ -732,6 +732,13 @@ login**:
    On a computer with several desktop users this means: whoever sees it live
    first "uses it up", and the others do not get it at their login.
 
+`cst btrfs install` (and `cst btrfs snapshots setup`) writes the user unit
+`/etc/systemd/user/cst-pending-alerts.service` and then reloads every user
+manager that is running (each `user@UID.service`, root's too), so every user
+already logged in gets the new unit at once, not only the one who ran the
+install. Each reload is a best try and prints nothing; when the managers
+cannot be listed, only the calling user's (`SUDO_USER`) is reloaded.
+
 **Coming from f44-tools.** Older versions of this repository were called
 f44-tools, and these parts had other names: `/usr/local/bin/f44-pending-alerts`,
 the user unit `f44-pending-alerts.service`, the folder `/var/lib/f44-alerts/`
@@ -851,7 +858,16 @@ docker volume rm <name>         # or one volume by name
   as below, and a later `install` starts afresh). One gap is left: a
   container that writes into a volume during the few milliseconds between
   mark's two looks at the volumes is asked for after `+C` (still flushed),
-  so a kill exactly there can lose that request.
+  so a kill exactly there can lose that request. When that second look
+  fails (an error reading a volume), `mark` writes the request all the
+  same and exits 2, with a journal line `... the migration is requested:
+  the next boot looks at the volumes again`: what a container wrote in
+  between is unknown, and no boot asks for a folder that has `+C`. A
+  migration with nothing to copy just removes its flag at the next boot.
+  When that request cannot be written either, it is recorded as
+  `not-scheduled` as above. If the same error comes back at the boots, the
+  request ends as any other that does not finish: two boots, then the
+  give-up alert and its record.
   When no volume holds copy-on-write data, `mark` removes an old counter
   instead; if that fails (a folder in its place, a read-only `/var`), it
   sets no `+C`, exits 2 and the journal names the file (the next boot sets
@@ -895,8 +911,16 @@ docker volume rm <name>         # or one volume by name
   it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
-  The first boot that is not held back removes the record, and so does a
-  boot that finds no volumes folder (Docker removed, `data-root` moved). To run the
+  The first boot that is not held back removes the record. When Docker or
+  another `dockerd` held the boot back, so do a boot that finds no volumes
+  folder (Docker removed, `data-root` moved) and one with nothing to do (no
+  migration scheduled, and the folder has `+C` already), whatever its format;
+  a boot held back by `daemon.json` is always recorded. The record is format 1 (its `"v"`); one without it,
+  as an older CST wrote it, is format 0 and is read and counted on. A record
+  of a newer format (a newer CST wrote it, and an older one runs now) is left
+  as it is by a held-back boot that would count itself, which is not counted in it
+  and says so in the journal, and `status` and `cst doctor` name it. A time no clock can show
+  (a damaged record) is printed as `?`, and the rest of the line stays. To run the
   migration by hand once nothing uses the volumes:
   `sudo systemctl stop docker.socket docker.service`, then
   `sudo systemctl start docker-volumes-nocow.service`, and when it is done
@@ -911,7 +935,12 @@ docker volume rm <name>         # or one volume by name
   from two boots on), and the first boot after the file is fixed runs it. `mark`
   (what `install` runs) sets no `+C` then and exits 2, but writes the request
   (an old count reset, then the flag, each flushed to disk), so that boot runs
-  the migration. Another dockerd whose config file cannot be read that way
+  the migration. Its journal line says so: `/etc/docker/daemon.json: not
+  JSON: the migration is requested, and mark sets no +C on the volumes
+  folder: fix the file, and the first boot after that runs it` (the folder
+  keeps the `+C` an earlier install may have set). When the request
+  cannot be written, the line before it says why, and mark's own line is
+  `... mark sets no +C on the volumes folder`. Another dockerd whose config file cannot be read that way
   counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
@@ -2752,6 +2781,12 @@ journalctl -b -u docker-volumes-nocow
 
 Remove the cause, or run the migration by hand once nothing uses the volumes
 (section 4.10).
+
+`/var/lib/docker-volumes-nocow/postponed is format N of the
+docker-nocow-postponed (this CST reads format 1 and older): written by a newer
+CST` instead means an older helper runs beside the record a newer one wrote (a
+downgrade): it does not count its boots in it. Install the newer CST again, or
+remove the record; the first boot that is not held back removes it too.
 
 ### No desktop alerts arrive
 

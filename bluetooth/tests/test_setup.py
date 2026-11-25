@@ -191,6 +191,20 @@ BAP_REGISTERED = "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink
 HELP_SHA256 = "024e16e4bf3bf117be2240efc15cb17a6f007bcaae54113ab9ab55d918420a08"
 USAGE_SHA256 = "9dd2a72a99899fde725a9245c38af75e42d2a058658c2e7d3757c2802563a128"
 LW = "cst-bt-ldac48.service"
+# plan's reasons for bluetoothd's restart, and the note under a row whose restart the record owes too.
+BT_MAIN_CONF_ROW = "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
+BT_OWED_ROW = "still owed: an earlier run did not restart it; apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
+OWED = "(still owed: an earlier run did not restart it)"
+# The rows of an older CST's copy of the watcher's unit (where the user manager does not read units).
+LW_STALE = "an older CST's copy, where your user manager does not read units: apply removes it"
+LW_STALE_FOREIGN = "recorded as CST's, not written by CST: left alone; apply drops its record line"
+LW_STALE_SAME = "the same file as the unit's, by another path: apply only drops this record line"
+LW_STALE_LINK = "the enable link of that older copy: apply removes it"
+LW_KEPT_WHY = (
+    "the user manager does not say where it reads units (UnitPath), so a recorded copy of the unit may be"
+    " the one it runs; a later run removes them once it answers"
+)
+LW_KEPT_NOTE = "kept with the recorded copies of the watcher's unit: the user manager does not say where it reads units"
 
 
 def row(word: str, label: str, note: str = "") -> str:
@@ -717,7 +731,7 @@ class RestartTest(SetupCase):
         r = m.run("apply", "--yes")
         self.order(
             r.calls,
-            "sudo cp -p",
+            "sudo env LC_ALL=C cp -p",
             "sudo install -m 0644",
             "sudo mv -f",
             "sudo systemctl restart bluetooth",
@@ -841,21 +855,42 @@ class RestartOwedTest(SetupCase):
         self.assertEqual(stat.S_IMODE(os.stat(m.pending).st_mode), 0o644)
         r = m.run("plan")
         self.assertEqual(r.returncode, 10)
-        self.assertIn(
-            row(
-                "restart",
-                "bluetooth.service",
-                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
-            )
-            + row("", "", "(still owed: an earlier run did not restart it)"),
-            r.stdout,
-        )
-        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2)
+        # main.conf is already as apply wants it: only the record owes bluetoothd's restart. Before,
+        # the row said "main.conf changes", with "(still owed: ...)" under it.
+        self.assertIn(row("restart", "bluetooth.service", BT_OWED_ROW), r.stdout)
+        self.assertNotIn("main.conf changes", r.stdout)
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 1)  # WirePlumber's
         r = m.run("apply", "--yes")
         self.order(r.calls, "sudo systemctl restart bluetooth", "systemctl --user restart wireplumber")
         self.assertFalse(os.path.exists(m.pending))
         r = m.run("plan")
         self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_a_forced_run_that_did_not_restart(self) -> None:
+        # apply --force --no-restart on a machine already applied: main.conf is not touched, yet the
+        # record owes bluetoothd's restart. plan has no --force and sees only the record; before, its
+        # row said "main.conf changes", which never changed.
+        m = self.machine(DONE)
+        m.run("apply", "--yes")
+        r = m.run("apply", "--yes", "--force", "--no-restart")
+        self.assertIn("Not restarted (--no-restart).", r.stdout)  # the checks find no adapter: exit 1
+        self.assertEqual(json.loads(self.text(m.pending)).get("bluetooth.service"), m.unit_inv("system", "bluetooth"))
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(row("restart", "bluetooth.service", BT_OWED_ROW), r.stdout)
+        self.assertNotIn("main.conf changes", r.stdout)
+        self.assertNotIn("\n== main.conf, as apply would write it\n", r.stdout)
+
+    def test_revert_that_did_not_restart(self) -> None:
+        m = self.machine()
+        m.run("apply", "--yes")
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertEqual(r.returncode, 0, r.text)
+        # plan now finds main.conf to change back (apply's keys are gone) and the record owes the
+        # restart too: both reasons, the main.conf one first.
+        r = m.run("plan")
+        self.assertIn(row("restart", "bluetooth.service", BT_MAIN_CONF_ROW) + row("", "", OWED), r.stdout)
+        self.assertNotIn(BT_OWED_ROW, r.stdout)
 
     def test_a_restart_by_hand_or_a_stop_ends_what_is_owed(self) -> None:
         m = self.machine()
@@ -944,15 +979,9 @@ class OwedBeforeTheWriteTest(SetupCase):
         self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
         r = m.run("plan")
         self.assertEqual(r.returncode, 10, r.text)
-        self.assertIn(
-            row(
-                "restart",
-                "bluetooth.service",
-                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
-            ),
-            r.stdout,
-        )
-        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2, r.stdout)
+        # main.conf has the keys: the restart is owed, not a main.conf change (before: "main.conf changes").
+        self.assertIn(row("restart", "bluetooth.service", BT_OWED_ROW), r.stdout)
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 1, r.stdout)
         self.resume_twice(m, self.BT_RESTART, self.WP_RESTART)
 
     def test_stopped_after_wireplumbers_files(self) -> None:
@@ -988,7 +1017,10 @@ class OwedBeforeTheWriteTest(SetupCase):
                 "wireplumber.service": m.unit_inv("user", "wireplumber"),
             },
         )
-        self.assertEqual(m.run("plan").stdout.count("(still owed: an earlier run did not restart it)"), 2)
+        # main.conf lost apply's keys, so plan would write them again: that reason first, then the note.
+        r = m.run("plan")
+        self.assertIn(row("restart", "bluetooth.service", BT_MAIN_CONF_ROW) + row("", "", OWED), r.stdout)
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2, r.stdout)
 
 
 class RevertResumesTest(SetupCase):
@@ -1509,7 +1541,9 @@ class MainConfTest(SetupCase):
             ctx = " --preserve=context" if selinux else ""
             z = " -Z" if selinux else ""
             self.assertEqual(len(sudo), 3, sudo)
-            self.assertEqual(sudo[0], f"sudo cp -p{ctx} --update=none-fail {m.main_conf} {backup.group(1)}")
+            self.assertEqual(
+                sudo[0], f"sudo env LC_ALL=C cp -p{ctx} --update=none-fail {m.main_conf} {backup.group(1)}"
+            )
             self.assertRegex(sudo[1], rf"^sudo install -m 0644 -o root -g root{z} \S+ {re.escape(m.main_conf)}\.new$")
             self.assertEqual(sudo[2], f"sudo mv -f {m.main_conf}.new {m.main_conf}")
             self.assertEqual(self.text(backup.group(1)), VENDOR)
@@ -1540,7 +1574,7 @@ class MainConfTest(SetupCase):
         self.assertNotIn("KernelExperimental = " + ISO, self.text(m.main_conf))
         self.order(
             r.calls,
-            "sudo cp -p",
+            "sudo env LC_ALL=C cp -p",
             "sudo install",
             "sudo mv -f",
             "sudo systemctl restart bluetooth",
@@ -1670,6 +1704,309 @@ class WatcherTest(SetupCase):
         )
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
         self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), m.run("plan").stdout)
+
+    def test_the_unit_goes_where_the_user_manager_reads_units(self) -> None:
+        # XDG_CONFIG_HOME in the shell only: the user manager reads ~/.config/systemd/user (its UnitPath,
+        # FAKE's default here), so the unit goes there. Before, it went to $XDG_CONFIG_HOME/systemd/user,
+        # which the manager never loaded (tier 1 test_220: `systemctl --user enable` then fails).
+        m = self.machine(DONE)
+        xdg = os.path.join(m.home, "xdg")
+        m.put(os.path.join(xdg, "cst", "bluetooth.conf"), f"DEVICE={MAC}\nLDAC_RATE=48000\n")
+        env = {"XDG_CONFIG_HOME": xdg}
+        r = m.run("apply", "--no-restart", env=env)
+        self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
+        self.assertIn("systemctl --user show -p UnitPath --value", r.calls)
+        self.assertFalse(os.path.exists(os.path.join(xdg, "systemd")), r.text)
+        self.assertIn(m.lw_unit, json.loads(self.text(m.record))["files"])
+        self.assertIn(row("ok", f"systemd/user/{LW}", "up to date (LDAC to 48000 Hz)"), m.run("plan", env=env).stdout)
+
+    def test_the_unit_follows_the_folder_the_manager_names(self) -> None:
+        # A manager with XDG_CONFIG_HOME of its own (UnitPath names it first): there. One that does not
+        # answer: ~/.config/systemd/user, systemd's default.
+        for answer, folder in (
+            ("y/systemd/user /etc/systemd/user\n", "y/systemd/user"),
+            (None, ".config/systemd/user"),
+        ):
+            with self.subTest(answer=answer):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                if answer is None:
+                    m.flag("no-unit-path")
+                else:
+                    m.put("unit-path", f"{m.home}/{answer}")
+                unit = os.path.join(m.home, folder, LW)
+                r = m.run("apply", "--no-restart")
+                self.assertIn(f"written:   {unit} (LDAC to 48000 Hz)\n", r.stdout)
+                self.assertTrue(os.path.isfile(unit))
+                self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, unit]))
+
+    def test_an_older_copy_elsewhere_is_removed(self) -> None:
+        # The upgrade: an older CST wrote and recorded the unit under the shell's XDG_CONFIG_HOME
+        # (here: an apply while the manager named that folder). Now the manager reads ~/.config: plan
+        # shows the older copy's removal, apply removes it through the installer and writes the new
+        # one, a second apply changes nothing, revert removes the new one.
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        self.assertTrue(os.path.isfile(old))
+        # The enable link that manager's `systemctl --user enable` made beside it (FAKE makes none).
+        link = os.path.join(os.path.dirname(old), "default.target.wants", LW)
+        os.makedirs(os.path.dirname(link))
+        os.symlink(old, link)
+        os.unlink(m.state + "/unit-path")
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(row("remove", "~/xdg/systemd/user/" + LW, LW_STALE), r.stdout)
+        self.assertIn(row("remove", "~/xdg/systemd/user/default.target.wants/" + LW, LW_STALE_LINK), r.stdout)
+        self.assertIn(row("write", f"systemd/user/{LW}", "the LDAC rate watcher (LDAC_RATE=48000)"), r.stdout)
+        r = m.run("revert", "--check")
+        self.assertIn(f"would remove {link} (its enable link)\nwould remove {old} (an older CST's copy)\n", r.stdout)
+        self.assertTrue(os.path.islink(link))
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"removed:   {link} (its enable link)\nremoved:   {old} (an older CST's copy)\n", r.stdout)
+        self.assertFalse(os.path.lexists(link))
+        self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, m.lw_unit]))
+        r = m.run("apply", "--no-restart")
+        self.assertNotIn("older CST", r.stdout)
+        self.assertIn(f"unchanged: {LW} enabled and active\n", r.stdout)
+        self.assertNotIn(LW_STALE, m.run("plan").stdout)
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
+        self.assertEqual(json.loads(self.text(m.record))["files"], {})
+
+    def test_an_enable_link_it_cannot_remove_stops_the_run_with_the_copy_kept(self) -> None:
+        # The older copy's wants folder cannot be written (EACCES): apply stops with one ERROR line
+        # (no traceback) before it touches the copy, so the copy and its record line stay and the next
+        # run finds both again; once the folder can be written, apply removes the link, then the copy.
+        # Before, the copy and its record line went first and the link stayed behind, found by no later
+        # run.
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        link = os.path.join(os.path.dirname(old), "default.target.wants", LW)
+        os.makedirs(os.path.dirname(link))
+        os.symlink(old, link)
+        os.chmod(os.path.dirname(link), 0o555)
+        self.addCleanup(os.chmod, os.path.dirname(link), 0o755)
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertEqual(r.returncode, 1, r.text)
+        self.assertIn(
+            f": ERROR: cannot remove {link}, the enable link of {old}: Permission denied (both kept)\n", r.stderr
+        )
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotIn("removed:", r.stdout)
+        self.assertNotIn(f"written:   {m.lw_unit}", r.stdout)  # the run stopped there
+        self.assertTrue(os.path.isfile(old) and os.path.islink(link))
+        self.assertIn(old, json.loads(self.text(m.record))["files"])
+        os.chmod(os.path.dirname(link), 0o755)
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertIn(f"removed:   {link} (its enable link)\nremoved:   {old} (an older CST's copy)\n", r.stdout)
+        self.assertFalse(os.path.lexists(link) or os.path.exists(old))
+
+    def test_an_enable_link_to_a_unit_of_the_users_own_is_left_alone(self) -> None:
+        # The older copy's wants folder holds a link of the unit's name to a unit of the user's own
+        # elsewhere, not to the copy (no manager enabled that copy). plan shows only the copy's removal,
+        # revert --check names no removal of the link, and apply and revert remove the copy and leave the
+        # link and the unit it points to as they are. A link is CST's to remove only when it points to
+        # the copy (watcher_unit.enable_link).
+        for cmd in ("apply", "revert"):
+            with self.subTest(cmd=cmd):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+                m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+                m.run("apply", "--no-restart")
+                os.unlink(m.state + "/unit-path")
+                mine = m.put(os.path.join(m.home, "mine", LW), "[Unit]\nDescription=mine\n")
+                link = os.path.join(os.path.dirname(old), "default.target.wants", LW)
+                os.makedirs(os.path.dirname(link))
+                os.symlink(mine, link)
+                r = m.run("plan")
+                self.assertIn(row("remove", "~/xdg/systemd/user/" + LW, LW_STALE), r.stdout)
+                self.assertNotIn("default.target.wants", r.stdout)
+                self.assertNotIn(LW_STALE_LINK, r.stdout)
+                r = m.run("revert", "--check")
+                self.assertIn(f"would remove {old} (an older CST's copy)\n", r.stdout)
+                self.assertNotIn(link, r.stdout)
+                r = m.run(cmd, "--yes", "--no-restart")
+                self.assertIn(f"removed:   {old} (an older CST's copy)\n", r.stdout)
+                self.assertNotIn(link, r.stdout + r.stderr)
+                self.assertFalse(os.path.exists(old))
+                self.assertEqual(os.readlink(link), mine)
+                self.assertEqual(self.text(mine), "[Unit]\nDescription=mine\n")
+
+    def test_older_copies_are_kept_when_the_manager_names_no_folder(self) -> None:
+        # The manager's UnitPath cannot be read (no answer): the unit's folder is only systemd's default,
+        # and the copy the record lists elsewhere may be the one the manager loads. plan shows no removal,
+        # revert removes nothing there and keeps its record line. Before, both called it an older copy
+        # and revert removed it, with no stop, disable or reload.
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        for answer in ("no answer", "a split that is not safe"):
+            with self.subTest(answer=answer):
+                if answer == "no answer":
+                    m.flag("no-unit-path")
+                else:
+                    os.unlink(m.state + "/no-unit-path")
+                    m.put("unit-path", f"{m.home}/my cfg/systemd/user /etc/systemd/user\n")
+                r = m.run("plan")
+                self.assertNotIn(LW_STALE, r.stdout)
+                self.assertNotIn("older CST", r.stdout)
+                r = m.run("revert", "--check")
+                self.assertNotIn("older CST", r.stdout)
+                r = m.run("revert", "--yes", "--no-restart")
+                self.assertNotIn("older CST", r.stdout)
+                self.assertTrue(os.path.isfile(old))
+                self.assertIn(old, json.loads(self.text(m.record))["files"])
+
+    def test_the_program_is_kept_while_the_recorded_copies_are(self) -> None:
+        # The live unit was recorded under a folder the manager named then (~/xdg), and now the manager's
+        # UnitPath cannot be read: revert keeps that copy (it may be the unit the manager runs) and the
+        # watcher's program with it, so that unit does not start a missing program, and says both in one
+        # line; a second revert changes nothing. apply with the watcher off does the same, and plan says
+        # so. Once the manager answers, revert removes both. Before, revert and apply removed the program,
+        # left the copy enabled and said nothing of it.
+        for cmd in ("revert", "apply"):
+            with self.subTest(cmd=cmd):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+                m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+                m.run("apply", "--no-restart")
+                os.unlink(m.state + "/unit-path")
+                m.flag("no-unit-path")
+                kept = f"{m.lw_prog} and {old}: {LW_KEPT_WHY}\n"
+                if cmd == "apply":
+                    m.user_settings(f"DEVICE={MAC}\n")  # the watcher off
+                    r = m.run("plan")
+                    self.assertIn(row("note", "~/.local/lib/cst/bt-ldac-watch", LW_KEPT_NOTE), r.stdout)
+                    self.assertNotIn(f"stops and removes {LW}", r.stdout)
+                    self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), r.stdout)
+                else:
+                    r = m.run("revert", "--check")
+                    self.assertIn(f"would keep {kept}", r.stdout)
+                    self.assertNotIn("would stop, disable and remove", r.stdout)
+                for _ in range(2):
+                    r = m.run(cmd, "--yes", "--no-restart")
+                    self.assertEqual(r.stderr.count(f"WARNING: kept {kept}"), 1, r.text)
+                    self.assertNotIn(f"removed:   {m.lw_prog}", r.stdout)
+                    self.assertTrue(os.access(m.lw_prog, os.X_OK) and os.path.isfile(old))
+                    self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, old]))
+                m.flag("no-unit-path", on=False)
+                r = m.run("revert", "--yes", "--no-restart")
+                self.assertIn(f"removed:   {old} (an older CST's copy)\n", r.stdout)
+                self.assertIn(f"removed:   {m.lw_prog}\n", r.stdout)
+                self.assertNotIn("kept", r.stderr)
+                self.assertEqual(json.loads(self.text(m.record))["files"], {})
+
+    def test_a_copy_gone_or_the_unit_itself_keeps_no_program(self) -> None:
+        # The manager's UnitPath cannot be read, and the copy the record lists elsewhere cannot be a unit
+        # the manager runs: it is gone from disk, or it is the unit file in ~/.config by another path (a
+        # link ~/cfg -> ~/.config). revert removes the program as before, with no "kept" line.
+        for case in ("gone", "the unit itself"):
+            with self.subTest(case=case):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                if case == "gone":
+                    copy = os.path.join(m.home, "xdg", "systemd", "user", LW)
+                else:
+                    os.makedirs(os.path.join(m.home, ".config"), exist_ok=True)
+                    os.symlink(".config", os.path.join(m.home, "cfg"))
+                    copy = os.path.join(m.home, "cfg", "systemd", "user", LW)
+                m.put("unit-path", f"{os.path.dirname(copy)} /etc/systemd/user\n")
+                m.run("apply", "--no-restart")
+                self.assertIn(copy, json.loads(self.text(m.record))["files"])
+                os.unlink(m.state + "/unit-path")
+                m.flag("no-unit-path")
+                if case == "gone":
+                    os.unlink(copy)
+                r = m.run("revert", "--yes", "--no-restart")
+                self.assertIn(f"removed:   {m.lw_prog}\n", r.stdout)
+                self.assertNotIn("kept", r.stderr)
+                self.assertFalse(os.path.exists(m.lw_prog))
+
+    def test_a_home_not_written_plainly_still_plans(self) -> None:
+        # HOME as a shell or pam_env can leave it. A trailing slash: the record is read where the
+        # installer writes it (record_file), so the older copy is still shown. One with a "." in it,
+        # which the record's reader refuses: plan prints its rows, without the older copies. Before,
+        # both ended with a traceback ("not a plain absolute path").
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        r = m.run("plan", env={"HOME": m.home + "//"})
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(f"{old} {LW_STALE}\n", r.stdout)  # the label is not shortened to ~ for this HOME
+        for cmd in ("plan", "status"):
+            with self.subTest(cmd=cmd):
+                r = m.run(cmd, env={"HOME": m.home + "/."})
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertIn(f"systemd/user/{LW}", r.stdout)
+                self.assertNotIn(LW_STALE, r.stdout)
+
+    def test_a_copy_recorded_by_another_path_to_the_unit_is_only_forgotten(self) -> None:
+        # An older CST recorded the unit through a link (~/cfg -> ~/.config, a dotfiles set-up): the same
+        # file as the one the manager loads now. plan says apply only drops that record line; apply does,
+        # and leaves the unit as it is (no write, no reload, no restart); revert --check names no removal
+        # of it; revert removes the unit once. Before, apply and revert removed the live unit through the
+        # other path (apply then wrote it again, reloaded and restarted the watcher).
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        os.makedirs(os.path.join(m.home, ".config"), exist_ok=True)
+        os.symlink(".config", os.path.join(m.home, "cfg"))
+        alias = os.path.join(m.home, "cfg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(alias)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        self.assertIn(alias, json.loads(self.text(m.record))["files"])
+        os.unlink(m.state + "/unit-path")
+        before = os.stat(m.lw_unit)
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(row("forget", "~/cfg/systemd/user/" + LW, LW_STALE_SAME), r.stdout)
+        self.assertNotIn(LW_STALE, r.stdout)
+        r = m.run("revert", "--check")
+        self.assertIn(f"would forget {alias} (the same file as {m.lw_unit})\n", r.stdout)
+        self.assertNotIn(f"would remove {alias}", r.stdout)
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"forgotten: {alias} (the same file as {m.lw_unit})\n", r.stdout)
+        self.assertNotIn("older CST", r.stdout)
+        self.assertIn(f"unchanged: {LW} enabled and active\n", r.stdout)
+        self.assertNotIn("systemctl --user daemon-reload", r.calls)
+        after = os.stat(m.lw_unit)
+        self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+        self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, m.lw_unit]))
+        self.assertNotIn(LW_STALE_SAME, m.run("plan").stdout)
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
+        self.assertEqual(json.loads(self.text(m.record))["files"], {})
+
+    def test_an_older_copy_cst_did_not_write_is_left_alone(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        m.put(old, "[Unit]\nDescription=mine\n")
+        r = m.run("plan")
+        self.assertIn(row("forget", "~/xdg/systemd/user/" + LW, LW_STALE_FOREIGN), r.stdout)
+        # The legend names the word.
+        self.assertIn("; forget = apply leaves the file alone and drops its install record line;", r.stdout)
+        # --check says what the run does: it forgets the file and leaves it (before: "would remove").
+        r = m.run("revert", "--check")
+        self.assertIn(f"would forget {old} (not written by CST: left alone)\n", r.stdout)
+        self.assertNotIn(f"would remove {old}", r.stdout)
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertIn(
+            f"WARNING: {old} was not written by CST: left alone (forgotten from the install record)\n", r.stderr
+        )
+        self.assertEqual(self.text(old), "[Unit]\nDescription=mine\n")
+        self.assertEqual(json.loads(self.text(m.record))["files"], {})
+        self.assertNotIn(LW_STALE_FOREIGN, m.run("plan").stdout)
 
     def test_apply_adopts_a_current_watcher_the_record_does_not_list(self) -> None:
         """A current program and unit missing from the install record (installed before it existed)
@@ -2004,7 +2341,8 @@ class StatusTest(SetupCase):
 
 class EnvironmentTest(SetupCase):
     """The commands get the caller's environment: nothing added, LC_CTYPE as it was; only the
-    `systemctl show` of a unit's state (cst_core's SystemdPort.show) adds LC_ALL=C."""
+    `systemctl show` of a unit's state (cst_core's SystemdPort.show) and of the user manager's UnitPath
+    (show_value of the manager itself, which CST reads) add LC_ALL=C."""
 
     def test_no_leak(self) -> None:
         m = self.machine(DONE)
@@ -2019,7 +2357,7 @@ class EnvironmentTest(SetupCase):
             shows: list[set[str]] = []
             for line in m.env_log().splitlines():
                 call, words = line.split("\t", 1)
-                if call.startswith("systemctl") and "show -p ActiveState" in call:
+                if call.startswith("systemctl") and ("show -p ActiveState" in call or "show -p UnitPath" in call):
                     shows.append(set(words.split()))
                 else:
                     seen |= set(words.split())

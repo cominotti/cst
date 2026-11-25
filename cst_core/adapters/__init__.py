@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 import time
 from typing import TypedDict, Unpack
 
-from cst_core.domain.units import parse_show_props, parse_show_units, show_units_argv
+from cst_core.domain.units import parse_show_props, parse_show_units, show_manager_value_argv, show_units_argv
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode, StdinMode, SystemctlHost, UnitName
 
 
@@ -115,9 +115,14 @@ class SystemctlAdapter:
         """`systemctl show-environment`: the manager's environment, one KEY=VALUE per line."""
         return self._systemctl("show-environment", output=output)
 
-    def show_value(self, unit: str, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+    def show_value(self, unit: str | None, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl show -p PROP --value unit`, with the adapter's own timeout and locale (show() has the
-        C locale; a value shown to the user, such as a timestamp, keeps the caller's)."""
+        C locale; a value shown to the user, such as a timestamp, keeps the caller's). unit None: a
+        property of the manager itself (show_manager_value_argv, such as UnitPath), asked as show asks
+        (on the host from a toolbox unless on_host is LOCAL, the C locale, 20 s at most or the adapter's
+        timeout): CST reads it, and nobody sees it."""
+        if unit is None:
+            return self._show(show_manager_value_argv(self._head, prop), output=output)
         return self._systemctl("show", "-p", prop, "--value", unit, output=output)
 
     def start(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
@@ -144,11 +149,13 @@ class SystemctlAdapter:
         """Remove what systemd keeps for unit (what: state, cache, logs, ...); its exit status and output."""
         return self._systemctl("clean", f"--what={what}", unit, output=output)
 
-    def _show(self, argv: list[str]) -> CommandResult:
+    def _show(self, argv: list[str], *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """A `systemctl show` argv as show and show_units run it: on_host as the adapter's policy says for
         show, the C locale, 20 s at most or the adapter's timeout."""
         timeout = 20 if self._timeout is None else self._timeout
         scope = _ScopeOptions(self._scope, on_host=self._show_on_host)
+        if output != OutputMode.CAPTURE:
+            scope["output"] = output
         return self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
 
     def show_units(self, pattern: str, props: Sequence[str]) -> list[dict[str, str]] | None:

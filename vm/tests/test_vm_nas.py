@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Mapping, Sequence
 import contextlib
 import dataclasses
+import datetime
 import fcntl
 import io
 import json
@@ -53,7 +54,7 @@ from btrfs.tests.snapshot_fakes import RuntimeTest
 from cst_core.ports import ClockPort
 from vm import domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, restic as vm_adapters_restic
-from vm.application import nas as vm_app_nas
+from vm.application import nas as vm_app_nas, nas_torn as vm_app_nas_torn
 from vm.domain import backup as vm_domain_backup
 from vm.ports import ProgressPort
 from vm import wiring as vm_wiring
@@ -632,13 +633,16 @@ class LiveBackupTest(Nas):
         self.assertIn(
             f"cst vm: the restic snapshot {SNAP_ID[:8]} of win is complete but not in the index: {self.index} is "
             "format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST, so the index was "
-            "left as it is and cst vm does not list this backup; the snapshot stays in the repository, where the "
-            'retention sees it as any VM backup of its tags (restore it by its ID: vm/README.md, section "Restore '
-            'from the NAS"). Then: use the cst vm of that CST',
+            "left as it is and cst vm does not list this backup; the snapshot stays in the repository: the next NAS "
+            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept as "
+            f"a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore it by "
+            'its ID: vm/README.md, section "Restore from the NAS"). Then: use the cst vm of that CST',
             r.stderr,
         )
         self.assertNotIn("nothing is backed up", r.stderr)
-        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup", "forget"])
+        # The index cannot be read, so the snapshots no record names cannot be checked: the retention waits.
+        self.assertIn("  retention skipped: the snapshots no record names were not checked (", r.stdout)
+        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup"])
         self.assertFalse(os.path.exists(self.overlay))
         with open(self.index) as f:
             self.assertEqual(f.read(), text)
@@ -830,6 +834,85 @@ class LiveBackupTest(Nas):
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
+
+    def test_an_entry_whose_snapshot_was_retagged_stays_in_the_index_under_its_new_id(self) -> None:
+        # restic tag saves the snapshot again under a new id, with the first id as its original: the
+        # entry left the index, although restic still lists the backup.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        repo = "sftp:btrfs-setup-nas:/volume1/restic"
+        old = [
+            {"vm": "win", "mode": "nas", "snapshot": "first1", "repository": repo, "epoch": 1, "timestamp": "a"},
+            {"vm": "win", "mode": "nas", "snapshot": "gone22", "repository": repo, "epoch": 2, "timestamp": "b"},
+        ]
+        with open(self.index, "w") as f:
+            json.dump({"backups": old}, f)
+        listed = [{"id": "second", "original": "first1"}, {"id": "other3", "original": ""}, {"id": SNAP_ID}]
+        self.restic_cfg(snapshots_json=json.dumps(listed))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # Under the id restic lists it by now: restic restores no snapshot by its original.
+        self.assertEqual([e.get("snapshot") for e in self.index_entries()], ["second", SNAP_ID])
+        self.assertEqual(
+            self.index_entries()[0],
+            {**old[0], "snapshot": "second", "original": "first1"},
+            "the rest of the entry kept, and its first id",
+        )
+
+    def test_an_entry_whose_snapshot_was_retagged_twice_stays_in_the_index_and_is_no_stray(self) -> None:
+        # restic keeps the first id as the original of every later tag change: after a second restic tag
+        # the entry moved to the first copy's id named nothing restic lists, left the index and its
+        # snapshot (newer than the oldest indexed backup) was named as one no record names.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        repo = "sftp:btrfs-setup-nas:/volume1/restic"
+        old = [
+            {"vm": "win", "mode": "nas", "snapshot": STRAY_A, "repository": repo, "epoch": 1, "timestamp": "a"},
+            {"vm": "win", "mode": "nas", "snapshot": STRAY_B, "repository": repo, "epoch": 2, "timestamp": "b"},
+        ]
+        with open(self.index, "w") as f:
+            json.dump({"backups": old}, f)
+        own = _listed(SNAP_ID, STRAY_T2)
+        for copy in (STRAY_C, STRAY_D):
+            with self.subTest(copy=copy):
+                listed = [
+                    _listed(STRAY_A, STRAY_T0),
+                    _listed(copy, STRAY_T1, vm_domain.KEEP_TAG, original=STRAY_B),
+                    own,
+                ]
+                self.restic_cfg(snapshots_json=json.dumps(listed))
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertNotIn("retention skipped", r.stdout)
+                self.assertEqual(
+                    [(e.get("snapshot"), e.get("original")) for e in self.index_entries()],
+                    [(STRAY_A, None), (copy, STRAY_B), (SNAP_ID, None)],
+                )
+
+    def test_a_snapshot_no_record_names_is_named_and_the_run_still_succeeds(self) -> None:
+        # The retention counted it as a backup. The run's own snapshot is not one.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        repo = "sftp:btrfs-setup-nas:/volume1/restic"
+        first = {"vm": "win", "mode": "nas", "snapshot": STRAY_A, "repository": repo, "epoch": 1, "timestamp": "a"}
+        with open(self.index, "w") as f:
+            json.dump({"backups": [first]}, f)
+        own = _listed(SNAP_ID, "2026-11-08T01:06:40Z")
+        for listed, named in (
+            ([_listed(STRAY_A, STRAY_T1), own], False),
+            ([_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2), own], True),
+        ):
+            with self.subTest(named=named):
+                self.restic_cfg(snapshots_json=json.dumps(listed))
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                retention = [c["args"] for c in self.restic_calls() if "--keep-weekly" in c["args"]]
+                alerts = [c for c in self.calls() if c.startswith("notify ") and "no record names" in c]
+                if named:
+                    self.assertIn("retention skipped: restic lists 1 snapshot of win that neither", r.stdout)
+                    self.assertIn(f"restic tag --add cst-adopted {STRAY_B}", r.stdout)
+                    self.assertEqual(len(retention), 1, "only the first run's")
+                    self.assertEqual(len(alerts), 1, self.calls())
+                else:
+                    self.assertNotIn("retention skipped", r.stdout)
+                    self.assertEqual((len(retention), alerts), (1, []))
 
     def test_a_nas_entry_without_its_snapshot_is_kept_and_does_not_stop_the_prune(self) -> None:
         # It passed the reader (it has a path) and the prune read its snapshot: a KeyError after the backup.
@@ -1695,15 +1778,19 @@ class TornRecordTest(Nas):
                 self.restic_cfg(snapshots_json=self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, BOTH_TAGS)))
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(os.path.join(self.fix, "restic.log"))
+                # The second run has the first one's backup in the index: the snapshots no record names are listed.
+                strays = ["snapshots"] if os.path.exists(self.index) else []
                 r = self.run_tool("backup", "win", "--nas")
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 calls = [c["args"] for c in self.restic_calls()]
-                self.assertEqual([a[0] for a in calls], ["cat", "backup", "snapshots", "forget", "forget", "snapshots"])
+                self.assertEqual(
+                    [a[0] for a in calls], ["cat", "backup", "snapshots", "forget", *strays, "forget", "snapshots"]
+                )
                 self.assertEqual(
                     calls[2], ["snapshots", "--json", "--no-lock", "--host", "sophia", "--tag", "cst-vm,vm:win"]
                 )
                 self.assertEqual(calls[3], ["forget", "--retry-lock", "30m", TORN_ID], "by the listed full id")
-                self.assertIn("--keep-weekly", calls[4])
+                self.assertIn("--keep-weekly", calls[4 + len(strays)])
                 self.assertIn(f"torn restic snapshot {TORN_ID[:8]} of an earlier run forgotten", r.stdout)
                 self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
 
@@ -1775,6 +1862,24 @@ class TornRecordTest(Nas):
         )
         self.assertEqual(self.torn_list(), [])
 
+    def test_a_recorded_snapshot_whose_tags_were_changed_is_forgotten_by_its_new_id(self) -> None:
+        # restic tag saved it again under a new id, with the recorded one as its original: the retry took it
+        # for "forgotten already" and dropped it from the record, and the next check named it as a stray.
+        retagged = "f00dcafe" + "2" * 56
+        self.write_torn([self.torn_entry()])
+        listing = [
+            {"id": SNAP_ID, "tags": BOTH_TAGS},
+            {"id": retagged, "original": TORN_ID, "tags": [*BOTH_TAGS, "cst-keep"]},
+        ]
+        self.restic_cfg(snapshots_json=json.dumps(listing))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.forgets()[0], ["forget", "--retry-lock", "30m", retagged], "by its listed id")
+        self.assertIn("--keep-weekly", self.forgets()[1], "then the retention")
+        self.assertIn(f"torn restic snapshot {retagged[:8]} of an earlier run forgotten", r.stdout)
+        self.assertNotIn("forgotten already", r.stdout)
+        self.assertEqual(self.torn_list(), [])
+
     def test_a_recorded_snapshot_listed_without_both_tags_is_kept_and_the_retention_waits(self) -> None:
         # restic lists by both tags, so a listed snapshot without them is an answer of another shape:
         # never forgotten, never dropped, and the retention (which could count it) waits.
@@ -1833,12 +1938,15 @@ class TornRecordTest(Nas):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.forgets()[0], ["forget", "--retry-lock", "30m", TORN_ID])
         self.assertEqual(self.torn_doc(), {"version": 1, "torn": odd})
-        # Only entries of other VMs or repositories: no restic call for them.
+        # Only entries of other VMs or repositories: no restic call for them (the one listing before the
+        # retention is the check of the snapshots no record names: the first run indexed its backup).
         self.write_torn(odd[:2])
         os.unlink(os.path.join(self.fix, "restic.log"))
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup", "forget", "snapshots"])
+        self.assertEqual(
+            [c["args"][0] for c in self.restic_calls()], ["cat", "backup", "snapshots", "forget", "snapshots"]
+        )
         self.assertEqual(self.torn_list(), odd[:2])
 
     def test_a_good_run_without_a_record_writes_none(self) -> None:
@@ -1895,6 +2003,83 @@ class TornRecordTest(Nas):
         with vm_adapters_backup.VmLock("torn", os.path.join(self.tmp, "run")):
             vm_adapters_backup.drop_torn(cfg, [self.torn_entry()], lock_timeout=0.2)
         self.assertEqual(self.torn_list(), [])
+
+
+class SnapshotNamesTest(unittest.TestCase):
+    """The ids a listed restic snapshot answers to (snapshot_names, nas_snapshot_ids): its own, and its
+    original when restic tag saved it again under a new id."""
+
+    def test_a_retagged_snapshot_answers_to_its_original_too(self) -> None:
+        self.assertEqual(vm_domain_backup.snapshot_names({"id": "new", "original": "old"}), ["new", "old"])
+
+    def test_an_original_that_is_no_id_is_left_out(self) -> None:
+        for original in ("", 5, None, ["old"]):
+            with self.subTest(original=original):
+                self.assertEqual(vm_domain_backup.snapshot_names({"id": "new", "original": original}), ["new"])
+        self.assertEqual(vm_domain_backup.snapshot_names({"id": "new"}), ["new"])
+
+    def test_the_index_prune_gets_the_listed_ids_and_their_originals(self) -> None:
+        class Listing(FakeNasRestic):
+            @override
+            def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+                del env, args, timeout
+                return 0, json.dumps([{"id": "new", "original": "old"}, {"id": SNAP_ID}]), ""
+
+        got = vm_app_nas_torn.nas_snapshot_ids(Listing(), "win", _NAS_REPO)
+        self.assertEqual(got, {"new": "new", "old": "new", SNAP_ID: SNAP_ID})
+
+    def test_an_indexed_entry_named_by_an_original_takes_the_listed_id(self) -> None:
+        def nas(snap: str, vm: str = "win") -> vm_domain_backup.IndexEntry:
+            return {"vm": vm, "mode": "nas", "snapshot": snap, "repository": "/repo", "epoch": 1}
+
+        entries = [nas("first1"), nas("kept22"), nas("short"), nas("gone33"), nas("first1", vm="other")]
+        alive = {"second": "second", "first1": "second", "kept22": "kept22", "shortened": "shortened"}
+        got = vm_domain_backup.nas_index(entries, nas(SNAP_ID), alive)
+        # A short id restic lists by itself stays as it is; another VM's entry is not this listing's.
+        self.assertEqual(
+            sorted((e["vm"], e.get("snapshot")) for e in got),
+            [("other", "first1"), ("win", SNAP_ID), ("win", "kept22"), ("win", "second"), ("win", "short")],
+        )
+
+    def test_a_listed_id_that_is_another_snapshots_original_names_itself_in_either_order(self) -> None:
+        # restic lists both a snapshot and a copy whose original it is (restic rewrite without --forget):
+        # the later one in the listing won, and an entry of the first moved to the copy.
+        first, copy = {"id": "first1"}, {"id": "copy22", "original": "first1"}
+        entry: vm_domain_backup.IndexEntry = {"vm": "win", "mode": "nas", "snapshot": "first1", "repository": "/repo"}
+
+        class Listing(FakeNasRestic):
+            answer = ""
+
+            @override
+            def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+                del env, args, timeout
+                return 0, self.answer, ""
+
+        for listed in ([first, copy], [copy, first]):
+            with self.subTest(listed=listed):
+                restic = Listing()
+                restic.answer = json.dumps(listed)
+                alive = vm_app_nas_torn.nas_snapshot_ids(restic, "win", _NAS_REPO)
+                self.assertEqual(alive, {"first1": "first1", "copy22": "copy22"})
+                assert alive is not None
+                own: vm_domain_backup.IndexEntry = {**entry, "snapshot": SNAP_ID}
+                got = vm_domain_backup.nas_index([entry], own, alive)
+                self.assertEqual([e.get("snapshot") for e in got], ["first1", SNAP_ID])
+
+    def test_an_entry_retagged_twice_keeps_its_first_id_and_follows_the_second_copy(self) -> None:
+        def nas(snap: str, **more: str) -> vm_domain_backup.IndexEntry:
+            return {"vm": "win", "mode": "nas", "snapshot": snap, "repository": "/repo", "epoch": 1, **more}
+
+        own = {SNAP_ID: SNAP_ID}
+        once = vm_domain_backup.nas_index(
+            [nas("first1")], nas(SNAP_ID), {"second": "second", "first1": "second", **own}
+        )
+        self.assertEqual(once, [nas("second", original="first1"), nas(SNAP_ID)])
+        # restic lists the second copy with the first id as its original, not the first copy's.
+        twice = vm_domain_backup.nas_index(once, nas(SNAP_ID), {"third": "third", "first1": "third", **own})
+        self.assertEqual(twice, [nas("third", original="first1"), nas(SNAP_ID)])
+        # An entry restic lists by its own id stays as it is, its original with it.
+        self.assertEqual(vm_domain_backup.nas_index(twice, nas(SNAP_ID), {"third": "third", **own}), twice)
 
 
 class ConstantsTest(unittest.TestCase):
@@ -2380,6 +2565,7 @@ class FakeNasStore:
         self.removed: list[str] = []
         self.torn: list[vm_domain_backup.TornEntry] = []
         self.record_fails = False
+        self.written: list[list[vm_domain_backup.IndexEntry]] = []  # each index written, in order
 
     def is_file(self, path: str) -> bool:
         return path in self.disk_paths
@@ -2447,7 +2633,7 @@ class FakeNasStore:
         return []
 
     def write_index(self, entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
-        del entries
+        self.written.append(list(entries))
 
     def read_torn(self) -> list[vm_domain_backup.TornEntry]:
         return []
@@ -3212,6 +3398,28 @@ class NasHeldStopThawTest(unittest.TestCase):
         self.assertEqual(alerts, [])
 
 
+# The stop of a run whose read was a backup: the snapshot is indexed before the stop ends the run.
+STOPPED_INDEXED = (
+    f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} of win is a backup: indexed (the retention runs "
+    "at the next backup)"
+)
+
+
+def _written(store: FakeNasStore) -> list[list[tuple[str, object]]]:
+    """Each index the run wrote: (snapshot, consistency) of each of its entries."""
+    return [[(e.get("snapshot", ""), e.get("consistency")) for e in index] for index in store.written]
+
+
+def _contexts(e: BaseException) -> list[type[BaseException]]:
+    """The types along e's chain of __context__."""
+    found: list[type[BaseException]] = []
+    cur = e.__context__
+    while cur is not None:
+        found.append(type(cur))
+        cur = cur.__context__
+    return found
+
+
 class NasStopAfterSnapshotTest(unittest.TestCase):
     """A stop that ended restic once restic had written its snapshot (StopAfterSnapshot, with restic's exit
     status and summary): a torn snapshot is recorded before the stop is raised, with no forget (the next
@@ -3223,10 +3431,17 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
     disk_a = "/img/a.qcow2"
 
     def _run(
-        self, rc: int, *, live: bool = True, started: bool = False, record_fails: bool = False
+        self,
+        rc: int,
+        *,
+        live: bool = True,
+        started: bool = False,
+        record_fails: bool = False,
+        check_raises: bool = False,
     ) -> tuple[str, FakeNasStore, FakeNasRestic, list[str]]:
         """nas_run whose restic is stopped after its snapshot with exit status rc (started: a shut-off VM
-        runs from then on); (the stop's message, the store, restic, the virsh commands)."""
+        runs from then on; check_raises: its check after the read meets an error of the virsh port); (the
+        stop's message, the store, restic, the virsh commands). The stop itself is in self.stop."""
         disks = [("vda", self.disk_a)]
         answered: list[bool] = []
 
@@ -3238,6 +3453,8 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
             _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if args[0] == "domstate" and not live:
+                if check_raises and answered:
+                    raise RuntimeError("the virsh port failed")
                 return 0, ("running" if started and answered else vm_domain.SHUT_OFF) + "\n", ""
             return None
 
@@ -3252,6 +3469,7 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
         with self.assertRaises(vm_domain_backup.Stop) as ctx:
             vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=live)
+        self.stop = ctx.exception
         return str(ctx.exception), store, restic, [c[0][0] for c in commands.virsh_log]
 
     def test_a_torn_snapshot_is_recorded_and_nothing_forgotten_before_the_stop(self) -> None:
@@ -3269,18 +3487,63 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
         self.assertNotIn("forget", [c[0] for c in restic.calls])
         self.assertEqual(cmds.count("blockcommit"), 1)
 
-    def test_a_good_answer_of_a_running_vm_records_nothing(self) -> None:
-        # Passes on the code before the fix too (the stop then came as a plain Stop): it pins that a
-        # snapshot restic ended on its own (exit 0) is not counted as torn.
+    def test_a_good_answer_of_a_running_vm_is_indexed_before_the_stop(self) -> None:
+        # A snapshot restic ended on its own (exit 0) is not counted as torn: it is a backup, indexed.
         msg, store, restic, cmds = self._run(0)
-        self.assertEqual((msg, store.torn), ("stopped by signal SIGTERM", []))
-        self.assertNotIn("forget", [c[0] for c in restic.calls])
+        self.assertEqual((msg, store.torn), (STOPPED_INDEXED, []))
+        self.assertEqual(_written(store), [[(SNAP_ID, "crash-consistent")]])
+        self.assertEqual([c[0] for c in restic.calls], ["cat"], "restic_ready only: no listing, forget or retention")
         self.assertEqual(cmds.count("blockcommit"), 1)
 
-    def test_a_good_answer_of_a_shut_off_vm_is_checked_before_the_stop(self) -> None:
-        msg, store, _restic, cmds = self._run(0, live=False)
-        self.assertEqual((msg, store.torn), ("stopped by signal SIGTERM", []))
+    def test_a_good_answer_of_a_shut_off_vm_is_checked_then_indexed_before_the_stop(self) -> None:
+        msg, store, restic, cmds = self._run(0, live=False)
+        self.assertEqual((msg, store.torn), (STOPPED_INDEXED, []))
+        self.assertEqual(_written(store), [[(SNAP_ID, "shut-off")]])
+        self.assertEqual([c[0] for c in restic.calls], ["cat"], "restic_ready only")
         self.assertEqual(cmds.count("domstate"), 1, "the check after the read ran")
+
+    def test_a_good_answer_whose_check_fails_is_recorded_as_torn_before_the_stop(self) -> None:
+        msg, store, restic, _cmds = self._run(0, live=False, check_raises=True)
+        self.assertEqual([(e["snapshot"], e["why"]) for e in store.torn], [(SNAP_ID, "check failed")])
+        self.assertIn(f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup: recorded in ", msg)
+        self.assertEqual(store.written, [])
+        self.assertNotIn("forget", [c[0] for c in restic.calls], "the forget is the next run's")
+        self.assertIn(RuntimeError, _contexts(self.stop), "the check's error stays in the stop's context")
+
+    def test_a_good_answer_the_index_refuses_is_named_by_the_stop(self) -> None:
+        refused = vm_domain_backup.IndexRefused("/i is format 2 of the vm-index", "use that cst vm")
+        with mock.patch.object(FakeNasStore, "write_index", autospec=True, side_effect=refused):
+            msg, store, _restic, _cmds = self._run(0)
+        self.assertEqual(store.written, [])
+        self.assertTrue(
+            msg.startswith(
+                f"stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is complete but not in the "
+                "index: /i is format 2 of the vm-index, "
+            ),
+            msg,
+        )
+        self.assertIn("the snapshot stays in the repository", msg)
+        # It is no backup the retention counts: the next runs name it, and their retention waits for it.
+        self.assertIn(
+            f"their retention waits for it until it is kept as a backup (restic tag --add cst-adopted {SNAP_ID})", msg
+        )
+        self.assertNotIn("any VM backup of its tags", msg)
+
+    def test_a_good_answer_whose_index_cannot_be_written_is_named_by_the_stop(self) -> None:
+        # The OSError replaced the stop, and nothing named the good snapshot.
+        with mock.patch.object(
+            FakeNasStore, "write_index", autospec=True, side_effect=OSError(28, "No space left on device")
+        ):
+            msg, store, _restic, _cmds = self._run(0)
+        self.assertEqual((store.written, store.torn), ([], []))
+        self.assertEqual(
+            msg,
+            f"stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is a backup, but the index could "
+            "not be written ([Errno 28] No space left on device); the snapshot stays in the repository: the next NAS "
+            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept "
+            f"as a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore "
+            'it by its ID: vm/README.md, section "Restore from the NAS")',
+        )
 
     def test_a_shut_off_vm_started_during_the_read_has_its_snapshot_recorded(self) -> None:
         msg, store, restic, _cmds = self._run(0, live=False, started=True)
@@ -3290,6 +3553,328 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
 
 
 _NAS_REPO: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+
+
+STRAY_A = "aaaa1111" + "a" * 56  # an indexed backup
+STRAY_B = "bbbb2222" + "b" * 56  # a snapshot no record names
+STRAY_C = "cccc3333" + "c" * 56
+STRAY_D = "dddd4444" + "d" * 56
+STRAY_T0 = "2026-10-25T04:30:00.000000001+02:00"  # before the change to winter time: an hour more offset
+STRAY_T1 = "2026-11-01T04:30:00.123456789+01:00"
+STRAY_T2 = "2026-11-08T04:30:00.5+01:00"
+
+
+class _StrayRestic(FakeNasRestic):
+    """restic with a fixed listing (None: restic snapshots fails), forget failing for the ids in fail."""
+
+    def __init__(self, listed: Sequence[Mapping[str, object]] | None, fail: Sequence[str] = ()) -> None:
+        super().__init__()
+        self.listed = listed
+        self.fail = fail
+
+    @override
+    def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+        del env, timeout
+        self.calls.append(list(args))
+        if args[0] == "snapshots":
+            if self.listed is None:
+                return 1, "", "Fatal: unable to open the repository"
+            return 0, json.dumps(self.listed), ""
+        if args[0] == "forget" and args[-1] in self.fail:
+            return 1, "", "Fatal: repository is already locked"
+        return 0, "", ""
+
+
+class _StrayStore(FakeNasStore):
+    """The index and the torn record as given (refuse: "index" or "torn" cannot be read)."""
+
+    def __init__(
+        self,
+        index: Sequence[vm_domain_backup.IndexEntry],
+        torn: Sequence[vm_domain_backup.TornEntry] = (),
+        refuse: str = "",
+    ) -> None:
+        super().__init__([])
+        self.index = list(index)
+        self.torn_entries = list(torn)
+        self.refuse = refuse
+
+    @override
+    def read_index(self) -> list[vm_domain_backup.IndexEntry]:
+        if self.refuse == "index":
+            raise vm_domain_backup.IndexRefused("/i is format 2 of the vm-index", "use the cst vm of that CST")
+        return list(self.index)
+
+    @override
+    def read_torn(self) -> list[vm_domain_backup.TornEntry]:
+        if self.refuse == "torn":
+            raise vm_domain_backup.TornRefused("/t is not JSON")
+        return list(self.torn_entries)
+
+
+class _KeepSettings(FakeNasSettings):
+    @override
+    def number(self, key: str) -> int:
+        return {"VM_NAS_KEEP_WEEKLY": 4, "VM_NAS_KEEP_MONTHLY": 3}.get(key, 0)
+
+
+def _stray_entry(snap: str, *, vm: str = "win", repository: str = "/repo") -> vm_domain_backup.IndexEntry:
+    return {"vm": vm, "mode": "nas", "snapshot": snap, "repository": repository, "host": "sophia", "epoch": 1}
+
+
+def _listed(snap: str, time_: object, *tags: str, original: str | None = None) -> dict[str, object]:
+    return {
+        "id": snap,
+        "time": time_,
+        "tags": ["cst-vm", "vm:win", *tags],
+        **({} if original is None else {"original": original}),
+    }
+
+
+class NasStraySnapshotTest(unittest.TestCase):
+    """A NAS run compares the VM's snapshots restic lists with the index and the record of torn snapshots
+    (retention_after_torn, unaccounted): one that neither names, newer than the oldest indexed one, is named
+    in the output and in an alert, and the retention waits (it would count it as a backup); nothing is
+    forgotten. With no NAS entry of the VM in the index, nothing is compared."""
+
+    def _run(
+        self,
+        index: Sequence[vm_domain_backup.IndexEntry],
+        listed: Sequence[Mapping[str, object]] | None,
+        *,
+        torn_kept: Sequence[vm_domain_backup.TornEntry] = (),
+        refuse: str = "",
+        made: str = "",
+    ) -> tuple[list[str], list[tuple[str, str]], list[list[str]]]:
+        """retention_after_torn of win (torn_kept: recorded torn snapshots whose forget fails); (the output,
+        the alerts, restic's calls)."""
+        signals = FakeNasSignals()
+        restic = _StrayRestic(listed, [e["snapshot"] for e in torn_kept])
+        alerts: list[tuple[str, str]] = []
+        out = FakeNasOut()
+        port = vm_app_nas.NasBackup(
+            commands=FakeNasCommands(lambda _args: (0, "", ""), signals),
+            store=_StrayStore(index, torn_kept, refuse),
+            settings=_KeepSettings(),
+            restic=restic,
+            signals=signals,
+            lock=lambda _vm: contextlib.nullcontext(),
+            alert=lambda title, body: alerts.append((title, body)),
+            clock=FakeNasClock(),
+            out=out,
+            root=True,
+        )
+        cfg = vm_wiring.vm_settings({"CST_PROG": "cst vm", "CST_VM_NONROOT_OK": "1"})
+        vm_app_nas_torn.retention_after_torn(cfg, port, "win", _NAS_REPO, made=made)
+        return out.lines, alerts, restic.calls
+
+    def assert_retention_ran(self, lines: Sequence[str], calls: Sequence[Sequence[str]]) -> None:
+        self.assertTrue(any("--keep-weekly" in c for c in calls), calls)
+        self.assertFalse([ln for ln in lines if "retention skipped" in ln], lines)
+
+    def test_a_newer_snapshot_no_record_names_is_named_and_the_retention_waits(self) -> None:
+        index, listed = [_stray_entry(STRAY_A)], [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)]
+        lines, alerts, calls = self._run(index, listed)
+        line = (
+            "  retention skipped: restic lists 1 snapshot of win that neither the index nor the record of torn "
+            "snapshots names (each may be torn): bbbb2222 (2026-11-08T04:30:00+01:00); look at each (restic ls "
+            f"{STRAY_B}), then forget it (restic forget {STRAY_B}) or keep it as a backup (restic tag --add "
+            f"cst-adopted {STRAY_B}), with the repository's variables of vm/README.md, section \"Restore from the "
+            'NAS"; the repository keeps more until each is forgotten or kept'
+        )
+        self.assertEqual(lines, [line])
+        body = (
+            "win: the NAS repository has 1 snapshot(s) of win that no record names (bbbb2222); its retention "
+            "waits until each is forgotten (restic forget ID) or kept (restic tag --add cst-adopted ID): see "
+            "the backup's output"
+        )
+        self.assertEqual(alerts, [("VM backup: a NAS snapshot no record names", body)])
+        self.assertEqual(calls, [["snapshots", "--json", "--no-lock", "--host", "sophia", "--tag", "cst-vm,vm:win"]])
+
+    def test_several_strays_are_named_together(self) -> None:
+        listed = [_listed(STRAY_A, STRAY_T0), _listed(STRAY_B, STRAY_T1), _listed(STRAY_C, STRAY_T2)]
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], listed)
+        self.assertIn("restic lists 2 snapshots of win that neither", lines[0])
+        self.assertIn(
+            "bbbb2222 (2026-11-01T04:30:00+01:00), cccc3333 (2026-11-08T04:30:00+01:00); look at each (restic ls ID), "
+            "then forget it (restic forget ID) or keep it as a backup (restic tag --add cst-adopted ID) (ID: each of "
+            f"{STRAY_B} {STRAY_C}), with",
+            lines[0],
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("2 snapshot(s) of win that no record names (bbbb2222, cccc3333)", alerts[0][1])
+
+    def test_a_snapshot_older_than_every_indexed_one_is_left_alone(self) -> None:
+        # An older CST's backup, or one from before the index was moved aside: not named.
+        lines, alerts, calls = self._run(
+            [_stray_entry(STRAY_A)], [_listed(STRAY_B, STRAY_T0), _listed(STRAY_A, STRAY_T1)]
+        )
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
+    def test_times_are_compared_as_instants(self) -> None:
+        # 03:30+01:00 is 02:30 UTC, after 03:00+02:00 (01:00 UTC): newer, although its text sorts first.
+        index = [_stray_entry(STRAY_A)]
+        listed = [_listed(STRAY_A, "2026-10-25T03:00:00+02:00"), _listed(STRAY_B, "2026-10-25T02:30:00+01:00")]
+        lines, alerts, _calls = self._run(index, listed)
+        self.assertIn("bbbb2222 (2026-10-25T02:30:00+01:00)", lines[0])
+        self.assertEqual(len(alerts), 1)
+
+    def test_no_nas_entry_of_the_vm_in_this_repository_compares_nothing(self) -> None:
+        local: vm_domain_backup.IndexEntry = {"vm": "win", "mode": "reflink", "path": "/b/win", "epoch": 1}
+        for index in (
+            [],
+            [local],
+            [_stray_entry(STRAY_A, vm="other")],
+            [_stray_entry(STRAY_A, repository="sftp:elsewhere:/r")],
+        ):
+            with self.subTest(index=index):
+                lines, alerts, calls = self._run(index, [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)])
+                self.assertFalse([c for c in calls if c[0] == "snapshots"], "no listing")
+                self.assert_retention_ran(lines, calls)
+                self.assertEqual(alerts, [])
+
+    def test_the_runs_own_snapshot_and_an_adopted_one_are_no_strays(self) -> None:
+        index = [_stray_entry(STRAY_A)]
+        for listed, made in (
+            ([_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)], STRAY_B),
+            ([_listed(STRAY_A, STRAY_T1), _listed(STRAY_C, STRAY_T2, "cst-adopted")], ""),
+            ([_listed(STRAY_A, STRAY_T1)], ""),  # forgotten by hand: no longer listed
+        ):
+            with self.subTest(listed=listed, made=made):
+                lines, alerts, calls = self._run(index, listed, made=made)
+                self.assert_retention_ran(lines, calls)
+                self.assertEqual(alerts, [])
+
+    def test_a_snapshot_in_the_torn_record_is_left_to_its_retry(self) -> None:
+        torn: vm_domain_backup.TornEntry = {
+            "snapshot": STRAY_B,
+            "vm": "win",
+            "repository": "/repo",
+            "host": "sophia",
+            "timestamp": "20261108T033000Z",
+            "why": "incomplete",
+        }
+        listed = [_listed(STRAY_A, STRAY_T0), _listed(STRAY_B, STRAY_T1)]
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], listed, torn_kept=[torn])
+        self.assertEqual(len(lines), 1)
+        self.assertIn("retention skipped: restic forget bbbb2222 (torn, of an earlier run): Fatal: ", lines[0])
+        self.assertNotIn("neither the index", lines[0])
+        self.assertTrue(lines[0].endswith("; the repository keeps more until the next backup"), lines[0])
+        self.assertEqual(alerts, [])
+        # A stray beside it: both reasons, the stray named.
+        listed.append(_listed(STRAY_C, STRAY_T2))
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], listed, torn_kept=[torn])
+        self.assertRegex(
+            lines[0], r"retention skipped: restic forget bbbb2222 \(torn.*; restic lists 1 snapshot of win"
+        )
+        self.assertIn("cccc3333", lines[0])
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_retagged_backup_is_accounted_for_by_its_original(self) -> None:
+        # restic tag saved A again as C (original A): C is the indexed backup, not a stray.
+        index = [_stray_entry(STRAY_B), _stray_entry(STRAY_A)]
+        listed = [_listed(STRAY_B, STRAY_T0), _listed(STRAY_C, STRAY_T1, "cst-keep", original=STRAY_A)]
+        lines, alerts, calls = self._run(index, listed)
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
+    def test_an_upgrade_names_a_backup_an_older_cst_left_out_of_the_index_until_it_is_adopted(self) -> None:
+        # The state an older cst vm left: it dropped the entry of A once restic tag saved A again as C (it
+        # read only the listed ids), and left a good read a stop ended (B) out of the index. Both are newer
+        # than the oldest indexed backup (D), so the first run after the update names them; adopted, they
+        # are counted and the next run is quiet.
+        older = "dddd4444" + "d" * 56
+        index = [_stray_entry(older)]
+        listed = [
+            _listed(older, STRAY_T0),
+            _listed(STRAY_C, STRAY_T1, original=STRAY_A),
+            _listed(STRAY_B, STRAY_T2),
+        ]
+        lines, alerts, calls = self._run(index, listed)
+        self.assertIn("restic lists 2 snapshots of win that neither", lines[0])
+        self.assertIn("cccc3333 (2026-11-01T04:30:00+01:00), bbbb2222 (2026-11-08T04:30:00+01:00)", lines[0])
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual([c[0] for c in calls], ["snapshots"], "the retention waits")
+        adopted = [
+            _listed(older, STRAY_T0),
+            _listed(STRAY_C, STRAY_T1, "cst-adopted", original=STRAY_A),
+            _listed(STRAY_B, STRAY_T2, "cst-adopted"),
+        ]
+        lines, alerts, calls = self._run(index, adopted)
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
+    def test_a_short_id_in_the_index_names_the_listed_snapshot(self) -> None:
+        lines, alerts, calls = self._run(
+            [_stray_entry(STRAY_A[:8])], [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T0)]
+        )
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
+    def test_an_entry_of_another_vm_or_repository_accounts_for_nothing(self) -> None:
+        index = [_stray_entry(STRAY_A), _stray_entry(STRAY_B, vm="other"), _stray_entry(STRAY_B, repository="/r2")]
+        lines, alerts, _calls = self._run(index, [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)])
+        self.assertIn("bbbb2222", lines[0])
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_time_that_cannot_be_read(self) -> None:
+        # A stray's: named (the retention keeps more). The only indexed one's: no baseline, nothing named.
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, "x")])
+        self.assertIn("bbbb2222 (time unknown)", lines[0])
+        self.assertEqual(len(alerts), 1)
+        for when in ("x", None, "2026-11-01T04:30:00"):
+            with self.subTest(when=when):
+                lines, alerts, calls = self._run(
+                    [_stray_entry(STRAY_A)], [_listed(STRAY_A, when), _listed(STRAY_B, STRAY_T2)]
+                )
+                self.assert_retention_ran(lines, calls)
+                self.assertEqual(alerts, [])
+
+    def test_what_cannot_be_read_makes_the_retention_wait_unnamed(self) -> None:
+        listed = [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)]
+        cases: tuple[tuple[Sequence[Mapping[str, object]] | None, str, str], ...] = (
+            (
+                None,
+                "",
+                "restic snapshots did not list the snapshots of win, so the snapshots no record names were not checked",
+            ),
+            (listed, "index", "the snapshots no record names were not checked (/i is format 2 of the vm-index: "),
+            (listed, "torn", "the snapshots no record names were not checked (/t is not JSON)"),
+        )
+        for listed_now, refuse, said in cases:
+            with self.subTest(listed=listed_now is not None, refuse=refuse):
+                lines, alerts, calls = self._run([_stray_entry(STRAY_A)], listed_now, refuse=refuse)
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn(said, lines[0])
+                self.assertTrue(lines[0].endswith("the repository keeps more until the next backup"), lines[0])
+                self.assertFalse([c for c in calls if "--keep-weekly" in c])
+                self.assertEqual(alerts, [])
+
+
+class ResticInstantTest(unittest.TestCase):
+    """restic_instant: restic's RFC 3339 times as instants; anything else None."""
+
+    def test_restics_forms(self) -> None:
+        utc = datetime.UTC
+        self.assertEqual(
+            vm_domain_backup.restic_instant("2026-11-01T04:30:00.123456789+01:00"),
+            datetime.datetime(2026, 11, 1, 3, 30, 0, 123456, tzinfo=utc),
+        )
+        self.assertEqual(
+            vm_domain_backup.restic_instant("2026-11-01T03:30:00Z"), datetime.datetime(2026, 11, 1, 3, 30, tzinfo=utc)
+        )
+
+    def test_offsets_across_a_change_of_time_order_as_instants(self) -> None:
+        before = vm_domain_backup.restic_instant("2026-10-25T02:59:00+02:00")
+        after = vm_domain_backup.restic_instant("2026-10-25T02:01:00+01:00")
+        assert before is not None and after is not None
+        self.assertLess(before, after)
+
+    def test_anything_else_is_none(self) -> None:
+        for value in ("", "yesterday", "2026-11-01T04:30:00", 1794100000, None, ["2026-11-01T03:30:00Z"]):
+            with self.subTest(value=value):
+                self.assertIsNone(vm_domain_backup.restic_instant(value))
 
 
 class _PendingStops(FakeNasSignals):
@@ -3313,11 +3898,67 @@ class _PendingStops(FakeNasSignals):
         self.depth += 1
         try:
             yield
-        finally:
+        except BaseException:
+            # As signals_held: the stop that waited is raised at the unmask also when the block raised; it
+            # replaces the failure, which stays its __context__.
             self.depth -= 1
+            self._raise_pending()
+            raise
+        self.depth -= 1
+        self._raise_pending()
+
+    def _raise_pending(self) -> None:
         if self.depth == 0 and self.pending:
             self.pending = False
             raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+
+# A child that blocks a stop in the real signals_held (StopSignals), sends itself SIGTERM in the block and
+# then raises: what ends the block, and the exception that stays its __context__.
+SIGNALS_HELD_CHILD = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from vm.adapters.backup import StopSignals
+signals = StopSignals()
+signals.catch_stops()
+try:
+    with signals.held():
+        with signals.held():
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise RuntimeError("the block failed")
+except BaseException as e:
+    print(type(e).__name__, type(e.__context__).__name__)
+"""
+
+
+class PendingStopsMatchSignalsHeldTest(unittest.TestCase):
+    """_PendingStops, the fake of the stops held, does what the real signals_held does when its block
+    raises with a stop pending: the stop ends the outermost block, the failure its __context__."""
+
+    def test_the_real_signals_held_raises_the_stop_over_the_blocks_failure(self) -> None:
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", SIGNALS_HELD_CHILD, _CHECKOUT],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual((r.returncode, r.stdout), (0, "Stop RuntimeError\n"), r.stderr)
+
+    def test_the_fake_does_the_same(self) -> None:
+        signals = _PendingStops()
+        with self.assertRaises(vm_domain_backup.Stop) as ctx, signals.held(), signals.held():
+            signals.stop_now()
+            raise RuntimeError("the block failed")
+        self.assertIsInstance(ctx.exception.__context__, RuntimeError)
+        self.assertEqual((signals.depth, signals.pending), (0, False))
+
+    def test_a_failure_with_no_stop_pending_goes_on(self) -> None:
+        signals = _PendingStops()
+        with self.assertRaisesRegex(RuntimeError, "the block failed"), signals.held():
+            raise RuntimeError("the block failed")
+        self.assertEqual(signals.depth, 0)
 
 
 class NasStopHeldFromAnswerTest(unittest.TestCase):
@@ -3395,9 +4036,221 @@ class NasStopHeldFromAnswerTest(unittest.TestCase):
         self.assertNotIn("forget", [c[0] for c in restic.calls])
 
     def test_a_stop_during_the_check_of_a_vm_still_shut_off_waits_for_the_checks_end(self) -> None:
-        msg, store, _restic, at_check, total = self._shut_off(started=False)
-        self.assertEqual((msg, store.torn), ("stopped by signal SIGTERM", []))
+        msg, store, restic, at_check, total = self._shut_off(started=False)
+        self.assertEqual((msg, store.torn), (STOPPED_INDEXED, []))
+        self.assertEqual(_written(store), [[(SNAP_ID, "shut-off")]], "the checked read is indexed")
+        self.assertEqual([c[0] for c in restic.calls], ["cat"], "restic_ready only")
         self.assertGreater(total, at_check, "the sources' fingerprints were taken after the stop came")
+
+    def _live_held(self, *, commit_fails: bool) -> tuple[BaseException, FakeNasStore, list[int]]:
+        """nas_run of a running VM whose restic answers exit 0 with a snapshot and gets a stop at the staged
+        files' removal (held); (what ended the run, the store, the blockcommits done when the index was
+        written)."""
+        signals = _PendingStops()
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            _live: dict[str, str],
+            _store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "blockcommit" and commit_fails:
+                return 1, "", "error: block commit timed out"
+            return None
+
+        port, commands, store, _signals, _alerts = self._make_backup(
+            [("vda", self.disk_a)], on_virsh=hook, backup_fn=lambda: (0, {"snapshot_id": SNAP_ID}), signals=signals
+        )
+        commits: list[int] = []
+        write = store.write_index
+
+        def counted(entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+            commits.append([c[0][0] for c in commands.virsh_log].count("blockcommit"))
+            write(entries)
+
+        with (
+            mock.patch.object(store, "unstage", side_effect=lambda _folder: signals.stop_now()),
+            mock.patch.object(store, "write_index", side_effect=counted),
+            self.assertRaises(Exception) as ctx,
+        ):
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, _NAS_REPO, quiesce=False, live=True)
+        return ctx.exception, store, commits
+
+    def test_a_stop_at_the_staged_files_removal_of_a_good_read_indexes_it_after_the_merge_back(self) -> None:
+        stop, store, commits = self._live_held(commit_fails=False)
+        self.assertIsInstance(stop, vm_domain_backup.Stop)
+        self.assertEqual((str(stop), store.torn), (STOPPED_INDEXED, []))
+        self.assertEqual(_written(store), [[(SNAP_ID, "crash-consistent")]])
+        self.assertEqual(commits, [1], "the index is written after the merge back")
+
+    def test_a_held_stop_after_a_good_read_prints_the_runs_notes_first(self) -> None:
+        # They were dropped: a TPM copy that may be torn went unsaid for a backup the stop calls indexed.
+        note = "tpm changed while restic read it (/var/lib/swtpm): that copy may be torn"
+        lines: list[str] = []
+        preflight = vm_app_nas._nas_preflight
+
+        def noted(
+            cfg: vm_domain.VmSettings, p: vm_app_nas.NasBackup, vm: str, *, live: bool, quiesce: bool
+        ) -> vm_domain_backup.NasRun:
+            run = preflight(cfg, p, vm, live=live, quiesce=quiesce)
+            run.notes.append(note)
+            return run
+
+        def say(_out: FakeNasOut, text: str, *, flush: bool = False) -> None:
+            del flush
+            lines.append(text)
+
+        with (
+            mock.patch.object(vm_app_nas, "_nas_preflight", side_effect=noted),
+            mock.patch.object(FakeNasOut, "say", autospec=True, side_effect=say),
+        ):
+            stop, _store, _commits = self._live_held(commit_fails=False)
+        self.assertEqual(str(stop), STOPPED_INDEXED)
+        self.assertIn(f"  note: {note}", lines)
+
+    def test_a_stop_after_a_good_read_whose_merge_back_fails_indexes_nothing(self) -> None:
+        refused, store, _commits = self._live_held(commit_fails=True)
+        self.assertIsInstance(refused, Refused)
+        self.assertNotIsInstance(refused, vm_domain_backup.Stop)
+        self.assertEqual((store.written, store.torn), ([], []))
+        # The refusal names the good snapshot, which the next run names as one no record names.
+        self.assertIn(
+            f"\n(the backup itself: stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is a backup, "
+            "its read checked, but it is not in the index: the snapshot stays in the repository: the next NAS "
+            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept "
+            f"as a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore "
+            'it by its ID: vm/README.md, section "Restore from the NAS"))',
+            str(refused),
+        )
+
+    def _check_raises(self, *, stop: bool) -> tuple[BaseException, FakeNasStore, FakeNasRestic]:
+        """nas_run of a shut-off VM whose restic answers exit 0 with a snapshot, no stop carried, and whose
+        check after the read meets an error of the virsh port (stop: a stop held came before it)."""
+        signals = _PendingStops()
+        answered: list[bool] = []
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            _live: dict[str, str],
+            _store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] != "domstate":
+                return None
+            if answered:
+                if stop:
+                    signals.stop_now()
+                raise RuntimeError("the virsh port failed")
+            return 0, vm_domain.SHUT_OFF + "\n", ""
+
+        def backup() -> tuple[int, vm_domain_backup.ResticSummary]:
+            answered.append(True)
+            return 0, {"snapshot_id": SNAP_ID}
+
+        port, _commands, store, _signals, _alerts = self._make_backup(
+            [("vda", self.disk_a)], on_virsh=hook, backup_fn=backup, signals=signals
+        )
+        restic = port.restic
+        assert isinstance(restic, FakeNasRestic)
+        with self.assertRaises(Exception) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, _NAS_REPO, quiesce=False, live=False)
+        return ctx.exception, store, restic
+
+    def test_a_check_that_fails_with_no_stop_carried_records_nothing(self) -> None:
+        # Unchanged: only a stop that ended restic makes such a snapshot torn; else the error (or the stop
+        # that waited, which replaces it) goes on, and the next run's check names the snapshot.
+        for stop in (False, True):
+            with self.subTest(stop=stop):
+                e, store, restic = self._check_raises(stop=stop)
+                if stop:
+                    self.assertEqual(str(e), "stopped by signal SIGTERM")
+                    self.assertIsInstance(e.__context__, RuntimeError)
+                else:
+                    self.assertIsInstance(e, RuntimeError)
+                self.assertEqual((store.torn, store.written), ([], []))
+                self.assertEqual([c[0] for c in restic.calls], ["cat"], "restic_ready only")
+
+
+class NasStopAfterTheMergeBackTest(unittest.TestCase):
+    """A stop after a good read's merge back (in the retention, the index's listing or its write) ends the
+    run only once the snapshot is indexed, with no listing: else the next run names that backup as a
+    snapshot no record names."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a = "/img/a.qcow2"
+
+    def _run(self, where: str) -> tuple[BaseException, FakeNasStore, list[list[str]], FakeNasOut]:
+        """nas_run of a running VM whose good read is merged back, a stop coming where: "retention" (its
+        restic forget), "listing" (the index's restic snapshots) or "write" (the index's first write);
+        (what ended the run, the store, restic's calls, the output)."""
+        signals = _PendingStops()
+        port, _commands, store, _signals, _alerts = self._make_backup(
+            [("vda", self.disk_a)], on_virsh=lambda *_: None, signals=signals
+        )
+        port = dataclasses.replace(port, settings=_KeepSettings())
+        restic = port.restic
+        assert isinstance(restic, FakeNasRestic)
+        out = port.out
+        assert isinstance(out, FakeNasOut)
+        run, write = restic.run, store.write_index
+
+        def restic_run(env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+            answer = run(env, args, timeout)
+            if (where == "retention" and "--keep-weekly" in args) or (where == "listing" and args[0] == "snapshots"):
+                signals.stop_now()
+            return answer
+
+        def write_index(entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+            if where == "write" and not store.written:
+                store.written.append([])  # the first write started, cut short by the stop
+                signals.stop_now()
+            write(entries)
+
+        with (
+            mock.patch.object(restic, "run", side_effect=restic_run),
+            mock.patch.object(store, "write_index", side_effect=write_index),
+            self.assertRaises(BaseException) as ctx,
+        ):
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, _NAS_REPO, quiesce=False, live=True)
+        return ctx.exception, store, restic.calls, out
+
+    def test_the_backup_is_indexed_before_the_stop_ends_the_run(self) -> None:
+        for where in ("retention", "listing", "write"):
+            with self.subTest(where=where):
+                stop, store, calls, _out = self._run(where)
+                self.assertIsInstance(stop, vm_domain_backup.Stop)
+                self.assertEqual(str(stop), STOPPED_INDEXED)
+                self.assertEqual(_written(store)[-1], [(SNAP_ID, "crash-consistent")])
+                self.assertEqual(store.torn, [])
+                retention = [c for c in calls if "--keep-weekly" in c]
+                self.assertEqual(len(retention), 1, "the retention ran once, before the stop")
+                self.assertEqual([c for c in calls if c[0] == "forget" and c not in retention], [], "nothing forgotten")
+
+    def test_the_runs_notes_are_printed_before_the_stop(self) -> None:
+        # They were dropped: a TPM copy that may be torn went unsaid for a backup the stop calls indexed.
+        note = "tpm changed while restic read it (/var/lib/swtpm): that copy may be torn"
+        preflight = vm_app_nas._nas_preflight
+
+        def noted(
+            cfg: vm_domain.VmSettings, p: vm_app_nas.NasBackup, vm: str, *, live: bool, quiesce: bool
+        ) -> vm_domain_backup.NasRun:
+            run = preflight(cfg, p, vm, live=live, quiesce=quiesce)
+            run.notes.append(note)
+            return run
+
+        for where in ("retention", "listing", "write"):
+            with self.subTest(where=where), mock.patch.object(vm_app_nas, "_nas_preflight", side_effect=noted):
+                stop, _store, _calls, out = self._run(where)
+                self.assertEqual(str(stop), STOPPED_INDEXED)
+                self.assertIn(f"  note: {note}", out.lines)
+
+    def test_a_stop_in_the_retention_lists_nothing_more(self) -> None:
+        _stop, _store, calls, out = self._run("retention")
+        self.assertEqual([c[0] for c in calls].count("snapshots"), 0, "no listing after the stop")
+        self.assertNotIn("Done:", " ".join(out.lines))
 
 
 class _LingeringTimer(threading.Timer):
@@ -3600,7 +4453,9 @@ class ResticOutputDescriptorTest(unittest.TestCase):
         """A pipe whose read end has a descriptor at or above SELECT_FD_LIMIT: (read end, write end)."""
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft <= SELECT_FD_LIMIT:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (SELECT_FD_LIMIT * 2, hard))
+            # Up to the hard limit only: an unprivileged process cannot raise it (a hard limit at or below
+            # SELECT_FD_LIMIT leaves no such descriptor, and the test fails).
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, SELECT_FD_LIMIT * 2), hard))
             self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
         r, w = os.pipe()
         self.addCleanup(os.close, w)
@@ -3621,6 +4476,35 @@ class ResticOutputDescriptorTest(unittest.TestCase):
     def test_a_high_descriptor_with_nothing_to_read_times_out(self) -> None:
         stream, _ = self._high_pipe()
         self.assertFalse(vm_adapters_restic._Output(stream).fill(0.01))
+
+
+# A child that lowers its own limit of open files to a hard limit between SELECT_FD_LIMIT and twice it (as
+# some containers and CI runners set it), then runs a test of ResticOutputDescriptorTest.
+LOW_HARD_LIMIT_CHILD = r"""
+import resource, sys, unittest
+sys.path.insert(0, sys.argv[1])
+hard = min(resource.getrlimit(resource.RLIMIT_NOFILE)[1], 1536)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 1024), hard))
+suite = unittest.defaultTestLoader.loadTestsFromName(sys.argv[2])
+result = unittest.TextTestRunner(stream=sys.stdout, verbosity=0).run(suite)
+sys.exit(0 if result.wasSuccessful() and result.testsRun == 1 else 1)
+"""
+
+
+class ResticOutputDescriptorLimitTest(unittest.TestCase):
+    """ResticOutputDescriptorTest raises the soft limit of open files only up to the hard limit."""
+
+    def test_it_runs_under_a_hard_limit_below_twice_select_fd_limit(self) -> None:
+        name = f"{__name__}.ResticOutputDescriptorTest.test_a_line_from_a_high_descriptor_is_read"
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", LOW_HARD_LIMIT_CHILD, _CHECKOUT, name],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 class ResticBackupStartStopTest(unittest.TestCase):

@@ -21,7 +21,7 @@ from cst_core.domain.contracts import CPU_SETTINGS, SNAPSHOTS_CONF, StateFormatK
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import SettingsProblem, ShellAssignments, group
-from cst_core.domain.units import GLOBAL_USER_UNIT_DIR, SYSTEM_UNIT_DIR, USER_UNIT_DIR_REL
+from cst_core.domain.units import CONFIG_UNIT_DIR_REL, GLOBAL_USER_UNIT_DIR, SYSTEM_UNIT_DIR, USER_UNIT_DIR_REL
 from cst_core.domain.values import HOUR, Json, parse_whole_number
 from swap.domain import SETTINGS_REL
 
@@ -713,37 +713,49 @@ def is_unit_file(dest: str) -> bool:
     return dest.endswith(_UNIT_SUFFIXES) and not os.path.dirname(dest).endswith(".d")
 
 
-def _unit_folder_scope(folder: str, home: str, config: str) -> UnitScope | None:
-    """Whose manager loads units from folder (home: the user's, "" for root's record; config: the user's
-    XDG_CONFIG_HOME, "" when it is not set), or None."""
+def _unit_folder_scope(folder: str, home: str, user_dir: str) -> UnitScope | None:
+    """Whose manager loads units from folder (home: the user's, "" for root's record; user_dir: the folder
+    the user's manager names for the user's own units, "" when it was not asked), or None."""
     if folder == SYSTEM_UNIT_DIR:
         return UnitScope.SYSTEM
     if folder == GLOBAL_USER_UNIT_DIR:
         return UnitScope.USER
     if home and folder == os.path.join(home.rstrip("/"), USER_UNIT_DIR_REL):
         return UnitScope.USER
-    if home and config and folder == os.path.join(config.rstrip("/"), "systemd", "user"):
+    if home and user_dir and folder == os.path.normpath(user_dir):
         return UnitScope.USER
     return None
 
 
-def recorded_unit(dest: str, home: str, config: str = "") -> tuple[UnitScope, str] | None:
+def recorded_unit(dest: str, home: str, user_dir: str = "") -> tuple[UnitScope, str] | None:
     """(the manager, the unit name) of a recorded path that is a unit file (FOLDER/NAME) or a drop-in
     (FOLDER/NAME.d/FILE.conf) in a folder a manager loads units from; None for anything else (a
     *.wants link, a file of NAME.d that is no .conf, a drop-in of a manager's own settings such as
-    journald.conf.d, /run). home: the user's, for ~/.config/systemd/user; "" for root's record. config:
-    the user's XDG_CONFIG_HOME, for CONFIG/systemd/user (where cst bluetooth writes the LDAC watcher's
-    unit when it is set); "" when it is not set, and ignored for root's record."""
+    journald.conf.d, /run). home: the user's, for ~/.config/systemd/user; "" for root's record. user_dir:
+    the folder the user's manager loads the user's own units from (its UnitPath: where cst bluetooth writes
+    the LDAC watcher's unit); "" when it was not asked, and ignored for root's record."""
     folder, base = os.path.split(dest)
-    scope = _unit_folder_scope(folder, home, config)
+    scope = _unit_folder_scope(folder, home, user_dir)
     if scope is not None:
         return (scope, base) if base.endswith(_UNIT_SUFFIXES) else None
     parent, sub = os.path.split(folder)
-    scope = _unit_folder_scope(parent, home, config)
+    scope = _unit_folder_scope(parent, home, user_dir)
     name = sub.removesuffix(".d")
     if scope is None or name == sub or not name.endswith(_UNIT_SUFFIXES) or not base.endswith(".conf"):
         return None
     return scope, name
+
+
+def needs_user_unit_dir(dest: str, home: str) -> bool:
+    """A path of the user's record that is a unit file or a drop-in in a folder ending in /systemd/user
+    that recorded_unit cannot place without the user manager's own folder (neither /etc/systemd/user nor
+    ~/.config/systemd/user): only for such a path is the manager asked for its UnitPath."""
+    if not home or recorded_unit(dest, home) is not None:
+        return False
+    folder, base = os.path.split(dest)
+    if not base.endswith(_UNIT_SUFFIXES):  # a drop-in: FOLDER/NAME.d/FILE.conf
+        folder = os.path.dirname(folder)
+    return folder.endswith("/" + CONFIG_UNIT_DIR_REL) and recorded_unit(dest, home, folder) is not None
 
 
 def unit_applies(name: str, unit_id: str) -> bool:

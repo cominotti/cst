@@ -58,7 +58,13 @@ from cst_core.domain.values import (
     parse_integer,
     parse_whole_number,
 )
-from cst_core.domain.units import ActiveState
+from cst_core.domain.units import (
+    ActiveState,
+    UNIT_PATH_PROP,
+    named_user_unit_dir,
+    show_manager_value_argv,
+    user_unit_dir,
+)
 from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -325,6 +331,58 @@ class ActiveStateTest(unittest.TestCase):
         self.assertNotIn("", running)
         self.assertNotIn("a-word-a-newer-systemd-adds", running)
         self.assertEqual(str(ActiveState.MAINTENANCE), "maintenance")
+
+
+class UserUnitDirTest(unittest.TestCase):
+    """user_unit_dir: the folder a user manager reads the user's own units from, by its UnitPath."""
+
+    # systemd 262's answer for a user manager without XDG_CONFIG_HOME (a workstation's, the home renamed).
+    SYSTEMD_262: Final = (
+        "/var/home/u/.config/systemd/user.control /run/user/1000/systemd/user.control "
+        "/run/user/1000/systemd/transient /run/user/1000/systemd/generator.early /var/home/u/.config/systemd/user "
+        "/etc/xdg/systemd/user /etc/systemd/user /run/user/1000/systemd/user /run/systemd/user "
+        "/run/user/1000/systemd/generator /var/home/u/.local/share/systemd/user "
+        "/var/home/u/.local/share/flatpak/exports/share/systemd/user /var/lib/flatpak/exports/share/systemd/user "
+        "/usr/local/share/systemd/user /usr/share/systemd/user /usr/local/lib/systemd/user /usr/lib/systemd/user "
+        "/run/user/1000/systemd/generator.late\n"
+    )
+
+    def test_the_first_folder_of_its_own(self) -> None:
+        self.assertEqual(user_unit_dir(self.SYSTEMD_262, "/var/home/u"), "/var/home/u/.config/systemd/user")
+        # The manager's own XDG_CONFIG_HOME comes first (systemd's persistent config folder).
+        xdg = self.SYSTEMD_262.replace("/var/home/u/.config/systemd/user ", "/var/home/u/xdg/systemd/user ")
+        self.assertEqual(user_unit_dir(xdg, "/var/home/u"), "/var/home/u/xdg/systemd/user")
+        self.assertEqual(
+            user_unit_dir("/srv/u/cfg//systemd/user /etc/systemd/user", "/home/u"), "/srv/u/cfg/systemd/user"
+        )
+
+    def test_systemds_default_without_a_safe_answer(self) -> None:
+        default = "/home/u/.config/systemd/user"
+        for answer in (None, "", "\n", "/etc/systemd/user /usr/lib/systemd/user", "/run/user/1/systemd/user"):
+            with self.subTest(answer=answer):
+                self.assertEqual(user_unit_dir(answer, "/home/u"), default)
+        # A folder with a space: systemd does not quote it, the split gives a relative piece.
+        spaced = "/home/u/my cfg/systemd/user /etc/systemd/user"
+        self.assertEqual(user_unit_dir(spaced, "/home/u"), default)
+        # A piece of a split that is still absolute lands on a system folder: not the user's.
+        self.assertEqual(user_unit_dir("/home/u/x /etc/systemd/user", "/home/u"), default)
+
+    def test_the_folder_named_or_none(self) -> None:
+        # named_user_unit_dir: the folder only when the answer names it; None where user_unit_dir guesses
+        # systemd's default (also for an answer that names ~/.config/systemd/user, it is named).
+        self.assertEqual(named_user_unit_dir(self.SYSTEMD_262), "/var/home/u/.config/systemd/user")
+        self.assertEqual(named_user_unit_dir("/srv/u/cfg//systemd/user /etc/systemd/user"), "/srv/u/cfg/systemd/user")
+        for answer in (
+            None,
+            "",
+            "\n",
+            "/etc/systemd/user /usr/lib/systemd/user",
+            "/run/user/1/systemd/user",
+            "/home/u/my cfg/systemd/user /etc/systemd/user",
+            "/home/u/x /etc/systemd/user",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNone(named_user_unit_dir(answer))
 
 
 class ManagedFilesTest(unittest.TestCase):
@@ -692,6 +750,50 @@ class AdaptersTest(unittest.TestCase):
         )
         self.assertEqual(local.show_units("*.mount", ("Id",)), [{"Id": "a.mount"}])
         self.assertEqual(seen[0][1], {"check": False, "timeout": 5, "locale_c": True, "on_host": False})
+
+    def test_systemctl_show_value_of_the_manager_itself(self) -> None:
+        seen: list[tuple[list[str], dict[str, object]]] = []
+
+        class Recording:
+            def run(self, argv: Sequence[str], *, check: bool = False, **options: object) -> CommandResult:
+                seen.append((list(argv), {"check": check, **options}))
+                return CommandResult(0, "/h/.config/systemd/user /etc/systemd/user\n", "")
+
+        # No unit: a property of the manager, asked as show asks (on the host from a toolbox unless
+        # LOCAL, the C locale, 20 s or the adapter's timeout); a unit: as before, the adapter's own.
+        user = SystemctlAdapter(Recording(), user=True, on_host=SystemctlHost.EVERY)
+        res = user.show_value(None, UNIT_PATH_PROP)
+        self.assertEqual(res.stdout, "/h/.config/systemd/user /etc/systemd/user\n")
+        user.show_value(UnitName("wireplumber"), "MainPID")
+        self.assertEqual(
+            seen,
+            [
+                (
+                    ["systemctl", "--user", "show", "-p", "UnitPath", "--value"],
+                    {"check": False, "timeout": 20, "locale_c": True, "on_host": True},
+                ),
+                (
+                    ["systemctl", "--user", "show", "-p", "MainPID", "--value", "wireplumber"],
+                    {"check": False, "timeout": None, "locale_c": False, "on_host": True},
+                ),
+            ],
+        )
+        seen.clear()
+        local = SystemctlAdapter(Recording(), timeout=5, on_host=SystemctlHost.LOCAL)
+        local.show_value(None, UNIT_PATH_PROP, output=OutputMode.STDOUT)
+        self.assertEqual(
+            seen,
+            [
+                (
+                    ["systemctl", "show", "-p", "UnitPath", "--value"],
+                    {"check": False, "timeout": 5, "locale_c": True, "on_host": False, "output": OutputMode.STDOUT},
+                )
+            ],
+        )
+        self.assertEqual(
+            show_manager_value_argv(["systemctl", "--user"], "UnitPath"),
+            ["systemctl", "--user", "show", "-p", "UnitPath", "--value"],
+        )
 
     def test_systemctl_adapter_user_scope(self) -> None:
         unit = UnitName("cst-toolchains-prune.timer")
@@ -1953,6 +2055,7 @@ class StateContractsTest(unittest.TestCase):
         StateFormatKey.GAME_INTENDED,
         StateFormatKey.GAME_LEFTOVERS,
         StateFormatKey.DOCKER_NOCOW_OUTCOME,
+        StateFormatKey.DOCKER_NOCOW_POSTPONED,
     )
 
     def test_every_format_names_real_writers_and_readers(self) -> None:
@@ -2008,7 +2111,7 @@ class StateContractsTest(unittest.TestCase):
         from cpu.domain import GAME_STATE
         from cpu.game.domain import GamePaths
         from cst_core.domain.record import ROOT_RECORD
-        from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX, VM_TORN
+        from doctor.domain import ALERT_PENDING, GAME_INTENDED, NOCOW_POSTPONED, VM_INDEX, VM_TORN
 
         self.assertEqual(GcPaths().last_used, state_format(StateFormatKey.DOCKER_GC_STATE).path)
         self.assertEqual(GcPaths().last_run, state_format(StateFormatKey.DOCKER_GC_LAST_RUN).path)
@@ -2027,6 +2130,9 @@ class StateContractsTest(unittest.TestCase):
         self.assertEqual(VM_TORN, state_format(StateFormatKey.VM_NAS_TORN).path)
         self.assertEqual(ROOT_RECORD, state_format(StateFormatKey.INSTALL_RECORD).path)
         self.assertEqual(NocowPaths().outcome, state_format(StateFormatKey.DOCKER_NOCOW_OUTCOME).path)
+        postponed = state_format(StateFormatKey.DOCKER_NOCOW_POSTPONED)
+        self.assertEqual((NocowPaths().postponed, NOCOW_POSTPONED), (postponed.path, postponed.path))
+        self.assertEqual(postponed.version, 1)
 
     def test_paths_of_installed_programs_come_from_the_manifest(self) -> None:
         from btrfs.bulk.domain import BulkPaths

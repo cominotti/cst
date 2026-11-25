@@ -9,8 +9,9 @@ runs, their arguments and where their output goes are bluetooth-setup.sh's.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from functools import cached_property
 import re
-from typing import Literal
+from typing import Final, Literal
 
 from cst_core.domain.shapes import parse_json
 from bluetooth.domain import (
@@ -29,24 +30,24 @@ from bluetooth.domain import (
     render_unit,
     render_wp,
     satisfied,
-    set_keys,
-    settings_report,
     unit_state,
     wp_state,
 )
 from bluetooth.ports import BluetoothHostPort
 from bluetooth.setup.domain import (
+    BT_RESTART_MAIN_CONF,
+    BT_RESTART_OWED,
     BapState,
     BearerState,
     BluetoothCommand,
     Config,
-    Exit,
     LDAC_WATCHER_LABEL,
     LE_AUDIO_LABEL,
+    LW_KEPT_NOTE,
     LeState,
     Options,
     Paths,
-    OLD_WP_MARKER,
+    OWED_NOTE,
     REFUSED_CONFLICT_NOTE,
     WpState,
     bap_state,
@@ -54,8 +55,6 @@ from bluetooth.setup.domain import (
     is_running,
     item,
     no_headset_note,
-    read_settings_output,
-    rule_device,
     senders_of,
     home_tilde,
     wp_label,
@@ -63,60 +62,25 @@ from bluetooth.setup.domain import (
     watcher_prog_state,
     wp_word,
 )
+from bluetooth.setup.application import watcher_unit
+from bluetooth.setup.application.inputs import rule_headsets
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
 from cst_core.domain.units import ActiveState, EnablementState
-from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
+from cst_core.ports import (
+    ClockPort,
+    CommandResult,
+    CommandRunnerPort,
+    InstallRecordPort,
+    OutputMode,
+    SystemdPort,
+    UnitName,
+)
 
 
-def read_bluetooth_settings(
-    host: BluetoothHostPort, paths: Paths
-) -> tuple[dict[str, str], tuple[str, ...], str] | Exit:
-    """(the merged settings, the keys the user's file sets, what to print on stderr). As
-    bluetooth-setup.sh's two bt-helper calls (settings, then settings-keys), each names a file
-    it cannot read: the first leaves the settings empty, the second (the user's file) ends the
-    run with exit 1."""
-    files: list[tuple[str, str]] = []
-    user: str | None = None
-    try:
-        for path in (paths.default_settings, paths.user_settings):
-            text = host.read_or_none(path)
-            if text is not None:
-                files.append((path, text))
-        user = next((t for p, t in files if p == paths.user_settings), "")
-        shown, said = settings_report(files)
-    except (OSError, ValueError) as e:
-        shown, said = "", f"bt-helper: {e}\n"
-    if user is None:  # not read yet: settings-keys read it again
-        try:
-            user = host.read_or_none(paths.user_settings) or ""
-        except (OSError, ValueError) as e:
-            return Exit(1, err=f"{said}bt-helper: {e}\n")
-    return read_settings_output(shown), tuple(set_keys(user)), said
-
-
-def is_cst_rule(files: SetupFilesPort, path: str) -> bool:
-    """The LDAC rule at path carries the marker of CST or of apply-le-audio.sh (its writers)."""
-    return files.contains(path, MARKER, quiet=True) or files.contains(path, OLD_WP_MARKER, quiet=True)
-
-
-def rule_headsets(files: SetupFilesPort, wp_dir: str) -> list[str]:
-    """The headsets of the LDAC rules CST (or apply-le-audio.sh) wrote in wp_dir: its
-    50-bluez-<ID>.conf files with one of their markers. Another program's file of that name, a .bak
-    copy and a name that is not an address do not count."""
-    try:
-        names = files.list_dir(wp_dir)
-    except OSError:
-        return []
-    found: list[str] = []
-    for name in names:
-        device, path = rule_device(name), f"{wp_dir}/{name}"
-        if device is None or not files.is_file(path):
-            continue
-        if is_cst_rule(files, path):
-            found.append(device)
-    return found
+# The states of the watcher's program that are CST's (revert and apply with the watcher off remove it).
+_LW_PROG_OURS: Final = (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE)
 
 
 class StepFailed(Exception):
@@ -141,7 +105,9 @@ class SetupMachine:
     host: BluetoothHostPort
     container: bool
     bt_timeout: int
+    records: InstallRecordPort  # the user's install record, read only (the watcher's older copies)
     lc_ctype: str  # what CST_LC_CTYPE hands the installer ("" or "=VALUE")
+    c_locale: tuple[str, ...]  # env's words for the C locale (cst_core's c_locale): a command sudo runs
     python: str  # the system Python the installer runs on
 
 
@@ -184,6 +150,8 @@ class Survey:
         self.le_change = False
         self.bearer_state = BearerState.NONE
         self.lw_want = False
+        self.lw_stale: tuple[str, ...] = ()  # an older CST's copies of the watcher's unit, elsewhere
+        self.lw_kept: tuple[str, ...] = ()  # recorded copies kept: the manager names no folder
         self.lw_unit_st: OwnedState | Literal[""] = ""
         self.lw_prog_st: OwnedState | Literal[""] = ""
         self.lw_enabled = ""
@@ -503,18 +471,30 @@ class Survey:
         f = self.m.files
         self.lw_want = bool(self.c.ldac_rate) and self.headset  # the watcher is for one headset
         self.lw_unit_st = self.file_state(
-            self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
+            self.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
+        self.lw_stale = watcher_unit.older_copies(self.m.records, self.p.home, self.lw_unit_file, self.lw_unit_path)
+        self.lw_kept = watcher_unit.kept_copies(f, self.m.records, self.p.home, self.lw_unit_file, self.lw_unit_path)
         self.lw_prog_st = self._lw_prog_state() if f.exists(self.p.lw_prog) else OwnedState.MISSING
         u = self.m.user_systemd_host
         self.lw_enabled = u.is_enabled(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
         self.lw_active = u.is_active(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
         if self.lw_want:
             want = (OwnedState.OK, OwnedState.OK, "enabled", ActiveState.ACTIVE)
-            done = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) == want
-            self.lw_change = not done
+            ours_change = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) != want
         else:
-            self.lw_change = self.lw_ours_present()
+            ours_change = self.lw_removes()
+        self.lw_change = ours_change or bool(self.lw_stale)
+
+    @cached_property
+    def lw_unit_path(self) -> str | None:
+        """The user manager's UnitPath (watcher_unit): asked once, on first use."""
+        return watcher_unit.unit_path(self.m.user_systemd_host)
+
+    @cached_property
+    def lw_unit_file(self) -> str:
+        """The watcher's unit file, where the user manager reads units (watcher_unit)."""
+        return watcher_unit.unit_file(self.lw_unit_path, self.p.home)
 
     def _lw_prog_state(self) -> OwnedState:
         """The watcher's program by the installer's plan (watcher_prog_state; a failed plan's error on stderr)."""
@@ -530,8 +510,18 @@ class Survey:
         return f"no headset is set (LDAC_RATE={rate} needs one)" if rate else "LDAC_RATE is empty"
 
     def lw_ours_present(self) -> bool:
-        prog_ours = (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE)
-        return self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE) or self.lw_prog_st in prog_ours
+        return self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE) or self.lw_prog_st in _LW_PROG_OURS
+
+    def lw_keeps_prog(self) -> bool:
+        """revert (or apply with the watcher off) keeps CST's program of the watcher: recorded copies of
+        its unit are kept (lw_kept), and one of them may be the unit the manager runs."""
+        return bool(self.lw_kept) and self.lw_prog_st in _LW_PROG_OURS
+
+    def lw_removes(self) -> bool:
+        """revert (or apply with the watcher off) removes something of the watcher's: its unit, or its
+        program unless that is kept (lw_keeps_prog)."""
+        unit_ours = self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE)
+        return unit_ours or (self.lw_prog_st in _LW_PROG_OURS and not self.lw_keeps_prog())
 
     def lw_unit_label(self) -> str:
         return f"systemd/user/{LDAC_UNIT}"
@@ -666,6 +656,7 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
+        self._lw_stale_report()
         if self.lw_enabled != EnablementState.ENABLED or self.lw_active != ActiveState.ACTIVE:
             why = (
                 f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it"
@@ -679,8 +670,9 @@ class Survey:
     def _lw_off_report(self, rate: str) -> None:
         """The watcher's rows when apply keeps it off."""
         why = self.lw_off_why()
-        if self.lw_ours_present():
-            self.item("remove", LDAC_WATCHER_LABEL, f"{why}: apply stops and removes {LDAC_UNIT} and its program")
+        if self.lw_removes():
+            what = LDAC_UNIT if self.lw_keeps_prog() else f"{LDAC_UNIT} and its program"
+            self.item("remove", LDAC_WATCHER_LABEL, f"{why}: apply stops and removes {what}")
         elif rate:
             self.item("skip", LDAC_WATCHER_LABEL, f"off: {why}")
         else:
@@ -689,6 +681,14 @@ class Survey:
             self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
         if self.lw_prog_st == OwnedState.CONFLICT:
             self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
+        if self.lw_keeps_prog():
+            self.item("note", self.lw_prog_label(), LW_KEPT_NOTE)
+        self._lw_stale_report()
+
+    def _lw_stale_report(self) -> None:
+        """The rows of an older CST's copies of the watcher's unit (watcher_unit.stale_rows)."""
+        for row in watcher_unit.stale_rows(self.m.files, self.lw_stale, self.lw_unit_file, self.tilde):
+            self.item(*row)
 
     def lw_last_failure(self) -> bool:
         """The watcher's last outcome in its log was a failure (sets lw_fail)."""
@@ -731,13 +731,11 @@ class Survey:
         """The restarts section of plan: what apply restarts, and why."""
         self.section("restarts")
         if self.bt_restart:
-            self.item(
-                "restart",
-                BLUETOOTH_UNIT,
-                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
-            )
-            if self.bt_owed:
-                self.item("", "", "(still owed: an earlier run did not restart it)")
+            # The reason that holds: a restart only the record owes is named as owed, not as a main.conf
+            # change (main.conf is already as wanted after --no-restart, or untouched after --force).
+            self.item("restart", BLUETOOTH_UNIT, BT_RESTART_MAIN_CONF if self.mc_changed else BT_RESTART_OWED)
+            if self.mc_changed and self.bt_owed:
+                self.item("", "", OWED_NOTE)
         else:
             self.item("ok", BLUETOOTH_UNIT, "no restart needed")
         if self.wp_restart:
@@ -745,7 +743,7 @@ class Survey:
             if self.le_change:
                 self.item("", "", "(the LE Audio change takes effect only with this restart)")
             if self.wp_owed:
-                self.item("", "", "(still owed: an earlier run did not restart it)")
+                self.item("", "", OWED_NOTE)
         else:
             self.item("ok", "wireplumber (your session)", "no restart needed")
 
@@ -754,8 +752,8 @@ class Survey:
         self.compute_plan()
         self.out(
             "Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews comments or the install record, restarts nothing;\n"
-            "write/update/remove/set/restart = apply would change that; CONFLICT = apply stops; ? = could not be read;\n"
-            "warn/note = for your information.\n"
+            "write/update/remove/set/restart = apply would change that; forget = apply leaves the file alone and drops its install record line;\n"
+            "CONFLICT = apply stops; ? = could not be read; warn/note = for your information.\n"
         )
         self.header()
         self.files_report()
@@ -771,7 +769,7 @@ class Survey:
             self.diff(self.p.le_conf, render_le_off())
         if self.lw_want and self.lw_unit_st == OwnedState.CHANGE:
             self.section(f"{self.lw_unit_label()}, as apply would write it")
-            self.diff(self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate))
+            self.diff(self.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate))
         self.out("\n")
         if (
             self.mc_changed

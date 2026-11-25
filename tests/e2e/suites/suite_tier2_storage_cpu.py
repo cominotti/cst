@@ -693,6 +693,74 @@ echo E2E-OK
 """
 )
 
+# test_05d: mark's second look at the volumes fails after +C. A small tmpfs
+# mounted over a copy-on-write volume's _data hides its file: the first look
+# finds no copy-on-write data (no request yet), and the second one's +C on that
+# folder fails on tmpfs (EOPNOTSUPP; ENOTTY on a kernel without tmpfs flags): a
+# stand-in for data the first look did not see and a second look that failed.
+# tmpfs cannot hold +C, and the second look comes only after +C is set on the
+# volumes folder, so this needs the loop btrfs. mark exits 2 and writes the
+# request all the same; with the mount gone, the next boot migrates the hidden
+# file.
+NOCOW_SECOND_SCAN_SCRIPT = (
+    r"""
+set -E
+trap 'echo "test_05d FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+"""
+    + NOCOW_FAULT_FNS
+    + r"""
+vol=e2e-scan
+cleanup() {
+    local _
+    for _ in 1 2 3 4 5; do
+        mountpoint -q "$vols/$vol/_data" 2>/dev/null || break
+        umount "$vols/$vol/_data" || umount -l "$vols/$vol/_data" || true
+    done
+    rm -rf "${vols:?}/$vol"
+    rm -f "$flag" "$attempts" "$state/postponed" "$state/outcome"
+    chattr +C "$vols" 2>/dev/null || true   # as install left it
+    systemctl reset-failed "$unit" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+test -x "$helper"
+idle_docker
+test ! -e "$flag"
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]   # as install (and test_05a) left it
+if grep -qF ' with copy-on-write data' <<<"$("$helper" status)"; then
+    fail "a volume holds copy-on-write data before the test: $("$helper" status)"
+fi
+cow_volume "$vol"
+d="$vols/$vol/_data"
+sum="$(sha256sum <"$d/db")"
+mount -t tmpfs -o size=1m tmpfs "$d"
+rm -f "$state/postponed" "$state/outcome"
+t0="$(mark)"
+
+# 1. mark: the second look fails after +C; the request is written all the same.
+rc=0; out="$("$helper" mark 2>&1)" || rc=$?
+echo "E2E-NOCOW mark, its second look failing: rc=$rc $out"
+[[ "$rc" == 2 ]]
+grep -qF "the migration is requested: the next boot looks at the volumes again" <<<"$out" || fail "mark's line: $out"
+test -e "$flag" || fail "mark wrote no request"
+test ! -e "$attempts"
+test ! -e "$state/outcome"
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]
+
+# 2. The mount gone: the next boot rewrites what the first look did not see.
+umount "$d"
+[[ "$(lsattr "$d/db" | awk '{print $1}')" != *C* ]]
+run_unit
+wait_lines "$t0" 'all Docker volumes are NOCOW now' 1
+[[ "$(sha256sum <"$d/db")" == "$sum" ]]
+[[ "$(lsattr "$d/db" | awk '{print $1}')" == *C* ]]
+[[ "$(ls -A "$vols/$vol")" == _data ]]
+test ! -e "$flag"
+test ! -e "$attempts"
+echo E2E-OK
+"""
+)
+
 
 # test_10a: runs a command on a new pseudo-terminal (crypt-perf needs a
 # terminal: it checks [[ -t 0 ]] and cryptsetup reads /dev/tty) and answers
@@ -1745,6 +1813,18 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
         for line in out.splitlines():
             if line.startswith("E2E-NOCOW"):
                 print(f"\ntest_05c: {line}")
+        self.assertIn("E2E-OK", out)
+
+    def test_05d_docker_volumes_nocow_mark_requests_when_its_second_scan_fails(self) -> None:
+        """docker-volumes-nocow mark when its second look at the volumes (after +C) fails: a tmpfs over a
+        copy-on-write volume's _data hides its file from the first look and refuses +C at the second; mark
+        exits 2, says the migration is requested and writes the flag (no count, no outcome record); with
+        the mount gone the next boot rewrites the hidden file with the same data and +C (flag and count
+        gone). Before, mark left +C and no flag, and no boot asked again."""
+        out = exec_bash(self.PRIV_CONTAINER, NOCOW_SECOND_SCAN_SCRIPT).stdout
+        for line in out.splitlines():
+            if line.startswith("E2E-NOCOW"):
+                print(f"\ntest_05d: {line}")
         self.assertIn("E2E-OK", out)
 
     def test_06_cpu_cgroups_game_profile_watchdog_polkit_and_vm_pin(self) -> None:

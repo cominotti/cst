@@ -512,10 +512,29 @@ install_pending_alerts() {
     systemctl --global enable "${PENDING_UNIT}"
     # A user manager already running sees the new unit only after a reload
     # (otherwise from the next login on; no harm either way).
-    if [[ -n "${target_user}" && "${target_user}" != root ]]; then
-        systemctl --user -M "${target_user}@" daemon-reload 2>/dev/null || true
-    fi
+    reload_user_managers
     cst_mark btrfs:alerts
+}
+
+# reload_user_managers: every running user manager (each user@UID.service,
+# root's too: it reads /etc/systemd/user as well) reloads, so each user
+# already logged in sees a user unit just rewritten there, not only the one
+# who ran the install. Best try and silent, as the one reload was before.
+# When the managers cannot be listed, only the calling user's (SUDO_USER) is
+# reloaded, as before.
+reload_user_managers() {
+    local listing unit uid
+    local -a uids=()
+    if listing="$(systemctl list-units --type=service --state=active --plain --no-legend --no-pager 'user@*.service' 2>/dev/null)"; then
+        while read -r unit _; do
+            if [[ "${unit}" =~ ^user@([0-9]+)\.service$ ]]; then uids+=("${BASH_REMATCH[1]}"); fi
+        done <<<"${listing}"
+    elif [[ -n "${target_user}" && "${target_user}" != root ]]; then
+        uids=("${target_user}")
+    fi
+    for uid in "${uids[@]}"; do
+        systemctl --user -M "${uid}@" daemon-reload 2>/dev/null || true
+    done
 }
 
 # remove_old_reader: the reader and user unit of versions named f44-tools.
@@ -1030,7 +1049,8 @@ DOCKER_NOCOW_BIN=/usr/local/sbin/docker-volumes-nocow
 # mark writes the request itself before it sets +C: the attempt counter reset, then the flag,
 # each flushed (exit 1: volumes left to copy). Also when daemon.json cannot be read (exit 2,
 # nothing marked: the first boot after the fix migrates). Every exit 2 leaves a journal line;
-# when the request could not be written, the folder keeps no +C and the next boot asks again.
+# when the request could not be written, the folder keeps no +C and the next boot asks again;
+# when mark's second look at the volumes fails after +C, the request is written all the same.
 # Nothing is written here: a flag touched beside an old count would make the next boot give up
 # at once.
 mark_docker_volumes() {

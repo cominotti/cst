@@ -14,7 +14,7 @@ import os.path
 import re
 from typing import Final, Literal
 
-from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
+from bluetooth.domain import LDAC_PROG, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.files import OwnedState
 from cst_core.domain.install import InstallReportWord
@@ -36,6 +36,39 @@ SETUP_SCRIPT: Final = MODULE_BY_NAME["bluetooth"].script  # the shell front cst 
 REFUSED_CONFLICT_NOTE: Final = "not written by CST: apply refuses; move it away by hand"
 LDAC_WATCHER_LABEL: Final = "LDAC rate watcher"  # the watcher's row in plan and status
 LE_AUDIO_LABEL: Final = "LE Audio"  # LE Audio's row in plan and status (and status's section)
+# The row of an older CST's copy of the watcher's unit, under the shell's XDG_CONFIG_HOME.
+LW_STALE_NOTE: Final = "an older CST's copy, where your user manager does not read units: apply removes it"
+LW_STALE_FOREIGN_NOTE: Final = "recorded as CST's, not written by CST: left alone; apply drops its record line"
+LW_STALE_SAME_NOTE: Final = "the same file as the unit's, by another path: apply only drops this record line"
+LW_STALE_LINK_NOTE: Final = "the enable link of that older copy: apply removes it"
+# Why revert (or apply with the watcher off) keeps the watcher's program while it keeps the recorded copies
+# of its unit (watcher_unit.kept_copies): one of them may be the unit the manager runs.
+LW_KEPT_WHY: Final = (
+    "the user manager does not say where it reads units (UnitPath), so a recorded copy of the unit may be"
+    " the one it runs; a later run removes them once it answers"
+)
+LW_KEPT_NOTE: Final = (
+    "kept with the recorded copies of the watcher's unit: the user manager does not say where it reads units"
+)
+# Where `systemctl --user enable` links the watcher's unit, beside it (its WantedBy=default.target).
+LW_WANTS_DIR: Final = "default.target.wants"
+
+
+class OlderCopy(StrEnum):
+    """What apply and revert do with a copy of the watcher's unit the record lists elsewhere
+    (watcher_unit.copy_kind)."""
+
+    REMOVE = "remove"  # CST's, or gone already: removed through the installer
+    FOREIGN = "foreign"  # a file CST did not write: left alone, its record line dropped
+    SAME = "same"  # another path to the current unit file (a link in its folders): only its record line dropped
+
+
+# plan's reasons for bluetoothd's restart: main.conf changes, or only the record owes it (an earlier run
+# that did not restart it: --no-restart, --force --no-restart, a question answered no, a stopped run).
+_BT_RESTART_DROPS: Final = "apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
+BT_RESTART_MAIN_CONF: Final = f"main.conf changes: {_BT_RESTART_DROPS}"
+BT_RESTART_OWED: Final = f"still owed: an earlier run did not restart it; {_BT_RESTART_DROPS}"
+OWED_NOTE: Final = "(still owed: an earlier run did not restart it)"  # under a restart row whose reason is another
 # Which command takes which option (bluetooth-setup.sh's allowed()).
 _ALLOWED: Final = frozenset(
     {
@@ -322,10 +355,6 @@ class Paths:
     def lw_prog(self) -> str:
         """The watcher's program, where the unit's ExecStart (bluetooth.domain.LDAC_PROG, %h/...) names it."""
         return self.home + LDAC_PROG.removeprefix("%h")
-
-    @property
-    def lw_unit_file(self) -> str:
-        return f"{self.config}/systemd/user/{LDAC_UNIT}"
 
     @property
     def pending(self) -> str:
