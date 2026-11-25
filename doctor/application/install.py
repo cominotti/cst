@@ -45,12 +45,12 @@ PENDING_REMOVALS: Final = {Component.BTRFS_IOCOST: "cst btrfs iocost revert"}
 
 # What check_units_loaded asks of every unit a manager has loaded, and the reload that loads its files again.
 LOADED_UNIT_PROPS: Final = ("Id", "LoadState", "NeedDaemonReload")
-# How many paths a line names before ", ..." (_shown).
+# How many paths a line names before ", ..." (_path_list).
 FILES_SHOWN: Final = 3
 RELOAD_FIX: Final = {UnitScope.SYSTEM: "sudo systemctl daemon-reload", UnitScope.USER: "systemctl --user daemon-reload"}
 
 
-def _shown(paths: list[str]) -> str:
+def _path_list(paths: list[str]) -> str:
     """The first FILES_SHOWN paths, then ", ..." when there are more."""
     return f"{', '.join(paths[:FILES_SHOWN])}{', ...' if len(paths) > FILES_SHOWN else ''}"
 
@@ -176,7 +176,7 @@ def _record_results(
     for component, dests in sorted(out.older.items()):
         yield Result(
             INFO,
-            f"{component}: {len(dests)} file(s) older than this checkout ({_shown(dests)}): "
+            f"{component}: {len(dests)} file(s) older than this checkout ({_path_list(dests)}): "
             f"{refresh(host, component)} installs them again",
         )
     if out.fine:
@@ -226,7 +226,7 @@ def _without_record(
             yield Result(
                 INFO,
                 f"{component}: installed before the install record; {len(differ)} of {found} file(s) differ from "
-                f"this checkout ({_shown(differ)}): "
+                f"this checkout ({_path_list(differ)}): "
                 f"{refresh(host, component)} installs them again and records them",
             )
 
@@ -348,7 +348,7 @@ def check_units_loaded(host: DoctorHostPort, *, installed: InstalledFilesPort | 
                 continue
             yield Result(
                 WARN,
-                f"{unit_id}: systemd has not loaded its files as they are on disk (CST installed {_shown(dests)}): "
+                f"{unit_id}: systemd has not loaded its files as they are on disk (CST installed {_path_list(dests)}): "
                 "this manager has not been reloaded since they changed (a command stopped before its daemon-reload "
                 "or reloaded only another user's manager, or a hand edit); systemd runs it as it loaded it before",
                 RELOAD_FIX[scope],
