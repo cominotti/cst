@@ -489,16 +489,17 @@ def tlc_argv(quint: str, spec: str, check: Check, config: str, endpoint: str) ->
     ]
 
 
-def trace_argv(quint: str, spec: str, job: TraceJob, out: str, endpoint: str) -> list[str]:
+def trace_argv(quint: str, spec: str, job: TraceJob, out: str, endpoint: Callable[[], str]) -> list[str]:
     """The run that writes job's trace to out: the simulator with one thread (a seed then gives the same walk),
-    or Apalache's bounded check of the negated witness, through its server at endpoint (`quint run` starts
-    no server and has no such option)."""
+    or Apalache's bounded check of the negated witness, through its server at the endpoint endpoint() gives,
+    called for that run only (`quint run` starts no server and has no such option)."""
     common = ["--main", job.main, "--step", job.step, "--max-steps", str(job.max_steps), "--out-itf", out]
     if job.backend == "simulator":
         argv = ["timeout", str(SIMULATOR_TIMEOUT), *NICE, quint, "run", spec, *common]
         argv += ["--max-samples", str(job.samples), "--n-traces", "1", "--n-threads", "1", "--seed", str(job.seed)]
     else:
-        argv = ["timeout", str(APALACHE_TIMEOUT), *NICE, quint, "verify", spec, *common, "--server-endpoint", endpoint]
+        argv = ["timeout", str(APALACHE_TIMEOUT), *NICE, quint, "verify", spec, *common]
+        argv += ["--server-endpoint", endpoint()]
     if job.invariant:
         argv += ["--invariant", job.invariant]
     return argv
@@ -636,7 +637,9 @@ class Session:
         """Each job's trace, normalized, into its spec's traces folder of the checkout; then the replays."""
         for job in jobs:
             raw = os.path.join(work, f"{job.name}.raw.itf.json")
-            argv = trace_argv(quint, os.path.join(self.checkout, job.spec), job, raw, server_endpoint(self.port()))
+            argv = trace_argv(
+                quint, os.path.join(self.checkout, job.spec), job, raw, lambda: server_endpoint(self.port())
+            )
             ran = self.run(argv, work, env)
             problem = trace_problem(job, ran)
             if problem is None and not os.path.exists(raw):

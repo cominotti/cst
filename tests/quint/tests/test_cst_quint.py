@@ -285,7 +285,7 @@ class ArgvTest(unittest.TestCase):
 
     def test_a_simulator_trace_uses_one_thread_and_its_seed(self) -> None:
         job = M.TraceJob(name="walk", spec="s.qnt", main="m", backend="simulator", max_steps=80, seed=11, samples=3)
-        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/walk.itf.json", "localhost:40001")
+        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/walk.itf.json", lambda: self.fail("a port for quint run"))
         self.assertEqual(argv[:8], ["timeout", "300", "nice", "-n", "10", "quint", "run", "/x/s.qnt"])
         for pair in (
             ("--n-threads", "1"),
@@ -302,7 +302,7 @@ class ArgvTest(unittest.TestCase):
 
     def test_an_apalache_witness_negates_the_invariant(self) -> None:
         job = M.TraceJob(name="w", spec="s.qnt", main="m", backend="apalache", max_steps=18, invariant="neverX")
-        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/w.itf.json", "localhost:40002")
+        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/w.itf.json", lambda: "localhost:40002")
         self.assertEqual(argv[:8], ["timeout", "600", "nice", "-n", "10", "quint", "verify", "/x/s.qnt"])
         self.assertEqual(argv[-2:], ["--invariant", "neverX"])
         self.assertEqual(argv[argv.index("--server-endpoint") + 1], "localhost:40002")
@@ -611,8 +611,7 @@ class MainTest(Base):
             ],
         )
         endpoints = [argv[argv.index("--server-endpoint") + 1] for argv in verify]
-        self.assertEqual(len(set(endpoints)), 2, endpoints)
-        self.assertTrue(all(e.startswith("localhost:400") for e in endpoints), endpoints)
+        self.assertEqual(endpoints, ["localhost:40001", "localhost:40002"], "the simulator takes no port")
         [walk] = self.run_.commands("run")
         self.assertNotIn("--server-endpoint", walk)
 
