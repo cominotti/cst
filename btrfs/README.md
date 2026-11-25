@@ -1587,7 +1587,11 @@ folder could not be synced after the rename (or that could not be put back
 after a failed reload), an `rpm-ostree kargs` that timed out after its
 transaction started, a top-mount unit that could not be put back. The run
 reads that layer again after the failure and undoes it with the others (the
-top-mount unit first). The error ends with
+top-mount unit first). For the kernel arguments it first waits, up to 3
+minutes, until `rpm-ostree status --json` names no running transaction: a
+client that timed out leaves its transaction running, and the change it
+stages later would otherwise be missed. A transaction still running after
+that counts as a layer it cannot read again (below). The error ends with
 `previous configuration restored.`, or with `ROLLBACK INCOMPLETE (...)`
 naming each layer that could not be put back. A layer the run cannot read
 again after its step failed is named there too, as unknown (`fstab: cannot

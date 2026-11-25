@@ -9,6 +9,8 @@ from enum import StrEnum
 import re
 from typing import Final
 
+from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.values import MINUTE
 from cst_core.domain.text import (
     file_lines,
     is_mount_comment,
@@ -32,6 +34,11 @@ TOP_MOUNT_UNIT_NAME: Final[str] = r"var-mnt-btrfs\x2dtop.mount"
 # What ROLLBACK INCOMPLETE says of a layer that cannot be read back after its step failed.
 FSTAB_UNREAD: Final[str] = f"fstab: cannot read {FSTAB_PATH} back, its state is unknown"
 TOP_MOUNT_UNREAD: Final[str] = f"top-mount: cannot read {TOP_MOUNT_UNIT_PATH} back, its state is unknown"
+# After a kargs change that answered a failure, how long the run waits for rpm-ostree to end the transaction
+# the change may have started (a client that timed out while the daemon went on), and how often it asks.
+KARGS_SETTLE_TIMEOUT_S: Final = 3 * MINUTE
+KARGS_SETTLE_POLL_S: Final = 2
+KARGS_STILL_RUNNING: Final[str] = "an rpm-ostree transaction is still running"
 
 # rpm-ostree mounts the booted deployment's root filesystem there too.
 _SYSROOT: Final = "/sysroot"
@@ -391,6 +398,24 @@ def kargs_edits_staged(read: tuple[bool, str, str], edits: Sequence[tuple[str, s
         return False
     toks = set(extract_rootflags_tokens(text))
     return all(new in toks and old not in toks for old, new in edits)
+
+
+def kargs_unread(err: str) -> str:
+    """What ROLLBACK INCOMPLETE says of the kernel arguments when they cannot be read back after a failed
+    change (the read's error, or KARGS_STILL_RUNNING)."""
+    return f"kargs: cannot read rpm-ostree kargs back ({err}), its state is unknown"
+
+
+def transaction_running(status_json: str) -> bool | None:
+    """Whether `rpm-ostree status --json`'s answer names a transaction that is running (its "transaction" is
+    not null); None when the text is not that answer."""
+    try:
+        doc = parse_json(status_json)
+    except ValueError:
+        return None
+    if not json_object(doc) or "transaction" not in doc:
+        return None
+    return doc["transaction"] is not None
 
 
 def top_mount_changed(top: TopMountInfo | None, new_options: str | None) -> bool:

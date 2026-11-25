@@ -41,6 +41,11 @@ class CompressHostPort(Protocol):
         """Return `(ok, stdout, err)` for `rpm-ostree kargs`."""
         ...
 
+    def read_settled_kargs(self) -> tuple[bool, str, str]:
+        """`read_kargs` once rpm-ostree runs no transaction (a change that answered a failure may still be
+        staging), waiting a bounded time; ok False when one still runs or rpm-ostree cannot say."""
+        ...
+
     def read_top_mount(self) -> TopMountInfo | None:
         """Read installed `var-mnt-btrfs\\x2dtop.mount`, or return None if not installed."""
         ...

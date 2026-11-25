@@ -60,7 +60,7 @@ from btrfs.cache.domain import (
 )
 from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
 from btrfs.cache.ports import BindingPaths
-from btrfs.compress.domain import TopMountInfo
+from btrfs.compress.domain import KARGS_STILL_RUNNING, TopMountInfo
 from btrfs.iocost.application import Iocost
 from btrfs.iocost.domain import (
     IOCOST_COMPONENT_LOCK_NAME,
@@ -1993,8 +1993,10 @@ class CompressWorld(FaultPoints):
     The points named in torn take effect first and then fail, as the real adapter can (btrfs/tests/
     test_compress_faults.py, AdapterFailureTest): /etc/fstab renamed into place before its folder's sync
     failed, or a put-back after a failed reload that failed too; an `rpm-ostree kargs` that timed out after
-    its transaction started; a top-mount unit whose put-back failed. After a failed point named in
-    unreadable_after, its layer's read cannot answer (read_fstab, read_top_mount: None) until the test clears
+    its transaction started; a top-mount unit whose put-back failed. With lagging_kargs, a torn kargs change
+    is staged only when its transaction ends: at read_settled_kargs (which, with stuck_kargs, answers that one
+    still runs and stages nothing) or settle(). After a failed point named in unreadable_after, its layer's
+    read cannot answer (read_fstab, read_top_mount: None; read_kargs: ok False) until the test clears
     unreadable. Reads are no points.
 
     update_kargs is rpm-ostree's: each `--delete=OLD` removes that exact argument and each `--append=NEW`
@@ -2019,6 +2021,11 @@ class CompressWorld(FaultPoints):
         # and the points whose failure did that so far.
         self.unreadable_after: frozenset[str] = frozenset()
         self.unreadable: set[str] = set()
+        # A torn kargs change staged only when its transaction ends (read_settled_kargs or settle()), and a
+        # transaction that does not end while read_settled_kargs waits.
+        self.lagging_kargs = False
+        self.stuck_kargs = False
+        self.pending_kargs: Callable[[], object] | None = None
         self.remounts: list[tuple[str, str]] = []
         self.ignored_remounts = 0  # the next ones answer (True, "") and change nothing (the verification's case)
 
@@ -2039,7 +2046,21 @@ class CompressWorld(FaultPoints):
         return self.cmdline
 
     def read_kargs(self) -> tuple[bool, str, str]:
+        if "kargs" in self.unreadable:
+            return False, "", "error: cannot read the kernel arguments"
         return True, self.kargs, ""
+
+    def read_settled_kargs(self) -> tuple[bool, str, str]:
+        if self.stuck_kargs:
+            return False, "", KARGS_STILL_RUNNING
+        self.settle()
+        return self.read_kargs()
+
+    def settle(self) -> None:
+        """The transaction of a lagging kargs change ends: the change is staged."""
+        if self.pending_kargs is not None:
+            self.pending_kargs()
+            self.pending_kargs = None
 
     def read_top_mount(self) -> TopMountInfo | None:
         return None if "top-mount" in self.unreadable else self.top
@@ -2076,8 +2097,11 @@ class CompressWorld(FaultPoints):
             self.kargs = " ".join(args) + "\n"
             return True, ""
 
+        def later() -> None:
+            self.pending_kargs = staged
+
         def failed(err: OSError) -> tuple[bool, str]:
-            self._torn("kargs", staged)
+            self._torn("kargs", later if self.lagging_kargs else staged)
             return False, str(err.strerror)
 
         return self.step("kargs", staged, failed)

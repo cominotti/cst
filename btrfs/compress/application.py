@@ -22,6 +22,7 @@ from btrfs.compress.domain import (
     effective_compress_spec,
     extract_rootflags_tokens,
     kargs_edits_staged,
+    kargs_unread,
     matches_target_spec,
     parse_proc_mounts,
     pick_root_mounts,
@@ -256,8 +257,12 @@ class CompressService:
         if plan.kargs_edits:
             ok, kerr = self._host.update_kargs(plan.kargs_edits)
             if not ok:
-                # rpm-ostree can stage the change and still answer a failure (a timed-out client).
-                if kargs_edits_staged(self._host.read_kargs(), plan.kargs_edits):
+                # rpm-ostree can stage the change and still answer a failure (a client that timed out while
+                # its transaction went on): the kernel arguments are read once no transaction runs.
+                read = self._host.read_settled_kargs()
+                if not read[0]:
+                    prog.unknown.append(kargs_unread(read[2]))
+                elif kargs_edits_staged(read, plan.kargs_edits):
                     prog.kargs_applied = plan.kargs_edits
                 return tuple(
                     msgs

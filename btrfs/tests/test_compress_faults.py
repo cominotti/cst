@@ -59,6 +59,9 @@ from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdap
 from btrfs.compress.application import CompressService
 from btrfs.compress.domain import (
     FSTAB_UNREAD,
+    KARGS_SETTLE_POLL_S,
+    KARGS_SETTLE_TIMEOUT_S,
+    KARGS_STILL_RUNNING,
     ROOTFLAGS_PREFIX,
     TOP_MOUNT_UNREAD,
     TopMountInfo,
@@ -68,6 +71,7 @@ from btrfs.compress.domain import (
     parse_proc_mounts,
     parse_top_mount_unit,
     pick_root_mounts,
+    transaction_running,
 )
 from btrfs.compress.domain.args import CompressArgs, CompressCommand
 from btrfs.tests.fakes import CompressWorld, kernel_remount_options
@@ -1106,6 +1110,163 @@ class UnreadableAfterFailureTest(unittest.TestCase):
                         self.assertEqual(run_tool(s, w, s.command)[0], 0)
                         self.assertTrue(coherent(s, w), s.name)
         self.assertEqual(cases, 32)
+
+
+class KargsStillStagingTest(unittest.TestCase):
+    """A kargs change that answers a failure while its transaction goes on (CompressWorld.lagging_kargs): the
+    run reads the kernel arguments once no transaction runs, so it sees the change staged and undoes it; when
+    the transaction still runs after the wait (stuck_kargs), or the kernel arguments cannot be read back, the
+    run names them as unknown and undoes the layers before them."""
+
+    def cases(self) -> Iterator[tuple[Start, list[str]]]:
+        for s in STARTS:
+            w = start_world(s)
+            forward = cut_points(w.plan, functools.partial(run_tool, s, w, s.command))
+            if "kargs" in forward:
+                yield s, forward[: forward.index("kargs")]
+
+    def world(self, s: Start) -> CompressWorld:
+        w = start_world(s)
+        w.torn = frozenset({"kargs"})
+        w.lagging_kargs = True
+        w.fail("kargs", no_space(), times=1)
+        return w
+
+    def test_a_change_staged_after_its_failure_is_undone(self) -> None:
+        cases = 0
+        for s, done in self.cases():
+            with self.subTest(start=s.name):
+                cases += 1
+                w = self.world(s)
+                start = layers(s.tool, w)
+                rc, out, err = run_tool(s, w, s.command)
+                w.settle()  # a transaction still running after the run ends
+                self.assertEqual(rc, 1, out)
+                self.assertTrue(err.endswith("; previous configuration restored."), err)
+                self.assertEqual(w.calls, [*done, "kargs", "kargs", *reversed(done)])
+                self.assertEqual(layers(s.tool, w), start)
+        self.assertEqual(cases, 7)
+
+    def test_a_transaction_still_running_or_kargs_unread_are_named_unknown(self) -> None:
+        cases = 0
+        for s, done in self.cases():
+            for why in ("stuck", "unreadable"):
+                with self.subTest(start=s.name, why=why):
+                    cases += 1
+                    w = self.world(s)
+                    if why == "stuck":
+                        w.stuck_kargs = True
+                        said = KARGS_STILL_RUNNING
+                    else:
+                        w.unreadable_after = frozenset({"kargs"})
+                        said = "error: cannot read the kernel arguments"
+                    rc, out, err = run_tool(s, w, s.command)
+                    self.assertEqual(rc, 1, out)
+                    self.assertTrue(
+                        err.endswith(
+                            f"; {INCOMPLETE} (kargs: cannot read rpm-ostree kargs back ({said}), its state is unknown)"
+                        ),
+                        err,
+                    )
+                    self.assertEqual(w.calls, [*done, "kargs", *reversed(done)])
+                    w.stuck_kargs = False
+                    w.unreadable.clear()
+                    w.settle()
+                    w.torn = frozenset()
+                    self.assertEqual(run_tool(s, w, s.command)[0], 0)
+                    self.assertTrue(coherent(s, w), s.name)
+        self.assertEqual(cases, 14)
+
+
+class _Clock:
+    """A clock whose sleep moves time on without sleeping."""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+        self.slept: list[float] = []
+
+    def now(self) -> float:
+        return self.t
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.t += seconds
+
+
+class _StatusRunner:
+    """`rpm-ostree status --json` answers in order (the last one again when they run out), `rpm-ostree kargs`
+    the given kernel arguments."""
+
+    def __init__(self, *status: CommandResult) -> None:
+        self.status = list(status)
+        self.cmds: list[list[str]] = []
+
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        del kw
+        self.cmds.append(list(argv))
+        if list(argv[:2]) == ["rpm-ostree", "status"]:
+            return self.status.pop(0) if len(self.status) > 1 else self.status[0]
+        return CommandResult(0, "rootflags=a\n", "", tuple(argv))
+
+
+def _status(transaction: str, rc: int = 0, stderr: str = "") -> CommandResult:
+    return CommandResult(rc, f'{{"deployments": [], "transaction": {transaction}}}', stderr, ("rpm-ostree",))
+
+
+BUSY = '["KernelArgs", ":1.92", "/org/projectatomic/rpmostree1/fedora/Transaction"]'
+
+
+class SettledKargsAdapterTest(unittest.TestCase):
+    """LinuxCompressHostAdapter.read_settled_kargs: it asks `rpm-ostree status --json` until it names no
+    transaction, then reads the kernel arguments; it gives up after KARGS_SETTLE_TIMEOUT_S."""
+
+    def adapter(self, runner: _StatusRunner, clock: _Clock) -> LinuxCompressHostAdapter:
+        return LinuxCompressHostAdapter(
+            CompressAdapterConfig(entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"), fallback_root=REPO),
+            ctx=_Ctx(tempfile.gettempdir()),
+            runner=runner,
+            clock=clock,
+        )
+
+    def test_it_waits_for_the_transaction_to_end_then_reads(self) -> None:
+        runner, clock = _StatusRunner(_status(BUSY), _status(BUSY), _status("null")), _Clock()
+        self.assertEqual(self.adapter(runner, clock).read_settled_kargs()[:2], (True, "rootflags=a\n"))
+        self.assertEqual(clock.slept, [KARGS_SETTLE_POLL_S, KARGS_SETTLE_POLL_S])
+        self.assertEqual(runner.cmds[-1], ["rpm-ostree", "kargs"])
+        self.assertEqual(runner.cmds.count(["rpm-ostree", "status", "--json"]), 3)
+
+    def test_it_reads_at_once_when_none_runs(self) -> None:
+        runner, clock = _StatusRunner(_status("null")), _Clock()
+        self.assertTrue(self.adapter(runner, clock).read_settled_kargs()[0])
+        self.assertEqual(clock.slept, [])
+
+    def test_a_transaction_that_does_not_end_is_still_running(self) -> None:
+        runner, clock = _StatusRunner(_status(BUSY)), _Clock()
+        self.assertEqual(self.adapter(runner, clock).read_settled_kargs(), (False, "", KARGS_STILL_RUNNING))
+        self.assertGreaterEqual(sum(clock.slept), KARGS_SETTLE_TIMEOUT_S)
+        self.assertLess(sum(clock.slept), KARGS_SETTLE_TIMEOUT_S + KARGS_SETTLE_POLL_S)
+        self.assertNotIn(["rpm-ostree", "kargs"], runner.cmds)
+
+    def test_a_status_that_cannot_answer_is_no_reading(self) -> None:
+        failed = CommandResult(1, "", "error: daemon gone\n", ("rpm-ostree",))
+        garbage = CommandResult(0, "not json", "", ("rpm-ostree",))
+        for res, why in ((failed, "rpm-ostree status failed: error: daemon gone"), (garbage, "no transaction state")):
+            with self.subTest(why=why):
+                runner, clock = _StatusRunner(res), _Clock()
+                ok, text, err = self.adapter(runner, clock).read_settled_kargs()
+                self.assertEqual((ok, text), (False, ""))
+                self.assertIn(why, err)
+                self.assertNotIn(["rpm-ostree", "kargs"], runner.cmds)
+
+    def test_transaction_running_reads_the_status_answer(self) -> None:
+        answers = [transaction_running('{"transaction": null}'), transaction_running(f'{{"transaction": {BUSY}}}')]
+        self.assertEqual(answers, [False, True])
+        for text in ("", "[]", '{"deployments": []}', "{"):
+            with self.subTest(text=text):
+                self.assertIsNone(transaction_running(text))
 
 
 class AlreadyAtTheTargetTest(unittest.TestCase):

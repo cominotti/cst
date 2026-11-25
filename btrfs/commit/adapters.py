@@ -32,6 +32,7 @@ from btrfs.compress.domain import (
     TOP_MOUNT_UNREAD,
     extract_rootflags_tokens,
     kargs_edits_staged,
+    kargs_unread,
     parse_proc_mounts,
     pick_root_mounts,
     top_mount_changed,
@@ -142,8 +143,12 @@ def _step_kargs(run: _Run) -> str | None:
         return None
     ok, kerr = host.update_kargs(edits)
     if not ok:
-        # rpm-ostree can stage the change and still answer a failure (a timed-out client).
-        if kargs_edits_staged(host.read_kargs(), edits):
+        # rpm-ostree can stage the change and still answer a failure (a client that timed out while its
+        # transaction went on): the kernel arguments are read once no transaction runs.
+        read = host.read_settled_kargs()
+        if not read[0]:
+            run.undo.append(_unknown(kargs_unread(read[2])))
+        elif kargs_edits_staged(read, edits):
             run.undo.append(lambda: _undo_kargs(host, edits))
         return f"Failed to update rpm-ostree kargs: {kerr}"
     run.undo.append(lambda: _undo_kargs(host, edits))

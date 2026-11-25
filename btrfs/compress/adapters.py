@@ -10,15 +10,19 @@ import os
 from typing import Final
 
 from btrfs.compress.domain import (
+    KARGS_SETTLE_POLL_S,
+    KARGS_SETTLE_TIMEOUT_S,
+    KARGS_STILL_RUNNING,
     PROC_CMDLINE_PATH,
     PROC_MOUNTS_PATH,
     ROOT_ANCHOR_TARGETS,
     TOP_MOUNT_UNIT_NAME,
     TopMountInfo,
     parse_top_mount_unit,
+    transaction_running,
 )
 from btrfs.compress.ports import TOP_MOUNT_ERRORS
-from cst_core.adapters import SystemctlAdapter
+from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, SystemdUnitVerifier
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
@@ -29,6 +33,7 @@ from cst_core.application.install import InstallRequest, InstallService
 from cst_core.domain.install import INSTALL_MANIFEST, Component
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import (
+    ClockPort,
     CommandFailed,
     CommandRunnerPort,
     ExecutionContextPort,
@@ -70,6 +75,7 @@ class LinuxCompressHostAdapter:
         ctx: ExecutionContextPort | None = None,
         runner: CommandRunnerPort | None = None,
         fs: FileSystemPort | None = None,
+        clock: ClockPort | None = None,
     ) -> None:
         self._entry_file = config.entry_file
         self._fallback_root = config.fallback_root
@@ -78,6 +84,7 @@ class LinuxCompressHostAdapter:
         self._ctx = HostExecutionContext() if ctx is None else ctx
         self._runner = SubprocessCommandRunner() if runner is None else runner
         self._fs = LocalFileSystemAdapter() if fs is None else fs
+        self._clock = SystemClockAdapter() if clock is None else clock
         self._systemctl = SystemctlAdapter(self._runner, on_host=SystemctlHost.LOCAL)
 
     def _etc_file(self, *parts: str) -> str:
@@ -150,6 +157,30 @@ class LinuxCompressHostAdapter:
             output=OutputMode.CAPTURE,
         )
         return (res.returncode == 0, res.stdout, res.stderr.strip() or res.stdout.strip())
+
+    def read_settled_kargs(self) -> tuple[bool, str, str]:
+        """`read_kargs` once `rpm-ostree status --json` names no running transaction, asking every
+        KARGS_SETTLE_POLL_S for at most KARGS_SETTLE_TIMEOUT_S: `(False, "", why)` when one still runs then or
+        rpm-ostree cannot say."""
+        deadline = self._clock.monotonic() + KARGS_SETTLE_TIMEOUT_S
+        while True:
+            res = self._runner.run(
+                ["rpm-ostree", "status", "--json"],
+                on_host=True,
+                timeout=30,
+                locale_c=True,
+                output=OutputMode.CAPTURE,
+            )
+            if res.returncode != 0:
+                return False, "", res.failure("rpm-ostree status")
+            running = transaction_running(res.stdout)
+            if running is None:
+                return False, "", "rpm-ostree status --json named no transaction state"
+            if not running:
+                return self.read_kargs()
+            if self._clock.monotonic() >= deadline:
+                return False, "", KARGS_STILL_RUNNING
+            self._clock.sleep(KARGS_SETTLE_POLL_S)
 
     def read_top_mount(self) -> TopMountInfo | None:
         """Read installed `var-mnt-btrfs\\x2dtop.mount`, or return None when not installed."""

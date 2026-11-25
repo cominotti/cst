@@ -166,6 +166,9 @@ class _FakeHost:
     def read_kargs(self) -> tuple[bool, str, str]:
         return (self.s.kargs_ok, self.s.kargs_text, self.s.kargs_err)
 
+    def read_settled_kargs(self) -> tuple[bool, str, str]:
+        return self.read_kargs()
+
     def read_top_mount(self) -> TopMountInfo | None:
         return self.s.top_mount
 
