@@ -11364,6 +11364,103 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_219_btrfs_alerts_install_reloads_every_running_user_manager(self) -> None:
+        """install_pending_alerts (as `cst btrfs install` and `snapshots setup` run it, the functions
+        taken from btrfs-setup.sh, the real installer, SUDO_USER tester) with two user managers running:
+        tester's and a second account's (e2e219, its user@UID.service started). In each, a transient unit
+        ordered After= cst-pending-alerts.service keeps that unit loaded. The unit's file is given an
+        older text, both managers reload it, and the current text is put back by hand: both managers
+        then say NeedDaemonReload yes ("cannot bite" otherwise). After install_pending_alerts both say
+        no. Before, only SUDO_USER's manager was reloaded and e2e219's kept the old unit. The unit file,
+        the files of btrfs:alerts and root's install record are copied aside and put back."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        unit = "/etc/systemd/user/cst-pending-alerts.service"
+        dests = (
+            '/usr/bin/python3 -I -c \'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import INSTALL_MANIFEST as m; "
+            'print(*(e.dest for e in m if e.component == "btrfs:alerts"), sep=chr(10))\''
+        )
+        if exec_bash(c, "getent passwd e2e219 || getent passwd 1219 || true").stdout.strip():
+            self.skipTest("the account e2e219 or the uid 1219 is taken")
+        exec_bash(
+            c,
+            f"""set -e
+            rm -rf /var/tmp/e2e-219; mkdir -p /var/tmp/e2e-219
+            {dests} >/var/tmp/e2e-219/dests
+            grep -qxF {unit} /var/tmp/e2e-219/dests
+            while read -r f; do
+                if [[ -e "$f" ]]; then echo "$f" >>/var/tmp/e2e-219/there; else echo "$f" >>/var/tmp/e2e-219/missing; fi
+            done </var/tmp/e2e-219/dests
+            if [[ -s /var/tmp/e2e-219/there ]]; then tar -cpf /var/tmp/e2e-219/files.tar -T /var/tmp/e2e-219/there; fi
+            if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-219/rec; fi
+            if [[ -d /var/lib/cst-alerts ]]; then touch /var/tmp/e2e-219/alerts-dir; fi
+            if systemctl --global -q is-enabled cst-pending-alerts.service 2>/dev/null; then touch /var/tmp/e2e-219/enabled; fi""",
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            systemctl --user -M tester@ stop e2e219-hold.service 2>/dev/null
+            systemctl stop user@1219.service user-runtime-dir@1219.service 2>/dev/null
+            userdel -rf e2e219 2>/dev/null
+            [[ -e /var/tmp/e2e-219/enabled ]] || systemctl --global disable cst-pending-alerts.service 2>/dev/null
+            if [[ -s /var/tmp/e2e-219/missing ]]; then xargs -r -d '\\n' rm -f </var/tmp/e2e-219/missing; fi
+            if [[ -e /var/tmp/e2e-219/files.tar ]]; then tar -xpf /var/tmp/e2e-219/files.tar -C /; fi
+            if [[ -e /var/tmp/e2e-219/rec ]]; then cp -p /var/tmp/e2e-219/rec {rec}; else rm -f {rec}; fi
+            [[ -e /var/tmp/e2e-219/alerts-dir ]] || rm -rf /var/lib/cst-alerts
+            systemctl --user -M tester@ daemon-reload
+            rm -rf /var/tmp/e2e-219""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_219 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(ALERTS_DIR|USER_UNIT_DIR|PENDING_UNIT|OLD_ALERTS_DIR|OLD_PENDING_UNIT|OLD_PENDING_READER)=' /opt/cst-rw/btrfs-setup.sh)"
+            SRC=/opt/cst-rw/btrfs
+            fns="check_syntax check_component_syntax remove_old_reader migrate_old_alerts install_pending_alerts reload_user_managers"
+            for f in $fns; do
+                eval "$(sed -n "/^$f() {/,/^}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F $fns >/dev/null
+            target_user=tester
+            unit="$USER_UNIT_DIR/$PENDING_UNIT"
+            install_pending_alerts >/dev/null
+            useradd -m -u 1219 e2e219
+            systemctl start user@1219.service
+            managers="tester@ 1219@"
+            for m in $managers; do
+                systemctl --user -M "$m" daemon-reload
+                systemd-run --user -M "$m" --unit e2e219-hold -p After="$PENDING_UNIT" -p RemainAfterExit=yes /bin/true >/dev/null 2>&1
+            done
+            ndr() { systemctl --user -M "$1" show -P NeedDaemonReload "$PENDING_UNIT"; }
+            cp -p "$unit" /var/tmp/e2e-219/current
+            { cat /var/tmp/e2e-219/current; echo "# e2e219: an older text"; } >"$unit"
+            for m in $managers; do
+                systemctl --user -M "$m" daemon-reload
+                [[ "$(systemctl --user -M "$m" show -P LoadState "$PENDING_UNIT")" == loaded ]] ||
+                    { echo "$PENDING_UNIT is not loaded in $m's manager" >&2; exit 1; }
+                [[ "$(ndr "$m")" == no ]]
+            done
+            sleep 1
+            cat /var/tmp/e2e-219/current >"$unit"
+            for m in $managers; do
+                [[ "$(ndr "$m")" == yes ]] || { echo "cannot bite: $m's manager does not flag $PENDING_UNIT" >&2; exit 1; }
+            done
+            install_pending_alerts >/dev/null
+            for m in $managers; do
+                [[ "$(ndr "$m")" == no ]] || { echo "$m's manager was not reloaded" >&2; exit 1; }
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_195_doctor_names_a_cst_user_unit_the_user_manager_has_not_loaded(self) -> None:
         """tester's real install record (copied aside and put back) with a drop-in of a running user unit

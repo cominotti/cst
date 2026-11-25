@@ -327,8 +327,8 @@ def _has_game_dropin(host: DoctorHostPort, unit_id: str) -> bool:
 def check_units_loaded(host: DoctorHostPort, *, installed: InstalledFilesPort | None = None) -> Iterator[Result]:
     """The units of the unit files and drop-ins CST installed (its install records) that systemd has loaded
     and not loaded again since a file of them changed: a change stopped before its daemon-reload or reloaded
-    only another user's manager (cst btrfs install reloads only the calling user's), or an edit. No systemctl
-    call for a manager CST installed no unit file or drop-in for."""
+    only another user's manager, or an edit. No systemctl call for a manager CST installed no unit file or
+    drop-in for."""
     if installed is None:
         return
     by_scope = _recorded_units(host, installed)
