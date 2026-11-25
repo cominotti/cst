@@ -2143,6 +2143,23 @@ class PostponedRecordTest(PostponeBase):
         self.assertIsNone(self.record())
         self.assertNotIn("postponed", self.call(self.cli.status)[1])
 
+    def test_a_file_in_place_of_the_state_folder_is_nothing_postponed(self) -> None:
+        # A file where /var/lib/docker-volumes-nocow belongs holds no record: removing "the record" in it
+        # raised NotADirectoryError, which stopped the boot's migrate before recover() and uninstall's
+        # unmark before it cleared +C.
+        state = os.path.dirname(self.postponed)
+        shutil.rmtree(state)
+        with open(state, "w") as f:
+            f.write("in the way\n")
+        os.remove(self.flag)  # nothing scheduled: the run needs no count of attempts in that folder
+        self.fs.docker_state = "inactive"
+        self.assertEqual(self.boot("b1", 1000), (0, ""))
+        self.assertFalse(os.path.exists(self.top + ".nocow-new"))  # recover() ran
+        rc, _out = self.call(self.cli.unmark)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.fs.sets, [self.vols])
+        self.assertEqual(self.fs.flags_of(self.vols), 0)  # +C cleared
+
     def test_recorded_when_the_folder_has_no_nocow_flag(self) -> None:
         # Nothing scheduled, but the volumes folder lost +C (Docker installed
         # after install): that is work the boot could not do either.

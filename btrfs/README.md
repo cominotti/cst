@@ -924,7 +924,8 @@ docker volume rm <name>         # or one volume by name
   and how many boots were held back (counted once per boot; written to disk
   with fsync, like the count of attempts). The record is 0644 and a state
   folder made for it 0755, whatever the umask the boot or a `sudo` hands on,
-  so `cst doctor` reads it as the user. `status` shows
+  so `cst doctor` reads it as the user. A file in place of the state folder
+  holds no record: `migrate` and `unmark` go on as with none. `status` shows
   it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).

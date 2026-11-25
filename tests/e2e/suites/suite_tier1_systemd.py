@@ -10516,6 +10516,59 @@ echo test_263-ok
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_266_docker_volumes_nocow_a_file_in_place_of_its_state_folder_is_nothing_postponed(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root) with a file at
+        /var/lib/docker-volumes-nocow, and /etc/docker/daemon.json naming a data root of the test's own
+        on a tmpfs whose one volume holds a leftover of an interrupted copy (_data.nocow-new): the boot's
+        migrate exits 0 with no "Not a directory" line for the record and gets past the record's removal to the
+        recovery, which removes the leftover; unmark exits 0 with no such line (its line about the outcome record in the same file is
+        another matter, not checked here). Before, removing the
+        record of postponed boots in that file raised NotADirectoryError: migrate wrote that error to
+        the journal and stopped before the recovery (the leftover stayed), and unmark stopped on it."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-266-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-266-made-docker ] && rm -rf /etc/docker || true; "
+            "rm -f /var/tmp/e2e-266-made-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_266 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-266-made-docker; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e {state} ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p {root}/volumes/v1/_data {root}/volumes/v1/_data.nocow-new
+            echo data >{root}/volumes/v1/_data/f
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            printf 'in the way\n' >{state}
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_266 migrate: rc=$rc $out" >&2
+            if grep -qF "Not a directory: '{state}/postponed'" <<<"$out"; then echo "migrate stopped at the record's removal" >&2; exit 1; fi
+            [[ "$rc" == 0 ]]
+            [ ! -e {root}/volumes/v1/_data.nocow-new ] || {{ echo "the recovery did not run" >&2; exit 1; }}
+            rc=0; out="$($prog unmark 2>&1)" || rc=$?
+            echo "test_266 unmark: rc=$rc $out" >&2
+            if grep -qF "Not a directory: '{state}/postponed'" <<<"$out"; then echo "unmark stopped at the record's removal" >&2; exit 1; fi
+            [[ "$rc" == 0 ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
         """The installed forms of the two Python ports, under real systemd: btrfs-health-check and

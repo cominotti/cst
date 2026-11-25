@@ -322,7 +322,7 @@ class NocowStateFiles:
         write_atomic(self.paths.postponed, json.dumps(record) + "\n", mode=0o644, relabel=False)
 
     def clear_postponed(self) -> None:
-        with contextlib.suppress(FileNotFoundError):  # nothing postponed
+        with contextlib.suppress(FileNotFoundError, NotADirectoryError):  # nothing postponed
             os.remove(self.paths.postponed)
 
     def read_outcome(self) -> OutcomeRead:
