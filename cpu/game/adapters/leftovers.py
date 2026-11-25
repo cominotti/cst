@@ -81,27 +81,35 @@ def undo_entries(
     uid it was for (keep says them), and the records dropped undone (no_user_manager). An entry whose uid no
     account has now is never undone in another user's manager: it is done when that uid's user manager is
     gone, else kept. An entry of a uid whose user manager is not running is done: what it held went with it.
-    say: see GameProfile.undo_record ('off' says it; the tick does not)."""
+    say: see GameProfile.undo_record ('off' says it; the tick does not). Each entry starts from the user acted
+    for when the pass began (an entry of no user's is that user's, whatever entry of a uid came before it), and
+    the profile acts for that user again afterwards."""
     failed: list[Entry] = []
     dropped: set[Record] = set()
-    for uid, rec in reversed(entries):
-        if uid is not None and user_manager_gone(profile, uid):
-            continue
-        if uid is not None and not profile.act_for(uid, say=False):
-            user: str | None = uid
-        elif uid is None and no_user_manager(profile, rec, say=say):
-            who = "off: " if say else ""
-            what = undo_text(rec, profile.paths.epp)
-            profile.log(
-                4, f"{who}could not undo {what}: TARGET_USER names no account, no user manager to undo it in: dropped"
-            )
-            dropped.add(rec)
-            continue
-        elif profile.undo_record(rec, reload, say=say):
-            continue
-        else:
-            user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
-        failed.append((user, rec))
+    settings = profile.s
+    try:
+        for uid, rec in reversed(entries):
+            profile.s = settings
+            if uid is not None and user_manager_gone(profile, uid):
+                continue
+            if uid is not None and not profile.act_for(uid, say=False):
+                user: str | None = uid
+            elif uid is None and no_user_manager(profile, rec, say=say):
+                who = "off: " if say else ""
+                what = undo_text(rec, profile.paths.epp)
+                profile.log(
+                    4,
+                    f"{who}could not undo {what}: TARGET_USER names no account, no user manager to undo it in: dropped",
+                )
+                dropped.add(rec)
+                continue
+            elif profile.undo_record(rec, reload, say=say):
+                continue
+            else:
+                user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
+            failed.append((user, rec))
+    finally:
+        profile.s = settings
     failed.reverse()
     return failed, dropped
 

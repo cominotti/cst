@@ -8342,6 +8342,58 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_208_cpu_game_profile_drops_an_entry_of_no_user_in_no_other_user_s_manager(self) -> None:
+        """The real game profile with the real user manager, profile off, TARGET_USER naming no account, and a
+        game.leftovers whose older entry is of no user ("user -": a new override of user.slice's CPUWeight) and
+        whose newer one is tester's (a new override of e2e208.slice). The tick undoes the newer first, in tester's
+        manager, then drops the entry of no user (no user manager to undo it in) and removes the file; tester's
+        own override of user.slice is left as it was. The old pass still acted for tester at the older entry, and
+        removed tester's override."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            rm -f /run/user/1000/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-208-conf.bak ]]; then mv /tmp/e2e-208-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl --user -M tester@ daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-208-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='e2e208-nobody'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            if getent passwd e2e208-nobody >/dev/null; then echo "e2e208-nobody has an account" >&2; exit 1; fi
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            tov=/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            # As tester: a folder root made there would keep tester's manager from writing its own overrides.
+            runuser -u tester -- mkdir -p "$(dirname "$tov")"
+            runuser -u tester -- sh -c 'printf "[Slice]\nCPUWeight=%s\n" "$1" >"$2"' sh "$tw" "$tov"
+            tsum=$(sha256sum "$tov")
+            printf '%s\n' 'cst-game-leftovers 2' 'user -' 'prop usr user.slice CPUWeight new -' \
+                "user $tuid" 'prop usr e2e208.slice MemoryLow new -' >"$lo"
+            got=$(gp tick 2>&1)
+            grep -qF "could not undo user.slice CPUWeight (its runtime override): TARGET_USER names no account, no user manager to undo it in: dropped" <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            test -e "$tov" || { echo "the tick removed tester's own override: $got" >&2; exit 1; }
+            [[ "$(sha256sum "$tov")" == "$tsum" ]] || { echo "tester's override changed" >&2; exit 1; }
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            rm -f "$tov"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS)
     def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
         """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose

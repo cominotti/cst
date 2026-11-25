@@ -2895,6 +2895,40 @@ class LeftoversTest(GameProfileCase):
         self.assertEqual(self.sets(self.systemd.actions), [])
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
+    def test_an_entry_of_no_user_after_one_of_a_uid_is_never_undone_in_that_uid_s_manager(self) -> None:
+        # TARGET_USER names no account. The pass undoes the newest entry first: uid 1001's ("other", an account
+        # whose manager runs), in its own manager. The entry of no user before it is then dropped (no user manager
+        # to undo it in), not undone in other's manager: the old pass still acted for other there, and removed
+        # other's own override of user.slice.
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        own = os.path.join(self.paths.run_user, "1001", "systemd", "user.control", "user.slice.d", "50-CPUWeight.conf")
+        self.write(own, "[Slice]\nCPUWeight=40\n")
+        self.write(
+            self.paths.leftovers,
+            "cst-game-leftovers 2\nuser -\nprop usr user.slice CPUWeight new -\n"
+            "user 1001\nprop usr e2e.slice MemoryLow new -\n",
+        )
+        self.no_game()
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            dataclasses.replace(self.settings, target_user="nobody-here"),
+            self.systemd,
+            uid_of=lambda u: {"other": "1001"}.get(u, ""),
+            name_of=lambda uid: {"1001": "other"}.get(uid, ""),
+            out=out,
+        )
+        self.assertEqual(p.tick(), 0)
+        self.assertTrue(os.path.exists(own))
+        self.assertIn(
+            "could not undo user.slice CPUWeight (its runtime override): TARGET_USER names no account, no user"
+            " manager to undo it in: dropped",
+            out.getvalue(),
+        )
+        self.assertIn("undid e2e.slice MemoryLow (its runtime override), kept in", out.getvalue())
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertEqual(p.s.target_user, "nobody-here")
+
     def foreign_state(self) -> str:
         """A game.state of an 'on' for uid 1001 (another uid than USER's), with records of its user manager; USER
         has a runtime override of user.slice's CPUWeight of its own. The user.slice record's override path."""
