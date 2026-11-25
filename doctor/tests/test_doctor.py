@@ -5323,6 +5323,32 @@ class SettingsWarningsTest(Scratch):
                 self.assertTrue(ws[0].startswith(line), ws)
                 self.assertTrue(ws[0].endswith(f". CST's Python programs take nothing from the line{said}{rest}"), ws)
 
+    def test_a_blank_beside_a_value_has_the_kept_wording_where_bash_sources_the_file(self) -> None:
+        # The line keeps bash's value in a file bash sources, so "take nothing from the line" would be false
+        # there; in vm.conf, which only Python reads, the line sets nothing and keeps the old wording.
+        d = os.path.join(self.root, "etc", "cst")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "vm.conf"), "w", encoding="utf-8") as f:
+            f.write("FOO='8\N{NO-BREAK SPACE}'\n")
+        host = doc_adapters.Host(self.env, repo=REPO)
+        path = doc_domain.HostPath("/etc/cst/vm.conf")
+        why = "a no-break space (U+00A0) at the end of the value: CST does not trim it (delete it)"
+        kept, plain = (
+            [r.message for r in doc_shared.settings_file_warnings(host, path, bash_sourced=b)] for b in (True, False)
+        )
+        self.assertEqual(
+            kept,
+            [
+                (
+                    f"/etc/cst/vm.conf line 1: FOO='8\N{NO-BREAK SPACE}': {why}. CST's Python programs read the "
+                    "value with the blank, as bash does, and the cst commands that change the machine with these "
+                    "settings refuse to run until it is fixed"
+                )
+            ],
+        )
+        self.assertEqual(len(plain), 1, plain)
+        self.assertIn(f"{why}. CST's Python programs take nothing from the line, and", plain[0])
+
 
 class DoctorDomainTest(unittest.TestCase):
     """Pure domain functions exposed by `doctor.domain`."""

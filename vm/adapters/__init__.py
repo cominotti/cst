@@ -33,6 +33,7 @@ from cst_core.domain.text import (
     first_line,
     parse_shell_assignments,
     parse_snapshots_conf,
+    strip_ascii_blanks,
 )
 from vm.domain import (
     VmCommand,
@@ -340,4 +341,5 @@ class VmConfFiles:
 def knobs(paths: VmPaths) -> dict[str, bool]:
     """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""
     conf = read_conf(paths.vm_conf, nas_conf=paths.nas_conf)
-    return {k: conf.get(k, "yes").strip().lower() not in NO_WORDS for k in KNOBS}
+    # ASCII blanks only: VM_NOCOW='no<NBSP>' is a problem line (prepare_command refuses), never "no".
+    return {k: strip_ascii_blanks(conf.get(k, "yes")).lower() not in NO_WORDS for k in KNOBS}

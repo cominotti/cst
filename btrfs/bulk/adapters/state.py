@@ -15,13 +15,28 @@ import os
 import re
 from typing import TypeIs
 
-from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkJournalKind, BulkPaths, ItemJournal
+from btrfs.bulk.domain import (
+    BY_ID,
+    ITEMS,
+    KEEP_HEADER,
+    BadSettings,
+    BulkJournalKind,
+    BulkPaths,
+    ItemJournal,
+    KeepLineError,
+)
 from btrfs.bulk.domain.steam import SteamJournal, SteamPhase, dec
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, parse_json
-from cst_core.domain.text import describe_problems, parse_shell_assignments
+from cst_core.domain.text import (
+    SettingsProblem,
+    blank_edge_problem,
+    describe_problems,
+    parse_shell_assignments,
+    strip_ascii_blanks,
+)
 
 # The journals of moves not finished yet (read back by any later btrfs-bulk).
 JOURNAL = state_format(StateFormatKey.BULK_JOURNAL)
@@ -194,14 +209,18 @@ class StateFiles:
     def read_keep(self) -> tuple[set[str], list[str]]:
         """(ids kept in /home by choice, unknown ids) from the keep file: one id
         per line, '#' starts a comment. Bytes that are not UTF-8 make an unknown
-        id. Raises OSError if it exists but cannot be read (a folder, say): then
-        nobody knows what is meant to stay, and apply moves nothing."""
+        id. Raises OSError if it exists but cannot be read (a folder, say), and
+        KeepLineError (an OSError) for an id with a blank other than space or tab
+        beside it (a no-break space): then nobody knows what is meant to stay,
+        and apply moves nothing. ASCII blanks around an id are trimmed."""
         known: set[str] = set()
         unknown: list[str] = []
         try:
             with open(self.paths.keep, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    ident = line.split("#", 1)[0].strip()
+                for number, line in enumerate(f, 1):
+                    ident = strip_ascii_blanks(line.split("#", 1)[0])
+                    if (why := blank_edge_problem(ident)) is not None:
+                        raise KeepLineError(SettingsProblem(number, line, why))
                     if ident in BY_ID:
                         known.add(ident)
                     elif ident:
@@ -211,7 +230,10 @@ class StateFiles:
         return known, unknown
 
     def edit_keep(self, add: Sequence[str], remove: Collection[str]) -> None:
-        """Add/remove ids in the keep file; other lines (comments) stay as they are."""
+        """Add/remove ids in the keep file; other lines (comments) stay as they are. Each line's id is
+        read as read_keep reads it (ASCII blanks trimmed); a line whose id has another blank beside it
+        (a no-break space) raises KeepLineError before anything is written: it may mean an id, so
+        neither keep nor unkeep can tell whether it is there."""
         keep = self.paths.keep
         # surrogateescape: lines this tool cannot read are written back unchanged.
         try:
@@ -220,8 +242,12 @@ class StateFiles:
         except FileNotFoundError:
             lines = [KEEP_HEADER]
         lines = [ln if ln.endswith("\n") else ln + "\n" for ln in lines]
-        lines = [ln for ln in lines if ln.split("#", 1)[0].strip() not in remove]
-        have = {ln.split("#", 1)[0].strip() for ln in lines}
+        ids = [strip_ascii_blanks(ln.split("#", 1)[0]) for ln in lines]
+        for number, (ln, ident) in enumerate(zip(lines, ids, strict=True), 1):
+            if (why := blank_edge_problem(ident)) is not None:
+                raise KeepLineError(SettingsProblem(number, ln, why))
+        lines = [ln for ln, ident in zip(lines, ids, strict=True) if ident not in remove]
+        have = {strip_ascii_blanks(ln.split("#", 1)[0]) for ln in lines}
         lines += [i + "\n" for i in add if i not in have]
         os.makedirs(self.paths.etc, mode=0o755, exist_ok=True)
         # UTF-8, surrogateescape; durable (file and folder): apply and the boot step act on it.

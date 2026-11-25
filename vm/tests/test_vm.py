@@ -2289,15 +2289,29 @@ class PackageTest(unittest.TestCase):
             numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
             self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 3, 6])
 
-    def test_a_vm_conf_number_with_a_no_break_space_uses_the_default(self) -> None:
-        # The reader of a file only Python reads trims ASCII blanks only: the no-break space stays in the
-        # value, which is then no whole number in ASCII digits (str.strip() used to drop it: 8).
+    def test_a_vm_conf_number_with_a_no_break_space_is_a_problem_line(self) -> None:
+        # The reader trims ASCII blanks only, and a no-break space beside a value makes the line a problem
+        # (it used to stay in the value, which then read as no number: the default 4, without a word).
+        # Every command that changes the machine with vm.conf then refuses before it reads a number.
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "vm.conf")
             with open(conf, "w", encoding="utf-8") as f:
                 f.write("VM_NAS_KEEP_WEEKLY=\N{NO-BREAK SPACE}8\nVM_NAS_KEEP_MONTHLY = 5\t\n")
-            numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY")
-            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 5])
+            # The other settings files in the scratch folder too (missing): only vm.conf has a line.
+            paths = replace(PATHS, vm_conf=conf, cpu_conf=os.path.join(tmp, "cpu"), nas_conf=os.path.join(tmp, "nas"))
+            got = vm_adapters.settings_file(conf, bash_sourced=False, nas_conf=paths.nas_conf)
+            self.assertEqual([p.line for p in got.problems], [1])
+            self.assertIn("a no-break space (U+00A0) at the start of the value", got.problems[0].reason)
+            self.assertEqual(dict(got.values), {"VM_NAS_KEEP_MONTHLY": "5"})
+            for cmd, sub in (
+                (vm_domain.VmCommand.BACKUP, None),
+                (vm_domain.VmCommand.TUNE, vm_domain.VmSub.APPLY),
+                (vm_domain.VmCommand.NOCOW, vm_domain.VmSub.APPLY),
+            ):
+                with self.subTest(cmd=cmd), self.assertRaises(Refused) as e:
+                    vm_adapters.prepare_command(paths, cmd, sub, nas=False, vm="win")
+                self.assertIn(f"{conf} line 1: VM_NAS_KEEP_WEEKLY=", str(e.exception))
+                self.assertIn("Fix these lines first; nothing was changed.", str(e.exception))
 
     def test_every_no_word_turns_a_knob_off_and_anything_else_leaves_it_on(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2307,6 +2321,23 @@ class PackageTest(unittest.TestCase):
                     with open(conf, "w") as f:
                         f.write(f"VM_NOCOW={word}\n")
                     self.assertEqual(vm_adapters.knobs(replace(PATHS, vm_conf=conf))["VM_NOCOW"], on)
+
+    def test_a_knob_with_a_blank_beside_it_refuses_nocow_apply(self) -> None:
+        # str.strip() read VM_NOCOW='no<NBSP>' as no; a no-break space or U+001C beside the word now makes
+        # the line a problem: nocow apply refuses, and no word with such a blank is read as a no word.
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "vm.conf")
+            paths = replace(PATHS, vm_conf=conf, cpu_conf=os.path.join(tmp, "cpu"), nas_conf=os.path.join(tmp, "nas"))
+            for word in ("'no\N{NO-BREAK SPACE}'", "no\x1c", "'\N{IDEOGRAPHIC SPACE}off'"):
+                with self.subTest(word=word):
+                    with open(conf, "w", encoding="utf-8") as f:
+                        f.write(f"VM_NOCOW={word}\n")
+                    with self.assertRaises(Refused) as e:
+                        vm_adapters.prepare_command(
+                            paths, vm_domain.VmCommand.NOCOW, vm_domain.VmSub.APPLY, nas=False, vm=None
+                        )
+                    self.assertIn(f"{conf} line 1: VM_NOCOW=", str(e.exception))
+                    self.assertTrue(vm_adapters.knobs(paths)["VM_NOCOW"], "the line sets nothing: the default")
 
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())

@@ -7,7 +7,7 @@ processes, the desktop alert, the clock; its output; who runs it.
 from __future__ import annotations
 
 from collections.abc import Callable
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import os
 import pwd
 import re
@@ -23,7 +23,7 @@ from cst_core.domain.contracts import Urgency
 from cst_core.ports import CommandResult, CommandRunnerPort
 from btrfs.bulk.domain import BIG, BulkPaths, Ctx, LstatKind, PathChain
 from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP, STEAM_COMMS
-from btrfs.snapshot_runtime.domain import guard_limit
+from btrfs.snapshot_runtime.domain import GUARD_KEYS, guard_limit, guard_number
 from cst_core.domain.text import parse_snapshots_conf
 
 
@@ -238,11 +238,25 @@ class Host:
             found = re.findall(rf"""^[ \t]*{name}=(["']?)([0-9]{{1,6}})\1[ \t]*(?:#.*)?$""", program, re.MULTILINE)
             if found:
                 vals[key] = int(found[-1][1])
-        conf = parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
+        conf = self._snapshots_conf()
         for key, name in names.items():
             if name in conf:
                 vals[key] = guard_limit(conf[name])
         return {k: v * BIG for k, v in vals.items()}
+
+    def snapshot_guard_invalid(self) -> tuple[tuple[str, str], ...]:
+        """The space guard settings snapshots.conf assigns that btrfs-snapshot's hourly run cannot hold at
+        (no number guard_number computes, as the run reads them): (setting, value) pairs, in GUARD_KEYS'
+        order. The hourly run stops at each, so no /home snapshot is made until it is fixed;
+        snapshot_guard reads such a value as 0 (no limit)."""
+        conf = self._snapshots_conf()
+        return tuple(
+            (k, conf[k]) for k in GUARD_KEYS if k in conf and not isinstance(guard_number(conf[k], exact=True), int)
+        )
+
+    def _snapshots_conf(self) -> Mapping[str, str]:
+        """The settings snapshots.conf in the settings folder assigns, as btrfs-snapshot reads them."""
+        return parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
 
     @staticmethod
     def _read_settings_text(path: str) -> str:

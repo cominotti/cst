@@ -7,11 +7,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 import re
-from typing import Final
+from typing import Final, Literal, overload
 
 from btrfs.health_check.domain import awk_field, bash_div, bash_int, bash_wrap
 from cst_core.domain.shapes import ShapeError, first_item, items_of, object_of, object_or_empty, parse_json
-from cst_core.domain.text import group, read_fields
+from cst_core.domain.text import group, read_fields, strip_ascii_blanks
 from cst_core.domain.values import DAY, HOUR, MINUTE
 
 TAG: Final = "btrfs-snapshot"
@@ -48,6 +48,13 @@ class GuardError(StrEnum):
 
     BAD_NUMBER = "bad-number"
     NOT_A_NUMBER = "not-a-number"
+    # guard_number(exact=True) only: bash computes it, but only by wrapping past 64 bits.
+    OUT_OF_RANGE = "out-of-range"
+
+
+# The range of bash's 64-bit integers: an exact reading (_Arith's exact) refuses anything outside it.
+BASH_INT_MIN: Final = -(1 << 63)
+BASH_INT_MAX: Final = (1 << 63) - 1
 
 
 # The bases bash takes in a BASE#DIGITS number, and its digits 0-9 and a-z (A-Z read as a-z up to that base).
@@ -56,9 +63,10 @@ _MAX_BASE: Final = 64
 _ONE_CASE_DIGITS: Final = 36
 
 
-def _based(base: int, digits: str) -> int:
+def _based(base: int, digits: str, *, exact: bool = False) -> int:
     """BASE#DIGITS as bash reads it: base 2 to 64; digits 0-9, then a-z, A-Z, @ and _ (a-z and A-Z
-    alike up to base 36); a digit not below the base is an error."""
+    alike up to base 36); a digit not below the base is an error. exact: OverflowError for a value past
+    BASH_INT_MAX, instead of bash's wrap."""
     if not _MIN_BASE <= base <= _MAX_BASE:
         raise ValueError("invalid arithmetic base")
     n = 0
@@ -74,6 +82,8 @@ def _based(base: int, digits: str) -> int:
         if d >= base:
             raise ValueError("value too great for base")
         n = n * base + d
+        if exact and n > BASH_INT_MAX:
+            raise OverflowError(digits)
     return bash_wrap(n)
 
 
@@ -91,16 +101,27 @@ class _Arith:
     octal, 0x hexadecimal, BASE#DIGITS with no leading 0 in BASE), unary + and -, ** (right to left,
     below unary -: -2**2 is 4), * / %, + -, parentheses, blanks (space, tab and newline, as bash's:
     any other character, a no-break space or a carriage return among them, is an error). Every constant and every
-    result wraps around as bash's 64-bit integers do. A name is an unset variable (NOT_A_NUMBER): the
+    result wraps around as bash's 64-bit integers do; exact: one outside [BASH_INT_MIN, BASH_INT_MAX] raises
+    OverflowError instead (-9223372036854775808 among them: it is unary - of 9223372036854775808, which
+    does not fit). A name is an unset variable (NOT_A_NUMBER): the
     file is read as data, a name is no value; but bash reads the token after a name before the name's
     value, so a name followed by a token that is neither an operator nor a name (x;, x 08, x
     <no-break space>) is bash's error of that token; after a chain of names (x y;, x y z 08), the first
     token that is not a name. Anything else, a division by 0 or a negative
     exponent is an error (BAD_NUMBER)."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, exact: bool = False) -> None:
         self.tokens = [group(m, 1) for m in _ARITH_TOKEN.finditer(text)]
         self.pos = 0
+        self.exact = exact
+
+    def fit(self, n: int) -> int:
+        """N as a 64-bit result: wrapped as bash's, or (exact) OverflowError when it does not fit."""
+        if not self.exact:
+            return bash_wrap(n)
+        if not BASH_INT_MIN <= n <= BASH_INT_MAX:
+            raise OverflowError(n)
+        return n
 
     def peek(self) -> str:
         return self.tokens[self.pos] if self.pos < len(self.tokens) else ""
@@ -115,7 +136,7 @@ class _Arith:
         while self.peek() in ("+", "-"):
             op = self.take()
             m = self.term()
-            n = bash_wrap(n + m if op == "+" else n - m)
+            n = self.fit(n + m if op == "+" else n - m)
         return n
 
     def term(self) -> int:
@@ -124,12 +145,12 @@ class _Arith:
             op = self.take()
             m = self.power()
             if op == "*":
-                n = bash_wrap(n * m)
+                n = self.fit(n * m)
             elif m == 0:
                 raise ValueError("division by 0")
             else:
                 q = bash_div(n, m)
-                n = bash_wrap(q if op == "/" else n - q * m)
+                n = self.fit(q if op == "/" else n - q * m)
         return n
 
     def power(self) -> int:
@@ -140,11 +161,20 @@ class _Arith:
         e = self.power()
         if e < 0:
             raise ValueError("exponent less than 0")
-        return bash_wrap(pow(n, e, 1 << 64))
+        if not self.exact:
+            return bash_wrap(pow(n, e, 1 << 64))
+        if n in (0, 1):
+            return 1 if e == 0 else n
+        if n == -1:
+            return 1 if e % 2 == 0 else -1
+        r = 1
+        for _ in range(e):  # |n| >= 2: past the bound within 64 steps, never an unbounded power
+            r = self.fit(r * n)
+        return r
 
     def unary(self) -> int:
         if self.peek() in ("+", "-"):
-            return bash_wrap(-self.unary()) if self.take() == "-" else self.unary()
+            return self.fit(-self.unary()) if self.take() == "-" else self.unary()
         return self.atom()
 
     def atom(self) -> int:
@@ -166,28 +196,54 @@ class _Arith:
             raise LookupError(tok)
         return self._constant(tok)
 
-    @staticmethod
-    def _constant(tok: str) -> int:
+    def _constant(self, tok: str) -> int:
         """An integer constant as bash reads it (0x hexadecimal, BASE#DIGITS, decimal, a leading 0
-        octal), wrapped to 64 bits; ValueError for a token bash cannot read as one."""
+        octal), wrapped to 64 bits (exact: OverflowError past BASH_INT_MAX); ValueError for a token
+        bash cannot read as one."""
         if re.fullmatch(r"0[xX][0-9a-fA-F]*", tok):
-            return bash_wrap(int(tok[2:] or "0", 16))
+            return self.fit(int(tok[2:] or "0", 16))
         if m := re.fullmatch(r"([0-9]+)#([0-9A-Za-z@_]+)", tok):
             if m.group(1).startswith("0"):
                 raise ValueError("invalid number")  # bash reads no base with a leading 0
-            return _based(int(m.group(1)), m.group(2))
+            return _based(int(m.group(1)), m.group(2), exact=self.exact)
         n = bash_int(tok)
         if n is None:
             raise ValueError(tok)
-        return n
+        if not self.exact:
+            return n
+        if len(tok) > 1 and tok.startswith("0"):
+            return self.fit(int(tok, 8))  # octal: a power-of-two base has no digit limit in int()
+        if len(tok) > len(str(BASH_INT_MAX)):
+            raise OverflowError(tok)  # past the bound, and never handed to int() at any length
+        return self.fit(int(tok))
 
 
-def guard_number(text: str) -> int | GuardError:
+# What guard_number gives without exact: bash's two errors, never OUT_OF_RANGE.
+type BashArithError = Literal[GuardError.BAD_NUMBER, GuardError.NOT_A_NUMBER]
+
+
+@overload
+def guard_number(text: str, *, exact: Literal[False] = False) -> int | BashArithError: ...
+
+
+@overload
+def guard_number(text: str, *, exact: bool) -> int | GuardError: ...
+
+
+def guard_number(text: str, *, exact: bool = False) -> int | GuardError:
     """A numeric setting as bash arithmetic (( ... SETTING ... )) read it under set -u (_Arith):
-    empty is 0."""
+    empty is 0. exact: OUT_OF_RANGE for a value bash computes only by wrapping (a constant or a result
+    outside [BASH_INT_MIN, BASH_INT_MAX]); what bash cannot compute keeps its error."""
+    n = _arith_value(text, exact=False)
+    if not exact or not isinstance(n, int):
+        return n
+    return _arith_value(text, exact=True)
+
+
+def _arith_value(text: str, *, exact: bool) -> int | GuardError:
     if not text.strip(" \t\n"):
         return 0
-    parser = _Arith(text)
+    parser = _Arith(text, exact=exact)
     try:
         n = parser.expr()
         if parser.peek():
@@ -196,14 +252,16 @@ def guard_number(text: str) -> int | GuardError:
         return GuardError.NOT_A_NUMBER
     except ValueError:
         return GuardError.BAD_NUMBER
+    except OverflowError:
+        return GuardError.OUT_OF_RANGE
     return n
 
 
 def guard_limit(text: str) -> int:
-    """A space guard setting (GiB) as a limit the hourly run can hold at: guard_number's value; 0 (no
-    limit) for one it cannot compare (BAD_NUMBER: its test is false; NOT_A_NUMBER: the run stops
-    first) and for a negative one, which never holds."""
-    n = guard_number(text)
+    """A space guard setting (GiB) as a limit the hourly run can hold at: guard_number's exact value; 0
+    (no limit) for one it cannot hold at (an error or OUT_OF_RANGE: the hourly run stops) and for a
+    negative one, which never holds."""
+    n = guard_number(text, exact=True)
     return n if isinstance(n, int) and n > 0 else 0
 
 
@@ -293,9 +351,12 @@ CORE_HINTS: Final = (
 )
 
 
-def settings_problem_line(conf: str, number: int, text: str, reason: str) -> str:
-    """The warning of a line of snapshots.conf that is not a setting (as the bash front writes it)."""
-    return f"<4>{TAG}: {conf} line {number}: {text.strip()}: {reason}; ignored"
+def settings_problem_line(conf: str, number: int, text: str, reason: str, *, kept: bool = False) -> str:
+    """The warning of a line of snapshots.conf that is not a setting (as the bash front writes it). kept:
+    a blank beside the value (SettingsProblem.kept), whose line still sets bash's value: the warning says
+    so, and claims nothing about whether that value works."""
+    what = "kept as bash reads it, with the blank (fix the line)" if kept else "ignored"
+    return f"<4>{TAG}: {conf} line {number}: {strip_ascii_blanks(text)}: {reason}; {what}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,14 +520,40 @@ RESTIC_DAMAGE_RE: Final = re.compile(
 _UNITS: Final[Mapping[str, int]] = {"": 1, "s": 1, "m": MINUTE, "h": HOUR, "d": DAY}
 
 
-def duration_s(text: str) -> int | None:
+def duration_s(text: str, *, exact: bool = False) -> int | None:
     """Seconds of a timeout(1) duration (N, Ns, Nm, Nh, Nd); 6 h if it cannot be read. None for a
-    number bash arithmetic refused (08: a leading 0 is octal), which stopped bash's run."""
+    number bash arithmetic refused (08: a leading 0 is octal), which stopped bash's run; exact: None
+    too for a number or a number of seconds past BASH_INT_MAX."""
     m = re.fullmatch(r"([0-9]+)([smhd]?)", text)
     if m is None:
         return DEFAULT_NAS_TIMEOUT_S
-    n = bash_int(m.group(1))
-    return None if n is None else n * _UNITS[m.group(2)]
+    n = guard_number(m.group(1), exact=True) if exact else bash_int(m.group(1))
+    if not isinstance(n, int):
+        return None
+    seconds = n * _UNITS[m.group(2)]
+    return None if exact and seconds > BASH_INT_MAX else seconds
+
+
+# The NAS numbers the runtime computes with, and how it puts each into bash arithmetic.
+_NAS_DAY_KEYS: Final = ("NAS_PRUNE_EVERY_DAYS", "NAS_CHECK_EVERY_DAYS")
+
+
+def nas_out_of_range(settings: Mapping[str, str], now: int) -> tuple[str, ...]:
+    """The NAS settings whose number the run computes only by wrapping past 64 bits, in DEFAULTS'
+    order: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS and NAS_CHECK_EVERY_DAYS as "VALUE * 86400"
+    (as due() puts them in), NAS_TIMEOUT's seconds, and the run's deadline NOW + those seconds. A value
+    bash cannot compute is not among them (its error stays where the run meets it)."""
+    bad: list[str] = []
+    for key in DEFAULTS:
+        if key == "NAS_STALE_DAYS" or key in _NAS_DAY_KEYS:
+            expr = settings[key] if key == "NAS_STALE_DAYS" else f"{settings[key]} * {DAY}"
+            if guard_number(expr, exact=True) == GuardError.OUT_OF_RANGE:
+                bad.append(key)
+        elif key == "NAS_TIMEOUT" and duration_s(settings[key]) is not None:
+            seconds = duration_s(settings[key], exact=True)
+            if seconds is None or seconds > BASH_INT_MAX - now:
+                bad.append(key)
+    return tuple(bad)
 
 
 def restic_line(line: str) -> str:

@@ -1822,11 +1822,31 @@ class SettingsProblemTest(GameProfileCase):
             out.getvalue(),
             f"<3>game-profile: {conf} line 2: BUILD_CPUS=$(nproc): $, ` or \\ outside single quotes: bash would expand it"
             " (use single quotes)\n"
-            f"<3>game-profile: not switched on: a line of {conf} sets nothing (fix it; 'off' still works)\n",
+            f"<3>game-profile: not switched on: a line of {conf} is not a plain setting (fix it; 'off' still works)\n",
         )
         self.assertFalse(os.path.exists(self.state))
         self.assertEqual(self.systemd.actions, [])
         self.assertEqual(p.locked("on"), 1)  # what the unit's ExecStart gets
+
+    def test_a_blank_beside_a_value_refuses_on_too(self) -> None:
+        # The line keeps bash's value (a file bash sources), but 'on' refuses on it as on any problem line:
+        # BUILD_CPUS='12-23<NBSP>' must not pin the boxes to what CpuSet makes of it.
+        self.write(self.paths.conf, "TARGET_USER='testuser'\nBUILD_CPUS='12-23\N{NO-BREAK SPACE}'\n")
+        settings, problems = read_settings(self.paths.conf)
+        self.assertEqual([(p.line, p.kept) for p in problems], [(2, True)])
+        self.assertEqual(settings.build_cpus, "12-23\N{NO-BREAK SPACE}")
+        out = io.StringIO()
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems, out=out)
+        self.assertEqual(p.on(), 1)
+        conf = self.paths.conf
+        self.assertEqual(
+            out.getvalue(),
+            f"<3>game-profile: {conf} line 2: BUILD_CPUS='12-23\N{NO-BREAK SPACE}': a no-break space (U+00A0) at "
+            "the end of the value: CST does not trim it (delete it)\n"
+            f"<3>game-profile: not switched on: a line of {conf} is not a plain setting (fix it; 'off' still works)\n",
+        )
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.systemd.actions, [])
 
     def test_a_refused_on_drops_the_by_hand_mark_and_a_later_game_is_switched_off(self) -> None:
         self.write(self.manual, "")  # 'cst cpu game on' makes it, then starts cpu-game.service
@@ -1856,7 +1876,7 @@ class SettingsProblemTest(GameProfileCase):
             out.getvalue(),
             f"<4>game-profile: {conf} line 2: BUILD_CPUS=$(nproc): $, ` or \\ outside single quotes: bash would expand it"
             " (use single quotes)\n"
-            f"<4>game-profile: tick changes nothing: a line of {conf} sets nothing (fix it; 'off' still works;"
+            f"<4>game-profile: tick changes nothing: a line of {conf} is not a plain setting (fix it; 'off' still works;"
             " said once per boot)\n",
         )
         self.assertEqual(self.sets(self.systemd.actions), [])
@@ -1960,7 +1980,7 @@ class SettingsProblemTest(GameProfileCase):
         self.assertEqual(p.state(), 0)
         self.assertIn(f"\n  settings: {self.paths.conf} line 2: BUILD_CPUS=$(nproc): ", out.getvalue())
         self.assertIn(
-            "(sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)\n", out.getvalue()
+            "(not a plain setting: 'on' refuses and the watchdog changes nothing until it is fixed)\n", out.getvalue()
         )
 
 

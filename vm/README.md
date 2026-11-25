@@ -976,7 +976,15 @@ as bash reads them (`NAS_ENABLED=1 # on` is `1`; in `snapshots.conf` also a
 value an older CST wrote with backslashes, `a\ b`). `vm.conf`, which only
 Python reads, also allows blanks around `=` (`VM_NOCOW = 0`; spaces and tabs:
 a no-break space is not a blank, so before the key or around `=` it makes
-the line a problem, and in a value it stays part of the value). A line that is
+the line a problem). A value with a no-break space or another Unicode blank
+at its start or end, in quotes or not, is a problem line too: it is never
+trimmed. In `vm.conf` such a line sets nothing, so `backup`, `tune apply`,
+`nocow apply` and `backup-timer on` refuse until it is fixed
+(`VM_NAS_KEEP_WEEKLY=<no-break space>8` never becomes the default 4, and
+`VM_NOCOW='no<no-break space>'` never reads as `no`); in `cpu-setup.conf`
+and `snapshots.conf` the value stays as bash reads it and the line is still
+named, with the same refusals. A blank inside a value (`a<no-break space>b`)
+is kept. A line that is
 not a plain `KEY=VALUE` (blanks around `=` in a bash file, a value with `$`,
 a backtick or a backslash outside single quotes, an unclosed quote) sets
 nothing and is named with its line number: `status` and the `plan`s print it

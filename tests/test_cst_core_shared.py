@@ -86,6 +86,7 @@ from cst_core.domain.text import (
     YES_WORDS,
     cgroup_v2_path,
     count_text,
+    describe_problem_lines,
     describe_problems,
     enum_member,
     first_line,
@@ -1731,12 +1732,12 @@ class ShellAssignmentsTest(unittest.TestCase):
 
     def test_python_only_files_trim_ascii_blanks_only(self) -> None:
         # str.strip() and \s also took a no-break space, U+3000 and other Unicode blanks, which bash and
-        # systemd keep: around the key they make the line no assignment, around the value they stay in it.
+        # systemd keep: around the key they make the line no assignment, beside the value a problem line
+        # (test_a_blank_beside_a_value_is_a_problem_line), inside it they stay in it.
         nbsp, ideo = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}"
         for line, want in (
-            (f"K={nbsp}v", f"{nbsp}v"),
-            (f"K = v{ideo}", f"v{ideo}"),
             (f"K=v{nbsp}# c", f"v{nbsp}# c"),
+            (f"K = a{ideo}b", f"a{ideo}b"),
             ("K = v\r", "v"),
             ("K=v\t# c", "v"),
             ("K=v\f\v# c", "v"),
@@ -1750,6 +1751,82 @@ class ShellAssignmentsTest(unittest.TestCase):
                 got = parse_shell_assignments(line + "\n", bash_sourced=False)
                 self.assertEqual(dict(got.values), {})
                 self.assertEqual([(p.line, p.reason) for p in got.problems], [(1, "not a KEY=VALUE line")])
+
+    # Lines whose value has a blank other than space or tab at its start or end, and the reason's start.
+    BLANK_EDGE_LINES = (
+        ("K=\N{NO-BREAK SPACE}v", "a no-break space (U+00A0) at the start of the value"),
+        ("K=v\N{IDEOGRAPHIC SPACE}", "an ideographic space (U+3000) at the end of the value"),
+        ("K='\N{NO-BREAK SPACE}8'", "a no-break space (U+00A0) at the start of the value"),
+        ("K=' \N{NO-BREAK SPACE}8'", "a no-break space (U+00A0) at the start of the value"),
+        ('K="8\N{EM SPACE}"', "an em space (U+2003) at the end of the value"),
+        ("K=a\x1c", "a control character (U+001C) at the end of the value"),
+        ("K='\f8'", "a control character (U+000C) at the start of the value"),
+        ("K='8\v' # c", "a control character (U+000B) at the end of the value"),
+    )
+
+    def test_a_blank_beside_a_value_is_a_problem_line(self) -> None:
+        # Never trimmed, never a silent default: VM_NAS_KEEP_WEEKLY=<NBSP>8 used to be read as no number.
+        for line, why in self.BLANK_EDGE_LINES:
+            with self.subTest(line=line):
+                got = parse_shell_assignments(line + "\n", bash_sourced=False)
+                self.assertEqual(dict(got.values), {}, "a file only Python reads: the line sets nothing")
+                (p,) = got.problems
+                self.assertEqual((p.line, p.kept), (1, False))
+                self.assertEqual(p.reason, f"{why}: CST does not trim it (delete it)")
+        # In a plain file, ASCII blanks around an unquoted value are trimmed first, as before.
+        spaced = parse_shell_assignments("K = 8\f\nJ=\N{NO-BREAK SPACE}8 \n", bash_sourced=False)
+        self.assertEqual((dict(spaced.values), [p.line for p in spaced.problems]), ({"K": "8"}, [2]))
+
+    def test_a_blank_beside_a_value_in_a_file_bash_sources_keeps_bash_value(self) -> None:
+        # The line keeps bash's parse: the value bash sets, and the problem marked kept.
+        for line, why in self.BLANK_EDGE_LINES:
+            with self.subTest(line=line):
+                got = parse_shell_assignments(line + "\n")
+                (p,) = got.problems
+                self.assertEqual((p.line, p.kept), (1, True))
+                self.assertTrue(p.reason.startswith(why), p.reason)
+                self.assertEqual([(a.line, a.key) for a in got.entries], [(1, "K")])
+                if os.access(BASH, os.X_OK):
+                    self.assertEqual(self.bash_values(line + "\n", ["K"]), dict(got.values))
+
+    def test_a_blank_inside_a_value_is_no_problem(self) -> None:
+        # A folder or a game name may hold one; the last one is one word for bash (no blank after it).
+        for line, want in (
+            ("K=a\N{NO-BREAK SPACE}b", "a\N{NO-BREAK SPACE}b"),
+            ("K='a\N{IDEOGRAPHIC SPACE}b'", "a\N{IDEOGRAPHIC SPACE}b"),
+            ("K=8\N{NO-BREAK SPACE}#c", "8\N{NO-BREAK SPACE}#c"),
+        ):
+            for bash_sourced in (True, False):
+                with self.subTest(line=line, bash_sourced=bash_sourced):
+                    got = parse_shell_assignments(line + "\n", bash_sourced=bash_sourced)
+                    self.assertEqual((dict(got.values), got.problems), ({"K": want}, ()))
+
+    def test_a_problem_shows_the_blank_it_names(self) -> None:
+        # The line is shown with ASCII blanks trimmed only: str.strip() would hide the no-break space.
+        (p,) = parse_shell_assignments("K=8\N{NO-BREAK SPACE}\n", bash_sourced=False).problems
+        self.assertEqual(
+            describe_problems("/etc/x.conf", (p,)),
+            "/etc/x.conf line 1: K=8\N{NO-BREAK SPACE}: a no-break space (U+00A0) at the end of the value: "
+            "CST does not trim it (delete it)",
+        )
+
+    def test_describe_problem_lines_is_one_item_per_problem(self) -> None:
+        # A problem line's text can hold a form feed, U+001C or U+2028 (only a newline ends a line):
+        # str.splitlines() of describe_problems' text would split it, the list form never does.
+        got = parse_shell_assignments("A='1\x1c'\nB=\"2\N{LINE SEPARATOR}\"\nC = 3\n").problems
+        lines = describe_problem_lines("/etc/x.conf", got)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual([ln.split(" ", 3)[:3] for ln in lines], [["/etc/x.conf", "line", f"{n}:"] for n in (1, 2, 3)])
+        self.assertEqual("\n".join(lines), describe_problems("/etc/x.conf", got))
+        self.assertEqual(describe_problem_lines("/etc/x.conf", ()), [])
+
+    def test_snapshots_conf_checks_an_old_writer_value_too(self) -> None:
+        # printf %q's $'...' form of a no-break space before 8: bash's value, and a kept problem.
+        got = parse_snapshots_conf("K=$'\\302\\2408'\nJ=$'\\v8'\n")
+        self.assertEqual(dict(got.values), {"K": "\N{NO-BREAK SPACE}8", "J": "\v8"})
+        self.assertEqual([(p.line, p.kept) for p in got.problems], [(1, True), (2, True)])
+        self.assertIn("a no-break space (U+00A0) at the start of the value", got.problems[0].reason)
+        self.assertIn("a control character (U+000B) at the start of the value", got.problems[1].reason)
 
     # Lines an older CST's snap_conf_set wrote with printf %q, and what bash makes of them.
     OLD_WRITER_LINES = (

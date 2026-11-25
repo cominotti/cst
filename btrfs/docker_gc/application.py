@@ -191,7 +191,7 @@ class DockerGc:
             self.console.log(3, str(e))
             return NEWER_STATE_EXIT
         except UnknownProtection as e:
-            for line in str(e).splitlines():
+            for line in e.lines:
                 self.console.log(3, line)
             return BAD_SETTINGS_EXIT
         except InspectError as e:

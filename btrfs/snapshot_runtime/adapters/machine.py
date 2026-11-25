@@ -23,6 +23,7 @@ from btrfs.snapshot_runtime.domain import (
     CacheArgs,
     Sources,
     cache_args,
+    nas_out_of_range,
     settings_problem_line,
     sources,
 )
@@ -41,7 +42,7 @@ from cst_core.domain.contracts import (
     state_format,
 )
 from cst_core.domain.errors import shell_exit_status
-from cst_core.domain.text import parse_snapshots_conf
+from cst_core.domain.text import Assignment, file_lines, parse_snapshots_conf
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 
 
@@ -101,16 +102,18 @@ class SnapshotRun:
         self.settings["HOME_DIR"] = self.env_home
         if os.access(self.conf, os.R_OK):
             # Bytes that are not UTF-8 kept as they are (bash kept them): surrogateescape.
-            got = parse_snapshots_conf(self.read_raw(self.conf))
+            raw = self.read_raw(self.conf)
+            got = parse_snapshots_conf(raw)
             for problem in got.problems:
                 print(
-                    settings_problem_line(self.conf, problem.line, problem.text, problem.reason),
+                    settings_problem_line(self.conf, problem.line, problem.text, problem.reason, kept=problem.kept),
                     file=sys.stderr,
                     flush=True,
                 )
             for a in got.entries:
                 if a.key in DEFAULTS:
                     self.settings[a.key] = a.value
+            self.refuse_wrapping(got.entries, raw)
         if self.env_home:
             self.settings["HOME_DIR"] = self.env_home
         self.snapdir = f"{self.settings['TOP']}/{self.settings['SNAP_DIR_NAME']}"
@@ -120,6 +123,18 @@ class SnapshotRun:
             os.makedirs(self.state, exist_ok=True)
         except OSError as e:
             print(f"mkdir: cannot create directory '{self.state}': {e.strerror}", file=sys.stderr, flush=True)
+
+    def refuse_wrapping(self, entries: Sequence[Assignment], raw: str) -> None:
+        """A NAS number of snapshots.conf that bash computes only by wrapping past 64 bits
+        (nas_out_of_range) is a problem line of its last assignment: its warning, and the default."""
+        lines = file_lines(raw)
+        for key in nas_out_of_range(self.settings, self.now()):
+            last = next(a for a in reversed(entries) if a.key == key)
+            reason = "a number past 2**63 - 1 (bash would wrap it): not wrapped"
+            print(
+                settings_problem_line(self.conf, last.line, lines[last.line - 1], reason), file=sys.stderr, flush=True
+            )
+            self.settings[key] = DEFAULTS[key]
 
     # ---- output --------------------------------------------------------------------------------
     def log(self, prio: int, msg: str, stream: TextIO | None = None) -> None:

@@ -1384,6 +1384,15 @@ Settings in `/etc/btrfs-setup/snapshots.conf`: `NAS_HOST`, `NAS_PORT`,
 `NAS_TIMEOUT=6h`, `NAS_KEEP_DAILY=14`, `NAS_KEEP_WEEKLY=8`,
 `NAS_KEEP_MONTHLY=12`.
 
+A NAS number the run would compute only past 2**63 - 1, where bash's 64-bit
+arithmetic wraps around, is a problem line: `NAS_STALE_DAYS` itself,
+`NAS_PRUNE_EVERY_DAYS` and `NAS_CHECK_EVERY_DAYS` times 86400 (more than
+106751991167300 days), `NAS_TIMEOUT`'s seconds, and the run's deadline (now
+plus those seconds). The run warns (`snapshots.conf line N: NAS_TIMEOUT=...:
+a number past 2**63 - 1 (bash would wrap it): not wrapped; ignored`) and uses
+the default of that setting. Before, `NAS_CHECK_EVERY_DAYS=4611686018427387904`
+wrapped to 0 days, a check at every run.
+
 ### The VM backups share this repository
 
 `cst vm backup --nas` (and its weekly timer) stores the libvirt VM in the
@@ -1593,7 +1602,13 @@ That file (the items you keep in /home) is a folder, or cannot be opened.
 Since the script cannot know what you want to keep, it moves **no** item
 until it is fixed. Delete it (`sudo rm -r /etc/btrfs-setup/bulk-keep`) and
 run `bulk keep ID` again for each item you keep. (Odd characters in the file
-are fine: such a line shows up as an `unknown item` and is ignored.)
+are fine: such a line shows up as an `unknown item` and is ignored.) An id with
+a no-break space or another Unicode blank beside it (`apps<no-break space>`)
+says `has a line it cannot read` instead, with the line: it may mean `apps`,
+so `bulk apply`, the boot step and the Steam commands move nothing until you
+fix that line by hand: `bulk keep` and `bulk unkeep` refuse while it is
+there (exit 1, `btrfs-bulk: cannot update /etc/btrfs-setup/bulk-keep: line N: ...`)
+and leave the file as it is.
 
 **`bulk status` says `waits for the next boot (busy)`.**
 Reboot normally: the item is moved before the login screen. Or close the
@@ -1957,7 +1972,13 @@ the NAS keys), in the forms above, and a `# comment` after a value; an
 `export` in front is dropped. A line that is anything else (a command, a
 value with `$`, a backtick or a blank outside quotes) is never run: it gets
 a warning on stderr (`... snapshots.conf line N: TEXT: REASON; ignored`, in
-the journal of the unit) and the snapshot runs without it. A line for a key
+the journal of the unit) and the snapshot runs without it. A value with a
+no-break space or another Unicode blank at its start or end
+(`HOME_PRESERVE='24h<no-break space>'`) is no such line: bash reads it with
+the blank, so `btrfs-snapshot` keeps that value too and warns
+(`...; kept as bash reads it, with the blank (fix the line)`); its bash commands
+(`convert`, `settings-lines`, `snapshots status`) take the value as bash does,
+with no warning, and `cst vm`'s NAS backup and `cst doctor` name the line. A line for a key
 that is not one of its settings (`SCRUB_LIMIT`, set by `cst btrfs`) is left
 to its own reader. Before, bash sourced the whole file as root, so every line
 ran. `cst btrfs snapshots status` and `snapshots nas setup|status|enable`
@@ -2698,13 +2719,33 @@ How it works, as a sequence:
 
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
 `RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`. Each limit is read as
-bash arithmetic reads it (64-bit: a number too large wraps around; `010` is
-8, `2#1010` is 10; blanks are spaces, tabs and newlines); a value bash cannot compute (`250GiB`, digits of
-another script) holds nothing.
+bash arithmetic reads it (`010` is 8, `2#1010` is 10; blanks are spaces,
+tabs and newlines), in the part of it CST reads: integer constants, `+`,
+`-`, `*`, `/`, `%`, `**` and parentheses. A value bash cannot compute
+(`250GiB`, `abc`, `1 x`, digits of another script, a no-break space), one
+with an operator CST does not read although bash would compute it
+(`1<<8`, `~5`, `5>3`, `1?2:3`), and a number past 2**63 - 1,
+which bash's 64-bit arithmetic would wrap around (`18446744073709551866`
+would be 250, `9223372036854775808` a negative number, so no limit),
+**stops the hourly run**, with exit 1 and a journal line naming the setting
+and its value (`SKIP_AT_OR_BELOW_GIB='250GiB' in /etc/btrfs-setup/snapshots.conf:
+not a number of GiB the space guard can hold at: no snapshot until it is
+fixed`), whether this hour's check would read that setting or not: no
+snapshot until it is fixed, never a run with no limit. The guard holds back
+the snapshot, not the expiry: older snapshots still expire by the normal
+retention (a prune) before the run stops. A valid
+`EMERGENCY_AT_OR_BELOW_GIB` still acts: at or below it the emergency purge
+runs instead (it is what frees a nearly full disk); above it the emergency is
+over, and its mark goes (`cst btrfs snapshots status` no longer says
+EMERGENCY). An invalid `EMERGENCY_AT_OR_BELOW_GIB` gives no number to purge
+at: no purge, and an emergency mark stays until it is fixed. Each such run
+ends with the same line and exit 1. The health check's `no successful hourly run for over 3 hours` alert follows.
 
 `cst btrfs bulk steam apply --copy` respects them: a real copy of a game
 needs its size plus the emergency limit plus 20 GiB free, and `plan` warns
-when the copies would pause the snapshots
+when the copies would pause the snapshots, and names a limit the hourly run
+stops at (`NOTE: btrfs-snapshot's hourly run stops at RESUME_ABOVE_GIB='abc'
+in snapshots.conf (no number)`; it then says nothing of where they resume)
 ([section 3](#steam-move-your-games-into-the-bulk-library)).
 
 Deleting snapshots frees space only for data that no other snapshot and no
