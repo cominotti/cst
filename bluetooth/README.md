@@ -366,7 +366,11 @@ wireplumber`).
   The command is `sudo env LC_ALL=C cp -p --update=none-fail`: cp's message
   for a name that is taken is read in the C locale whatever sudoers passes
   on (before, only when sudoers kept `LC_ALL`, as Fedora's does; with one
-  that drops it, a cp speaking another language stopped the run).
+  that drops it, a cp speaking another language stopped the run). sudo
+  checks the command it starts, here `env`: a sudoers that allows only
+  named commands must allow `/usr/bin/env` for this copy, not only
+  `/usr/bin/cp` (one that allowed only `cp` now refuses the backup, or asks
+  for a password).
 - The old `--check` is now `plan`, `--revert` is `revert`; the other options
   kept their names.
 
