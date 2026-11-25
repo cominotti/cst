@@ -1793,15 +1793,19 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   after it wrote `/etc/fstab` and before its `systemctl daemon-reload`
   leaves systemd with the old `/etc/fstab` loaded. The same `attach` or
   `detach` again finds nothing to write, so before it says "nothing to do"
-  it asks systemd, with one `systemctl show '*.mount'` (which lists the
-  mount units already loaded and loads none), whether it is behind: a unit
+  it asks systemd, with one `systemctl show --state=loaded '*.mount'`
+  (which lists every mount unit systemd has loaded, mounted or not, and
+  loads none; a glob without `--state=loaded` would leave out the inactive
+  ones, unmounted with no job queued), whether it is behind: a unit
   loaded from `/etc/fstab` that says `NeedDaemonReload=yes`, or a bind of
   the run mounted, with its line in `/etc/fstab`, whose unit systemd still
   took from the mount table (`/proc/self/mountinfo`, not `/etc/fstab`), or
   of which systemd has no unit at all when this run mounts it (had systemd
   read that line it would have the unit from `/etc/fstab` already: CST's
   lines are `nofail`, so `local-fs.target` wants them; this also holds
-  before systemd has handled the new mount).
+  before systemd has handled the new mount). A bind whose line systemd
+  has read has its unit from `/etc/fstab` even while it is unmounted, so
+  a `plan` or `attach` that mounts it runs no reload.
   Then it runs the daemon-reload and says `reloaded: systemd had not
   loaded /etc/fstab as it is on disk (an earlier run stopped)`; when
   systemctl gives no answer it reloads too, and says so. When it gives no
@@ -1822,10 +1826,12 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   systemd marks a reload as needed by the file's time, not its bytes, so
   any other program's rewrite of `/etc/fstab` makes the next run reload
   once more (harmless); and a `detach` killed before its reload on a
-  machine where no unit of `/etc/fstab` is loaded at all (an `/etc/fstab`
-  systemd-fstab-generator makes no unit of) reads as "not behind": it took
-  the lines out, so only `NeedDaemonReload` could tell (an `attach` still
-  sees its own binds' units). A bind mounted before the run with no unit
+  machine with no unit of `/etc/fstab` at all, mounted or not (an
+  `/etc/fstab` systemd-fstab-generator makes no unit of), reads as "not
+  behind": it took the lines out, so only `NeedDaemonReload` could tell
+  (elsewhere the units of the lines it took out stay loaded until a
+  reload, mounted or not, and say it; an `attach` still sees its own
+  binds' units). A bind mounted before the run with no unit
   at all proves nothing (a test root whose mounts systemd does not see).
   `status` asks the same question over every managed line and says
   `systemd has not loaded /etc/fstab as it is on disk ...: run that attach

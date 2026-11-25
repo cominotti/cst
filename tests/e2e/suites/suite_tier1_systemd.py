@@ -1124,6 +1124,86 @@ else:
 """
 
 
+def cache_reload_cleanup(w: str) -> str:
+    """The cleanup of cache_reload_scaffold(w): the bases stopped, /etc/fstab put back (removed only where
+    the scaffold found none, w/no-fstab; left alone where the scaffold stopped before it looked) and loaded,
+    the base folders this test made and the work folder removed. exec_bash runs bash -e: every step must
+    run, also after one that fails."""
+    return f"""
+            set +e
+            systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
+            systemctl daemon-reload
+            if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
+            if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
+            rm -rf {w}
+            """
+
+
+def cache_reload_scaffold(w: str) -> str:
+    """The start of a bash script that runs `cst btrfs cache` for u1 under the test root w
+    (CST_BTRFS_CACHE_ROOT, CACHE_MOUNT_STUB for findmnt, mount and umount over w/mounts, where both bases
+    are mounted), with the real systemd: tmpfs nofail lines for the two bases in w/etc/fstab, copied to the
+    real /etc/fstab and loaded (daemon-reload; nothing started). PATH="w/sync:$PATH" runs a command whose
+    daemon-reload first copies w/etc/fstab to /etc/fstab and counts it (`reloads` prints the count);
+    PATH="w/kill:$PATH" one whose daemon-reload copies it, then kills the pid in w/pid. $cst is the
+    checkout's cst. Clean up with cache_reload_cleanup(w)."""
+    return f"""
+            set -euo pipefail
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
+            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
+            [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
+            [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
+            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\n' >{w}/etc/passwd
+            cat >{w}/etc/fstab <<'EOF'
+tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
+tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
+EOF
+            row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }}
+            {{
+                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
+                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cat >{w}/bin/mnt-stub <<'STUB'
+{CACHE_MOUNT_STUB}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            cat >{w}/kill/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    for _ in $(seq 100); do [[ -s {w}/pid ]] && break; sleep 0.1; done
+    touch {w}/killed
+    kill -KILL "$(cat {w}/pid)"
+    sleep 5
+    exit 1
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            cat >{w}/sync/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    echo reload >>{w}/reloads
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/kill/systemctl {w}/sync/systemctl
+            touch {w}/reloads
+            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            cst=/opt/cst-rw/cst
+            reloads() {{ wc -l <{w}/reloads; }}
+            cp {w}/etc/fstab /etc/fstab
+            systemctl daemon-reload
+            """
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER: ClassVar[str] = ""
     NAS_CONTAINER: ClassVar[str] = ""
@@ -9612,87 +9692,21 @@ EOF
         only unmounted (detach), and systemd kept the old /etc/fstab until some later reload."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-177"
-        self.addCleanup(
-            exec_bash,
-            c,
-            # exec_bash runs bash -e: every step must run, also after one that fails.
-            f"""
-            set +e
-            systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
-            systemctl daemon-reload
-            if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
-            if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
-            rm -rf {w}
-            """,
-            check=False,
-        )
-        out = exec_bash(
-            c,
-            f"""
-            set -euo pipefail
-            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
-            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
-            [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
-            [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
-            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\nu2:x:1001:1001::/var/home/u2:/bin/bash\n' >{w}/etc/passwd
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            printf 'u2:x:1001:1001::/var/home/u2:/bin/bash\n' >>{w}/etc/passwd
             mkdir -p {w}/var/home/u2
-            cat >{w}/etc/fstab <<'EOF'
-tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
-tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
-EOF
-            row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }}
-            {{
-                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
-                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
-                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime uuid-cache-2222 /cache
-                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime uuid-cache-2222 /scratchpad
-            }} >{w}/mounts
-            cat >{w}/bin/mnt-stub <<'STUB'
-{CACHE_MOUNT_STUB}
-STUB
-            for p in findmnt mount umount; do
-                printf '#!/bin/bash\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\n' "$p" >{w}/bin/$p
-                chmod +x {w}/bin/$p
-            done
-            # Both shims hand systemd the test root's fstab at each daemon-reload; kill/ then kills the
-            # command (the pid this script recorded) before the reload runs, sync/ logs it and runs it.
-            cat >{w}/kill/systemctl <<'EOF'
-#!/bin/bash
-if [[ "$1" == daemon-reload ]]; then
-    cp {w}/etc/fstab /etc/fstab || exit 1
-    for _ in $(seq 100); do [[ -s {w}/pid ]] && break; sleep 0.1; done
-    touch {w}/killed
-    kill -KILL "$(cat {w}/pid)"
-    sleep 5
-    exit 1
-fi
-exec /usr/bin/systemctl "$@"
-EOF
-            cat >{w}/sync/systemctl <<'EOF'
-#!/bin/bash
-if [[ "$1" == daemon-reload ]]; then
-    cp {w}/etc/fstab /etc/fstab || exit 1
-    echo reload >>{w}/reloads
-fi
-exec /usr/bin/systemctl "$@"
-EOF
             # fail/: a daemon-reload that fails (nothing copied, systemd keeps what it loaded).
             mkdir -p {w}/fail
             printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then echo "Failed to reload daemon" >&2; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/fail/systemctl
             # nobus/: no systemd that answers (a rescue shell): every systemctl call fails.
             mkdir -p {w}/nobus
             printf '#!/bin/bash\necho "Failed to connect to bus: No such file or directory" >&2\nexit 1\n' >{w}/nobus/systemctl
-            chmod +x {w}/kill/systemctl {w}/sync/systemctl {w}/fail/systemctl {w}/nobus/systemctl
-            touch {w}/reloads
-            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
-            cst=/opt/cst-rw/cst
+            chmod +x {w}/fail/systemctl {w}/nobus/systemctl
             behind() {{ systemctl show -P NeedDaemonReload var-mnt-cache.mount; }}
-            reloads() {{ wc -l <{w}/reloads; }}
-            # The bases in the real /etc/fstab, loaded and started: their units come from /etc/fstab.
-            cp {w}/etc/fstab /etc/fstab
-            systemctl daemon-reload
+            # The bases in the real /etc/fstab (the scaffold loaded them), started: their units come from /etc/fstab.
             systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
             [[ "$(systemctl show -P SourcePath var-mnt-cache.mount)" == /etc/fstab ]]
             [[ "$(behind)" == no ]]
@@ -9795,9 +9809,137 @@ EOF
             [[ "$(behind)" == yes ]]
             again detach
             echo E2E-CACHE-177-OK
-            """,
-        ).stdout
+            """
+        )
+        out = exec_bash(c, script).stdout
         self.assertIn("E2E-CACHE-177-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_201_btrfs_cache_status_and_doctor_see_a_stale_fstab_whose_units_are_all_inactive(self) -> None:
+        """`cst btrfs cache` for u1 under a test root (cache_reload_scaffold: test_160's stand-ins for findmnt,
+        mount and umount) with the real systemd, where every unit of /etc/fstab is loaded and inactive: the
+        tmpfs base lines are loaded and not started, and the binds' units are loaded and not mounted (the
+        stand-ins' mounts are not real). /etc/fstab rewritten with no daemon-reload flags them all
+        (NeedDaemonReload=yes), and `systemctl show '*.mount'` without --state=loaded lists none of them
+        (the test fails as "cannot bite" otherwise). `status` and `cst doctor` say systemd has not loaded
+        /etc/fstab; an attach with nothing to mount reloads once (`reloaded:`), and then neither says it.
+        A detach killed at its daemon-reload after it took u1's lines out, the binds unmounted since: the
+        old lines' units stay loaded, inactive and flagged; the next detach reloads once and leaves no mount
+        unit of ~/.cache; a third has nothing to do. Before, status and doctor said nothing, and attach and
+        detach said "nothing to do" without a reload, since a glob alone hides inactive units."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-201"
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            st_line="  systemd            has not loaded /etc/fstab as it is on disk"
+            doc_line="btrfs cache: systemd has not loaded /etc/fstab as it is on disk"
+            # cst doctor also warns of the bases, which are not mounted: only its line of /etc/fstab counts.
+            doc() {{ $cst doctor >{w}/doc 2>&1 || true; grep -qF "$doc_line" {w}/doc; }}
+            status_warns() {{ $cst btrfs cache status --user u1 >{w}/st 2>&1; grep -qF "$st_line" {w}/st; }}
+            # listed UNIT [OPTION...]: whether `systemctl show [OPTION...] -p Id '*.mount'` lists UNIT.
+            listed() {{ local u=$1 ids; shift; ids="$(systemctl show "$@" -p Id '*.mount')"; grep -qxF "Id=$u" <<<"$ids"; }}
+            unit=var-mnt-cache.mount
+            [[ "$(systemctl show -P SourcePath $unit)" == /etc/fstab ]]
+            [[ "$(systemctl show -P ActiveState $unit)" == inactive ]]
+            listed $unit --state=loaded || {{ echo "the test cannot bite: --state=loaded does not list $unit" >&2; exit 1; }}
+            if listed $unit; then echo "the test cannot bite: a glob alone lists the inactive $unit" >&2; exit 1; fi
+
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || {{ cat {w}/out >&2; exit 1; }}
+            grep -qF "user=u1 kind=cache" /etc/fstab
+            bind_unit=var-home-u1-.cache.mount
+            [[ "$(systemctl show -P SourcePath $bind_unit)" == /etc/fstab ]]
+            [[ "$(systemctl show -P ActiveState $bind_unit)" == inactive ]]
+            if status_warns; then echo "status warns with systemd current" >&2; cat {w}/st >&2; exit 1; fi
+            # /etc/fstab rewritten (the same bytes, a new mtime), no reload: every unit of it flagged.
+            cp {w}/etc/fstab /etc/fstab
+            [[ "$(systemctl show -P NeedDaemonReload $unit)" == yes ]] \
+                || {{ echo "the test cannot bite: systemd does not flag $unit" >&2; exit 1; }}
+            if grep -qxF SourcePath=/etc/fstab <<<"$(systemctl show -p SourcePath '*.mount')"; then
+                echo "the test cannot bite: an active unit of /etc/fstab" >&2; exit 1
+            fi
+            status_warns || {{ echo "status does not say systemd has not loaded /etc/fstab" >&2; cat {w}/st >&2; exit 1; }}
+            doc || {{ echo "cst doctor does not warn that systemd has not loaded /etc/fstab" >&2; cat {w}/doc >&2; exit 1; }}
+            n=$(reloads)
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "attach: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" {w}/out \
+                || {{ echo "attach did not reload:" >&2; cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]] || {{ echo "attach: $(($(reloads) - n)) reloads" >&2; exit 1; }}
+            [[ "$(systemctl show -P NeedDaemonReload $unit)" == no ]]
+            if status_warns; then echo "status still warns after the reload" >&2; cat {w}/st >&2; exit 1; fi
+            if doc; then echo "cst doctor still warns after the reload" >&2; cat {w}/doc >&2; exit 1; fi
+
+            # A detach killed at its reload, after it took u1's lines out, then the binds unmounted.
+            rm -f {w}/pid {w}/killed
+            PATH="{w}/kill:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 &
+            echo $! >{w}/pid
+            rc=0; wait $! || rc=$?
+            [[ $rc == 137 && -e {w}/killed ]] || {{ echo "the killed detach exited $rc" >&2; cat {w}/out >&2; exit 1; }}
+            if grep -qF "user=u1" /etc/fstab; then echo "a u1 line after the killed detach" >&2; exit 1; fi
+            [[ "$(systemctl show -P NeedDaemonReload $bind_unit)" == yes ]] \
+                || {{ echo "the test cannot bite: systemd does not flag $bind_unit" >&2; exit 1; }}
+            [[ "$(systemctl show -P ActiveState $bind_unit)" == inactive ]]
+            if listed $bind_unit; then echo "the test cannot bite: a glob alone lists $bind_unit" >&2; exit 1; fi
+            grep -vF /var/home/u1/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            n=$(reloads)
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "detach: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" {w}/out \
+                || {{ echo "detach did not reload:" >&2; cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]] || {{ echo "detach: $(($(reloads) - n)) reloads" >&2; exit 1; }}
+            cache_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/.cache)"
+            [[ ! -e "$cache_unit" ]] || {{ echo "a mount unit of ~/.cache after the detach's reload" >&2; exit 1; }}
+            PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1
+            grep -qF "nothing to do" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]] || {{ echo "a third detach reloaded" >&2; exit 1; }}
+            echo E2E-CACHE-201-OK
+            """
+        )
+        self.assertIn("E2E-CACHE-201-OK", exec_bash(c, script).stdout)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_202_btrfs_cache_plan_and_attach_mount_binds_without_a_reload_when_systemd_is_current(self) -> None:
+        """`cst btrfs cache` for u1 under a test root (cache_reload_scaffold) with the real systemd and both
+        tmpfs bases started: after an attach, u1's binds unmounted (from the stand-ins' table). systemd has
+        read their lines: their units are loaded from /etc/fstab, inactive, NeedDaemonReload=no, and
+        `systemctl show '*.mount'` without --state=loaded lists neither (the test fails as "cannot bite"
+        otherwise). `plan` shows the mounts and no daemon-reload, `attach` mounts them and runs no reload,
+        and `status` says nothing of systemd. Before, plan said "attach runs systemctl daemon-reload after
+        the mounts" and attach reloaded, since the unmounted binds' units were not asked."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-202"
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || {{ cat {w}/out >&2; exit 1; }}
+            grep -vF /var/home/u1/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            unit=var-home-u1-.cache.mount
+            [[ "$(systemctl show -P LoadState $unit)" == loaded ]]
+            [[ "$(systemctl show -P ActiveState $unit)" == inactive ]]
+            [[ "$(systemctl show -P SourcePath $unit)" == /etc/fstab ]]
+            [[ "$(systemctl show -P NeedDaemonReload $unit)" == no ]]
+            if grep -qxF "Id=$unit" <<<"$(systemctl show -p Id '*.mount')"; then
+                echo "the test cannot bite: a glob alone lists the inactive $unit" >&2; exit 1
+            fi
+            plan_out="$($cst btrfs cache plan --user u1)"
+            grep -qF "mount --bind" <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            if grep -qF daemon-reload <<<"$plan_out"; then echo "$plan_out" >&2; exit 1; fi
+            n=$(reloads)
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "attach: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "Mounted /var/mnt/cache/u1 -> /var/home/u1/.cache." {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            if grep -qF "reloaded:" {w}/out; then echo "attach reloaded:" >&2; cat {w}/out >&2; exit 1; fi
+            [[ $(reloads) == "$n" ]] || {{ echo "attach: $(($(reloads) - n)) reloads" >&2; exit 1; }}
+            st_out="$($cst btrfs cache status --user u1)"
+            if grep -qF "  systemd   " <<<"$st_out"; then echo "$st_out" >&2; exit 1; fi
+            echo E2E-CACHE-202-OK
+            """
+        )
+        self.assertIn("E2E-CACHE-202-OK", exec_bash(c, script).stdout)
 
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed(self) -> None:
