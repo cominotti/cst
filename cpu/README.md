@@ -905,10 +905,13 @@ from `off` nor from the ticks that retry it. It names the failed step in the jou
 /run/cpu-setup/game.leftovers for the next off and tick`), writes its record
 to `/run/cpu-setup/game.leftovers`, and ends with `..., except N setting(s)
 kept in /run/cpu-setup/game.leftovers`. The next `off` and every watchdog
-`tick` while the profile is off undo the kept records again (`<5>undid ...,
-kept in /run/cpu-setup/game.leftovers by an earlier off` for each one that
-works now) and keep only those that fail again; the file is removed when
-none is left. A user manager's record keeps the user it was for (a `user
+`tick` while the profile is off undo the kept records again and keep only
+those that fail again; the file is removed when none is left. An `off` with
+no `game.state` and the tick log `<5>undid ..., kept in
+/run/cpu-setup/game.leftovers by an earlier off` for each one done now: one
+that works now, and also one whose unit or folder is gone (below), which had
+nothing left to set. An `off` with a `game.state` undoes the kept records
+with its own and names only those that fail again. A user manager's record keeps the user it was for (a `user
 UID` line before it), so it is undone for that user whatever
 `TARGET_USER` says later, and never in another user's manager: when no
 account has that uid any more, the record stays kept while that uid's user
