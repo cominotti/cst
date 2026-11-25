@@ -66,6 +66,7 @@ from btrfs.docker_volumes_nocow.domain import (
     GIVE_UP_AFTER,
     NocowCommand,
     NocowPaths,
+    OutcomeRecord,
     TreeScan,
     VolumeLeftovers,
     old_copy_name,
@@ -78,6 +79,7 @@ from btrfs.tests.fakes import NOCOW, OTHER, Crash, FakeSystem, carries_flags, en
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.shapes import object_of, parse_json
+from cst_core.ports import ReplacedNotSynced
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 from tests.script_loader import load_script
 
@@ -2664,6 +2666,24 @@ class OutcomeRecordTest(Base):
         self.assertFalse(os.path.exists(self.flag))
         self.assertIsNone(read_attempts(self))
         self.assertEqual(len(self.fs.commands(self.notify)), 1)
+
+    def test_a_record_in_place_whose_folder_cannot_be_synced_says_it_is_recorded(self) -> None:
+        # write_atomic's ReplacedNotSynced: the record is written, its folder not synced.
+        real_write = nocow_adapters.NocowStateFiles.write_outcome
+
+        def write(files: nocow_adapters.NocowStateFiles, record: OutcomeRecord) -> None:
+            real_write(files, record)
+            raise ReplacedNotSynced(errno.EIO, "Input/output error", None, self.outcome)
+
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "write_outcome", autospec=True, side_effect=write):
+            out = self.give_up_boot()
+        self.assertEqual(
+            out,
+            f"<4>{TAG}: recorded the outcome (gave-up) in {self.outcome} for status, but its folder could not be "
+            "synced: [Errno 5] Input/output error\n"
+            f"<3>{TAG}: Gave up after two boots; see journalctl -u docker-volumes-nocow.\n",
+        )
+        self.assertEqual(self.record()["outcome"], "gave-up")
 
     def test_a_give_up_whose_flag_stays_keeps_the_record_and_the_count(self) -> None:
         erofs = OSError(errno.EROFS, "Read-only file system")

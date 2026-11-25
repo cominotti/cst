@@ -16,8 +16,8 @@ from btrfs.docker_volumes_nocow.domain import (
     NocowPaths,
     OutcomeRead,
     PendingVolume,
-    copy_check_failed,
     config_reason,
+    copy_check_failed,
     copy_matches,
     label_mismatch,
     next_postponed,
@@ -29,7 +29,7 @@ from btrfs.docker_volumes_nocow.domain import (
     recovery,
 )
 from btrfs.docker_volumes_nocow.ports import DockerDaemonPort, NocowOutputPort, NocowStatePort, VolumeTreePort
-from cst_core.ports import ClockPort
+from cst_core.ports import ClockPort, ReplacedNotSynced
 
 
 class DockerVolumesNocow:
@@ -222,6 +222,12 @@ class DockerVolumesNocow:
         record = outcome_record(outcome, at=int(self.clock.now()), volumes=self.paths.volumes, reason=reason)
         try:
             self.state.write_outcome(record)
+        except ReplacedNotSynced as e:  # in place, its folder not synced
+            self.out.log(
+                4,
+                f"recorded the outcome ({outcome}) in {self.paths.outcome} for status, but its folder could not be "
+                f"synced: {e}",
+            )
         except OSError as e:
             self.out.log(4, f"cannot record the outcome ({outcome}) in {self.paths.outcome} for status: {e}")
 
