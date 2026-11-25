@@ -221,7 +221,8 @@ class InstallService:
         yet, or one that is no record (install starts it again), is empty. A record that is there and cannot
         be read (a folder, a FIFO, EACCES, EIO) stops a call that writes (refuse_unreadable) the same way,
         before anything changes: its update after the files would fail. A plan leaves it out (it cannot
-        tell)."""
+        tell), and so does every call for a record whose folder is a file (ENOTDIR: no record is there;
+        the update after the files says why, as before)."""
         found: dict[str, InstallRecord] = {}
         if self._record is None:
             return found
@@ -233,7 +234,7 @@ class InstallService:
                     raise InstallRefused(f"{path}: {e}: {outcome}") from None
                 found[path] = EMPTY_RECORD
             except OSError as e:
-                if refuse_unreadable:
+                if refuse_unreadable and not isinstance(e, NotADirectoryError):
                     # from e: a plan that shows the refusal tells a reader who may not read it (PermissionError).
                     raise InstallRefused(f"{path}: cannot be read ({e.strerror or e}): {outcome}") from e
                 continue

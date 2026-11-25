@@ -1079,6 +1079,21 @@ class InstallerRecordCliTest(unittest.TestCase):
                     self.assertIn(b"installed.json: cannot be read (" + why + b"): ", r.stderr)
                     self.assertFalse(os.path.lexists(self.stage + dest))
 
+    def test_a_record_whose_folder_is_a_file_fails_only_at_its_update_as_before(self) -> None:
+        # ENOTDIR: no record can be there, so install is not refused before its writes (that is for a record
+        # that is there and cannot be read): it writes its file and then fails to write the record, as before.
+        folder = os.path.dirname(self.record)
+        os.makedirs(os.path.dirname(folder), exist_ok=True)
+        if os.path.isdir(folder):
+            shutil.rmtree(folder)
+        Path(folder).write_text("not a folder\n")
+        r = self.cli("install", "--component", "btrfs:docker-gc")
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn(b"cst installer: cannot write", r.stderr)
+        self.assertNotIn(b"cannot be read", r.stderr)
+        self.assertTrue(os.path.isfile(self.stage + "/usr/local/sbin/docker-gc"))
+        self.assertEqual(Path(folder).read_text(), "not a folder\n")
+
     def test_check_judges_the_files_alone_when_the_record_cannot_be_read(self) -> None:
         # A record that cannot be read (here a folder in its place): plan cannot tell what it lists, so
         # check exits 0 for current files and 1 for a file that is not; nothing is written.
