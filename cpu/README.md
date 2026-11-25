@@ -926,7 +926,9 @@ cgroup, sysfs or EPP file whose folder is gone (a cgroup that ended, a CPU
 taken offline), so a folder made again later (the next login's cgroup) never
 gets the old session's value. A fixed unit's override outlives the unit, so
 it stays kept. `cst cpu game state` lists the
-kept settings (`leftovers: N setting(s) 'off' could not undo, ...`). When
+kept settings (`leftovers: N setting(s) 'off' could not undo, ...`), and
+`cst doctor` warns about them, by name
+([doctor/README.md, section 8.4](../doctor/README.md#84-settings-off-could-not-undo)). When
 `game.leftovers` cannot be written (`/run` full) the journal says each
 setting is not undone (`<3>off: could not keep ... in
 /run/cpu-setup/game.leftovers: not undone`, without `off:` from the tick)

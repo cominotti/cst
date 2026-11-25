@@ -7140,7 +7140,8 @@ PY
         file under a path whose folder is a plain file (the write fails, ENOTDIR), and machine.slice's
         CPUWeight set back to a value the real systemd refuses. 'off' exits 0, undoes everything else
         (machine.slice gets its own CPUWeight back from on's record), removes game.state, names both in the
-        journal and keeps exactly the two records in game.leftovers; 'state' lists them. A third record, of a
+        journal and keeps exactly the two records in game.leftovers; 'state' lists them, and cst doctor warns
+        about both, with off as the fix (and says nothing once the file is gone). A third record, of a
         cgroup file whose cgroup is gone (ENOENT from the real cgroupfs), is done: neither named nor kept. A tick while off
         keeps both (the file byte for byte); once the folder is a folder, the next tick writes the old value
         and keeps only the CPUWeight record, which the next 'off' keeps too. The old 'off' removed game.state
@@ -7207,6 +7208,14 @@ PY
             [[ "$(tail -n +2 "$lo")" == "$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: $knob, machine.slice CPUWeight" \
                 || { gp state >&2; exit 1; }
+            # cst doctor (as tester) warns about both, by name, with the fix line of a profile that is off.
+            doc() { runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+                /opt/cst-rw/cst doctor 2>&1 || true; }
+            d=$(doc)
+            grep -qE "WARN +game profile: 2 setting\(s\) 'off' could not undo keep the game's value: $knob, machine\.slice CPUWeight \(kept in /run/cpu-setup/game\.leftovers\)" <<<"$d" \
+                || { echo "doctor: $d" >&2; exit 1; }
+            grep -qF 'fix: sudo /usr/local/sbin/cpu-game-profile off' <<<"$d" || { echo "doctor: $d" >&2; exit 1; }
             # A tick while off: both still fail, the file stays byte for byte.
             sum=$(sha256sum "$lo")
             gp tick >/dev/null
@@ -7225,6 +7234,7 @@ PY
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
             rm -f "$lo"
             rm -rf /run/e2e182
+            if grep -qF "could not undo keep" <<<"$(doc)"; then echo "doctor warns with no game.leftovers" >&2; exit 1; fi
             # The tick while off judges TARGET_USER as it is, not the user of a kept record: with TARGET_USER
             # unset and a GameMode client running, a kept record of tester's user manager that the real
             # systemd still refuses is tried for tester, and cpu-game.service (a stub that records its starts)

@@ -149,7 +149,7 @@ vm-nas-torn        | /var/lib/cst/vm-nas-torn.json              | 1 | vm/adapter
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py cpu/cli.py cpu/power/adapters.py doctor/application/cpu.py | none (its existence is the contract)
 game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py doctor/application/cpu.py | first line "cst-game-intended 1" (none: 0)
-game-leftovers     | /run/cpu-setup/game.leftovers              | 1 | cpu/game/adapters/leftovers.py   | cpu/game/adapters/leftovers.py cpu/game/adapters/report.py | first line "cst-game-leftovers 1" (none: 0)
+game-leftovers     | /run/cpu-setup/game.leftovers              | 1 | cpu/game/adapters/leftovers.py   | cpu/game/adapters/leftovers.py cpu/game/adapters/report.py doctor/application/cpu.py | first line "cst-game-leftovers 1" (none: 0)
 """
 
 
