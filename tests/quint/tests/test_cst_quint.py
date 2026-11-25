@@ -16,10 +16,12 @@ from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 import hashlib
 import io
+import itertools
 import json
 import os
 import pwd
 import re
+import socket
 import subprocess
 import sys
 import tarfile
@@ -251,7 +253,7 @@ class ArgvTest(unittest.TestCase):
     def test_tlc_runs_with_its_config_under_nice_and_a_time_limit(self) -> None:
         check = M.Check(spec="s.qnt", main="nocow_ab", invariants=("a", "b"))
         self.assertEqual(
-            M.tlc_argv("quint", "/x/s.qnt", check, "/w/tlc.json"),
+            M.tlc_argv("quint", "/x/s.qnt", check, "/w/tlc.json", "localhost:40001"),
             [
                 "timeout",
                 "300",
@@ -271,6 +273,8 @@ class ArgvTest(unittest.TestCase):
                 "step_",
                 "--invariant",
                 "a,b",
+                "--server-endpoint",
+                "localhost:40001",
             ],
         )
         self.assertEqual(M.TLC_CONFIG, {"maxHeap": "-Xmx4g", "workers": 4})
@@ -281,7 +285,7 @@ class ArgvTest(unittest.TestCase):
 
     def test_a_simulator_trace_uses_one_thread_and_its_seed(self) -> None:
         job = M.TraceJob(name="walk", spec="s.qnt", main="m", backend="simulator", max_steps=80, seed=11, samples=3)
-        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/walk.itf.json")
+        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/walk.itf.json", lambda: self.fail("a port for quint run"))
         self.assertEqual(argv[:8], ["timeout", "300", "nice", "-n", "10", "quint", "run", "/x/s.qnt"])
         for pair in (
             ("--n-threads", "1"),
@@ -294,12 +298,14 @@ class ArgvTest(unittest.TestCase):
         ):
             self.assertEqual(argv[argv.index(pair[0]) + 1], pair[1], pair)
         self.assertNotIn("--invariant", argv)
+        self.assertNotIn("--server-endpoint", argv, "quint run starts no Apalache server and has no such option")
 
     def test_an_apalache_witness_negates_the_invariant(self) -> None:
         job = M.TraceJob(name="w", spec="s.qnt", main="m", backend="apalache", max_steps=18, invariant="neverX")
-        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/w.itf.json")
+        argv = M.trace_argv("quint", "/x/s.qnt", job, "/w/w.itf.json", lambda: "localhost:40002")
         self.assertEqual(argv[:8], ["timeout", "600", "nice", "-n", "10", "quint", "verify", "/x/s.qnt"])
         self.assertEqual(argv[-2:], ["--invariant", "neverX"])
+        self.assertEqual(argv[argv.index("--server-endpoint") + 1], "localhost:40002")
         self.assertNotIn("--backend", argv)
         self.assertNotIn("--seed", argv)
 
@@ -313,6 +319,72 @@ del os.process_cpu_count
 sys.argv = [sys.argv[1], "--help"]
 runpy.run_path(sys.argv[0], run_name="__main__")
 """
+
+
+class FreePortTest(unittest.TestCase):
+    def test_the_port_is_free_for_a_listening_socket_right_after(self) -> None:
+        port = M.free_port()
+        self.assertIsInstance(port, int)
+        self.assertTrue(0 < port < 2**16, port)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", port))
+            s.listen()
+            self.assertEqual(s.getsockname()[1], port)
+        self.assertEqual(M.server_endpoint(port), f"localhost:{port}")
+
+    def test_the_port_is_outside_the_kernels_ephemeral_range(self) -> None:
+        # A port of that range (a bind to port 0 gives one) can go to an outgoing connection, or another run's
+        # bind to port 0, in the seconds before Apalache binds it: Apalache then cannot start, and the verify fails.
+        low, high = M.ephemeral_range()
+        for _ in range(20):
+            port = M.free_port()
+            self.assertFalse(low <= port <= high, (port, low, high))
+            self.assertTrue(1024 <= port < 2**16, port)
+        cases = {
+            (32768, 60999): (61000, 65535),  # Linux's default: IANA's dynamic ports above it
+            (1024, 65000): (65001, 65535),
+            (49152, 65535): (1024, 49151),  # no dynamic port left: the unprivileged ones below it
+        }
+        for ephemeral, (first, last) in cases.items():
+            with self.subTest(ephemeral=ephemeral):
+                ports = M.server_ports(ephemeral)
+                self.assertEqual((ports[0], ports[-1], len(ports)), (first, last, last - first + 1))
+                self.assertTrue(first <= M.free_port(ephemeral=lambda e=ephemeral: e) <= last)
+        with self.assertRaisesRegex(M.StepError, r"ephemeral range 1024-65535"):
+            M.free_port(ephemeral=lambda: (1024, 65535))
+
+    def test_the_ephemeral_range_is_read_from_the_kernel_or_linuxs_default(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cst-quint-test-") as tmp:
+            path = os.path.join(tmp, "ip_local_port_range")
+            for text, want in (("10000\t20000\n", (10000, 20000)), ("", (32768, 60999)), ("x y\n", (32768, 60999))):
+                with self.subTest(text=text):
+                    with open(path, "w", encoding="ascii") as f:
+                        f.write(text)
+                    self.assertEqual(M.ephemeral_range(path), want)
+            self.assertEqual(M.ephemeral_range(os.path.join(tmp, "absent")), (32768, 60999))
+
+    def test_a_port_held_on_ipv6_only_is_not_free(self) -> None:
+        # quint connects to localhost, which can be ::1 first: a server there only is not Apalache, and Apalache's
+        # own bind of the port would fail.
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as held:
+            held.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            held.bind(("::", 0))
+            held.listen()
+            taken = held.getsockname()[1]
+            self.assertFalse(M.port_is_free(taken))
+            other = M.free_port()
+            picks = iter([taken, other])
+            self.assertEqual(M.free_port(choose=lambda ports: next(picks)), other)
+            self.assertTrue(M.port_is_free(other))
+
+    def test_a_port_held_on_ipv4_is_not_free_and_no_free_port_is_a_step_error(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            taken = held.getsockname()[1]
+            self.assertFalse(M.port_is_free(taken))
+            with self.assertRaisesRegex(M.StepError, r"no free port for the Apalache server in 64 tries"):
+                M.free_port(choose=lambda ports: taken)
 
 
 class HostPythonTest(unittest.TestCase):
@@ -484,6 +556,22 @@ class CacheRootTest(Base):
         self.assertEqual(self.run_.calls, [])
         self.assertFalse(os.path.exists(os.path.join(self.checkout, "rel")))
 
+    def test_no_cache_folder_says_the_password_database_has_no_absolute_home(self) -> None:
+        # cache_base gives None also for a home folder the password database has but that is relative or empty:
+        # what the tool prints then must not say there is none.
+        env = {"XDG_CACHE_HOME": "rel", "HOME": "", "PATH": "/usr/bin:/bin"}
+        want = (
+            "cst-quint: no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, "
+            "and the password database has no absolute home folder for this user"
+        )
+        for pw_dir in ("", "rel"):
+            entry = pwd.struct_passwd(("u", "x", 1000, 1000, "", pw_dir, "/bin/sh"))
+            self.lines.clear()
+            with self.subTest(pw_dir=pw_dir), mock.patch("tests.xdg_cache.pwd.getpwuid", return_value=entry):
+                self.assertEqual(self.main(env=env), 2)
+                self.assertEqual(self.lines, [want])
+                self.assertEqual(self.run_.calls, [])
+
 
 class MainTest(Base):
     def test_every_instance_holds(self) -> None:
@@ -499,6 +587,49 @@ class MainTest(Base):
         self.assertIn("2 instance(s) in 18.8 s, largest RSS of any run 878.9 MiB", self.lines)
         self.assertEqual(os.listdir(os.path.join(self.cache, "work")), [], "the work folder is removed")
         self.assertEqual(sorted(os.listdir(self.checkout)), ["specs", "tests"], "nothing written into the checkout")
+
+    def test_every_verify_names_a_free_localhost_server_port(self) -> None:
+        # Without one, quint uses its default localhost:8822: two runs at once (two checkouts, two agents) race
+        # to start Apalache there, or one uses the other's server and loses it when that run's quint exits.
+        self.assertEqual(self.main(), 0)
+        tlc = self.run_.commands("tlc")
+        self.assertEqual(len(tlc), 2)
+        for argv in tlc:
+            with self.subTest(argv=argv):
+                self.assertIn("--server-endpoint", argv)
+                host, _, port = argv[argv.index("--server-endpoint") + 1].partition(":")
+                self.assertEqual(host, "localhost")
+                self.assertRegex(port, r"^[0-9]+$")
+                self.assertTrue(0 < int(port) < 2**16, port)
+
+    def test_each_verify_takes_its_own_port(self) -> None:
+        self.assertEqual(self.main(port=itertools.count(40001).__next__), 0)
+        endpoints = [argv[argv.index("--server-endpoint") + 1] for argv in self.run_.commands("tlc")]
+        self.assertEqual(endpoints, ["localhost:40001", "localhost:40002"])
+
+    def test_each_apalache_trace_takes_its_own_port_and_the_simulator_none(self) -> None:
+        jobs = (
+            M.TraceJob(name="w1", spec="specs/s.qnt", main="m", backend="apalache", max_steps=9, invariant="neverX"),
+            M.TraceJob(name="walk", spec="specs/s.qnt", main="m", backend="simulator", max_steps=10, seed=3),
+            M.TraceJob(name="w2", spec="specs/s.qnt", main="m", backend="apalache", max_steps=9, invariant="neverY"),
+        )
+        with (
+            mock.patch.object(M, "TRACES_DIR", {"specs/s.qnt": "specs/traces"}),
+            mock.patch.object(M, "REPLAYS", {"specs/s.qnt": "specs.tests.test_replay"}),
+        ):
+            self.assertEqual(self.main("--traces", jobs=jobs, port=itertools.count(40001).__next__), 0)
+        verify = self.run_.commands("verify")
+        self.assertEqual(
+            [argv[argv.index("--out-itf") + 1].rsplit(os.sep, 1)[-1] for argv in verify],
+            [
+                "w1.raw.itf.json",
+                "w2.raw.itf.json",
+            ],
+        )
+        endpoints = [argv[argv.index("--server-endpoint") + 1] for argv in verify]
+        self.assertEqual(endpoints, ["localhost:40001", "localhost:40002"], "the simulator takes no port")
+        [walk] = self.run_.commands("run")
+        self.assertNotIn("--server-endpoint", walk)
 
     def test_a_violation_fails_and_prints_the_counterexample(self) -> None:
         self.run_.verdicts["inst_b"] = (1, VIOLATED)
