@@ -5486,7 +5486,9 @@ EOF
         SFTP: restic's own `snapshots --json` (its time, and the "original" a real `restic tag` sets) and
         its --host filter. Snapshots of the VM's tags: "old" (made before the index: an older CST's, left
         alone), "good" and "kept" (indexed; "kept" then retagged by hand, so restic lists it under a new ID,
-        which the index's step then gives the entry: restic finds the snapshot by it only),
+        which the index's step then gives the entry: restic finds the snapshot by it only; then retagged
+        again, restic keeping the first ID as its original, so the entry, which keeps that ID too, is no
+        stray and moves to the third ID),
         one of another host, and "stray" (the newest, in neither the index nor the record). The retry names
         the stray only, with the commands that forget or adopt it, sends one alert (to a stub, never the
         container's btrfs-notify) and skips the retention, forgetting nothing; once adopted, the retention
@@ -5522,16 +5524,26 @@ EOF
             grep -qx "index: None" "$w/index.out"
             [[ "$(d indexed "$CST_VM_INDEX")" == "$(printf '%s\\n' "$good" "$kept2" | sort | xargs)" ]]
             restic ls -q --no-lock "$kept2" >/dev/null
+            # A second restic tag (cst-keep stays: the retention below keeps it): restic keeps the first
+            # ID as the original, not kept2. The retry
+            # (before the index's step) still counts the entry's snapshot, and the step then moves it.
+            restic tag -q --add e2e-second "$kept2"
+            kept3="$(restic snapshots --json --no-lock | d retagged "$kept")"
+            [[ ${#kept3} == 64 && "$kept3" != "$kept2" && "$kept3" != "$kept" ]]
             before="$(all)"
             d retry e2evm >"$w/retry.out"
             cat "$w/retry.out" >&2
             grep -qF "  retention skipped: restic lists 1 snapshot of e2evm that neither the index nor the record of torn snapshots names (each may be torn): ${stray:0:8} (" "$w/retry.out"
             grep -qF "(restic tag --add cst-adopted $stray)" "$w/retry.out"
             grep -qF "(restic forget $stray)" "$w/retry.out"
-            for s in "$old" "$good" "$kept" "$kept2" "$other"; do
+            for s in "$old" "$good" "$kept" "$kept2" "$kept3" "$other"; do
                 if grep -qF "${s:0:8}" "$w/retry.out"; then echo "named ${s:0:8}" >&2; exit 1; fi
             done
             [[ "$(all)" == "$before" ]]
+            d index_step e2evm "$good" >"$w/index2.out"
+            grep -qx "index: None" "$w/index2.out"
+            [[ "$(d indexed "$CST_VM_INDEX")" == "$(printf '%s\\n' "$good" "$kept3" | sort | xargs)" ]]
+            restic ls -q --no-lock "$kept3" >/dev/null
             [[ "$(wc -l <"$w/alerts.log")" == 1 ]]
             grep -qF "VM backup: a NAS snapshot no record names" "$w/alerts.log"
             grep -qF "${stray:0:8}" "$w/alerts.log"

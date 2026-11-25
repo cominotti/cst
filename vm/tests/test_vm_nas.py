@@ -852,7 +852,40 @@ class LiveBackupTest(Nas):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # Under the id restic lists it by now: restic restores no snapshot by its original.
         self.assertEqual([e.get("snapshot") for e in self.index_entries()], ["second", SNAP_ID])
-        self.assertEqual(self.index_entries()[0], {**old[0], "snapshot": "second"}, "the rest of the entry kept")
+        self.assertEqual(
+            self.index_entries()[0],
+            {**old[0], "snapshot": "second", "original": "first1"},
+            "the rest of the entry kept, and its first id",
+        )
+
+    def test_an_entry_whose_snapshot_was_retagged_twice_stays_in_the_index_and_is_no_stray(self) -> None:
+        # restic keeps the first id as the original of every later tag change: after a second restic tag
+        # the entry moved to the first copy's id named nothing restic lists, left the index and its
+        # snapshot (newer than the oldest indexed backup) was named as one no record names.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        repo = "sftp:btrfs-setup-nas:/volume1/restic"
+        old = [
+            {"vm": "win", "mode": "nas", "snapshot": STRAY_A, "repository": repo, "epoch": 1, "timestamp": "a"},
+            {"vm": "win", "mode": "nas", "snapshot": STRAY_B, "repository": repo, "epoch": 2, "timestamp": "b"},
+        ]
+        with open(self.index, "w") as f:
+            json.dump({"backups": old}, f)
+        own = _listed(SNAP_ID, STRAY_T2)
+        for copy in (STRAY_C, STRAY_D):
+            with self.subTest(copy=copy):
+                listed = [
+                    _listed(STRAY_A, STRAY_T0),
+                    _listed(copy, STRAY_T1, vm_domain.KEEP_TAG, original=STRAY_B),
+                    own,
+                ]
+                self.restic_cfg(snapshots_json=json.dumps(listed))
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertNotIn("retention skipped", r.stdout)
+                self.assertEqual(
+                    [(e.get("snapshot"), e.get("original")) for e in self.index_entries()],
+                    [(STRAY_A, None), (copy, STRAY_B), (SNAP_ID, None)],
+                )
 
     def test_a_snapshot_no_record_names_is_named_and_the_run_still_succeeds(self) -> None:
         # The retention counted it as a backup. The run's own snapshot is not one.
@@ -2007,6 +2040,22 @@ class SnapshotNamesTest(unittest.TestCase):
             sorted((e["vm"], e.get("snapshot")) for e in got),
             [("other", "first1"), ("win", SNAP_ID), ("win", "kept22"), ("win", "second"), ("win", "short")],
         )
+
+
+    def test_an_entry_retagged_twice_keeps_its_first_id_and_follows_the_second_copy(self) -> None:
+        def nas(snap: str, **more: str) -> vm_domain_backup.IndexEntry:
+            return {"vm": "win", "mode": "nas", "snapshot": snap, "repository": "/repo", "epoch": 1, **more}
+
+        own = {SNAP_ID: SNAP_ID}
+        once = vm_domain_backup.nas_index(
+            [nas("first1")], nas(SNAP_ID), {"second": "second", "first1": "second", **own}
+        )
+        self.assertEqual(once, [nas("second", original="first1"), nas(SNAP_ID)])
+        # restic lists the second copy with the first id as its original, not the first copy's.
+        twice = vm_domain_backup.nas_index(once, nas(SNAP_ID), {"third": "third", "first1": "third", **own})
+        self.assertEqual(twice, [nas("third", original="first1"), nas(SNAP_ID)])
+        # An entry restic lists by its own id stays as it is, its original with it.
+        self.assertEqual(vm_domain_backup.nas_index(twice, nas(SNAP_ID), {"third": "third", **own}), twice)
 
 
 class ConstantsTest(unittest.TestCase):
@@ -3485,6 +3534,7 @@ _NAS_REPO: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
 STRAY_A = "aaaa1111" + "a" * 56  # an indexed backup
 STRAY_B = "bbbb2222" + "b" * 56  # a snapshot no record names
 STRAY_C = "cccc3333" + "c" * 56
+STRAY_D = "dddd4444" + "d" * 56
 STRAY_T0 = "2026-10-25T04:30:00.000000001+02:00"  # before the change to winter time: an hour more offset
 STRAY_T1 = "2026-11-01T04:30:00.123456789+01:00"
 STRAY_T2 = "2026-11-08T04:30:00.5+01:00"

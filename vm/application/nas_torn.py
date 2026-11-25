@@ -28,6 +28,7 @@ from vm.domain.backup import (
     Stop,
     TornEntry,
     is_restic_snapshot,
+    entry_names,
     snapshot_names,
     stray_snapshots,
     strays_alert,
@@ -218,11 +219,12 @@ def unaccounted(p: NasBackup, vm: str, nas: NasRepo, made: str) -> tuple[str, bo
     names them too); None when none is left. With no NAS entry of vm in this repository in the index
     (no backup indexed yet, or the index moved aside), nothing is compared and restic is not asked."""
     try:
+        # Each entry by its snapshot and, once a restic tag moved it, its first id (entry_names).
         indexed = [
             snap
             for e in p.store.read_index()
             if e["vm"] == vm and e.get("mode") == BackupMode.NAS and e.get("repository") == nas["repo"]
-            if (snap := e.get("snapshot")) is not None and snap
+            for snap in entry_names(e)
         ]
         torn = [e["snapshot"] for e in _torn_of(p, vm, nas)]
     except (OSError, Refused) as e:

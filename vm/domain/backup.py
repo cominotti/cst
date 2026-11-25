@@ -63,6 +63,7 @@ class IndexEntry(TypedDict, total=False):
     path: str
     mode: str
     snapshot: str
+    original: str
     repository: str
     host: str
     consistency: str
@@ -78,6 +79,7 @@ _ENTRY_KEYS: KeyTypes = {
     "path": (str,),
     "mode": (str,),
     "snapshot": (str,),
+    "original": (str,),
     "repository": (str,),
     "host": (str,),
     "consistency": (str,),
@@ -471,7 +473,8 @@ def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[s
     the VM's snapshots restic lists answer to (snapshot_names), with the id restic lists that snapshot
     under (None: not readable). The VM's NAS entries of entry's repository that answer to none leave
     the index; one that answers only to the original a restic tag kept takes the listed id, the one
-    restic restores, lists and forgets the snapshot by."""
+    restic restores, lists and forgets the snapshot by, and keeps its first id as its original
+    (entry_names): restic keeps that first id as the original of every later tag change."""
     snap = entry["snapshot"]
     out = [e for e in entries if not (e.get("mode") == BackupMode.NAS and e.get("snapshot") == snap)]
     out.append(entry)
@@ -484,12 +487,17 @@ def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[s
                 and e.get("mode") == BackupMode.NAS
                 and e.get("repository") == entry["repository"]
             ):
-                now = _listed_as(e["snapshot"], alive)
+                now = _listed_as(entry_names(e), alive)
                 if now is None:
                     continue
                 if now != e["snapshot"]:
-                    moved = e.copy()  # the entry under the id restic lists it by
+                    moved = e.copy()  # the entry under the id restic lists it by, its first id kept
+                    first = e.get("original") or e["snapshot"]
                     moved["snapshot"] = now
+                    if first != now:
+                        moved["original"] = first
+                    else:
+                        moved.pop("original", None)
                     kept.append(moved)
                     continue
             kept.append(e)
@@ -498,17 +506,25 @@ def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[s
     return out
 
 
-def _listed_as(snap: str, alive: Mapping[str, str]) -> str | None:
-    """The id restic lists the snapshot snap under (alive: nas_index's), a prefix either way as restic
-    matches a short id: snap itself when restic lists it by it, else the id of the snapshot whose
-    original it is; None when restic lists neither."""
+def entry_names(e: IndexEntry) -> list[str]:
+    """The ids an index entry's snapshot answers to: its snapshot, and the id it had first (original)
+    once nas_index moved it to the id a restic tag gave it."""
+    snap, original = e.get("snapshot"), e.get("original")
+    return [n for n in (snap, original) if n is not None and n]
 
-    def names(name: str) -> bool:
+
+def _listed_as(snaps: Sequence[str], alive: Mapping[str, str]) -> str | None:
+    """The id restic lists the snapshot of the entry whose names are snaps (entry_names) under (alive:
+    nas_index's), a prefix either way as restic matches a short id: the first of snaps restic lists by
+    itself, else the id of the snapshot whose original one of snaps is; None when restic lists none."""
+
+    def names(name: str, snap: str) -> bool:
         return name.startswith(snap) or snap.startswith(name)
 
-    if any(names(name) for name, now in alive.items() if name == now):
-        return snap
-    return next((now for name, now in alive.items() if name != now and names(name)), None)
+    for snap in snaps:
+        if any(names(name, snap) for name, now in alive.items() if name == now):
+            return snap
+    return next((now for snap in snaps for name, now in alive.items() if name != now and names(name, snap)), None)
 
 
 def nas_done_lines(notes: Sequence[str], snap: str, vm: str, consistency: str, keep: str | None) -> list[str]:

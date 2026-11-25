@@ -939,10 +939,14 @@ The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 versions and the deployment); entries whose snapshot was forgotten leave it.
 An entry stays when its snapshot's tags were changed by hand (`restic tag`,
 for example `restic tag --remove cst-keep ID` above): restic then lists the
-snapshot under a new ID, with the entry's ID as its `original`, and finds it
-by the new ID only (`restic restore` of the old one says "no matching ID
-found"); the next NAS backup of the VM gives the entry the new ID, which
-`cst vm list` then shows.
+snapshot under a new ID, with the ID it had first as its `original` (restic
+keeps that first ID through every later change of the tags), and finds it by
+the new ID only (`restic restore` of the old one says "no matching ID
+found"). The next NAS backup of the VM gives the entry the new ID, which
+`cst vm list` then shows, and keeps the first ID in the entry's `original`
+key, so the entry follows its snapshot through later tag changes too. An
+older CST reads such an entry by its new ID and keeps it until the tags
+change again.
 When `restic snapshots` cannot be read as a list of snapshots with their ids
 (another shape, an id that is not text), no entry leaves: the index keeps them
 all until a later backup reads the list.
@@ -1152,8 +1156,8 @@ overlay is removed, a failed merge (loud, alert, nothing removed), a VM shut
 down during the backup, the shut-off path and its re-check, the refused
 states, a left-over overlay, an unusable repository (no snapshot taken),
 the keep tag, `forget`'s arguments, the index entries (an entry whose snapshot
-restic lists under a new ID after `restic tag` stays, under that new ID:
-`SnapshotNamesTest`), the timer's units
+restic lists under a new ID after `restic tag` stays, under that new ID, and
+after a second `restic tag` too: `SnapshotNamesTest`), the timer's units
 (the stop budget covers the merge's limit), and that the NAS constants match
 `btrfs/btrfs-snapshot`. They also check what a manual run can meet: a closed
 terminal during restic (on a pseudo-terminal) and a pipe without a reader
@@ -1210,7 +1214,8 @@ listing that fails or an index or record that cannot be read makes the
 retention wait unnamed. Tier 1's `test_203` runs it against the real restic
 (its `time`, the `original` a real `restic tag` sets, the `--host`
 filter): the index's step moves a retagged entry to its new ID (restic finds
-the snapshot by it only), the stray named and not counted, then quiet after it is adopted or
+the snapshot by it only), and after a second `restic tag` the entry is no
+stray and moves again, the stray named and not counted, then quiet after it is adopted or
 forgotten, and no listing with the index moved aside. Tier 1's `test_200` stops a
 real restic read once restic printed its snapshot (the snapshot is recorded
 and named, and the next retry forgets it), `test_204` stops it once restic
