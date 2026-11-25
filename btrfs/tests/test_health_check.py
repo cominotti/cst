@@ -456,6 +456,23 @@ class HealthCheckTest(unittest.TestCase):
                 else:
                     self.assert_healthy(r)
 
+    def test_unallocated_count_divides_as_bash_arithmetic(self) -> None:
+        # The old bash prints $(( unalloc / 1024 ** 2 )): an Unallocated of 2**64 - 1 is -1 there, and bash's
+        # division truncates towards zero, so the CRITICAL line says 0 MiB (floor division said -1). The real
+        # bash is the oracle for the count.
+        value = str(2**64 - 1)
+        (mib,) = run_bash('echo "$(( $1 / 1024 ** 2 ))"', value)
+        self.assertEqual(mib, "0")
+        self.fs["device_usage"] = device_usage(2**64 - 1, 800 * GIB)
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs /var: CRITICAL: only {mib} MiB unallocated on /dev/mapper/cst-test-1: ENOSPC is close. First free "
+            "space (old snapshots, caches, images), then 'btrfs balance start -dusage=0 /var', then -dusage=5, 15, 30; "
+            "never a metadata or full balance. If a balance hangs the PC or the boot: boot once with ,skip_balance "
+            "added to the rootflags= of the kernel command line, then 'btrfs balance cancel /var' (cst btrfs README, "
+            "section 13)",
+        )
+
     def test_metadata_almost_full(self) -> None:
         alloc = f"sys/fs/btrfs/{UUID}/allocation"
         self.write(f"{alloc}/metadata/bytes_used", f"{20 * GIB - 600 * 1024**2}\n")

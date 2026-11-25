@@ -202,7 +202,7 @@ def unallocated_problems(mnt: str, rows: Sequence[tuple[str, str]]) -> tuple[lis
             # One line (one alert line per problem). Order matters: a balance needs unallocated room to
             # work in, so freeing space comes first; the ladder starts at -dusage=0 (empty chunks, no copying).
             problems.append(
-                f"btrfs {mnt}: CRITICAL: only {unalloc // MIB} MiB unallocated on {dev}: ENOSPC is close. First free "
+                f"btrfs {mnt}: CRITICAL: only {bash_div(unalloc, MIB)} MiB unallocated on {dev}: ENOSPC is close. First free "
                 f"space (old snapshots, caches, images), then 'btrfs balance start -dusage=0 {mnt}', then "
                 "-dusage=5, 15, 30; never a metadata or full balance. If a balance hangs the PC or the boot: boot once "
                 "with ,skip_balance added to the rootflags= of the kernel command line, then "
@@ -210,7 +210,7 @@ def unallocated_problems(mnt: str, rows: Sequence[tuple[str, str]]) -> tuple[lis
             )
         elif unalloc < UNALLOC_MIN_GIB * GIB:
             problems.append(
-                f"btrfs {mnt}: only {unalloc // GIB} GiB unallocated on {dev} (warning below {UNALLOC_MIN_GIB} GiB; "
+                f"btrfs {mnt}: only {bash_div(unalloc, GIB)} GiB unallocated on {dev} (warning below {UNALLOC_MIN_GIB} GiB; "
                 "metadata grows only from unallocated space). Free space, or compact half-empty data chunks: "
                 f"'btrfs balance start -dusage=20 {mnt}'"
             )
