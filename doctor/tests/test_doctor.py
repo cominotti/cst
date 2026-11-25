@@ -4488,6 +4488,28 @@ class UnitsLoadedTest(Scratch):
         calls = self.calls()
         self.assertFalse([c for c in calls if "--state=loaded" in c], calls)
 
+    def test_both_checks_judge_each_record_as_it_was_read_once(self) -> None:
+        # An install that rewrites a record between the install check and this one cannot make the two
+        # disagree: each record is read once per check-up.
+        dropin = "/etc/systemd/system/x.service.d/10-cst.conf"
+        self.record(dropin)
+        self.answer(("x.service", "yes"))
+        reads: list[str] = []
+
+        class Counting(doc_adapters.InstalledFiles):
+            @override
+            def record(self, path: doc_domain.ViewPath) -> InstallRecord | None:
+                reads.append(path)
+                return super().record(path)
+
+        files = Counting(REPO)
+        install = list(doc_install.check_install(self.host, installed=files))
+        self.assertIn(doc_domain.OK, [r.status for r in install])
+        os.unlink(self.root_record)  # the record changes after the install check read it
+        units = list(doc_install.check_units_loaded(self.host, installed=files))
+        self.assertEqual(units, [self.warning("x.service", dropin)])
+        self.assertEqual(sorted(reads), sorted([self.root_record, self.user_record]))
+
     def test_a_record_that_cannot_be_read_gives_no_line_here(self) -> None:
         os.makedirs(self.root_record)
         self.answer(("x.service", "yes"))

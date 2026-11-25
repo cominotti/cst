@@ -17,7 +17,7 @@ from cst_core.domain.record import (
 )
 from cst_core.domain.text import YES_WORDS, enum_member
 from cst_core.domain.units import LoadState, parse_show_units
-from doctor.application.shared import check, refresh, runs
+from doctor.application.shared import check, facts, refresh, runs
 from doctor.domain import (
     INFO,
     OK,
@@ -236,28 +236,44 @@ def _record_paths(host: DoctorHostPort) -> tuple[tuple[Owner, HostPath], ...]:
     return ((Owner.ROOT, HostPath(ROOT_RECORD)), (Owner.USER, host_join(host.home, USER_RECORD_REL)))
 
 
+def _read_records(
+    host: DoctorHostPort, installed: InstalledFilesPort
+) -> list[tuple[Owner, HostPath, InstallRecord | RecordFormatError | OSError | None]]:
+    """Root's install record and the user's: (owner, path, the record, None for none, or the error its read
+    raised)."""
+    out: list[tuple[Owner, HostPath, InstallRecord | RecordFormatError | OSError | None]] = []
+    for owner, path in _record_paths(host):
+        try:
+            rec: InstallRecord | RecordFormatError | OSError | None = installed.record(host.path(path))
+        except (RecordFormatError, OSError) as e:
+            rec = e
+        out.append((owner, path, rec))
+    return out
+
+
 @check(CHECKS, "install")
 def check_install(host: DoctorHostPort, *, installed: InstalledFilesPort | None = None) -> Iterator[Result]:
     """The files CST installed (its install records): missing, changed since, partial installs, older
     than this checkout, units whose programs are gone; without a record, the payload comparison."""
     if installed is None:
         return
-    for owner, path in _record_paths(host):
-        try:
-            rec = installed.record(host.path(path))
-        except RecordFormatError as e:
-            why = "written by a newer CST: update this checkout (git pull)" if e.newer else "it is no install record"
-            yield Result(WARN, f"{path}: {e}; {why}")
+    # Kept for check_units_loaded, which then judges the records as this check read them (an install may
+    # rewrite one in between).
+    facts(host).records = reads = _read_records(host, installed)
+    for owner, path, rec in reads:
+        if isinstance(rec, RecordFormatError):
+            why = "written by a newer CST: update this checkout (git pull)" if rec.newer else "it is no install record"
+            yield Result(WARN, f"{path}: {rec}; {why}")
             continue
-        except PermissionError as e:
-            yield Result(INFO, f"{path}: not readable as your user ({e.strerror or e})")
+        if isinstance(rec, PermissionError):
+            yield Result(INFO, f"{path}: not readable as your user ({rec.strerror or rec})")
             continue
-        except OSError as e:
+        if isinstance(rec, OSError):
             # A folder in its place, a read error: every install and removal of CST stops at it, after it has
             # changed its files (the record's update fails). No one command fixes it safely: no fix line.
             yield Result(
                 WARN,
-                f"{path}: the install record cannot be read ({e.strerror or e}): every CST install and removal "
+                f"{path}: the install record cannot be read ({rec.strerror or rec}): every CST install and removal "
                 "stops at it, after it has changed its files; move it aside",
             )
             continue
@@ -269,15 +285,13 @@ def check_install(host: DoctorHostPort, *, installed: InstalledFilesPort | None 
 
 
 def _recorded_units(host: DoctorHostPort, installed: InstalledFilesPort) -> dict[UnitScope, dict[str, list[str]]]:
-    """{manager: {unit name: [the recorded unit files and drop-ins of it]}} of both records. A record that
-    is absent, not one or cannot be read gives nothing here: check_install reports it."""
+    """{manager: {unit name: [the recorded unit files and drop-ins of it]}} of both records, as check_install
+    read them in this check-up (read here when it has not run). A record that is absent, not one or cannot be
+    read gives nothing here: check_install reports it."""
     out: dict[UnitScope, dict[str, list[str]]] = {}
-    for owner, path in _record_paths(host):
-        try:
-            rec = installed.record(host.path(path))
-        except RecordFormatError, OSError:
-            continue
-        if rec is None:
+    reads = facts(host).records
+    for owner, _, rec in _read_records(host, installed) if reads is None else reads:
+        if not isinstance(rec, InstallRecord):
             continue
         home = host.home if owner == Owner.USER else ""
         for dest in sorted(rec.files):
