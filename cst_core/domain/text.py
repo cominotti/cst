@@ -344,9 +344,16 @@ def _plain_assignment(key: str, rest: str, *, exported: bool) -> tuple[str, str]
     return why if value is None else (key, value)
 
 
+def describe_problem_lines(path: str, problems: tuple[SettingsProblem, ...]) -> list[str]:
+    """describe_problems as a list, one item per problem, for a caller that keeps a list of warnings:
+    never split describe_problems' text again (str.splitlines also splits at a form feed, U+001C or
+    U+2028, which a problem line's text can hold)."""
+    return [f"{path} {p}" for p in problems]
+
+
 def describe_problems(path: str, problems: tuple[SettingsProblem, ...]) -> str:
     """One line per problem: `PATH line N: TEXT: REASON`."""
-    return "\n".join(f"{path} {p}" for p in problems)
+    return "\n".join(describe_problem_lines(path, problems))
 
 
 def parse_shell_assignments(text: str, *, bash_sourced: bool = True) -> ShellAssignments:

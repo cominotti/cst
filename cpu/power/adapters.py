@@ -14,7 +14,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import host_view_path, undo_python_start
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
-from cst_core.domain.text import describe_problems, strip_ascii_blanks
+from cst_core.domain.text import describe_problem_lines, strip_ascii_blanks
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import ExecutionContextPort
 from cpu.game.adapters.host import read_settings, read_stripped, write_sysfs_line
@@ -202,7 +202,7 @@ def read_cpu_topology(sys_dir: str, p_cores: str, e_cores: str) -> CpuTopology:
 def collect_power_snapshot(paths: PowerPaths) -> PowerSnapshot:
     """Collect configuration and live sysfs state into a pure `PowerSnapshot`."""
     settings, problems = read_settings(paths.conf)
-    warnings: list[str] = describe_problems(paths.conf, problems).splitlines()
+    warnings: list[str] = describe_problem_lines(paths.conf, problems)
     gpu_mode, gpu_err = parse_gpu_pm_mode(settings.gpu_pm_mode)
     if gpu_err is not None:
         warnings.append(gpu_err)

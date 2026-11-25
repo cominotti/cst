@@ -86,6 +86,7 @@ from cst_core.domain.text import (
     YES_WORDS,
     cgroup_v2_path,
     count_text,
+    describe_problem_lines,
     describe_problems,
     enum_member,
     first_line,
@@ -1808,6 +1809,16 @@ class ShellAssignmentsTest(unittest.TestCase):
             "/etc/x.conf line 1: K=8\N{NO-BREAK SPACE}: a no-break space (U+00A0) at the end of the value: "
             "CST does not trim it (delete it)",
         )
+
+    def test_describe_problem_lines_is_one_item_per_problem(self) -> None:
+        # A problem line's text can hold a form feed, U+001C or U+2028 (only a newline ends a line):
+        # str.splitlines() of describe_problems' text would split it, the list form never does.
+        got = parse_shell_assignments("A='1\x1c'\nB=\"2\N{LINE SEPARATOR}\"\nC = 3\n").problems
+        lines = describe_problem_lines("/etc/x.conf", got)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual([ln.split(" ", 3)[:3] for ln in lines], [["/etc/x.conf", "line", f"{n}:"] for n in (1, 2, 3)])
+        self.assertEqual("\n".join(lines), describe_problems("/etc/x.conf", got))
+        self.assertEqual(describe_problem_lines("/etc/x.conf", ()), [])
 
     def test_snapshots_conf_checks_an_old_writer_value_too(self) -> None:
         # printf %q's $'...' form of a no-break space before 8: bash's value, and a kept problem.

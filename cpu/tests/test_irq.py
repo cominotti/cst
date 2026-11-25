@@ -339,6 +339,25 @@ class CpuIrqLifecycleTest(unittest.TestCase):
             ),
         )
 
+    def test_a_problem_line_whose_text_holds_a_line_separator_is_one_warning(self) -> None:
+        # str.splitlines() of describe_problems' text split such a line in two, the second piece with no
+        # file or line number; only a newline ends a settings line.
+        for sep in ("\x0c", "\x1c", chr(0x2028)):
+            with self.subTest(sep=repr(sep)):
+                self._write(self.paths.conf, f"BUILD_CPUS='12-23{sep}'\nP_CORES = '0-7'\n")
+                warnings = collect_irq_snapshot(self.paths, runner=self.runner, has_rpm_ostree=True).warnings
+                name = "a line separator" if sep == chr(0x2028) else "a control character"
+                first = (
+                    f"{self.paths.conf} line 1: BUILD_CPUS='12-23{sep}': {name} (U+{ord(sep):04X}) at the end of the "
+                    "value: CST does not trim it (delete it)"
+                )
+                second = (
+                    f"{self.paths.conf} line 2: P_CORES = '0-7': blanks around =: bash runs it as a command and "
+                    "sets nothing"
+                )
+                self.assertEqual([w for w in warnings if "line " in w], [first, second])
+                self.assertFalse([w for w in warnings if w.startswith("'")], warnings)
+
     def test_bad_build_cpus_or_settings_refuse_apply_and_keep_files(self) -> None:
         # An empty ban-list would remove the files; a bad BUILD_CPUS must refuse instead (exit 1),
         # touching no file and restarting nothing.

@@ -310,6 +310,19 @@ class CpuPowerLifecycleTest(unittest.TestCase):
             warnings,
         )
 
+    def test_a_problem_line_whose_text_holds_a_line_separator_is_one_warning(self) -> None:
+        # str.splitlines() of describe_problems' text split such a line in two, the second piece with no
+        # file or line number; only a newline ends a settings line.
+        for sep in ("\x1d", chr(0x2029)):
+            with self.subTest(sep=repr(sep)):
+                self._write(self.paths.conf, f"GPU_PM_MODE='always'\nCPU_CSTATE_MAX_LATENCY_US='50{sep}'\n")
+                warnings = collect_power_snapshot(self.paths).config_warnings
+                mine = [w for w in warnings if "CPU_CSTATE_MAX_LATENCY_US='50" in w]
+                self.assertEqual(len(mine), 1, warnings)
+                self.assertTrue(mine[0].startswith(f"{self.paths.conf} line 2: "), mine)
+                self.assertTrue(mine[0].endswith("at the end of the value: CST does not trim it (delete it)"), mine)
+                self.assertFalse([w for w in warnings if w.startswith("'")], warnings)
+
     def test_apply_and_revert_wait_for_the_run_lock(self) -> None:
         # cpu-game-profile holds /run/cpu-setup/lock while it switches; apply and revert wait for it
         # and change nothing when it stays held. status and plan never wait.
