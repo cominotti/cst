@@ -30,7 +30,9 @@ Apalache (whose jar also runs TLC) and the Rust evaluator, each checked against 
 is unpacked into QUINT_HOME. A tool is used as it is only when the stamp beside it records the
 hash that was checked. quint, Apalache and TLC run from a work folder under the same cache (they
 write _apalache-out/ in the current folder), under nice, each with a time limit, TLC with 4 GB of
-heap and 4 workers (quint's defaults are 8 GB and every CPU).
+heap and 4 workers (quint's defaults are 8 GB and every CPU). Each quint verify gets its own localhost
+port, free when it starts, for the Apalache server quint starts and stops with it, so two runs at once
+neither share a server nor collide on quint's default port 8822.
 
 It needs node and npm, java (17 or later) and curl. Exit status: 0 every property holds (and with
 --traces, the replay passes); 1 a property is violated, a run timed out or failed, or a download did
@@ -47,6 +49,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -80,6 +83,8 @@ EX_FAILED: Final = 1
 EX_USAGE: Final = 2
 REQUIRED: Final = ("node", "npm", "java", "curl", "nice", "timeout")
 NICE: Final = ("nice", "-n", "10")
+# quint's own default host for the Apalache server; the port is chosen at run time (free_port).
+SERVER_HOST: Final = "localhost"
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,7 +398,24 @@ def quint_env(env: Mapping[str, str], home: str, work: str) -> dict[str, str]:
     return {**env, "QUINT_HOME": home, "JVM_ARGS": JVM_ARGS, "TMPDIR": work}
 
 
-def tlc_argv(quint: str, spec: str, check: Check, config: str) -> list[str]:
+def free_port() -> int:
+    """A TCP port no socket holds right now, on any address: the kernel's pick for a bind to the wildcard."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        address: object = s.getsockname()
+    match address:
+        case (str(), int() as port):
+            return port
+        case _:
+            raise OSError(f"an AF_INET socket's address is {address!r}")
+
+
+def server_endpoint(port: int) -> str:
+    """quint's --server-endpoint for an Apalache server on port: quint starts one there when none answers."""
+    return f"{SERVER_HOST}:{port}"
+
+
+def tlc_argv(quint: str, spec: str, check: Check, config: str, endpoint: str) -> list[str]:
     return [
         "timeout",
         str(TLC_TIMEOUT),
@@ -411,18 +433,21 @@ def tlc_argv(quint: str, spec: str, check: Check, config: str) -> list[str]:
         check.step,
         "--invariant",
         ",".join(check.invariants),
+        "--server-endpoint",
+        endpoint,
     ]
 
 
-def trace_argv(quint: str, spec: str, job: TraceJob, out: str) -> list[str]:
+def trace_argv(quint: str, spec: str, job: TraceJob, out: str, endpoint: str) -> list[str]:
     """The run that writes job's trace to out: the simulator with one thread (a seed then gives the same walk),
-    or Apalache's bounded check of the negated witness."""
+    or Apalache's bounded check of the negated witness, through its server at endpoint (`quint run` starts
+    no server and has no such option)."""
     common = ["--main", job.main, "--step", job.step, "--max-steps", str(job.max_steps), "--out-itf", out]
     if job.backend == "simulator":
         argv = ["timeout", str(SIMULATOR_TIMEOUT), *NICE, quint, "run", spec, *common]
         argv += ["--max-samples", str(job.samples), "--n-traces", "1", "--n-threads", "1", "--seed", str(job.seed)]
     else:
-        argv = ["timeout", str(APALACHE_TIMEOUT), *NICE, quint, "verify", spec, *common]
+        argv = ["timeout", str(APALACHE_TIMEOUT), *NICE, quint, "verify", spec, *common, "--server-endpoint", endpoint]
     if job.invariant:
         argv += ["--invariant", job.invariant]
     return argv
@@ -517,6 +542,9 @@ class Session:
     run: Exec
     env: Mapping[str, str]
     out: Callable[[str], None]
+    # A free port for each quint verify, taken right before it runs: the window before Apalache binds it stays
+    # one command long, and no run reuses a port a server that is shutting down may still hold.
+    port: Callable[[], int] = free_port
 
     def tools(self, work: str) -> tuple[str, dict[str, str]]:
         """quint's program and its environment, every tool in place and checked."""
@@ -540,7 +568,7 @@ class Session:
         status, largest, total = 0, 0, 0.0
         for check in checks:
             path = spec if spec is not None else os.path.join(self.checkout, check.spec)
-            ran = self.run(tlc_argv(quint, path, check, config), work, env)
+            ran = self.run(tlc_argv(quint, path, check, config, server_endpoint(self.port())), work, env)
             found = verdict(ran)
             largest, total = max(largest, ran.max_rss_kb), total + ran.seconds
             self.out(
@@ -557,7 +585,8 @@ class Session:
         """Each job's trace, normalized, into its spec's traces folder of the checkout; then the replays."""
         for job in jobs:
             raw = os.path.join(work, f"{job.name}.raw.itf.json")
-            ran = self.run(trace_argv(quint, os.path.join(self.checkout, job.spec), job, raw), work, env)
+            argv = trace_argv(quint, os.path.join(self.checkout, job.spec), job, raw, server_endpoint(self.port()))
+            ran = self.run(argv, work, env)
             problem = trace_problem(job, ran)
             if problem is None and not os.path.exists(raw):
                 problem = f"quint wrote no trace (exit {ran.returncode})"
@@ -604,7 +633,7 @@ def checkout_root() -> str:
 @dataclass(frozen=True, slots=True)
 class Seams:
     """What main takes from outside: the checkout, the environment, how commands run and what is on PATH,
-    where lines go, and the checks and trace jobs (the tests give fakes)."""
+    where lines go, the checks and trace jobs, and the free ports (the tests give fakes)."""
 
     checkout: str | None = None
     env: Mapping[str, str] | None = None
@@ -613,6 +642,7 @@ class Seams:
     out: Callable[[str], None] = print
     checks: Sequence[Check] = CHECKS
     jobs: Sequence[TraceJob] = TRACE_JOBS
+    port: Callable[[], int] = free_port
 
 
 def usage_problem(args: argparse.Namespace, chosen: Sequence[Check]) -> str | None:
@@ -646,7 +676,7 @@ def main(argv: Sequence[str], seams: Seams | None = None) -> int:
     if cache is None:
         out(f"cst-quint: {NO_CACHE_BASE}")
         return EX_USAGE
-    session = Session(checkout or checkout_root(), cache, run, env, out)
+    session = Session(checkout or checkout_root(), cache, run, env, out, s.port)
     os.makedirs(os.path.join(session.cache, "work"), exist_ok=True)
     work = tempfile.mkdtemp(prefix="run-", dir=os.path.join(session.cache, "work"))
     try:

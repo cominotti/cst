@@ -1051,7 +1051,12 @@ npm, java (17 or later) and curl.
 About 240 MB in all, fetched once. quint, Apalache and TLC run from a new
 work folder under `~/.cache/cst-quint/work` (they write `_apalache-out/` in
 the folder they run in, and quint's TLC translation goes to `TMPDIR`, which
-is set to it), removed at the end. Every run is under `nice -n 10` and a time
+is set to it), removed at the end. Each `quint verify` (the TLC checks and
+the Apalache traces) gets `--server-endpoint localhost:PORT`, with a port
+free at that moment: quint starts its own Apalache server there and stops it
+when it ends, so two runs at once (two checkouts or agents) neither share a
+server nor collide on quint's default port 8822, and a server something else
+left on 8822 is never used. Every run is under `nice -n 10` and a time
 limit (TLC 5 minutes per instance, Apalache 10 minutes, the simulator 5). TLC
 gets an explicit config, `{"maxHeap": "-Xmx4g", "workers": 4}`, and
 `JVM_ARGS=-Xmx4g`: quint's defaults are an 8 GB heap and a worker per CPU.
