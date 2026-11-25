@@ -13,8 +13,10 @@ A layering refactor moves a package towards its profile
 ([docs/architecture.md, "Package profile"](../../../docs/architecture.md#package-profile)):
 the light one (domain, adapters, cli) unless a full-profile layer pays for
 itself. Do not add a port that mirrors one command per method, a
-`presenter.py` with one output format or a `wiring.py` without a re-exec,
-and do not reshape code that moves or deletes data only for a metric. When
+`presenter.py` with one output format or a `wiring.py` without a re-exec
+(a package with an `application/` layer is the exception: its `cli.py` may
+not import an adapter, so its construction is in `wiring.py`), and do not
+reshape code that moves or deletes data only for a metric. When
 the refactor brings a budget or ceiling down, `invowk cmd fix budgets
 --apply` records it; a refactor never raises one.
 

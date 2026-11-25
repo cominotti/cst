@@ -129,8 +129,10 @@ uninstall.
   its own, type the use case with cst_core's `CommandRunnerPort` /
   `FileSystemPort` and fake those.
 - `wiring.py`: only when the program reads its environment and also re-runs
-  itself (sudo, runuser); otherwise the construction stays in `cli.py`'s
-  `main`.
+  itself (sudo, runuser), or when the package has an `application/` layer:
+  such a package is in `HEXAGONAL_PACKAGES`, whose `cli.py` may not import
+  an adapter, so the construction moves to `wiring.py` (`cpu/game`).
+  Otherwise the construction stays in `cli.py`'s `main`.
 - `presenter.py`: only when there are two or more output formats (text and
   `--json`).
 

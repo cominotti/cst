@@ -72,7 +72,7 @@ from cpu.game.domain import (
 from cpu.game.ports import GamePorts
 
 
-# How the watchdog's words on the settings end: it says them once per boot (GameProfile.say_once).
+# How the watchdog's words on the settings end: it says them once per boot (GameProfileSteps.say_once).
 _ONCE: Final = " (fix it; said once per boot)"
 
 
