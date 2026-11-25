@@ -551,21 +551,24 @@ class GameProfile:
         manager is what 'off' undoes."""
         self.act_for(state_uid(recs), say=say)
 
-    def act_for(self, uid: str | None, *, say: bool = True) -> None:
+    def act_for(self, uid: str | None, *, say: bool = True) -> bool:
         """Act for the user with that uid in the user manager's side from now on (None: TARGET_USER as it
-        is): user_from_state's rule, also for the user a kept record of game.leftovers names."""
+        is): user_from_state's rule, also for the user a kept record of game.leftovers names. False when no
+        account has that uid: the user acted for stays as it was, which is not that user."""
         if uid is None:
-            return
+            return True
         target = self.s.target_user
         if target and self._lookup_uid(target, say=say) == uid:
-            return
+            return True
         name = self._name_of(uid)
-        if name:
-            if say:
-                conf = self.paths.conf
-                why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
-                self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
-            self.s = dataclasses.replace(self.s, target_user=name)
+        if not name:
+            return False
+        if say:
+            conf = self.paths.conf
+            why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
+            self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
+        self.s = dataclasses.replace(self.s, target_user=name)
+        return True
 
     def undo_record(self, rec: Sequence[str], reload: dict[str, bool]) -> bool:
         """Undo one record of game.state (as state_undo reads it); False when the undo failed: a file write

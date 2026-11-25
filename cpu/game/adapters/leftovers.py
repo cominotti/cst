@@ -47,14 +47,18 @@ def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
 def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: dict[str, bool], *, say: bool) -> list[Entry]:
     """Undo the entries, the last first (a property touched twice ends at its oldest value), each record of
     the user manager for the user its entry names; the ones whose undo failed, in their order, each with the
-    uid it was for (say: each named in a warning line)."""
+    uid it was for (say: each named in a warning line). An entry whose uid no account has now is never
+    undone in another user's manager: it is done when that uid's user manager is gone, else kept."""
     failed: list[Entry] = []
     for uid, rec in reversed(entries):
-        if uid is not None:
-            profile.act_for(uid, say=False)
-        if profile.undo_record(rec, reload):
+        if uid is not None and not profile.act_for(uid, say=False):
+            if user_manager_gone(profile, uid):
+                continue
+            user: str | None = uid
+        elif profile.undo_record(rec, reload):
             continue
-        user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
+        else:
+            user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
         failed.append((user, rec))
         if say:
             what = undo_text(rec, profile.paths.epp)
@@ -82,11 +86,16 @@ def keep(profile: GameProfile, failed: Sequence[Entry], *, readable: bool) -> No
         profile.log(3, f"off: could not keep {undo_text(rec, profile.paths.epp)} in {path}: not undone")
 
 
+def user_manager_gone(profile: GameProfile, uid: str) -> bool:
+    """The user manager of that uid is gone with its runtime overrides: its runtime folder is (a logout)."""
+    return not os.path.isdir(os.path.join(profile.paths.run_user, uid, "systemd"))
+
+
 def unit_gone(profile: GameProfile, mgr: Manager, unit: str) -> bool:
     """The unit of a set-property that failed in 'off' is gone, with its runtime overrides, so nothing is
     left to undo: the user manager's runtime folder is gone (a logout), or a transient unit (its overrides
     live beside it) is not loaded. A fixed unit's override outlives the unit: it is never gone."""
-    if mgr == "usr" and not os.path.isdir(os.path.join(profile.paths.run_user, profile.uid(), "systemd")):
+    if mgr == "usr" and user_manager_gone(profile, profile.uid()):
         return True
     if not transient_unit(unit):
         return False

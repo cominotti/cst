@@ -2567,12 +2567,8 @@ class LeftoversTest(GameProfileCase):
         self.assertEqual(self.sets(self.systemd.actions), [f"{USR} set-property --runtime user.slice CPUWeight=30"])
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
-    def kept_for_the_user(self, target: str) -> tuple[GameProfile, io.StringIO]:
-        """A game.leftovers whose record of the user manager, for USER, still fails; a profile whose
-        TARGET_USER is target (USER's account found by its uid, no other account)."""
-        self.write(self.paths.leftovers, f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n")
-        self.systemd.fail_set.add(("usr", "user.slice"))
-        os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)  # USER is logged in
+    def accounts_profile(self, target: str) -> tuple[GameProfile, io.StringIO]:
+        """A profile whose TARGET_USER is target, on accounts where only USER (uid UID) has one."""
         out = io.StringIO()
         p = GameProfile(
             self.paths,
@@ -2583,6 +2579,14 @@ class LeftoversTest(GameProfileCase):
             out=out,
         )
         return p, out
+
+    def kept_for_the_user(self, target: str) -> tuple[GameProfile, io.StringIO]:
+        """A game.leftovers whose record of the user manager, for USER, still fails; a profile whose
+        TARGET_USER is target (accounts_profile)."""
+        self.write(self.paths.leftovers, f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n")
+        self.systemd.fail_set.add(("usr", "user.slice"))
+        os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)  # USER is logged in
+        return self.accounts_profile(target)
 
     def test_the_tick_while_off_judges_target_user_not_the_user_of_a_kept_record(self) -> None:
         # A GameMode client runs (game_scratch's) and TARGET_USER is unset or names no account: 'on' would
@@ -2601,6 +2605,31 @@ class LeftoversTest(GameProfileCase):
                 self.assertNotIn(f"{SYS} start --no-block cpu-game.service", self.systemd.actions)
                 self.assertIn("GameMode client running, profile not switched on: TARGET_USER", out.getvalue())
                 self.assertEqual(p.s.target_user, target)
+
+    def test_a_kept_record_whose_uid_has_no_account_is_never_undone_for_another_user(self) -> None:
+        # The record was kept for uid 1001, whose account is gone now; TARGET_USER is USER (another uid).
+        text = "cst-game-leftovers 1\nuser 1001\nprop usr app.slice MemoryZSwapWriteback existed yes\n"
+        self.no_game()
+        # Its user manager is still there (/run/user/1001/systemd): kept as it is, for that uid.
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        for action in ("tick", "off"):
+            with self.subTest(action=action):
+                self.write(self.paths.leftovers, text)
+                p, out = self.accounts_profile(USER)
+                self.systemd.actions = []
+                self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
+                self.assertEqual(self.sets(self.systemd.actions), [])
+                self.assertEqual(self.read(self.paths.leftovers), text)
+                self.assertNotIn("undid", out.getvalue())
+                if action == "off":
+                    self.assertIn("off: could not undo app.slice MemoryZSwapWriteback=yes: kept in", out.getvalue())
+        # Its user manager is gone (a logout): nothing is left to undo, the record is done.
+        shutil.rmtree(os.path.join(self.paths.run_user, "1001"))
+        p, _ = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.sets(self.systemd.actions), [])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
 
     def test_a_transient_unit_that_is_gone_is_no_leftover(self) -> None:
         # A Docker scope with an override of its own before the game, which ended before 'off'.

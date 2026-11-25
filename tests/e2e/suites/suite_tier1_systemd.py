@@ -7145,7 +7145,8 @@ PY
         and keeps only the CPUWeight record, which the next 'off' keeps too. The old 'off' removed game.state
         with both records in it and kept nothing. With TARGET_USER unset and a GameMode client running, a tick
         tries a kept record of tester's user manager for tester and still does not start cpu-game.service (a
-        stub): the old tick then acted for tester and started it."""
+        stub): the old tick then acted for tester and started it. A kept record of a uid with no account is
+        never set in tester's manager: kept while that uid's runtime folder is there, done once it is gone."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -7159,7 +7160,7 @@ PY
             rm -f /etc/cpu-setup/cpu-setup.conf
             if [[ -e /tmp/e2e-182-conf.bak ]]; then mv /tmp/e2e-182-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rmdir /etc/cpu-setup 2>/dev/null || true
-            rm -rf /run/cpu-setup /run/e2e182
+            rm -rf /run/cpu-setup /run/e2e182 /run/user/4242
             systemctl daemon-reload || true
             """,
             check=False,
@@ -7242,6 +7243,24 @@ PY
             rm -f "$stub" "$lo" /run/cpu-setup/settings-warned
             systemctl daemon-reload
             printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            # A kept record of a uid no account has now is never undone in another user's manager: kept while
+            # that uid's user manager is there (/run/user/UID/systemd), done once it is gone. The old tick set
+            # it in tester's (TARGET_USER's) manager and dropped it as undone.
+            ghost=4242
+            if getent passwd "$ghost" >/dev/null; then echo "uid $ghost has an account" >&2; exit 1; fi
+            grec='prop usr app.slice CPUWeight existed 77'
+            app_own=$(systemctl --user -M tester@ show -P CPUWeight app.slice)
+            [[ "$app_own" != 77 ]]
+            mkdir -p "/run/user/$ghost/systemd"
+            printf 'cst-game-leftovers 1\nuser %s\n%s\n' "$ghost" "$grec" >"$lo"
+            gp tick >/dev/null
+            [[ "$(tail -n +2 "$lo")" == "user $ghost"$'\n'"$grec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight app.slice)" == "$app_own" ]] \
+                || { echo "tester's app.slice got the other user's CPUWeight" >&2; exit 1; }
+            rm -rf "/run/user/$ghost"
+            gp tick >/dev/null
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight app.slice)" == "$app_own" ]]
             echo E2E-OK
             """,
         ).stdout
