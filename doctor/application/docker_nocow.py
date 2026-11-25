@@ -16,6 +16,7 @@ from btrfs.docker_volumes_nocow.domain import (
     parse_outcome,
 )
 from cst_core.domain.shapes import parse_json
+from cst_core.domain.text import count_text
 from doctor.domain import (
     INFO,
     NOCOW_ATTEMPTS,
@@ -80,7 +81,7 @@ def _nocow_count(host: DoctorHostPort) -> int:
     """The helper's count of boots, as CounterFile.count reads it (0: none, or no number)."""
     try:
         with host.open_text(host.path(NOCOW_ATTEMPTS)) as f:
-            return int(f.read(256))
+            return count_text(f.read(256))
     except OSError, ValueError:
         return 0
 

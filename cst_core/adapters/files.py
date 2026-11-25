@@ -28,7 +28,7 @@ from typing import Literal, overload
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, owned_file_state
 from cst_core.domain.install import Owner, link_read_through
-from cst_core.domain.text import first_line
+from cst_core.domain.text import count_text, first_line
 from cst_core.domain.units import MASK_TARGET
 
 
@@ -455,8 +455,8 @@ class CounterFile:
     def count(self) -> int:
         try:
             with open(self.path) as f:
-                return int(f.read())
-        except OSError, ValueError:
+                return count_text(f.read())
+        except OSError, ValueError:  # ValueError: bytes the locale cannot decode
             return 0
 
     def save(self, count: int) -> None:
