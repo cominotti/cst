@@ -57,10 +57,9 @@ from btrfs.cache.ports import (
     MountTablePort,
 )
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
+from cst_core.domain.values import ExitAndLines
 
 _NOT_MOUNTED: Final = LiveMount(source="", target="", fstype="", options="", uuid="", fsroot="")
-
-type Outcome = tuple[int, list[str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +78,7 @@ class CacheMounts:
         """What the machine shows of the selected binds (read only)."""
         return _probe_snapshot(parsed, self)
 
-    def run(self, parsed: CacheMountParsedArgs, prog: str) -> Outcome:
+    def run(self, parsed: CacheMountParsedArgs, prog: str) -> ExitAndLines:
         """The requested subcommand: (exit status, its lines); prog: the command's name in plan's lines."""
         snap = self.snapshot(parsed)
         match parsed.action:
@@ -94,14 +93,14 @@ class CacheMounts:
             case _:
                 return 0, format_cache_mount_status(snap, seam_root=self.seam_root)
 
-    def status(self, snap: CacheMountSnapshot) -> Outcome:
+    def status(self, snap: CacheMountSnapshot) -> ExitAndLines:
         """The status lines; systemd is asked about /etc/fstab only where the cache is set up."""
         if snap.mounts_error is None and snap.fstab_error is None and _cache_set_up(snap):
             targets = {e.target for e in snap.all_managed}
             snap = replace(snap, fstab_behind=fstab_lines_unread(self.systemd.mount_units(), targets))
         return 0, format_cache_mount_status(snap, seam_root=self.seam_root)
 
-    def plan(self, snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, prog: str) -> Outcome:
+    def plan(self, snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, prog: str) -> ExitAndLines:
         """What attach would do, changing nothing."""
         if snap.user is not None:
             cur_fstab, new_fstab = _attach_fstab(snap)
@@ -389,7 +388,7 @@ def _commit_fstab_or_undo(
     return _error_after_undo(failed.cause, undo_errors)
 
 
-def _apply_attach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> Outcome:
+def _apply_attach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> ExitAndLines:
     """Folders, then mount --bind, then /etc/fstab and daemon-reload: a failure takes back the
     binds this run mounted (and /etc/fstab), so no line is left that would mount at the next boot."""
     blockers = validate_attach_snapshot(snap, allow_nonempty=parsed.allow_nonempty)
@@ -428,7 +427,7 @@ def _apply_attach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: Cac
     return 0, lines
 
 
-def _apply_detach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> Outcome:
+def _apply_detach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> ExitAndLines:
     """Drop the user's managed lines from /etc/fstab and reload systemd first, then unmount only the
     binds CST made (the mirror of attach), so no line is left for a bind that is not mounted, even
     when the run dies halfway. A failed write or reload puts /etc/fstab back; a failed umount mounts

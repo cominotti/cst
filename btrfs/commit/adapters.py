@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-import os
 from typing import Final
 
 from btrfs.commit.domain import (
@@ -24,13 +24,13 @@ from btrfs.commit.domain import (
 )
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
 from btrfs.compress.domain import (
-    CompressSnapshot,
     FSTAB_PATH,
     FSTAB_UNREAD,
     PROC_MOUNTS_PATH,
     REMOUNT_UNREAD,
     TOP_MOUNT_UNIT_PATH,
     TOP_MOUNT_UNREAD,
+    CompressSnapshot,
     extract_rootflags_tokens,
     kargs_edits_staged,
     kargs_unread,
@@ -43,6 +43,7 @@ from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
 from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines, format_status_note_lines
 from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.domain.errors import Refused
+from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandFailed
 
 SEAM_COMMIT_PROC: Final = "CST_BTRFS_COMMIT_PROC"
@@ -227,7 +228,7 @@ def execute_commit_change(
     *,
     prog: str = COMMIT_PROG,
     seam_proc: str = "",
-) -> tuple[int, list[str]]:
+) -> ExitAndLines:
     """Run transactional `apply` or `revert` against `host` (`CompressHostPort`)."""
     snap, kargs_ok, kargs_err = read_commit_snapshot(host)
     if not kargs_ok:
@@ -314,9 +315,7 @@ def format_commit_plan_lines(plan: CommitPlan, prog: str, *, dry_run: bool, seam
     return out
 
 
-def dispatch_commit_cli_action(
-    parsed: CommitParsedArgs, env: ManagedCliEnv, *, read_only: bool
-) -> tuple[int, list[str]]:
+def dispatch_commit_cli_action(parsed: CommitParsedArgs, env: ManagedCliEnv, *, read_only: bool) -> ExitAndLines:
     """Resolve host adapter and execute the requested `commit-interval` subcommand."""
     del read_only
     host, seam_proc, env_map = _host_for_env(env)

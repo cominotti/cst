@@ -24,6 +24,7 @@ from btrfs.scrub_limit.domain import ScrubLimitAction, ScrubParsedArgs
 from cst_core.adapters import SystemctlHost
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import ManagedCliEnv, ManagedCliSpec, run_managed_cli, undo_python_start
+from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandRunnerPort
 
 ScrubCliDeps = ManagedCliEnv
@@ -49,14 +50,14 @@ def build_scrub_limit(paths: ScrubPaths, runner: CommandRunnerPort | None, *, re
     )
 
 
-def scrub_limit_status(paths: ScrubPaths, *, runner: CommandRunnerPort | None = None) -> tuple[int, list[str]]:
+def scrub_limit_status(paths: ScrubPaths, *, runner: CommandRunnerPort | None = None) -> ExitAndLines:
     """Read-only status of `SCRUB_LIMIT`, drop-in, sysfs, and whether systemd loaded the drop-in."""
     return build_scrub_limit(paths, runner, read_only=True).status()
 
 
 def scrub_limit_plan(
     paths: ScrubPaths, target_limit: str | None, *, runner: CommandRunnerPort | None = None
-) -> tuple[int, list[str]]:
+) -> ExitAndLines:
     """Read-only dry run of `cst btrfs scrub-limit set|off`, the daemon-reload included that apply runs
     when systemd has not loaded the drop-in as it is on disk."""
     return build_scrub_limit(paths, runner, read_only=True).plan(target_limit)
@@ -67,14 +68,14 @@ def scrub_limit_apply(
     target_limit: str | None,
     *,
     runner: CommandRunnerPort | None = None,
-) -> tuple[int, list[str]]:
+) -> ExitAndLines:
     """Update `SCRUB_LIMIT` in `snapshots.conf`, update/remove `10-cst-limit.conf`, and reload systemd if needed.
 
     When the installer or daemon-reload fails, snapshots.conf and the drop-in go back to what they were."""
     return build_scrub_limit(paths, runner, read_only=False).apply(target_limit)
 
 
-def _run_action(service: ScrubLimit, parsed: ScrubParsedArgs) -> tuple[int, list[str]]:
+def _run_action(service: ScrubLimit, parsed: ScrubParsedArgs) -> ExitAndLines:
     if parsed.action == ScrubLimitAction.STATUS:
         return service.status()
     if parsed.action == ScrubLimitAction.PLAN:
@@ -89,7 +90,7 @@ class ScrubCliExecutor:
 
     build: ScrubBuild | None = None
 
-    def __call__(self, parsed: ScrubParsedArgs, env: ManagedCliEnv, /, *, read_only: bool) -> tuple[int, list[str]]:
+    def __call__(self, parsed: ScrubParsedArgs, env: ManagedCliEnv, /, *, read_only: bool) -> ExitAndLines:
         """Run the parsed action; read_only: status and plan (the host's view from a toolbox)."""
         if self.build is not None:
             return _run_action(self.build(read_only), parsed)

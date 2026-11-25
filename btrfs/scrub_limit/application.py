@@ -24,7 +24,7 @@ from btrfs.scrub_limit.domain import (
 )
 from btrfs.scrub_limit.ports import ScrubDropinPort, ScrubSettingsPort, ScrubSysfsPort, ScrubSystemdPort
 from cst_core.domain.install import InstallReportWord
-from cst_core.domain.values import MINUTE
+from cst_core.domain.values import MINUTE, ExitAndLines
 
 # The longest a daemon-reload this run's own write did not ask for may take (systemd was behind, or
 # could not say): a PID 1 that does not answer must not hang a run with nothing to change.
@@ -182,7 +182,7 @@ class ScrubLimit:
     systemd: ScrubSystemdPort
     sysfs: ScrubSysfsPort
 
-    def status(self) -> tuple[int, list[str]]:
+    def status(self) -> ExitAndLines:
         """Read-only status of SCRUB_LIMIT, the drop-in, sysfs, and whether systemd loaded the drop-in."""
         conf_text, conf_unreadable = self.settings.read()
         dropin_text, _ = self.dropin.read()
@@ -199,7 +199,7 @@ class ScrubLimit:
         )
         return (1 if conf_unreadable else 0), lines
 
-    def plan(self, target_limit: str | None) -> tuple[int, list[str]]:
+    def plan(self, target_limit: str | None) -> ExitAndLines:
         """Read-only dry run of set|off, the daemon-reload included that apply runs when systemd has not
         loaded the drop-in as it is on disk."""
         conf_text, dropin_text, read_error = _read_conf_and_dropin(self.settings, self.dropin)
@@ -218,7 +218,7 @@ class ScrubLimit:
             *scrub_limit_plan_reload_lines(dropin_text=dropin_text, target_limit=target_limit, need_reload=need_reload),
         ]
 
-    def apply(self, target_limit: str | None) -> tuple[int, list[str]]:
+    def apply(self, target_limit: str | None) -> ExitAndLines:
         """Update SCRUB_LIMIT in snapshots.conf, update or remove the drop-in, and reload systemd if needed.
 
         When the installer or daemon-reload fails, snapshots.conf and the drop-in go back to what they were."""

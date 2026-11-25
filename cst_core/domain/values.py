@@ -18,6 +18,9 @@ from typing import Final, Self
 # comes back as a list and a set does not go, so neither is one.
 type Json = bool | int | float | str | list[Json] | dict[str, Json] | None
 
+# What a use case answers: its exit status and the lines it prints.
+type ExitAndLines = tuple[int, list[str]]
+
 
 class DomainValidationError(ValueError):
     """Raised when a domain value object invariant is violated."""

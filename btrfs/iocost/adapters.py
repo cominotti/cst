@@ -5,26 +5,11 @@ lock files, and where they are (IocostPaths). wiring.py builds the use cases ove
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 import re
+from dataclasses import dataclass
 from typing import Final
 
-from cst_core.adapters import SystemctlAdapter, SystemctlHost
-from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
-from cst_core.adapters.locks import take_lock
-from cst_core.adapters.runner import HostExecutionContext
-from cst_core.adapters.runtime import (
-    host_view_path,
-    installer_script_for,
-    probe_systemd_unit,
-    run_installer,
-)
-from cst_core.application.install import InstallRequest, InstallService, record_file
-from cst_core.domain.install import INSTALL_MANIFEST, Component, InstallReportWord, Owner, select_entries
-from cst_core.domain.record import ComponentState
-from cst_core.domain.text import first_line, group
-from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
     IOCOST_COMPONENT_LOCK_NAME,
@@ -40,6 +25,22 @@ from btrfs.iocost.domain import (
     BlockDisk,
     UdevProperties,
 )
+from cst_core.adapters import SystemctlAdapter, SystemctlHost
+from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
+from cst_core.adapters.locks import take_lock
+from cst_core.adapters.runner import HostExecutionContext
+from cst_core.adapters.runtime import (
+    host_view_path,
+    installer_script_for,
+    probe_systemd_unit,
+    run_installer,
+)
+from cst_core.application.install import InstallRequest, InstallService, record_file
+from cst_core.domain.install import INSTALL_MANIFEST, Component, InstallReportWord, Owner, select_entries
+from cst_core.domain.record import ComponentState
+from cst_core.domain.text import first_line, group
+from cst_core.domain.values import ExitAndLines
+from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode
 
 _DEVNO_RE: Final = re.compile(r"^\d+:\d+$", re.ASCII)
 _ACTIVE_SCHED_RE: Final = re.compile(r"\[([^\]]+)\]")
@@ -146,7 +147,7 @@ def udev_properties(runner: CommandRunnerPort, name: str) -> UdevProperties:
     )
 
 
-def _installer_step(runner: CommandRunnerPort, script: str, subargs: list[str]) -> tuple[int, list[str]]:
+def _installer_step(runner: CommandRunnerPort, script: str, subargs: list[str]) -> ExitAndLines:
     rc, lines, err = run_installer(runner, script, subargs)
     return rc, [*lines, *([err] if err else [])]
 
@@ -279,13 +280,13 @@ class IocostInstaller:
         """Whether a checkout's installer is known."""
         return bool(self.installer_script)
 
-    def install(self) -> tuple[int, list[str]]:
+    def install(self) -> ExitAndLines:
         """installer.py install --component btrfs:iocost."""
         return _installer_step(
             self.runner, self.installer_script, ["install", "--component", Component.BTRFS_IOCOST.value]
         )
 
-    def mark_done(self) -> tuple[int, list[str]]:
+    def mark_done(self) -> ExitAndLines:
         """installer.py mark --component btrfs:iocost done."""
         mark = ["mark", "--component", Component.BTRFS_IOCOST.value, "done"]
         return _installer_step(self.runner, self.installer_script, mark)
