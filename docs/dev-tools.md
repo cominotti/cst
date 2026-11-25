@@ -1053,7 +1053,10 @@ work folder under `~/.cache/cst-quint/work` (they write `_apalache-out/` in
 the folder they run in, and quint's TLC translation goes to `TMPDIR`, which
 is set to it), removed at the end. Each `quint verify` (the TLC checks and
 the Apalache traces) gets `--server-endpoint localhost:PORT`, with a port
-free at that moment: quint starts its own Apalache server there and stops it
+free at that moment on IPv4 and IPv6, picked outside the kernel's ephemeral
+range (`ip_local_port_range`: IANA's dynamic ports above it, 61000 to 65535
+on Linux's default, so no outgoing connection is given it before Apalache
+binds it): quint starts its own Apalache server there and stops it
 when it ends, so two runs at once (two checkouts or agents) neither share a
 server nor collide on quint's default port 8822, and a server something else
 left on 8822 is never used. Every run is under `nice -n 10` and a time

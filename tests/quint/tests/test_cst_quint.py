@@ -332,6 +332,60 @@ class FreePortTest(unittest.TestCase):
             self.assertEqual(s.getsockname()[1], port)
         self.assertEqual(M.server_endpoint(port), f"localhost:{port}")
 
+    def test_the_port_is_outside_the_kernels_ephemeral_range(self) -> None:
+        # A port of that range (a bind to port 0 gives one) can go to an outgoing connection, or another run's
+        # bind to port 0, in the seconds before Apalache binds it: Apalache then cannot start, and the verify fails.
+        low, high = M.ephemeral_range()
+        for _ in range(20):
+            port = M.free_port()
+            self.assertFalse(low <= port <= high, (port, low, high))
+            self.assertTrue(1024 <= port < 2**16, port)
+        cases = {
+            (32768, 60999): (61000, 65535),  # Linux's default: IANA's dynamic ports above it
+            (1024, 65000): (65001, 65535),
+            (49152, 65535): (1024, 49151),  # no dynamic port left: the unprivileged ones below it
+        }
+        for ephemeral, (first, last) in cases.items():
+            with self.subTest(ephemeral=ephemeral):
+                ports = M.server_ports(ephemeral)
+                self.assertEqual((ports[0], ports[-1], len(ports)), (first, last, last - first + 1))
+                self.assertTrue(first <= M.free_port(ephemeral=lambda e=ephemeral: e) <= last)
+        with self.assertRaisesRegex(M.StepError, r"ephemeral range 1024-65535"):
+            M.free_port(ephemeral=lambda: (1024, 65535))
+
+    def test_the_ephemeral_range_is_read_from_the_kernel_or_linuxs_default(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cst-quint-test-") as tmp:
+            path = os.path.join(tmp, "ip_local_port_range")
+            for text, want in (("10000\t20000\n", (10000, 20000)), ("", (32768, 60999)), ("x y\n", (32768, 60999))):
+                with self.subTest(text=text):
+                    with open(path, "w", encoding="ascii") as f:
+                        f.write(text)
+                    self.assertEqual(M.ephemeral_range(path), want)
+            self.assertEqual(M.ephemeral_range(os.path.join(tmp, "absent")), (32768, 60999))
+
+    def test_a_port_held_on_ipv6_only_is_not_free(self) -> None:
+        # quint connects to localhost, which can be ::1 first: a server there only is not Apalache, and Apalache's
+        # own bind of the port would fail.
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as held:
+            held.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            held.bind(("::", 0))
+            held.listen()
+            taken = held.getsockname()[1]
+            self.assertFalse(M.port_is_free(taken))
+            other = M.free_port()
+            picks = iter([taken, other])
+            self.assertEqual(M.free_port(choose=lambda ports: next(picks)), other)
+            self.assertTrue(M.port_is_free(other))
+
+    def test_a_port_held_on_ipv4_is_not_free_and_no_free_port_is_a_step_error(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            taken = held.getsockname()[1]
+            self.assertFalse(M.port_is_free(taken))
+            with self.assertRaisesRegex(M.StepError, r"no free port for the Apalache server in 64 tries"):
+                M.free_port(choose=lambda ports: taken)
+
 
 class HostPythonTest(unittest.TestCase):
     def test_help_runs_without_the_names_python_3_12_lacks(self) -> None:
