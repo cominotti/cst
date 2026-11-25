@@ -430,26 +430,26 @@ def marker_problem(uuid: str, since_human: str, state: str) -> str:
 
 
 def scrub_age_days(now: int, started: int) -> int:
-    """The last scrub's age in days: the old ( $(date +%s) - started_epoch ) / 86400."""
-    return bash_div(now - started, DAY)
+    """The last scrub's age in days: the old ( $(date +%s) - started_epoch ) / 86400, 64-bit, wrapping."""
+    return bash_div(bash_wrap(now - started), DAY)
 
 
 def boot_since(now: int, uptime_s: int) -> int:
-    """When the machine booted: the old $(date +%s) - $(awk int(uptime))."""
-    return now - uptime_s
+    """When the machine booted: the old $(date +%s) - $(awk int(uptime)), 64-bit, wrapping."""
+    return bash_wrap(now - uptime_s)
 
 
 def snapshots_overdue(now: int, last: int, awake: int) -> bool:
     """No successful hourly snapshot for SNAPSHOT_MAX_AGE, and awake for SNAPSHOT_GRACE: the old
-    (( $(date +%s) - last > 3 * 3600 )) && (( $(date +%s) - awake_since > 20 * 60 )); the first is
-    64-bit, wrapping (a last of 2**63 is -2**63 there)."""
-    return bash_wrap(now - last) > SNAPSHOT_MAX_AGE and now - awake > SNAPSHOT_GRACE
+    (( $(date +%s) - last > 3 * 3600 )) && (( $(date +%s) - awake_since > 20 * 60 )), 64-bit, wrapping
+    (a last of 2**63 is -2**63 there)."""
+    return bash_wrap(now - last) > SNAPSHOT_MAX_AGE and bash_wrap(now - awake) > SNAPSHOT_GRACE
 
 
 def nas_overdue(now: int, nas_last: int) -> bool:
     """No successful NAS backup for NAS_MAX_AGE_DAYS: the old (( v > 0 )) && (( $(date +%s) - nas_last
-    > 8 * 86400 ))."""
-    return nas_last > 0 and now - nas_last > NAS_MAX_AGE_DAYS * DAY
+    > 8 * 86400 )), 64-bit, wrapping."""
+    return nas_last > 0 and bash_wrap(now - nas_last) > NAS_MAX_AGE_DAYS * DAY
 
 
 def awake_since(suspend_journal: str, boot_since: int) -> int:

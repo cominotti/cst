@@ -1259,6 +1259,41 @@ done < "$1"
                 found = [p.removeprefix("NVMe nvme0n1: ") + ";" for p in smart_problems("nvme0n1", "", log)]
                 self.assertEqual("".join(found) or "none", bash)
 
+    # The old btrfs-health-check's date arithmetic (git show b819032f^:btrfs/btrfs-health-check): line 201 (the
+    # scrub's age), 314 (boot_since), 318-319 (the snapshots' two tests), 333 (the NAS's), with $(date +%s) and
+    # the values read put in as text. One line per case: each expression's result, space-separated.
+    DATES = """while IFS= read -r -d '' now && IFS= read -r -d '' a && IFS= read -r -d '' b; do
+    (
+        age=$(( ( ${now} - a ) / 86400 ))
+        boot=$(( ${now} - a ))
+        if (( ${now} - a > 3 * 3600 )) && (( ${now} - b > 20 * 60 )); then snap=1; else snap=0; fi
+        if (( a > 0 && ${now} - a > 8 * 86400 )); then nas=1; else nas=0; fi
+        echo "${age} ${boot} ${snap} ${nas}"
+    ) 2>/dev/null || echo error
+done < "$1"
+"""
+    DATE_CASES: Final = (
+        (1_700_000_000, 1_699_000_000, 1_699_990_000),
+        (1_700_000_000, -(2**63) + 5, 0),  # the scrub started at -2**63 + 5: bash wraps to a negative age
+        (1_700_000_000, -(2**63), -(2**63)),  # uptime and awake at -2**63: boot_since and the grace wrap
+        (-(2**63), 1, 1),
+        (2**63 - 1, -1, -1),
+        (1_700_000_000, 2**63 - 1, 2**63 - 1),
+        (0, 0, 0),
+    )
+
+    def test_date_arithmetic_wraps_as_the_old_bash(self) -> None:
+        from btrfs.health_check.domain import boot_since, nas_overdue, scrub_age_days, snapshots_overdue
+
+        values = [str(v) for case in self.DATE_CASES for v in case]
+        with tempfile.TemporaryDirectory() as tmp:
+            got = run_bash(self.DATES, nul_file(tmp, values))
+        self.assertEqual(len(got), len(self.DATE_CASES))
+        for (now, a, b), bash in zip(self.DATE_CASES, got, strict=True):
+            with self.subTest(now=now, a=a, b=b):
+                ours = (scrub_age_days(now, a), boot_since(now, a), snapshots_overdue(now, a, b), nas_overdue(now, a))
+                self.assertEqual(f"{ours[0]} {ours[1]} {int(ours[2])} {int(ours[3])}", bash)
+
     # The old btrfs-health-check's reclaim count (git show b819032f^:btrfs/btrfs-health-check, lines
     # 169-179), its state file's read replaced by the value: skip, no problem, or the problem's count.
     RECLAIM = """while IFS= read -r -d '' errs && IFS= read -r -d '' seen; do

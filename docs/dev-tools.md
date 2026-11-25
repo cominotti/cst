@@ -785,6 +785,15 @@ not derive from it.
   field that is not UTF-8 reads back decoded with U+FFFD. No writer is left
   for one: the game profile leaves a cgroup folder whose name is no unit
   name alone, and systemd names the scopes.
+- `mbt_bash_arith.py`: the health check's and the NAS run's numbers
+  against the real bash: each property calls one domain function
+  (`scrub_age_days`, `boot_since`, `snapshots_overdue`, `nas_overdue`;
+  the reads `bash_int`, `bash_decimal` and `critical_warning_value`)
+  with values around 0, +-2**63 and +-2**64 (digit strings of up to 5000
+  digits, with leading zeros, and hex for the reads) and has bash evaluate
+  the old program's line with the same values, one `bash -c` per example:
+  the results agree, wrapped at 64 bits as bash's. About 2 s at 100
+  examples.
 - `mbt_game_profile.py`: a state machine over the game profile's `on`,
   `tick` and `off` (through `locked`), with the unit tests' scratch and fake
   systemctl, whose daemon-reload sets each value from the override files and

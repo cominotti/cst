@@ -243,7 +243,11 @@ health check makes sure you hear about it.
 **How:** `btrfs-health-check` reads the state of the filesystem and the disks.
 It **never changes the filesystem**. It only writes its own small state files in
 `/var/lib/btrfs-health-check` (and markers of the degraded-boot part, see
-section 8). It alerts about:
+section 8). Every number it reads and computes (counters, sizes, the
+scrub's age, the times since the last snapshot and the last NAS backup)
+follows the old bash version's 64-bit arithmetic: a result past 2**63 - 1
+wraps around to a negative number, as bash's did, so a damaged date or
+state file gives the same answer as before the port. It alerts about:
 
 | Problem | Example message (start) |
 |---|---|
