@@ -10468,6 +10468,54 @@ echo test_263-ok
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_265_docker_volumes_nocow_postponed_record_s_new_folder_is_0755_under_umask_077(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root) postpones the boot's migration
+        (/etc/docker/daemon.json is not JSON) under a umask of 077, as sudo hands on the user's, with no
+        /var/lib/docker-volumes-nocow yet: the folder it makes for the record is 0755 and the record
+        0644, so cst doctor as tester reads it and names the postponed boot. Before, a makedirs of its
+        own made the folder 0700 before write_atomic saw it, and doctor as the user could not read the
+        record."""
+        c = self.SYSTEMD_CONTAINER
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -rf {state} /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-265-made-docker ] && rm -rf /etc/docker || true; "
+            "rm -f /var/tmp/e2e-265-made-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_265 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            rec={state}/postponed
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-265-made-docker; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e {state} ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            printf '{{' >/etc/docker/daemon.json
+            rc=0; out="$(umask 077 && $prog migrate 2>&1)" || rc=$?
+            echo "test_265 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            echo "test_265 modes: $(stat -c '%a %n' {state} "$rec")" >&2
+            [[ "$(stat -c %a {state})" == 755 ]]
+            [[ "$(stat -c %a "$rec")" == 644 ]]
+            d="$({{ ut /opt/cst-rw/cst doctor 2>&1 || true; }} | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_265 doctor: $d" >&2
+            if grep -qF "cannot read $rec" <<<"$d"; then echo "doctor as tester could not read the record" >&2; exit 1; fi
+            grep -qF "Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last " <<<"$d"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
         """The installed forms of the two Python ports, under real systemd: btrfs-health-check and

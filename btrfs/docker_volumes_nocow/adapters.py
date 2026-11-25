@@ -316,7 +316,7 @@ class NocowStateFiles:
         return rec if is_stored_postponed(rec) else None
 
     def write_postponed(self, record: PostponedRecord) -> None:
-        os.makedirs(os.path.dirname(self.paths.postponed), exist_ok=True)
+        # write_atomic creates a missing folder 0755, whatever the umask (sudo keeps the user's).
         # 0644: cst doctor reads it as the user. Durable (file and folder fsynced): a
         # boot counter, like the attempts counter; a reset must not lose a boot.
         write_atomic(self.paths.postponed, json.dumps(record) + "\n", mode=0o644, relabel=False)

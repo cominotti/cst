@@ -1642,6 +1642,21 @@ class DaemonJsonProblemTest(PostponeBase):
         self.assertIn(f"{self.PROBLEM}: the boot's migration waits until it is fixed\n", self.call(self.cli.status)[1])
         self.assertIn("migration postponed at 1 boot(s) in a row", self.call(self.cli.status)[1])
 
+    def test_the_postponed_record_s_new_folder_is_0755_whatever_the_umask(self) -> None:
+        # The boot's migrate runs as root with the umask it was given (sudo keeps the user's: 077, say), and
+        # the state folder is not there yet: the folder made for the record must still let cst doctor, as
+        # the user, read it. A makedirs of its own made it 0700 before write_atomic's ensure_dir saw it.
+        state = os.path.dirname(self.postponed)
+        shutil.rmtree(state)
+        old = os.umask(0o077)
+        try:
+            rc, _out = self.call(self.cli.migrate)
+        finally:
+            os.umask(old)
+        self.assertEqual(rc, 0)
+        self.assertEqual(stat.S_IMODE(os.stat(state).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(self.postponed).st_mode), 0o644)
+
     def test_recorded_with_nothing_scheduled_and_no_default_folder(self) -> None:
         # The default folder says nothing about the one Docker uses (data-root may have pointed
         # elsewhere before the file broke): the boot is recorded all the same, for status and doctor.
