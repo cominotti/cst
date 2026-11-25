@@ -16,7 +16,7 @@ from unittest import mock
 
 from cst_core.domain.values import GIB, MIB
 from perf.adapters import LinuxPerfProbe, PerfPaths
-from perf.application import build_perf_report
+from perf.application import build_perf_report, collect_cpu_from_reader, collect_memory_from_reader
 from perf.cli import main as perf_cli_main
 from perf.domain.axis import worst_perf_verdict
 from perf.domain.evaluate import (
@@ -46,7 +46,9 @@ from perf.domain.models import (
     PerfAxis,
     PerfAxisReport,
     PerfCliError,
+    PerfPathKey,
     PerfProbeSnapshot,
+    PerfRootKind,
     PerfVerdict,
 )
 from perf.domain.parsers import (
@@ -678,6 +680,69 @@ class PerfEvaluatorTest(unittest.TestCase):
             axis(cpu),
             ([("cpuidle max enabled", "cpuidle: 2 µs"), ("irqbalance", "active (no ban-list)")], []),
         )
+
+
+class _DictReader:
+    """A PerfFsReader over a dict of files: (root, relative path) -> text, and keys -> text. It can hold
+    names a real folder cannot (more than 255 bytes), and records every read_rel."""
+
+    def __init__(self, files: dict[tuple[PerfRootKind, str], str], keys: dict[PerfPathKey, str] | None = None) -> None:
+        self.files = files
+        self.keys = keys or {}
+        self.reads: list[tuple[PerfRootKind, str]] = []
+
+    def read_key(self, key: PerfPathKey) -> str | None:
+        return self.keys.get(key)
+
+    def read_preempt(self) -> tuple[str | None, bool]:
+        return None, False
+
+    def read_rel(self, root: PerfRootKind, rel: str) -> str | None:
+        self.reads.append((root, rel))
+        return self.files.get((root, rel))
+
+    def list_rel(self, root: PerfRootKind, rel: str) -> tuple[str, ...]:
+        prefix = rel + "/"
+        return tuple(
+            sorted({p[len(prefix) :].split("/")[0] for r, p in self.files if r == root and p.startswith(prefix)})
+        )
+
+    def exists_rel(self, root: PerfRootKind, rel: str) -> bool:
+        return (root, rel) in self.files or bool(self.list_rel(root, rel))
+
+    def is_dir_rel(self, root: PerfRootKind, rel: str) -> bool:
+        return bool(self.list_rel(root, rel))
+
+
+class PerfAsciiNamesTest(unittest.TestCase):
+    """The uid of a user-UID.slice, the N of a cpuidle stateN and an IRQ number are ASCII digits within
+    int()'s limit: str.isdigit() also took "\N{SUPERSCRIPT TWO}" (which int() refuses: a traceback) and
+    "\N{ARABIC-INDIC DIGIT THREE}" (which int() reads as 3), and int() raised past 4300 digits."""
+
+    def test_a_session_slice_uid_is_ascii_digits(self) -> None:
+        files: dict[tuple[PerfRootKind, str], str] = {}
+        for uid in ("1000", "\N{SUPERSCRIPT TWO}", "1" * 5000, "\N{ARABIC-INDIC DIGIT THREE}"):
+            sess = f"user.slice/user-{uid}.slice/user@{uid}.service/session.slice"
+            files[PerfRootKind.CGROUP, f"{sess}/memory.current"] = f"{600 * MIB}\n"
+            files[PerfRootKind.CGROUP, f"{sess}/memory.min"] = f"{1024 * MIB}\n"
+        mem = collect_memory_from_reader(_DictReader(files))
+        self.assertEqual([(s.name, s.uid) for s in mem.session_slices], [("user-1000.slice/session.slice", 1000)])
+
+    def test_a_cpuidle_state_and_an_irq_number_are_ascii_digits(self) -> None:
+        base = "devices/system/cpu/cpu0/cpuidle"
+        files: dict[tuple[PerfRootKind, str], str] = {}
+        for n, name in (("0", "C1"), ("\N{SUPERSCRIPT TWO}", "C2"), ("\N{ARABIC-INDIC DIGIT THREE}", "C3")):
+            files[PerfRootKind.SYS, f"{base}/state{n}/name"] = f"{name}\n"
+            files[PerfRootKind.SYS, f"{base}/state{n}/latency"] = "2\n"
+        # An IRQ numbered "\N{SUPERSCRIPT TWO}" never gets its affinity read (parse_proc_interrupts drops
+        # it already; this pins the reader's own check too, which passes on the old code as well).
+        interrupts = "           CPU0       CPU1\n  10:  500000  0  amdgpu\n  \N{SUPERSCRIPT TWO}:  500000  0  x\n"
+        files[PerfRootKind.PROC, "irq/10/effective_affinity_list"] = "0\n"
+        reader = _DictReader(files, {PerfPathKey.INTERRUPTS: interrupts})
+        cpu = collect_cpu_from_reader(reader)
+        self.assertEqual([s.name for s in cpu.idle_states], ["C1"])
+        self.assertIn((PerfRootKind.PROC, "irq/10/effective_affinity_list"), reader.reads)
+        self.assertFalse([r for r in reader.reads if r[1].startswith("irq/\N{SUPERSCRIPT TWO}")])
 
 
 class PerfScratchIntegrationTest(unittest.TestCase):
