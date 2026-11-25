@@ -328,7 +328,8 @@ class GameProfileSteps:
 
     def cpus_fallback(self, unit: str) -> None:
         """A user manager started before cpuset was delegated to it accepts AllowedCPUs but never
-        writes cpuset.cpus: the cgroup file is written directly, and recorded for 'off'. game.intended gets
+        writes cpuset.cpus: the cgroup file is written directly, and recorded for 'off'; nothing when the file
+        already holds the list, as written or in the kernel's form (a manager that honours it). game.intended gets
         the value as the kernel shows it (cpuset_file_form) before the write, so the drift repair writes one
         whose write failed (setp's rule); after a write that worked, a second record when the kernel shows
         another form, never for an empty read-back."""
@@ -337,12 +338,12 @@ class GameProfileSteps:
         if not cg or not self.ports.kernel.writable(f):
             return
         old = self.ports.kernel.read_stripped(f) or ""
-        if old == self.s.build_cpus:
+        predicted = cpuset_file_form(self.s.build_cpus)
+        if old in {self.s.build_cpus, predicted}:  # systemd wrote it already (the kernel shows its own form)
             return
         if not self._append(self.paths.state, GameRecordKind.CGW, f, old):
             self.report_unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
             return
-        predicted = cpuset_file_form(self.s.build_cpus)
         self.append_intended(GameRecordKind.CGW, f, self.s.build_cpus, predicted)
         if not self.ports.kernel.write(f, self.s.build_cpus):
             self.log(4, f"{unit}: could not write {f}")

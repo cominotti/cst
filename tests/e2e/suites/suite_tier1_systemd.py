@@ -9356,6 +9356,69 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_252_cpu_game_profile_on_leaves_a_cpuset_the_user_manager_wrote_in_the_kernel_s_form(self) -> None:
+        """The real game profile and systemd, with cpuset delegated to tester's user manager (as test_251: a
+        runtime Delegate= drop-in, the manager restarted, a unit of its user.slice that asks for CPUs) and
+        BUILD_CPUS='0,1', not in the kernel's form. The manager honours user.slice's AllowedCPUs and writes its
+        cpuset.cpus as 0-1, so 'on''s fallback (cpus_fallback) finds the list there: no cgw record in game.state
+        or game.intended, and 'off' gives the file its own value back (""). The old 'on' compared the file with
+        BUILD_CPUS as written ('0-1' != '0,1'): it recorded the game's own value as the file's old one
+        (cgw FILE 0-1) and wrote the file again."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0,1'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            systemctl --user -M tester@ stop e2e252-hold.service 2>/dev/null || true
+            rm -f /run/systemd/system/user@1000.service.d/50-e2e252.conf
+            rmdir /run/systemd/system/user@1000.service.d 2>/dev/null || true
+            systemctl daemon-reload || true
+            systemctl restart user@1000.service || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-252-conf.bak ]]; then mv /tmp/e2e-252-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-252-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0,1'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            intended=/run/cpu-setup/game.intended
+            u=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+            f=$u/user.slice/cpuset.cpus
+            # cpuset delegated to tester's manager, kept in its subtree by a unit of user.slice that asks for CPUs.
+            install -d /run/systemd/system/user@1000.service.d
+            printf '[Service]\nDelegate=cpu cpuset io memory pids\n' >/run/systemd/system/user@1000.service.d/50-e2e252.conf
+            systemctl daemon-reload
+            systemctl restart user@1000.service
+            systemd-run --user -M tester@ --quiet --unit=e2e252-hold --slice=user.slice -p AllowedCPUs=0-63 sleep 600
+            for _ in $(seq 50); do [[ -e "$f" ]] && break; sleep 0.1; done
+            grep -qw cpuset "$u/cgroup.subtree_control" || { echo "cpuset not delegated: $(cat "$u/cgroup.subtree_control")" >&2; exit 1; }
+            own=$(cat "$f")
+            [[ -z "$own" ]] || { echo "user.slice has a cpuset.cpus of its own: $own" >&2; exit 1; }
+            got=$(gp on 2>&1) || { echo "on failed: $got" >&2; exit 1; }
+            # The manager set it (so 'on' saw cpuset delegated and its fallback looked at the file), in its own form.
+            grep -q "^prop usr user.slice AllowedCPUs " "$st" || { echo "game.state:" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(cat "$f")" == 0-1 ]] || { echo "cpuset.cpus after on: $(cat "$f")" >&2; exit 1; }
+            if grep -qF "cgw $f" "$st" "$intended"; then
+                echo "the fallback recorded a file the manager had written:" >&2; cat "$st" "$intended" >&2; exit 1
+            fi
+            gp off >/dev/null
+            [[ "$(cat "$f")" == "$own" ]] || { echo "cpuset.cpus after off: $(cat "$f")" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS)
     def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
         """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose

@@ -2280,6 +2280,24 @@ class GameProfileEscapesTest(GameProfileCase):
         out, _ = self.run_profile("tick", commas)
         self.assertNotIn(f, out)
 
+    def test_a_cpuset_fallback_the_manager_wrote_in_the_kernel_s_form_is_left_alone(self) -> None:
+        # A user manager that honours AllowedCPUs has written user.slice's cpuset.cpus in the kernel's form (12-15)
+        # when the fallback reads it, for a BUILD_CPUS written another way (12,13,14,15): nothing to write and
+        # nothing recorded. The old one compared the file with BUILD_CPUS as written: it recorded the game's own
+        # value as the file's old one (cgw FILE 12-15), wrote the file again, and 'off' wrote 12-15 back.
+        f = self.fallback_tree()
+        self.write(f, "12-15\n")
+        commas = dataclasses.replace(self.settings, build_cpus="12,13,14,15")
+        self.run_profile("on", commas)
+        self.assertEqual([r for r in records(self.read(self.state)) if r[:2] == ("cgw", f)], [])
+        self.assertEqual([r for r in records(self.read(self.intended)) if r[:2] == ("cgw", f)], [])
+        self.assertEqual(self.read(f), "12-15\n")
+        # BUILD_CPUS in the kernel's form already: left alone as before.
+        self.run_profile("off", commas)
+        self.write(f, "12-23\n")
+        self.run_profile("on")
+        self.assertEqual([r for r in records(self.read(self.state)) if r[:2] == ("cgw", f)], [])
+
     def test_a_game_intended_of_the_previous_version_reads_the_same(self) -> None:
         # Upgrade: the previous 'on' wrote one cgw record per file, after a write that worked.
         f = self.fallback_tree()
