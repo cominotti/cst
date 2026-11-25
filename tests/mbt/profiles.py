@@ -9,7 +9,8 @@ prints it, so a failure can be replayed with `--seed N`. None of them has a
 deadline: on a shared machine one slow example is load, not a bug.
 
 Hypothesis's own folder (its example database and the constants/ and
-unicode_data/ caches) is ${XDG_CACHE_HOME:-~/.cache}/cst-mbt/<key>, the key as
+unicode_data/ caches) is ${XDG_CACHE_HOME:-~/.cache}/cst-mbt/<key> (a relative
+XDG_CACHE_HOME is ignored: tests/xdg_cache.py), the key as
 tests/uv-dev makes it for the checkout's virtual environment. Its default
 would be ./.hypothesis, in the checkout.
 
@@ -41,6 +42,7 @@ from hypothesis.stateful import RuleBasedStateMachine, run_state_machine_as_test
 from cst_core.domain.text import enum_member
 from cst_core.domain.values import parse_whole_number
 from tests.repo_files import REPO
+from tests.xdg_cache import NO_CACHE_BASE, cache_base
 
 PROFILE_VAR: Final = "CST_MBT_PROFILE"
 EXAMPLES_VAR: Final = "CST_MBT_EXAMPLES"
@@ -70,10 +72,13 @@ class Active:
 
 
 def cache_dir(environ: Mapping[str, str] = os.environ) -> Path:
-    """Hypothesis's folder for this checkout, outside it (as tests/uv-dev keys its virtual environment)."""
+    """Hypothesis's folder for this checkout, outside it (as tests/uv-dev keys its virtual environment).
+
+    SystemExit when there is no cache folder (tests/xdg_cache.py's cache_base)."""
     key = hashlib.sha1(os.path.realpath(REPO).encode()).hexdigest()[:12]
-    home = environ.get("HOME") or os.path.expanduser("~")
-    base = environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
+    base = cache_base(environ)
+    if base is None:
+        raise SystemExit(f"tests/mbt: {NO_CACHE_BASE}")
     return Path(base) / "cst-mbt" / key
 
 

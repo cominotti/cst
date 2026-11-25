@@ -112,6 +112,8 @@ class QuintCiPathsTest(unittest.TestCase):
             "cst_core/domain/__init__.py",
             "cst_core/domain/errors.py",
             "cst_core/domain/values.py",
+            "tests/__init__.py",
+            "tests/xdg_cache.py",
         ):
             with self.subTest(path=path):
                 self.assertTrue(self.quint_path(path))

@@ -26,7 +26,8 @@ Which lines are mutated:
     --functions A,B   the named functions (every def with that name: methods, nested defs)
 Other options:
     --out DIR         where the session, the config and the reports go (a new, empty folder;
-                      default: a new folder under ${XDG_CACHE_HOME:-~/.cache}/cst-mutation/)
+                      default: a new folder under ${XDG_CACHE_HOME:-~/.cache}/cst-mutation/;
+                      a relative XDG_CACHE_HOME is ignored: tests/xdg_cache.py)
     --timeout SEC     seconds per mutant before it counts as killed (default 60)
 
 It never changes the checkout: it works on a copy in a temporary folder. Every
@@ -68,6 +69,7 @@ if str(_CHECKOUT) not in sys.path:
     sys.path.insert(0, str(_CHECKOUT))
 
 from cst_core.domain.text import unescape_mount_field
+from tests.xdg_cache import NO_CACHE_BASE, cache_base
 
 PROG = "cst-mutation"
 EXIT_FAILED = 1
@@ -555,7 +557,9 @@ def toplevel(cwd: str) -> str:
 
 
 def default_out(helper: str, env: Mapping[str, str], now: float) -> str:
-    cache = env.get("XDG_CACHE_HOME") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".cache")
+    cache = cache_base(env)
+    if cache is None:
+        raise UsageError(NO_CACHE_BASE)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     return os.path.join(cache, "cst-mutation", f"{helper.replace(os.sep, '-')}-{stamp}")
 

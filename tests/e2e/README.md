@@ -197,7 +197,7 @@ both tiers.
 CI runs `tests/e2e/run.py` (`invowk cmd test e2e tier1|tier2`), the files it
 imports and loads (`selection.py`, the two suites), `image_digest.py` and,
 in its quint jobs, `tests/quint/cst-quint` (`invowk cmd test quint`, with
-what it imports from `cst_core`) on the python3 of its ubuntu-24.04 runner,
+what it imports: `cst_core`'s errors and values, `tests/xdg_cache.py`) on the python3 of its ubuntu-24.04 runner,
 Python 3.12, not in a container. So
 these files are 3.12 code, while every other gate runs on Fedora's Python and
 ruff's target follows `requires-python` (3.15): `except A, B:` (3.14) or

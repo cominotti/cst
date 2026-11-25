@@ -259,8 +259,17 @@ would end up in every snapshot unless it is marked as a cache (below). `tests/uv
 - `RUFF_CACHE_DIR=${XDG_CACHE_HOME:-~/.cache}/cst-dev-ruff/<key>`
 
 where `<key>` is the first 12 hex digits of the SHA-1 of the checkout's
-physical path (`pwd -P`): one environment per checkout or worktree. Deleting
-these folders is safe; the next run creates them again. `.venv/` and
+physical path (`pwd -P`): one environment per checkout or worktree. The
+cache folder, here and for every dev tool (`tests/uv-dev`, `tests/run_unit.py`'s
+durations file, the mbt profiles, `cst-mutation`, `cst-quint`), follows one
+rule (`tests/xdg_cache.py`, and the same in `tests/uv-dev`'s bash): an
+absolute `XDG_CACHE_HOME`; else `.cache` under an absolute `HOME`; else
+under the home folder of the password database. A relative `XDG_CACHE_HOME`
+is ignored, as the XDG spec says, and a relative or empty `HOME` is no
+home: the tools run from the top of the checkout, so either would put the
+cache inside it. With none of the three the tool stops with "no cache
+folder". The `${XDG_CACHE_HOME:-~/.cache}` in this document is the short
+form of that rule. Deleting these folders is safe; the next run creates them again. `.venv/` and
 `.ruff_cache/` are in `.gitignore` in case a tool is run some other way.
 
 An IDE can make one anyway. A JetBrains IDE (PyCharm, IntelliJ with the
@@ -308,7 +317,7 @@ repository:
 - **`[tool.ruff] per-file-target-version`**: the files CI runs on its
   ubuntu-24.04 runner's python3 (`tests/e2e/**/*.py`, `tests/__init__.py`,
   `tests/quint/cst-quint`, and what they import, such as
-  `cst_core/domain/errors.py` and `values.py`) are formatted and linted as Python 3.12 (`py312`),
+  `cst_core/domain/errors.py`, `values.py` and `tests/xdg_cache.py`) are formatted and linted as Python 3.12 (`py312`),
   not as `requires-python`'s 3.15: `ruff format` would otherwise write
   `except A, B:` (3.14) there, and `ruff check` reports it as a syntax
   error in them. `tests/test_e2e_host_python.py` finds that set from the
@@ -1339,7 +1348,8 @@ the NAS spec models (`vm/application/nas.py`, `vm/adapters/restic.py`,
 (`vm/tests/test_vm_nas_replay.py`), what runs the job
 (`.github/workflows/ci.yml`, `cst.invowkmod/invowkfile.cue`,
 `.github/actions/setup-invowk/`), or what `cst-quint` imports (today
-`cst_core/domain/errors.py`, `values.py` and their packages' `__init__.py`);
+`cst_core/domain/errors.py`, `values.py`, `tests/xdg_cache.py` and their
+packages' `__init__.py`);
 `tests/test_quint_task.py` checks that list, the imports against the
 host-Python gate's closure; `CI Status` accepts it
 skipped only when none changed. It runs on the runner host, as the runner's

@@ -39,6 +39,7 @@ _READ_FILES = (
     "tests/e2e/suites/suite_tier1_systemd.py",
     "tests/e2e/suites/suite_tier2_storage_cpu.py",
     "tests/quint/cst-quint",
+    "tests/xdg_cache.py",
 )
 
 
@@ -64,6 +65,7 @@ class CheckoutTest(unittest.TestCase):
                 "tests/e2e/suites/suite_tier1_systemd.py",
                 "tests/e2e/suites/suite_tier2_storage_cpu.py",
                 "tests/quint/cst-quint",
+                "tests/xdg_cache.py",
             ],
         )
 

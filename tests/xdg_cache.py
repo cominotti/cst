@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The user's cache folder, as the dev tools under tests/ find it (tests/run_unit.py's durations file).
+"""The user's cache folder, as the dev tools under tests/ find it.
+
+tests/run_unit.py (its durations file), tests/mbt/profiles.py (Hypothesis's folder), tests/quint/cst-quint
+(its tools) and tests/mutation/cst-mutation (its output folder) use it; tests/uv-dev, a bash script, follows
+the same rule.
 
 Standard library only, and Python 3.12 code: the tools that import it run on /usr/bin/python3 without uv,
 some on CI's runner host (3.12).
@@ -8,6 +12,13 @@ some on CI's runner host (3.12).
 from collections.abc import Mapping
 import os
 import pwd
+from typing import Final
+
+# What a tool says when cache_base finds no folder (each puts its own name first).
+NO_CACHE_BASE: Final = (
+    "no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, "
+    "and the password database has no home folder for this user"
+)
 
 
 def cache_base(environ: Mapping[str, str]) -> str | None:

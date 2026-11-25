@@ -14,12 +14,13 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import contextlib
 import hashlib
 import io
 import json
 import os
+import pwd
 import shutil
 import sqlite3
 import stat
@@ -39,6 +40,7 @@ if _CHECKOUT not in sys.path:
 
 from tests.run_unit import HOST_GUARD_ENV, bytecode_files
 from tests.script_loader import load_script
+from tests.xdg_cache import NO_CACHE_BASE
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "cst-mutation")
@@ -830,6 +832,30 @@ class RunTest(unittest.TestCase):
             M.default_out("a/b", {"XDG_CACHE_HOME": "/c", "HOME": "/h"}, 0).rsplit("-", 2)[0], "/c/cst-mutation/a-b"
         )
 
+    def test_a_relative_xdg_cache_home_and_an_empty_home_are_no_cache_folder(self) -> None:
+        # XDG_CACHE_HOME=rel was used as it is (rel/cst-mutation, relative to where it runs), and an empty HOME
+        # gave the relative .cache/cst-mutation.
+        def folder(env: Mapping[str, str]) -> str:
+            return str(M.default_out("a/b", env, 0)).rsplit("-", 2)[0]
+
+        self.assertEqual(folder({"XDG_CACHE_HOME": "rel", "HOME": "/h"}), "/h/.cache/cst-mutation/a-b")
+        entry = pwd.struct_passwd(("u", "x", 1000, 1000, "", "/pw/home", "/bin/sh"))
+        with mock.patch("tests.xdg_cache.pwd.getpwuid", return_value=entry):
+            self.assertEqual(folder({"HOME": ""}), "/pw/home/.cache/cst-mutation/a-b")
+
+    def test_no_cache_folder_is_a_usage_error(self) -> None:
+        argv = ["pkg/tool", "pkg.tests.test_tool", "--all"]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("tests.xdg_cache.pwd.getpwuid", side_effect=KeyError("no entry")),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = M.execute(argv, repo=lambda: self.repo, tools=lambda: self.tools, env={"HOME": ""})
+        self.assertEqual(_int(rc), 2, stdout.getvalue() + stderr.getvalue())
+        self.assertIn(f"cst-mutation: {NO_CACHE_BASE}", stderr.getvalue())
+        self.assertEqual(self.calls(), [])
+
     def test_usage_errors_run_nothing(self) -> None:
         cases = [
             (["--functions", "nope"], "no function named nope"),
@@ -1057,6 +1083,7 @@ class RunByShebangTest(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
             os.makedirs(os.path.join(copy, "tests", "mutation"))
+            shutil.copy2(os.path.join(_CHECKOUT, "tests", "xdg_cache.py"), os.path.join(copy, "tests", "xdg_cache.py"))
             tool = os.path.join(copy, "tests", "mutation", "cst-mutation")
             shutil.copy2(TOOL, tool)
             r = subprocess.run(
