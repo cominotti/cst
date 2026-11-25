@@ -284,7 +284,7 @@ def postponed_newer(rec: object, path: str) -> str | None:
 
 
 def postponed_time(last: object) -> str | None:
-    """A postponed record's "last" as status and cst doctor show it ("%Y-%m-%d %H:%M"), or None when it
+    """A postponed record's "last" as status and cst doctor show it (LOCAL_TIME_FORMAT), or None when it
     is no integer (a bool is none) or a time the C library cannot show (the outcome record's guard)."""
     return _local_time(last) if type(last) is int else None
 
@@ -341,12 +341,15 @@ def outcome_unreadable(path: str) -> OutcomeRead:
     return OutcomeRead(problem=f"cannot read {path}")
 
 
+LOCAL_TIME_FORMAT: Final = "%Y-%m-%d %H:%M"  # how status and cst doctor show a time of the helper's records
+
+
 def _local_time(at: int) -> str | None:
-    """at (epoch seconds) as status and cst doctor show it ("%Y-%m-%d %H:%M"), or None when the C library
+    """at (epoch seconds) as status and cst doctor show it (LOCAL_TIME_FORMAT), or None when the C library
     cannot show it: time.localtime raises past its range, and time.strftime raises on some times
     localtime accepts (a year past what a C int holds)."""
     try:
-        return time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+        return time.strftime(LOCAL_TIME_FORMAT, time.localtime(at))
     except OverflowError, OSError, ValueError:
         return None
 
@@ -384,7 +387,7 @@ def outcome_line(read: OutcomeRead) -> str:
         return f"  {read.problem}"
     if read.record is None or read.outcome is None:
         return ""
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(read.record["at"]))
+    when = time.strftime(LOCAL_TIME_FORMAT, time.localtime(read.record["at"]))
     match read.outcome:
         case NocowOutcome.GAVE_UP:
             return f"  migration gave up {when}: {read.record['reason']}; run cst btrfs install to try again"

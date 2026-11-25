@@ -8,6 +8,7 @@ import time
 
 from btrfs.docker_volumes_nocow.domain import (
     DAEMON_JSON,
+    LOCAL_TIME_FORMAT,
     NocowOutcome,
     OutcomeRead,
     POSTPONED_FORMAT,
@@ -110,7 +111,7 @@ def check_docker_nocow_outcome(host: DoctorHostPort) -> Iterator[Result]:
     if read.problem:
         yield Result(INFO, f"Docker volumes NOCOW: {read.problem}")
     elif read.record is not None and read.outcome == NocowOutcome.NOT_SCHEDULED:
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(read.record["at"]))
+        when = time.strftime(LOCAL_TIME_FORMAT, time.localtime(read.record["at"]))
         yield Result(
             WARN,
             f"Docker volumes NOCOW: {read.record['volumes']} keeps copy-on-write data and no boot will migrate it "
