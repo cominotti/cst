@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from btrfs.compress.domain import (
     FSTAB_PATH,
+    FSTAB_UNREAD,
     PROC_MOUNTS_PATH,
     TOP_MOUNT_UNIT_PATH,
+    TOP_MOUNT_UNREAD,
     CoherenceReport,
     CompressMode,
     CompressPlan,
@@ -38,6 +40,7 @@ class _ApplyProgress:
     remounted: bool = False
     top_written: bool = False
     orig_live_spec: CompressSpec | None = None
+    unknown: list[str] = field(default_factory=list)  # the layers that cannot be read back after their step failed
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,8 +173,12 @@ class CompressService:
         try:
             self._host.update_top_mount(uuid, plan.new_top_mount_options)
         except TOP_MOUNT_ERRORS as exc:
-            # A failure whose put-back failed too leaves the new unit: it is undone with the rest.
-            prog.top_written = top_mount_changed(self._host.read_top_mount(), plan.new_top_mount_options)
+            # A failure whose put-back failed too leaves the new unit: it is undone with the rest; a unit that
+            # cannot be read back is named.
+            now = self._host.read_top_mount()
+            if now is None:
+                prog.unknown.append(TOP_MOUNT_UNREAD)
+            prog.top_written = top_mount_changed(now, plan.new_top_mount_options)
             return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
         msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")
         return None
@@ -193,7 +200,7 @@ class CompressService:
         return None
 
     def _rollback_layers(self, snap: CompressSnapshot, plan: CompressPlan, prog: _ApplyProgress) -> str:
-        errors: list[str] = []
+        errors: list[str] = list(prog.unknown)
         if prog.top_written and snap.top_mount is not None:
             try:
                 self._host.update_top_mount(snap.top_mount.uuid or snap.root_uuid, snap.top_mount.options)
@@ -233,10 +240,15 @@ class CompressService:
                 self._host.write_fstab(plan.new_fstab_text)
             except (OSError, CommandFailed) as exc:
                 failure = f"Failed to update {FSTAB_PATH}: {exc}"
-                # A write that failed after the new text was in place is undone like one that worked.
-                if self._host.read_fstab() != plan.new_fstab_text:
+                # A write that failed after the new text was in place is undone like one that worked; one
+                # that cannot be read back is named.
+                now = self._host.read_fstab()
+                if now is None:
+                    prog.unknown.append(FSTAB_UNREAD)
+                elif now != plan.new_fstab_text:
                     return tuple(msgs), failure
-                prog.fstab_written = True
+                else:
+                    prog.fstab_written = True
                 return tuple(msgs), f"{failure}; {self._rollback_layers(snap, plan, prog)}"
             prog.fstab_written = True
             msgs.append(f"Updated {FSTAB_PATH} ({plan.target_option}) and reloaded systemd.")

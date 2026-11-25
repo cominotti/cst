@@ -26,8 +26,10 @@ from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdap
 from btrfs.compress.domain import (
     CompressSnapshot,
     FSTAB_PATH,
+    FSTAB_UNREAD,
     PROC_MOUNTS_PATH,
     TOP_MOUNT_UNIT_PATH,
+    TOP_MOUNT_UNREAD,
     extract_rootflags_tokens,
     kargs_edits_staged,
     parse_proc_mounts,
@@ -77,6 +79,11 @@ def _unwind_rollback(undo_steps: list[Callable[[], str | None]]) -> str:
     return f"ROLLBACK INCOMPLETE ({'; '.join(errors)})" if errors else "previous configuration restored."
 
 
+def _unknown(layer_error: str) -> Callable[[], str | None]:
+    """The undo of a layer that cannot be read back after its step failed: nothing to run, its state named."""
+    return lambda: layer_error
+
+
 def _undo_fstab(host: CompressHostPort, prev_fstab: str) -> str | None:
     try:
         host.write_fstab(prev_fstab)
@@ -115,8 +122,12 @@ def _step_fstab(run: _Run) -> str | None:
     try:
         host.write_fstab(plan.new_fstab_text)
     except (OSError, CommandFailed) as exc:
-        # A write that failed after the new text was in place is undone like one that worked.
-        if host.read_fstab() == plan.new_fstab_text:
+        # A write that failed after the new text was in place is undone like one that worked; one that cannot
+        # be read back is named.
+        now = host.read_fstab()
+        if now is None:
+            run.undo.append(_unknown(FSTAB_UNREAD))
+        elif now == plan.new_fstab_text:
             run.undo.append(lambda: _undo_fstab(host, prev_fstab))
         return f"Failed to update {FSTAB_PATH}: {exc}"
     run.undo.append(lambda: _undo_fstab(host, prev_fstab))
@@ -178,8 +189,12 @@ def _step_top_mount(run: _Run) -> str | None:
     try:
         run.host.update_top_mount(uuid, options)
     except TOP_MOUNT_ERRORS as exc:
-        # A failure whose put-back failed too leaves the new unit: it is undone with the rest.
-        if top_mount_changed(run.host.read_top_mount(), options):
+        # A failure whose put-back failed too leaves the new unit: it is undone with the rest; a unit that cannot
+        # be read back is named.
+        now = run.host.read_top_mount()
+        if now is None:
+            run.undo.append(_unknown(TOP_MOUNT_UNREAD))
+        elif top_mount_changed(now, options):
             host, prev = run.host, top.options
             run.undo.append(lambda: _undo_top_mount(host, uuid, prev))
         return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"

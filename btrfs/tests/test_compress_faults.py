@@ -58,7 +58,9 @@ from btrfs.commit.domain import (
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
 from btrfs.compress.application import CompressService
 from btrfs.compress.domain import (
+    FSTAB_UNREAD,
     ROOTFLAGS_PREFIX,
+    TOP_MOUNT_UNREAD,
     TopMountInfo,
     effective_compress_spec,
     extract_rootflags_tokens,
@@ -1071,6 +1073,39 @@ class VerificationFailureTest(unittest.TestCase):
                 self.assertEqual(layers(s.tool, w), start)
                 self.assertEqual(run_tool(s, w, s.command)[0], 0)
         self.assertEqual(cases, len(STARTS))
+
+
+class UnreadableAfterFailureTest(unittest.TestCase):
+    """A step that fails and whose layer cannot be read back after it (read_fstab, read_top_mount: None),
+    whether the failure took effect or not: the run cannot tell, so ROLLBACK INCOMPLETE names that layer as
+    unknown, and only the layers before it are undone, in reverse; once the layer reads again, a run again
+    converges."""
+
+    def test_a_layer_that_cannot_be_read_back_is_named_unknown(self) -> None:
+        cases = 0
+        for s in STARTS:
+            w = start_world(s)
+            forward = cut_points(w.plan, functools.partial(run_tool, s, w, s.command))
+            for point, words in (("fstab write", FSTAB_UNREAD), ("top-mount", TOP_MOUNT_UNREAD)):
+                if point not in forward:
+                    continue
+                done = forward[: forward.index(point)]
+                for torn in (frozenset(), frozenset({point})):
+                    with self.subTest(start=s.name, point=point, torn=sorted(torn)):
+                        cases += 1
+                        w = start_world(s)
+                        w.torn = torn
+                        w.unreadable_after = frozenset({point})
+                        w.fail(point, no_space(), times=1)
+                        rc, out, err = run_tool(s, w, s.command)
+                        self.assertEqual(rc, 1, out)
+                        self.assertTrue(err.endswith(f"; {INCOMPLETE} ({words})"), err)
+                        self.assertEqual(w.calls, [*done, point, *reversed(done)])
+                        w.unreadable.clear()
+                        w.torn = frozenset()
+                        self.assertEqual(run_tool(s, w, s.command)[0], 0)
+                        self.assertTrue(coherent(s, w), s.name)
+        self.assertEqual(cases, 32)
 
 
 class AlreadyAtTheTargetTest(unittest.TestCase):

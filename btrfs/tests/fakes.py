@@ -1993,7 +1993,9 @@ class CompressWorld(FaultPoints):
     The points named in torn take effect first and then fail, as the real adapter can (btrfs/tests/
     test_compress_faults.py, AdapterFailureTest): /etc/fstab renamed into place before its folder's sync
     failed, or a put-back after a failed reload that failed too; an `rpm-ostree kargs` that timed out after
-    its transaction started; a top-mount unit whose put-back failed. Reads are no points.
+    its transaction started; a top-mount unit whose put-back failed. After a failed point named in
+    unreadable_after, its layer's read cannot answer (read_fstab, read_top_mount: None) until the test clears
+    unreadable. Reads are no points.
 
     update_kargs is rpm-ostree's: each `--delete=OLD` removes that exact argument and each `--append=NEW`
     adds one at the end, all or nothing (an OLD that is not there fails the whole call, with no effect). A
@@ -2013,6 +2015,10 @@ class CompressWorld(FaultPoints):
         self.top: TopMountInfo | None = None
         self.confirm_answer = True
         self.torn: frozenset[str] = frozenset()
+        # The points after whose failure their layer's read cannot answer (read_fstab, read_top_mount: None),
+        # and the points whose failure did that so far.
+        self.unreadable_after: frozenset[str] = frozenset()
+        self.unreadable: set[str] = set()
         self.remounts: list[tuple[str, str]] = []
         self.ignored_remounts = 0  # the next ones answer (True, "") and change nothing (the verification's case)
 
@@ -2024,7 +2030,7 @@ class CompressWorld(FaultPoints):
         return self.uuid
 
     def read_fstab(self) -> str | None:
-        return self.fstab
+        return None if "fstab write" in self.unreadable else self.fstab
 
     def read_proc_mounts(self) -> str | None:
         return self.mounts
@@ -2036,7 +2042,7 @@ class CompressWorld(FaultPoints):
         return True, self.kargs, ""
 
     def read_top_mount(self) -> TopMountInfo | None:
-        return self.top
+        return None if "top-mount" in self.unreadable else self.top
 
     def confirm(self, prompt: str) -> bool:
         del prompt
@@ -2046,6 +2052,8 @@ class CompressWorld(FaultPoints):
     def _torn(self, point: str, effect: Callable[[], object]) -> None:
         if point in self.torn:
             effect()
+        if point in self.unreadable_after:
+            self.unreadable.add(point)
 
     def write_fstab(self, text: str) -> None:
         def write() -> None:

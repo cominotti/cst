@@ -29,6 +29,9 @@ PROC_CMDLINE_PATH: Final[str] = "/proc/cmdline"
 OSTREE_BOOTED_PATH: Final[str] = "/run/ostree-booted"
 TOP_MOUNT_UNIT_PATH: Final[str] = r"/etc/systemd/system/var-mnt-btrfs\x2dtop.mount"
 TOP_MOUNT_UNIT_NAME: Final[str] = r"var-mnt-btrfs\x2dtop.mount"
+# What ROLLBACK INCOMPLETE says of a layer that cannot be read back after its step failed.
+FSTAB_UNREAD: Final[str] = f"fstab: cannot read {FSTAB_PATH} back, its state is unknown"
+TOP_MOUNT_UNREAD: Final[str] = f"top-mount: cannot read {TOP_MOUNT_UNIT_PATH} back, its state is unknown"
 
 # rpm-ostree mounts the booted deployment's root filesystem there too.
 _SYSROOT: Final = "/sysroot"

@@ -1589,9 +1589,11 @@ transaction started, a top-mount unit that could not be put back. The run
 reads that layer again after the failure and undoes it with the others (the
 top-mount unit first). The error ends with
 `previous configuration restored.`, or with `ROLLBACK INCOMPLETE (...)`
-naming each layer that could not be put back. In `compress-force`, a failed
-`/etc/fstab` write that left the old text, the first step, ends with its
-own error only: nothing was changed before it.
+naming each layer that could not be put back. A layer the run cannot read
+again after its step failed is named there too, as unknown (`fstab: cannot
+read /etc/fstab back, its state is unknown`), and is left as it is. In
+`compress-force`, a failed `/etc/fstab` write that left the old text, the
+first step, ends with its own error only: nothing was changed before it.
 A run that is killed (or loses power) between its steps can leave the
 layers disagreeing. The next boot still boots: every value is a valid mount
 option, and the previous deployment stays in the boot menu. `status` and
