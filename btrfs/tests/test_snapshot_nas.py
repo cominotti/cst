@@ -206,6 +206,15 @@ class GateTest(Base):
             self.assertEqual(self.nas(), (0, [log(5, "another NAS run is active; skipped")], ""))
         self.assertEqual(self.calls("restic"), [])
 
+    def test_a_run_skipped_for_the_lock_names_no_unreadable_number(self) -> None:
+        # A run that does nothing ends as a skip, with exit 0: the run that holds the lock names the setting
+        # and ends with the error. Before, the skip logged the setting's line, which said the run would end
+        # with an error after its backup and forget, and exited 1.
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="1 x")
+        with self.hold_lock("run/btrfs-snapshot-nas.lock"):
+            self.assertEqual(self.nas(), (0, [log(5, "another NAS run is active; skipped")], ""))
+        self.assertEqual(self.calls("restic"), [])
+
     def test_nas_unreachable(self) -> None:
         self.machine(sftp_rc=255)
         rc, lines, _ = self.nas()
@@ -885,7 +894,7 @@ class MaintenanceTest(Base):
         return log(
             3,
             f"{key}={value!r} in {conf}: not a number CST's arithmetic reads: {left_out} until it is fixed; "
-            "the NAS run ends with an error after its backup and forget",
+            "this NAS run ends with an error",
         )
 
     def test_a_nas_number_the_arithmetic_cannot_compute_ends_the_run_after_its_backup_and_forget(self) -> None:

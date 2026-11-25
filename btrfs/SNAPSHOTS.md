@@ -1417,7 +1417,10 @@ still does what does not depend on it: the backup, and `forget` with the
 retention. It leaves out what the setting governs (the prune, the
 repository check, or the alert for a stale backup), and it ends with exit 1,
 so the `btrfs-snapshot-nas` service shows as failed until the line is
-fixed. Before, a name stopped the run where it read the number, and any
+fixed. A run that only stops at "not configured completely" or at an
+unreachable NAS names it too and ends with exit 1; a run skipped because
+another one holds the NAS lock names nothing and ends with exit 0, as
+before. Before, a name stopped the run where it read the number, and any
 other such value made that comparison false without a word: no prune, no
 check or no stale alert, ever.
 

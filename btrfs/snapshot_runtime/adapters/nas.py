@@ -53,7 +53,7 @@ from cst_core.ports import OutputMode
 from cst_core.domain.errors import ResticExit
 
 UMOUNT_TRIES = 5
-# What the run leaves out while the NAS number it needs cannot be computed (Nas.unreadable_numbers).
+# What the run leaves out while the NAS number it needs cannot be computed (Nas.name_unreadable).
 _LEFT_OUT: Final = {
     "NAS_STALE_DAYS": "no alert for a stale NAS backup",
     "NAS_PRUNE_EVERY_DAYS": "no prune (forget runs without --prune)",
@@ -107,9 +107,10 @@ class Nas:
         self.names: list[str] = []
         self.snaps: list[str] = []
         self.features: list[str] = []
-        # The NAS numbers the run cannot compute (nas_unreadable): what each governs is left out, and the
-        # run ends with exit 1.
+        # The NAS numbers the run cannot compute (nas_unreadable): what each governs is left out. A run that
+        # goes past the lock, or stops at "not configured completely", names them and ends with exit 1.
         self.unreadable: tuple[str, ...] = ()
+        self.unreadable_named = False
         self.repository = f"sftp:{NAS_SSH_ALIAS}:{m.settings['NAS_PATH']}"
 
     # ---- numbers, as bash arithmetic read them -----------------------------------------------
@@ -513,19 +514,18 @@ class Nas:
             write_atomic(f"{m.state}/nas-summary", text, mode="umask", durable=False, relabel=False)
 
     # ---- the run -------------------------------------------------------------------------------
-    def unreadable_numbers(self) -> tuple[str, ...]:
-        """The NAS numbers the run cannot compute (nas_unreadable), each with a line naming it and its
-        value, whether this run would read it or not. What does not depend on them still runs (the
-        backup, nas-last-ok, forget); nas() then ends with exit 1."""
+    def name_unreadable(self) -> None:
+        """A line for each NAS number the run cannot compute (self.unreadable), naming it and its value,
+        whether this run would read it or not; nas() then ends with exit 1. What does not depend on them
+        still runs (the backup, nas-last-ok, forget). A run skipped for another one's lock names none."""
         m = self.m
-        keys = nas_unreadable(m.settings)
-        for key in keys:
+        for key in self.unreadable:
             m.log(
                 3,
                 f"{key}={m.settings[key]!r} in {m.conf}: not a number CST's arithmetic reads: {_LEFT_OUT[key]} "
-                "until it is fixed; the NAS run ends with an error after its backup and forget",
+                "until it is fixed; this NAS run ends with an error",
             )
-        return keys
+        self.unreadable_named = bool(self.unreadable)
 
     def run(self) -> None:
         m, s = self.m, self.m.settings
@@ -535,8 +535,9 @@ class Nas:
         if shutil.which("restic") is None:
             m.log(5, "NAS: restic is not installed yet (rpm-ostree: active after the next reboot); skipped")
             return
-        self.unreadable = self.unreadable_numbers()
+        self.unreadable = nas_unreadable(s)
         if not s["NAS_PATH"] or not m.non_empty(m.restic_password):
+            self.name_unreadable()
             m.log(
                 4,
                 f"NAS: not configured completely (NAS_PATH, {m.restic_password}); re-run 'cst btrfs snapshots nas setup'",
@@ -546,6 +547,7 @@ class Nas:
         if m.lock(m.nas_lock, wait=False) is None:
             m.log(5, "another NAS run is active; skipped")
             return
+        self.name_unreadable()
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, m.trap_stop)
         # Always unmount and unpin at the end, also when the run is stopped (bash's EXIT trap),
@@ -619,4 +621,4 @@ def nas(m: SnapshotRun, args: Sequence[str]) -> int:
         return EXIT_STOPPED
     except RunStopped:
         return 1
-    return 1 if run.unreadable else 0
+    return 1 if run.unreadable_named else 0
