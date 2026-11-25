@@ -11807,6 +11807,10 @@ EOF
             show revert3 "$out"
             [[ ! -e "$unit" && -f "$old" ]]
             recorded "$old"
+            # the kept copy's program is kept with it, and one line says so
+            [[ -f "$H/.local/lib/cst/bt-ldac-watch" ]] ||
+                { echo "revert3 removed the watcher's program while it kept $old" >&2; exit 1; }
+            grep -qF "WARNING: kept " <<<"$out"
             out="$(bt revert --yes --no-restart 2>&1)"
             show revert4 "$out"
             grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
