@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Literal, TypedDict
 import shlex
 
-from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
+from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib, parse_whole_number
 from cst_core.domain.text import enum_member
 
 APP = "com.google.Chrome"
@@ -177,7 +177,9 @@ def _ram_note(d: str | None, s: str | None) -> str:
     with a size S above the cap or no cap at all; "" for any other flags."""
     if d != CACHE_DIR:
         return ""
-    if s is not None and s.isdecimal() and int(s) > CACHE_SIZE:  # isdecimal: the digits int() reads
+    # ASCII digits within int()'s limit, as Chrome reads a number: isdecimal() also took digits of other
+    # scripts (fullwidth, Arabic-Indic), and int() raised past 4300 digits.
+    if s is not None and (size := parse_whole_number(s)) is not None and size > CACHE_SIZE:
         return "; WARNING: that cache lives in RAM, keep it small"
     if s in (None, "", "0"):
         return "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
