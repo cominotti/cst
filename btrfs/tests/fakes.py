@@ -25,7 +25,10 @@
   root's /etc/fstab; CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry;
   CacheWorld and FakeFstab, FakeCacheMountTable, FakeCacheSystemd, FakeCacheFolders, FakeCacheHostView and
   FakeCacheAccounts over it, the in-memory fakes of btrfs/cache/ports.py (over the same MountTable and
-  FstabSystemdView).
+  FstabSystemdView);
+- compress-force and commit-interval (test_compress_faults): CompressWorld, CompressHostPort in memory
+  (/etc/fstab, the staged and booted kernel arguments, the live mounts, the top-mount unit), and
+  kernel_remount_options, a mount's options as the kernel shows them after a remount.
 
 Not collected as a test module (unittest finds test*.py).
 """
@@ -57,6 +60,7 @@ from btrfs.cache.domain import (
 )
 from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
 from btrfs.cache.ports import BindingPaths
+from btrfs.compress.domain import TopMountInfo
 from btrfs.iocost.application import Iocost
 from btrfs.iocost.domain import (
     IOCOST_COMPONENT_LOCK_NAME,
@@ -1943,3 +1947,154 @@ class FakeCacheAccounts:
         if user.uid < MIN_HUMAN_UID:
             return None, f"refusing system user {user.name!r} (uid={user.uid} < {MIN_HUMAN_UID})"
         return CacheMountUser(user.name, user.uid, user.gid, w.real_path(user.home)), None  # os.path.realpath
+
+
+# ---- compress-force and commit-interval ------------------------------------------------------------------
+
+_HIDDEN_OPTIONS: Final = frozenset({"commit=30", "compress=no"})  # what the kernel never shows in /proc/mounts
+
+
+def _option_family(token: str) -> str:
+    """The option a token sets: compress and compress-force are one (each replaces the other)."""
+    key = token.split("=", 1)[0]
+    return "compress" if key in {"compress", "compress-force"} else key
+
+
+def kernel_remount_options(options: str, option: str) -> str:
+    """A mount's options as /proc/mounts shows them after `mount -o remount,OPTION`: the token of that
+    option's family replaced in its place (or added at the end), and dropped where the kernel hides it
+    (commit=30, btrfs's default; compress=no). Written out here, not through the domain's rewrite
+    helpers, so the fake does not share their bugs."""
+    family = _option_family(option)
+    out: list[str] = []
+    placed = False
+    for tok in options.split(","):
+        if tok and _option_family(tok) == family:
+            if not placed and option not in _HIDDEN_OPTIONS:
+                out.append(option)
+            placed = True
+        elif tok:
+            out.append(tok)
+    if not placed and option not in _HIDDEN_OPTIONS:
+        out.append(option)
+    return ",".join(out)
+
+
+class CompressWorld(FaultPoints):
+    """What compress-force's and commit-interval's port (CompressHostPort, btrfs/compress/ports.py) sees, in
+    memory: whether the host is rpm-ostree booted, the root UUID, /etc/fstab's text (None: no file), the staged
+    deployment's kernel arguments (`rpm-ostree kargs`'s answer) and the booted ones (/proc/cmdline), the live
+    mounts (/proc/mounts's text), the top-mount unit (TopMountInfo, None: not installed) and the answer to a
+    confirmation. The world implements the port itself.
+
+    Every mutating call is one point (FaultPoints): "fstab write" (write_fstab), "kargs" (update_kargs),
+    "remount" (remount) and "top-mount" (update_top_mount). A failed fstab write or top-mount update raises the
+    error with no effect, a failed kargs update or remount answers (False, the error's text) with no effect.
+    The points named in torn take effect first and then fail, as the real adapter can (btrfs/tests/
+    test_compress_faults.py, AdapterFailureTest): /etc/fstab renamed into place before its folder's sync
+    failed, or a put-back after a failed reload that failed too; an `rpm-ostree kargs` that timed out after
+    its transaction started; a top-mount unit whose put-back failed. Reads are no points.
+
+    update_kargs is rpm-ostree's: each `--delete=OLD` removes that exact argument and each `--append=NEW`
+    adds one at the end, all or nothing (an OLD that is not there fails the whole call, with no effect). A
+    remount changes every mount of the remounted device, and only those, as the kernel shows them
+    (kernel_remount_options); remounts lists each (target, option) asked for, a failed one too."""
+
+    def __init__(self, *, is_ostree: bool = True, root_uuid: str = "") -> None:
+        super().__init__()
+        self.ostree = is_ostree
+        self.uuid = root_uuid
+        self.fstab: str | None = None
+        self.kargs = ""  # the staged deployment's kernel arguments, as `rpm-ostree kargs` prints them
+        self.cmdline: str | None = None  # the booted ones (/proc/cmdline)
+        self.mounts: str | None = None  # /proc/mounts
+        self.top: TopMountInfo | None = None
+        self.confirm_answer = True
+        self.torn: frozenset[str] = frozenset()
+        self.remounts: list[tuple[str, str]] = []
+
+    # ---- CompressHostPort: reads ---------------------------------------------------------------------
+    def is_ostree(self) -> bool:
+        return self.ostree
+
+    def root_uuid(self) -> str:
+        return self.uuid
+
+    def read_fstab(self) -> str | None:
+        return self.fstab
+
+    def read_proc_mounts(self) -> str | None:
+        return self.mounts
+
+    def read_proc_cmdline(self) -> str | None:
+        return self.cmdline
+
+    def read_kargs(self) -> tuple[bool, str, str]:
+        return True, self.kargs, ""
+
+    def read_top_mount(self) -> TopMountInfo | None:
+        return self.top
+
+    def confirm(self, prompt: str) -> bool:
+        del prompt
+        return self.confirm_answer
+
+    # ---- CompressHostPort: the mutating calls ---------------------------------------------------------
+    def _torn(self, point: str, effect: Callable[[], object]) -> None:
+        if point in self.torn:
+            effect()
+
+    def write_fstab(self, text: str) -> None:
+        def write() -> None:
+            self.fstab = text
+
+        def failed(err: OSError) -> None:
+            self._torn("fstab write", write)
+            raise err
+
+        self.step("fstab write", write, failed)
+
+    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
+        def staged() -> tuple[bool, str]:
+            args = self.kargs.split()
+            for old, _new in edits:
+                if old not in args:
+                    return False, f"error: No karg '{old}' found"
+                args.remove(old)
+            args.extend(new for _old, new in edits)
+            self.kargs = " ".join(args) + "\n"
+            return True, ""
+
+        def failed(err: OSError) -> tuple[bool, str]:
+            self._torn("kargs", staged)
+            return False, str(err.strerror)
+
+        return self.step("kargs", staged, failed)
+
+    def update_top_mount(self, uuid: str, options: str) -> None:
+        def install() -> None:
+            self.top = TopMountInfo(installed=True, uuid=uuid, options=options)
+
+        def failed(err: OSError) -> None:
+            self._torn("top-mount", install)
+            raise err
+
+        self.step("top-mount", install, failed)
+
+    def remount(self, target: str, option: str) -> tuple[bool, str]:
+        self.remounts.append((target, option))
+        rows = [line.split() for line in (self.mounts or "").splitlines()]
+        device = next((f[0] for f in rows if f[1:2] == [target]), None)
+
+        def remounted() -> tuple[bool, str]:
+            if device is None:
+                return False, f"mount: {target}: not mounted."
+            self.mounts = "".join(
+                " ".join([f[0], f[1], f[2], kernel_remount_options(f[3], option), *f[4:]]) + "\n"
+                if f[0] == device
+                else " ".join(f) + "\n"
+                for f in rows
+            )
+            return True, ""
+
+        return self.step("remount", remounted, lambda err: (False, str(err.strerror)))
