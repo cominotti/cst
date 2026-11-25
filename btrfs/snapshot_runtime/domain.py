@@ -173,7 +173,7 @@ class _Arith:
         n = bash_int(tok)
         if n is None:
             raise ValueError(tok)
-        return bash_wrap(n)
+        return n
 
 
 def guard_number(text: str) -> int | GuardError:
