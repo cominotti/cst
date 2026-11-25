@@ -12,7 +12,7 @@ from typing import Final
 
 from btrfs.scrub_limit.domain import SCRUB_CONF_PATH, SCRUB_DROPIN_PATH, SCRUB_SERVICE
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
-from cst_core.adapters.files import ensure_dir, read_text, write_atomic
+from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import host_view_path, installer_script_for, run_installer
 from cst_core.domain.install import Component
@@ -98,8 +98,7 @@ class ScrubSettingsFile:
 
     def remove(self) -> None:
         """The file removed (one that is not there: nothing)."""
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(self.path)
+        LocalFileSystemAdapter().remove_file(self.path)
 
     def remove_folder_if_empty(self) -> None:
         """Its folder removed when it is empty."""
