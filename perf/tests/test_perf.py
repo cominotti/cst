@@ -14,7 +14,7 @@ from typing import override
 import unittest
 from unittest import mock
 
-from cst_core.domain.values import GIB, MIB
+from cst_core.domain.values import GIB, MIB, CpuSet
 from perf.adapters import LinuxPerfProbe, PerfPaths
 from perf.application import build_perf_report, collect_cpu_from_reader, collect_memory_from_reader
 from perf.cli import main as perf_cli_main
@@ -933,6 +933,27 @@ class PerfScratchIntegrationTest(unittest.TestCase):
                     rep = build_perf_report(probe, (PerfAxis.CPU,))
                 ids = {f.finding_id for f in rep.axes[0].findings}
                 self.assertEqual("cpu-deep-cstates" in ids, warned, ids)
+
+    def test_cpu_lists_of_cpu_setup_conf_take_ascii_blanks_only(self) -> None:
+        # cpu irq and vm-pin read BUILD_CPUS and P_CORES with CpuSet.parse, which drops ASCII blanks only:
+        # a no-break space makes the list invalid there. cst perf read it as valid (str.strip() dropped
+        # the no-break space) and diagnosed the CPU split as if it were set.
+        self._populate_healthy_tree()
+        conf = "etc/cpu-setup/cpu-setup.conf"
+        nbsp, ideo = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}"
+        for build, p_cores, want_build, want_p in (
+            ("12-23", "0-11", CpuSet.parse("12-23"), CpuSet.parse("0-11")),
+            (" 12-23\t", "\t0-11 ", CpuSet.parse("12-23"), CpuSet.parse("0-11")),
+            (f"12-23{nbsp}", f"{ideo}0-11", None, None),
+        ):
+            with self.subTest(build=build, p_cores=p_cores):
+                self._write(conf, f"BUILD_CPUS='{build}'\nP_CORES='{p_cores}'\n")
+                with mock.patch.dict(os.environ, {"CST_PERF_ROOT": self.tmp}, clear=True):
+                    cpu = LinuxPerfProbe(perf_paths_from_env()).collect_snapshot().cpu
+                self.assertEqual((cpu.build_cpus, cpu.p_cores), (want_build, want_p))
+                if want_build is None:
+                    with self.assertRaises(ValueError):
+                        CpuSet.parse(build)  # as cpu irq and vm-pin read it
 
     def test_irqbalance_env_precedence_effective_affinity_and_iocost_enable_zero(self) -> None:
         self._populate_healthy_tree()

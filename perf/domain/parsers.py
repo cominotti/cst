@@ -290,9 +290,13 @@ def parse_optional_int(text: str | None) -> int | None:
 
 
 def parse_optional_cpuset(spec: str | None) -> CpuSet | None:
-    """Parse comma/range CPU list string if valid and non-empty."""
-    cleaned = clean_opt_str(spec)
-    if cleaned is None:
+    """Parse comma/range CPU list string if valid and non-empty. ASCII blanks around it are dropped, as
+    CpuSet.parse drops them; a no-break space is part of the list (an invalid one), as cpu irq and vm-pin
+    read BUILD_CPUS and P_CORES."""
+    if spec is None:
+        return None
+    cleaned = strip_ascii_blanks(spec)
+    if cleaned == "":
         return None
     try:
         return CpuSet.parse(cleaned)
