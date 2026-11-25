@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Mapping, Sequence
 import contextlib
 import dataclasses
+import datetime
 import fcntl
 import io
 import json
@@ -638,7 +639,9 @@ class LiveBackupTest(Nas):
             r.stderr,
         )
         self.assertNotIn("nothing is backed up", r.stderr)
-        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup", "forget"])
+        # The index cannot be read, so the snapshots no record names cannot be checked: the retention waits.
+        self.assertIn("  retention skipped: the snapshots no record names were not checked (", r.stdout)
+        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup"])
         self.assertFalse(os.path.exists(self.overlay))
         with open(self.index) as f:
             self.assertEqual(f.read(), text)
@@ -847,6 +850,33 @@ class LiveBackupTest(Nas):
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") for e in self.index_entries()], ["first1", SNAP_ID])
+
+    def test_a_snapshot_no_record_names_is_named_and_the_run_still_succeeds(self) -> None:
+        # The retention counted it as a backup. The run's own snapshot is not one.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        repo = "sftp:btrfs-setup-nas:/volume1/restic"
+        first = {"vm": "win", "mode": "nas", "snapshot": STRAY_A, "repository": repo, "epoch": 1, "timestamp": "a"}
+        with open(self.index, "w") as f:
+            json.dump({"backups": [first]}, f)
+        own = _listed(SNAP_ID, "2026-11-08T01:06:40Z")
+        for listed, named in (
+            ([_listed(STRAY_A, STRAY_T1), own], False),
+            ([_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2), own], True),
+        ):
+            with self.subTest(named=named):
+                self.restic_cfg(snapshots_json=json.dumps(listed))
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                retention = [c["args"] for c in self.restic_calls() if "--keep-weekly" in c["args"]]
+                alerts = [c for c in self.calls() if c.startswith("notify ") and "no record names" in c]
+                if named:
+                    self.assertIn("retention skipped: restic lists 1 snapshot of win that neither", r.stdout)
+                    self.assertIn(f"restic tag --add cst-adopted {STRAY_B}", r.stdout)
+                    self.assertEqual(len(retention), 1, "only the first run's")
+                    self.assertEqual(len(alerts), 1, self.calls())
+                else:
+                    self.assertNotIn("retention skipped", r.stdout)
+                    self.assertEqual((len(retention), alerts), (1, []))
 
     def test_a_nas_entry_without_its_snapshot_is_kept_and_does_not_stop_the_prune(self) -> None:
         # It passed the reader (it has a path) and the prune read its snapshot: a KeyError after the backup.
@@ -1712,15 +1742,19 @@ class TornRecordTest(Nas):
                 self.restic_cfg(snapshots_json=self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, BOTH_TAGS)))
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(os.path.join(self.fix, "restic.log"))
+                # The second run has the first one's backup in the index: the snapshots no record names are listed.
+                strays = ["snapshots"] if os.path.exists(self.index) else []
                 r = self.run_tool("backup", "win", "--nas")
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 calls = [c["args"] for c in self.restic_calls()]
-                self.assertEqual([a[0] for a in calls], ["cat", "backup", "snapshots", "forget", "forget", "snapshots"])
+                self.assertEqual(
+                    [a[0] for a in calls], ["cat", "backup", "snapshots", "forget", *strays, "forget", "snapshots"]
+                )
                 self.assertEqual(
                     calls[2], ["snapshots", "--json", "--no-lock", "--host", "sophia", "--tag", "cst-vm,vm:win"]
                 )
                 self.assertEqual(calls[3], ["forget", "--retry-lock", "30m", TORN_ID], "by the listed full id")
-                self.assertIn("--keep-weekly", calls[4])
+                self.assertIn("--keep-weekly", calls[4 + len(strays)])
                 self.assertIn(f"torn restic snapshot {TORN_ID[:8]} of an earlier run forgotten", r.stdout)
                 self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
 
@@ -1850,12 +1884,15 @@ class TornRecordTest(Nas):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.forgets()[0], ["forget", "--retry-lock", "30m", TORN_ID])
         self.assertEqual(self.torn_doc(), {"version": 1, "torn": odd})
-        # Only entries of other VMs or repositories: no restic call for them.
+        # Only entries of other VMs or repositories: no restic call for them (the one listing before the
+        # retention is the check of the snapshots no record names: the first run indexed its backup).
         self.write_torn(odd[:2])
         os.unlink(os.path.join(self.fix, "restic.log"))
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup", "forget", "snapshots"])
+        self.assertEqual(
+            [c["args"][0] for c in self.restic_calls()], ["cat", "backup", "snapshots", "forget", "snapshots"]
+        )
         self.assertEqual(self.torn_list(), odd[:2])
 
     def test_a_good_run_without_a_record_writes_none(self) -> None:
@@ -3331,6 +3368,301 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
 
 
 _NAS_REPO: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+
+
+STRAY_A = "aaaa1111" + "a" * 56  # an indexed backup
+STRAY_B = "bbbb2222" + "b" * 56  # a snapshot no record names
+STRAY_C = "cccc3333" + "c" * 56
+STRAY_T0 = "2026-10-25T04:30:00.000000001+02:00"  # before the change to winter time: an hour more offset
+STRAY_T1 = "2026-11-01T04:30:00.123456789+01:00"
+STRAY_T2 = "2026-11-08T04:30:00.5+01:00"
+
+
+class _StrayRestic(FakeNasRestic):
+    """restic with a fixed listing (None: restic snapshots fails), forget failing for the ids in fail."""
+
+    def __init__(self, listed: Sequence[Mapping[str, object]] | None, fail: Sequence[str] = ()) -> None:
+        super().__init__()
+        self.listed = listed
+        self.fail = fail
+
+    @override
+    def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+        del env, timeout
+        self.calls.append(list(args))
+        if args[0] == "snapshots":
+            if self.listed is None:
+                return 1, "", "Fatal: unable to open the repository"
+            return 0, json.dumps(self.listed), ""
+        if args[0] == "forget" and args[-1] in self.fail:
+            return 1, "", "Fatal: repository is already locked"
+        return 0, "", ""
+
+
+class _StrayStore(FakeNasStore):
+    """The index and the torn record as given (refuse: "index" or "torn" cannot be read)."""
+
+    def __init__(
+        self,
+        index: Sequence[vm_domain_backup.IndexEntry],
+        torn: Sequence[vm_domain_backup.TornEntry] = (),
+        refuse: str = "",
+    ) -> None:
+        super().__init__([])
+        self.index = list(index)
+        self.torn_entries = list(torn)
+        self.refuse = refuse
+
+    @override
+    def read_index(self) -> list[vm_domain_backup.IndexEntry]:
+        if self.refuse == "index":
+            raise vm_domain_backup.IndexRefused("/i is format 2 of the vm-index", "use the cst vm of that CST")
+        return list(self.index)
+
+    @override
+    def read_torn(self) -> list[vm_domain_backup.TornEntry]:
+        if self.refuse == "torn":
+            raise vm_domain_backup.TornRefused("/t is not JSON")
+        return list(self.torn_entries)
+
+
+class _KeepSettings(FakeNasSettings):
+    @override
+    def number(self, key: str) -> int:
+        return {"VM_NAS_KEEP_WEEKLY": 4, "VM_NAS_KEEP_MONTHLY": 3}.get(key, 0)
+
+
+def _stray_entry(snap: str, *, vm: str = "win", repository: str = "/repo") -> vm_domain_backup.IndexEntry:
+    return {"vm": vm, "mode": "nas", "snapshot": snap, "repository": repository, "host": "sophia", "epoch": 1}
+
+
+def _listed(snap: str, time_: object, *tags: str, original: str | None = None) -> dict[str, object]:
+    return {
+        "id": snap,
+        "time": time_,
+        "tags": ["cst-vm", "vm:win", *tags],
+        **({} if original is None else {"original": original}),
+    }
+
+
+class NasStraySnapshotTest(unittest.TestCase):
+    """A NAS run compares the VM's snapshots restic lists with the index and the record of torn snapshots
+    (retention_after_torn, unaccounted): one that neither names, newer than the oldest indexed one, is named
+    in the output and in an alert, and the retention waits (it would count it as a backup); nothing is
+    forgotten. With no NAS entry of the VM in the index, nothing is compared."""
+
+    def _run(
+        self,
+        index: Sequence[vm_domain_backup.IndexEntry],
+        listed: Sequence[Mapping[str, object]] | None,
+        *,
+        torn_kept: Sequence[vm_domain_backup.TornEntry] = (),
+        refuse: str = "",
+        made: str = "",
+    ) -> tuple[list[str], list[tuple[str, str]], list[list[str]]]:
+        """retention_after_torn of win (torn_kept: recorded torn snapshots whose forget fails); (the output,
+        the alerts, restic's calls)."""
+        signals = FakeNasSignals()
+        restic = _StrayRestic(listed, [e["snapshot"] for e in torn_kept])
+        alerts: list[tuple[str, str]] = []
+        out = FakeNasOut()
+        port = vm_app_nas.NasBackup(
+            commands=FakeNasCommands(lambda _args: (0, "", ""), signals),
+            store=_StrayStore(index, torn_kept, refuse),
+            settings=_KeepSettings(),
+            restic=restic,
+            signals=signals,
+            lock=lambda _vm: contextlib.nullcontext(),
+            alert=lambda title, body: alerts.append((title, body)),
+            clock=FakeNasClock(),
+            out=out,
+            root=True,
+        )
+        cfg = vm_wiring.vm_settings({"CST_PROG": "cst vm", "CST_VM_NONROOT_OK": "1"})
+        vm_app_nas_torn.retention_after_torn(cfg, port, "win", _NAS_REPO, made=made)
+        return out.lines, alerts, restic.calls
+
+    def assert_retention_ran(self, lines: Sequence[str], calls: Sequence[Sequence[str]]) -> None:
+        self.assertTrue(any("--keep-weekly" in c for c in calls), calls)
+        self.assertFalse([ln for ln in lines if "retention skipped" in ln], lines)
+
+    def test_a_newer_snapshot_no_record_names_is_named_and_the_retention_waits(self) -> None:
+        index, listed = [_stray_entry(STRAY_A)], [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)]
+        lines, alerts, calls = self._run(index, listed)
+        line = (
+            "  retention skipped: restic lists 1 snapshot of win that neither the index nor the record of torn "
+            "snapshots names (each may be torn): bbbb2222 (2026-11-08T04:30:00+01:00); look at each (restic ls "
+            f"{STRAY_B}), then forget it (restic forget {STRAY_B}) or keep it as a backup (restic tag --add "
+            f"cst-adopted {STRAY_B}), with the repository's variables of vm/README.md, section \"Restore from the "
+            'NAS"; the repository keeps more until each is forgotten or kept'
+        )
+        self.assertEqual(lines, [line])
+        body = (
+            "win: the NAS repository has 1 snapshot(s) of win that no record names (bbbb2222); its retention "
+            "waits until each is forgotten (restic forget ID) or kept (restic tag --add cst-adopted ID): see "
+            "the backup's output"
+        )
+        self.assertEqual(alerts, [("VM backup: a NAS snapshot no record names", body)])
+        self.assertEqual(calls, [["snapshots", "--json", "--no-lock", "--host", "sophia", "--tag", "cst-vm,vm:win"]])
+
+    def test_several_strays_are_named_together(self) -> None:
+        listed = [_listed(STRAY_A, STRAY_T0), _listed(STRAY_B, STRAY_T1), _listed(STRAY_C, STRAY_T2)]
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], listed)
+        self.assertIn("restic lists 2 snapshots of win that neither", lines[0])
+        self.assertIn(
+            "bbbb2222 (2026-11-01T04:30:00+01:00), cccc3333 (2026-11-08T04:30:00+01:00); look at each (restic ls ID), "
+            "then forget it (restic forget ID) or keep it as a backup (restic tag --add cst-adopted ID) (ID: each of "
+            f"{STRAY_B} {STRAY_C}), with",
+            lines[0],
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("2 snapshot(s) of win that no record names (bbbb2222, cccc3333)", alerts[0][1])
+
+    def test_a_snapshot_older_than_every_indexed_one_is_left_alone(self) -> None:
+        # An older CST's backup, or one from before the index was moved aside: not named.
+        lines, alerts, calls = self._run(
+            [_stray_entry(STRAY_A)], [_listed(STRAY_B, STRAY_T0), _listed(STRAY_A, STRAY_T1)]
+        )
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
+    def test_times_are_compared_as_instants(self) -> None:
+        # 03:30+01:00 is 02:30 UTC, after 03:00+02:00 (01:00 UTC): newer, although its text sorts first.
+        index = [_stray_entry(STRAY_A)]
+        listed = [_listed(STRAY_A, "2026-10-25T03:00:00+02:00"), _listed(STRAY_B, "2026-10-25T02:30:00+01:00")]
+        lines, alerts, _calls = self._run(index, listed)
+        self.assertIn("bbbb2222 (2026-10-25T02:30:00+01:00)", lines[0])
+        self.assertEqual(len(alerts), 1)
+
+    def test_no_nas_entry_of_the_vm_in_this_repository_compares_nothing(self) -> None:
+        local: vm_domain_backup.IndexEntry = {"vm": "win", "mode": "reflink", "path": "/b/win", "epoch": 1}
+        for index in (
+            [],
+            [local],
+            [_stray_entry(STRAY_A, vm="other")],
+            [_stray_entry(STRAY_A, repository="sftp:elsewhere:/r")],
+        ):
+            with self.subTest(index=index):
+                lines, alerts, calls = self._run(index, [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)])
+                self.assertFalse([c for c in calls if c[0] == "snapshots"], "no listing")
+                self.assert_retention_ran(lines, calls)
+                self.assertEqual(alerts, [])
+
+    def test_the_runs_own_snapshot_and_an_adopted_one_are_no_strays(self) -> None:
+        index = [_stray_entry(STRAY_A)]
+        for listed, made in (
+            ([_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)], STRAY_B),
+            ([_listed(STRAY_A, STRAY_T1), _listed(STRAY_C, STRAY_T2, "cst-adopted")], ""),
+            ([_listed(STRAY_A, STRAY_T1)], ""),  # forgotten by hand: no longer listed
+        ):
+            with self.subTest(listed=listed, made=made):
+                lines, alerts, calls = self._run(index, listed, made=made)
+                self.assert_retention_ran(lines, calls)
+                self.assertEqual(alerts, [])
+
+    def test_a_snapshot_in_the_torn_record_is_left_to_its_retry(self) -> None:
+        torn: vm_domain_backup.TornEntry = {
+            "snapshot": STRAY_B,
+            "vm": "win",
+            "repository": "/repo",
+            "host": "sophia",
+            "timestamp": "20261108T033000Z",
+            "why": "incomplete",
+        }
+        listed = [_listed(STRAY_A, STRAY_T0), _listed(STRAY_B, STRAY_T1)]
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], listed, torn_kept=[torn])
+        self.assertEqual(len(lines), 1)
+        self.assertIn("retention skipped: restic forget bbbb2222 (torn, of an earlier run): Fatal: ", lines[0])
+        self.assertNotIn("neither the index", lines[0])
+        self.assertTrue(lines[0].endswith("; the repository keeps more until the next backup"), lines[0])
+        self.assertEqual(alerts, [])
+        # A stray beside it: both reasons, the stray named.
+        listed.append(_listed(STRAY_C, STRAY_T2))
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], listed, torn_kept=[torn])
+        self.assertRegex(
+            lines[0], r"retention skipped: restic forget bbbb2222 \(torn.*; restic lists 1 snapshot of win"
+        )
+        self.assertIn("cccc3333", lines[0])
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_retagged_backup_is_accounted_for_by_its_original(self) -> None:
+        # restic tag saved A again as C (original A): C is the indexed backup, not a stray.
+        index = [_stray_entry(STRAY_B), _stray_entry(STRAY_A)]
+        listed = [_listed(STRAY_B, STRAY_T0), _listed(STRAY_C, STRAY_T1, "cst-keep", original=STRAY_A)]
+        lines, alerts, calls = self._run(index, listed)
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
+    def test_a_short_id_in_the_index_names_the_listed_snapshot(self) -> None:
+        lines, alerts, calls = self._run(
+            [_stray_entry(STRAY_A[:8])], [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T0)]
+        )
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
+    def test_an_entry_of_another_vm_or_repository_accounts_for_nothing(self) -> None:
+        index = [_stray_entry(STRAY_A), _stray_entry(STRAY_B, vm="other"), _stray_entry(STRAY_B, repository="/r2")]
+        lines, alerts, _calls = self._run(index, [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)])
+        self.assertIn("bbbb2222", lines[0])
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_time_that_cannot_be_read(self) -> None:
+        # A stray's: named (the retention keeps more). The only indexed one's: no baseline, nothing named.
+        lines, alerts, _calls = self._run([_stray_entry(STRAY_A)], [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, "x")])
+        self.assertIn("bbbb2222 (time unknown)", lines[0])
+        self.assertEqual(len(alerts), 1)
+        for when in ("x", None, "2026-11-01T04:30:00"):
+            with self.subTest(when=when):
+                lines, alerts, calls = self._run(
+                    [_stray_entry(STRAY_A)], [_listed(STRAY_A, when), _listed(STRAY_B, STRAY_T2)]
+                )
+                self.assert_retention_ran(lines, calls)
+                self.assertEqual(alerts, [])
+
+    def test_what_cannot_be_read_makes_the_retention_wait_unnamed(self) -> None:
+        listed = [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T2)]
+        cases: tuple[tuple[Sequence[Mapping[str, object]] | None, str, str], ...] = (
+            (
+                None,
+                "",
+                "restic snapshots did not list the snapshots of win, so the snapshots no record names were not checked",
+            ),
+            (listed, "index", "the snapshots no record names were not checked (/i is format 2 of the vm-index: "),
+            (listed, "torn", "the snapshots no record names were not checked (/t is not JSON)"),
+        )
+        for listed_now, refuse, said in cases:
+            with self.subTest(listed=listed_now is not None, refuse=refuse):
+                lines, alerts, calls = self._run([_stray_entry(STRAY_A)], listed_now, refuse=refuse)
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn(said, lines[0])
+                self.assertTrue(lines[0].endswith("the repository keeps more until the next backup"), lines[0])
+                self.assertFalse([c for c in calls if "--keep-weekly" in c])
+                self.assertEqual(alerts, [])
+
+
+class ResticInstantTest(unittest.TestCase):
+    """restic_instant: restic's RFC 3339 times as instants; anything else None."""
+
+    def test_restics_forms(self) -> None:
+        utc = datetime.UTC
+        self.assertEqual(
+            vm_domain_backup.restic_instant("2026-11-01T04:30:00.123456789+01:00"),
+            datetime.datetime(2026, 11, 1, 3, 30, 0, 123456, tzinfo=utc),
+        )
+        self.assertEqual(
+            vm_domain_backup.restic_instant("2026-11-01T03:30:00Z"), datetime.datetime(2026, 11, 1, 3, 30, tzinfo=utc)
+        )
+
+    def test_offsets_across_a_change_of_time_order_as_instants(self) -> None:
+        before = vm_domain_backup.restic_instant("2026-10-25T02:59:00+02:00")
+        after = vm_domain_backup.restic_instant("2026-10-25T02:01:00+01:00")
+        assert before is not None and after is not None
+        self.assertLess(before, after)
+
+    def test_anything_else_is_none(self) -> None:
+        for value in ("", "yesterday", "2026-11-01T04:30:00", 1794100000, None, ["2026-11-01T03:30:00Z"]):
+            with self.subTest(value=value):
+                self.assertIsNone(vm_domain_backup.restic_instant(value))
 
 
 class _PendingStops(FakeNasSignals):

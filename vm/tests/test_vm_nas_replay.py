@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 import contextlib
 from dataclasses import dataclass, field
+import datetime
 import json
 import os
 import re
@@ -106,6 +107,7 @@ SPEC_CALLS: Final = frozenset(
         *(("domstate", o) for o in ("live", "stopped", "unreadable")),
         *(("domblklist", o) for o in (OK, "inactive_unreadable", "live_unreadable", "unreadable")),
         ("alert", ""),
+        ("alert_strays", ""),
         ("restic_snapshots", OK),
         ("restic_snapshots", FAIL),
         ("write_index", OK),
@@ -130,7 +132,7 @@ class Machine:
     live: Mapping[str, int]
     pers: Mapping[str, int]
     files: frozenset[tuple[str, int]]
-    repo: frozenset[tuple[int, bool]]
+    repo: frozenset[tuple[int, bool, bool]]  # (snapshot, made with --keep-tag, adopted by the user)
     record: frozenset[int]
     index: frozenset[int]
 
@@ -165,7 +167,9 @@ def machine_of(s: Mapping[str, Value]) -> Machine:
         live={t: number(v) for t, v in record(s["live"]).items()},
         pers={t: number(v) for t, v in record(s["pers"]).items()},
         files=frozenset((text(p[0]), number(p[1])) for p in pairs(s["files"])),
-        repo=frozenset((number(record(x)["id"]), truth(record(x)["keep"])) for x in items(s["repo"])),
+        repo=frozenset(
+            (number(record(x)["id"]), truth(record(x)["keep"]), truth(record(x)["adopted"])) for x in items(s["repo"])
+        ),
         record=frozenset(number(i) for i in items(s["record"])),
         index=frozenset(number(i) for i in items(s["index"])),
     )
@@ -214,6 +218,7 @@ class World:
     pers: dict[str, int] = field(default_factory=dict)
     files: set[tuple[str, int]] = field(default_factory=set)
     repo: dict[int, bool] = field(default_factory=dict)  # snapshot -> made with --keep-tag
+    adopted: set[int] = field(default_factory=set)  # tagged cst-adopted by the user (the strays alert named them)
     record: list[vm_domain_backup.TornEntry] = field(default_factory=list)
     index: list[vm_domain_backup.IndexEntry] = field(default_factory=list)
     writes: int = 0  # the guest's writes to the disks of a shut-off VM it was started on (fingerprints)
@@ -228,7 +233,7 @@ class World:
             live=dict(self.live),
             pers=dict(self.pers),
             files=frozenset(self.files),
-            repo=frozenset(self.repo.items()),
+            repo=frozenset((i, keep, i in self.adopted) for i, keep in self.repo.items()),
             record=frozenset(snap_number(e["snapshot"]) for e in self.record),
             index=frozenset(snap_number(e["snapshot"]) for e in self.index if e.get("mode") == "nas"),
         )
@@ -249,12 +254,23 @@ class World:
     def sources(self, definition: Mapping[str, int]) -> list[tuple[str, str]]:
         return [(t, self.path(t, definition[t])) for t in self.targets]
 
+    def take_repo(self, m: Machine) -> None:
+        """The repository as the spec's state has it (the user adopted or forgot a snapshot)."""
+        self.repo = {i: keep for i, keep, _ in m.repo}
+        self.adopted = {i for i, _, adopted in m.repo if adopted}
+
     def listed(self) -> str:
-        """restic snapshots --json of the VM's tags."""
+        """restic snapshots --json of the VM's tags, each snapshot with the time of the run that made it."""
         tags = [vm_domain.TAG, f"vm:{VM}"]
         return json.dumps(
             [
-                {"id": snap_id(i), "tags": tags + ([vm_domain.KEEP_TAG, KEEP_NAME] if keep else [])}
+                {
+                    "id": snap_id(i),
+                    "time": datetime.datetime.fromtimestamp(run_time(i), datetime.UTC).isoformat(),
+                    "tags": tags
+                    + ([vm_domain.KEEP_TAG, KEEP_NAME] if keep else [])
+                    + ([vm_domain.ADOPTED_TAG] if i in self.adopted else []),
+                }
                 for i, keep in sorted(self.repo.items())
             ]
         )
@@ -291,7 +307,7 @@ class Recorder:
         self.killed = False
         self.ignored = False
         self.merged = False  # the merge back is over: forget and drop_torn are retry_torn's
-        self.index_phase = False
+        self.index_reads = 0  # the index read after the merge back: the check of the strays, then the index's step
         self.after_backup = False
         self.committed = False  # the merge back's domstate said the VM is alive
         self.listing = ""  # the outcome of the recorded listing of a pair
@@ -460,14 +476,20 @@ class Store(FakeNasStore):
     @override
     def drop(self, path: str) -> None:
         t = next(t for t in self.world.targets if path.startswith(IMAGES[t] + vm_domain.OVERLAY_MARK))
-        self.rec.call("drop_overlay", t)
+        # In the snapshot's held block, which freezes the environment for the poll (the spec's snapshot is
+        # one step); each drop is a step of its own there, so the guest or a kill may come before it.
+        holding, self.rec.holding = self.rec.holding, False
+        try:
+            self.rec.call("drop_overlay", t)
+        finally:
+            self.rec.holding = holding
         self.world.files = {o for o in self.world.files if self.world.path(*o) != path}
 
     @override
     def read_index(self) -> list[vm_domain_backup.IndexEntry]:
         self.rec.port()
         if self.rec.merged:
-            self.rec.index_phase = True
+            self.rec.index_reads += 1
         return list(self.world.index)
 
     @override
@@ -514,7 +536,7 @@ class Restic(FakeNasRestic):
                 ok = self.rec.call("restic_ready").outcome == OK
                 return (0, "{}", "") if ok else (1, "", "Fatal: unable to open the repository")
             case "snapshots":
-                target = "index" if self.rec.index_phase else "torn"
+                target = ("torn", "strays", "index")[min(self.rec.index_reads, 2)]
                 if self.rec.call("restic_snapshots", target).outcome == FAIL:
                     return 1, "", "Fatal: unable to open the repository"
                 return 0, self.world.listed(), ""
@@ -527,7 +549,7 @@ class Restic(FakeNasRestic):
         """The retention (--keep-weekly: the spec's choice of what goes), or one snapshot forgotten."""
         if "--keep-weekly" in args:
             st = self.rec.call("retention")
-            repo = dict(st.machine.repo)
+            repo = {i: keep for i, keep, _ in st.machine.repo}
         else:
             i = snap_number(args[-1])
             st = self.rec.call("forget", "retry" if self.rec.merged else "", i)
@@ -699,7 +721,7 @@ def replay_run(world: World, run: Sequence[Step]) -> Ran:
     alerts: list[tuple[str, str]] = []
 
     def alert(title: str, body: str) -> None:
-        rec.call("alert")
+        rec.call("alert_strays" if title == vm_domain_backup.STRAYS_TITLE else "alert")
         alerts.append((title, body))
 
     port = vm_app_nas.NasBackup(
@@ -753,6 +775,8 @@ def replay(case: unittest.TestCase, path: str) -> set[tuple[str, str]]:
         if run[0].name != "~start":
             for st in run:  # the user or libvirt between runs
                 world.take(st.machine)
+                if st.name == "~user" and st.outcome in ("adopt", "forget"):
+                    world.take_repo(st.machine)
             continue
         ran = replay_run(world, run)
         seen |= {(c[0], c[3]) for c in ran.calls}

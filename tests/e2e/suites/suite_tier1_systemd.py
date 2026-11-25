@@ -921,6 +921,18 @@ elif step == "entries":  # the record at argv[2]: its version, then VM=ID per en
 elif step == "whys":  # the record at argv[2]: what tore each entry
     with open(sys.argv[2]) as f:
         print(*(e["why"] for e in json.load(f)["torn"]))
+elif step == "retagged":  # restic snapshots --json: the full ID of each snapshot whose original is argv[2]
+    print(*(s["id"] for s in json.load(sys.stdin) if s.get("original") == sys.argv[2]))
+elif step == "index":  # argv: the index, the repository, the VM, then the IDs of its NAS backups
+    path, repo, vm = sys.argv[2:5]
+    backups = [
+        {"vm": vm, "mode": "nas", "snapshot": snap, "repository": repo, "host": "e2ehost", "epoch": 1795000000 + n,
+         "timestamp": "20261124T000000Z", "consistency": "shut-off", "keep": None, "versions": {}, "deployment": None}
+        for n, snap in enumerate(sys.argv[5:])
+    ]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"version": 1, "backups": backups}, f)
 else:
     sys.path.insert(0, "/opt/cst-rw")
     from vm import wiring
@@ -5421,6 +5433,91 @@ EOF
             grep -qF "torn restic snapshot ${torn:0:8} of an earlier run forgotten" "$w/retry.out"
             [[ "$(listed)" == "$good" ]]
             [[ "$(d entries "$CST_VM_TORN")" == 1 ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_203_a_nas_snapshot_no_record_names_is_named_and_not_counted_with_the_real_restic(self) -> None:
+        """The check of the snapshots no record names (retention_after_torn) against the real restic over
+        SFTP: restic's own `snapshots --json` (its time, and the "original" a real `restic tag` sets) and
+        its --host filter. Snapshots of the VM's tags: "old" (made before the index: an older CST's, left
+        alone), "good" and "kept" (indexed; "kept" then retagged by hand, so restic lists it under a new ID),
+        one of another host, and "stray" (the newest, in neither the index nor the record). The retry names
+        the stray only, with the commands that forget or adopt it, sends one alert (to a stub, never the
+        container's btrfs-notify) and skips the retention, forgetting nothing; once adopted, the retention
+        runs; a second stray forgotten by hand leaves the next run quiet; with the index moved aside nothing
+        is compared and restic snapshots is not run."""
+        w = "/var/tmp/e2e-vm-strays"
+        nas_dir = "/srv/backup/e2e-vm-strays"
+        prelude = self._vm_torn_prelude("test_203", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
+            cat >"$w/notify" <<'EOF'
+#!/bin/sh
+printf '%s\\n' "$*" >>"$ALERTS_LOG"
+EOF
+            chmod 755 "$w/notify"
+            export CST_VM_NOTIFY="$w/notify" CST_VM_ALERTS="$w/alerts" ALERTS_LOG="$w/alerts.log"
+            all() { restic snapshots --json --no-lock | d ids; }
+            old="$(snap cst-vm,vm:e2evm)"
+            good="$(snap cst-vm,vm:e2evm)"
+            kept="$(snap cst-vm,vm:e2evm)"
+            date +%s%N >"$w/payload/stamp"
+            other="$(restic backup --json --host otherhost --tag cst-vm,vm:e2evm "$w/payload" | d summary)"
+            stray="$(snap cst-vm,vm:e2evm)"
+            d index "$CST_VM_INDEX" "$RESTIC_REPOSITORY" e2evm "$good" "$kept"
+            restic tag -q --add cst-keep "$kept"
+            kept2="$(restic snapshots --json --no-lock | d retagged "$kept")"
+            [[ ${#kept2} == 64 && "$kept2" != "$kept" ]]
+            before="$(all)"
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            grep -qF "  retention skipped: restic lists 1 snapshot of e2evm that neither the index nor the record of torn snapshots names (each may be torn): ${stray:0:8} (" "$w/retry.out"
+            grep -qF "(restic tag --add cst-adopted $stray)" "$w/retry.out"
+            grep -qF "(restic forget $stray)" "$w/retry.out"
+            for s in "$old" "$good" "$kept" "$kept2" "$other"; do
+                if grep -qF "${s:0:8}" "$w/retry.out"; then echo "named ${s:0:8}" >&2; exit 1; fi
+            done
+            [[ "$(all)" == "$before" ]]
+            [[ "$(wc -l <"$w/alerts.log")" == 1 ]]
+            grep -qF "VM backup: a NAS snapshot no record names" "$w/alerts.log"
+            grep -qF "${stray:0:8}" "$w/alerts.log"
+            restic tag -q --add cst-adopted "$stray"
+            d retry e2evm >"$w/adopted.out"
+            cat "$w/adopted.out" >&2
+            if grep -qF "retention skipped" "$w/adopted.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/adopted.out"
+            stray2="$(snap cst-vm,vm:e2evm)"
+            d retry e2evm >"$w/second.out"
+            cat "$w/second.out" >&2
+            grep -qF "): ${stray2:0:8} (" "$w/second.out"
+            restic forget -q "$stray2"
+            d retry e2evm >"$w/forgotten.out"
+            cat "$w/forgotten.out" >&2
+            if grep -qF "retention skipped" "$w/forgotten.out"; then exit 1; fi
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/forgotten.out"
+            [[ "$(wc -l <"$w/alerts.log")" == 2 ]]
+            snap cst-vm,vm:e2evm >/dev/null
+            mv "$CST_VM_INDEX" "$CST_VM_INDEX.aside"
+            mkdir -p "$w/bin"
+            export RESTIC_LOG="$w/restic.log" REAL_RESTIC="$(command -v restic)"
+            cat >"$w/bin/restic" <<'EOF'
+#!/bin/sh
+echo "$1" >>"$RESTIC_LOG"
+exec "$REAL_RESTIC" "$@"
+EOF
+            chmod 755 "$w/bin/restic"
+            PATH="$w/bin:$PATH" d retry e2evm >"$w/aside.out"
+            cat "$w/aside.out" >&2
+            if grep -qF "retention skipped" "$w/aside.out"; then exit 1; fi
+            if grep -qx snapshots "$w/restic.log"; then exit 1; fi
+            grep -qx forget "$w/restic.log"
+            [[ "$(wc -l <"$w/alerts.log")" == 2 ]]
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},

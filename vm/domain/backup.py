@@ -15,6 +15,7 @@ from cst_core.domain.errors import ExitStatus, Refused, ResticExit
 from cst_core.domain.shapes import KeyTypes, has_shape, items_of, json_object
 from cst_core.domain.values import MINUTE, Json
 from vm.domain import (
+    ADOPTED_TAG,
     KEEP_TAG,
     ON_CALENDAR,
     TAG,
@@ -245,6 +246,7 @@ class ResticSnapshot(TypedDict):
     snapshot had first, which restic sets when restic tag saves it again under a new id."""
 
     id: str
+    time: NotRequired[object]
     tags: NotRequired[object]
     original: NotRequired[object]
 
@@ -259,6 +261,83 @@ def snapshot_names(snap: ResticSnapshot) -> list[str]:
     changed (restic tag saves it again under a new id, with that first id as its original)."""
     original = snap.get("original")
     return [snap["id"], *([original] if isinstance(original, str) and original else [])]
+
+
+def restic_instant(value: object) -> datetime.datetime | None:
+    """A snapshot's time as restic snapshots --json gives it (RFC 3339: nanoseconds, the local offset
+    or Z), as an instant; None for anything else, a time without an offset included (it cannot be
+    compared with one that has it)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def _names_any(snap: ResticSnapshot, ids: Sequence[str]) -> bool:
+    """snap (by its id or its original) is one of ids, a prefix either way, as restic matches a short id."""
+    return any(n.startswith(i) or i.startswith(n) for n in snapshot_names(snap) for i in ids if i)
+
+
+def stray_snapshots(
+    listed: Sequence[ResticSnapshot], indexed: Sequence[str], torn: Sequence[str], made: str
+) -> list[ResticSnapshot]:
+    """The listed snapshots of a VM that no record names, each of which may be torn: neither the
+    index (indexed: the ids of its NAS entries), the record of torn snapshots (torn), the run's own
+    snapshot (made, "" none) nor the tag ADOPTED_TAG accounts for it. Only one not older than the
+    oldest listed snapshot the index names (the baseline) is a stray: those before it are an older
+    CST's or from before the index was started again, and stay. No listed snapshot the index names: no
+    baseline, no stray. A time that cannot be read is no baseline, and its snapshot can be a stray
+    (the retention keeps more, never less)."""
+    times = [t for s in listed if _names_any(s, indexed) and (t := restic_instant(s.get("time"))) is not None]
+    if not times:
+        return []
+    baseline = min(times)
+    known = [*indexed, *torn, made]
+
+    def stray(s: ResticSnapshot) -> bool:
+        tags, t = s.get("tags"), restic_instant(s.get("time"))
+        adopted = isinstance(tags, list) and ADOPTED_TAG in tags
+        return not adopted and not _names_any(s, known) and (t is None or t >= baseline)
+
+    return [s for s in listed if stray(s)]
+
+
+# The alert of a NAS run whose repository has a snapshot of the VM that no record names.
+STRAYS_TITLE: Final = "VM backup: a NAS snapshot no record names"
+
+
+def _stray_names(strays: Sequence[ResticSnapshot]) -> str:
+    def when(s: ResticSnapshot) -> str:
+        t = restic_instant(s.get("time"))
+        return "time unknown" if t is None else t.isoformat(timespec="seconds")
+
+    return ", ".join(f"{s['id'][:8]} ({when(s)})" for s in strays)
+
+
+def strays_text(vm: str, strays: Sequence[ResticSnapshot]) -> str:
+    """Why the retention waits for the strays of vm (stray_snapshots), with the commands that forget or
+    keep each: one stray's full id in them, several as ID with their full ids after."""
+    n = len(strays)
+    ident = strays[0]["id"] if n == 1 else "ID"
+    each = "" if n == 1 else f" (ID: each of {' '.join(s['id'] for s in strays)})"
+    return (
+        f"restic lists {n} snapshot{'s' if n > 1 else ''} of {vm} that neither the index nor the record of "
+        f"torn snapshots names (each may be torn): {_stray_names(strays)}; look at each (restic ls {ident}), "
+        f"then forget it (restic forget {ident}) or keep it as a backup (restic tag --add {ADOPTED_TAG} "
+        f'{ident}){each}, with the repository\'s variables of vm/README.md, section "Restore from the NAS"'
+    )
+
+
+def strays_alert(vm: str, strays: Sequence[ResticSnapshot]) -> str:
+    """The alert's body for the strays of vm: short, the commands are in the backup's output."""
+    return (
+        f"{vm}: the NAS repository has {len(strays)} snapshot(s) of {vm} that no record names "
+        f"({', '.join(s['id'][:8] for s in strays)}); its retention waits until each is forgotten "
+        f"(restic forget ID) or kept (restic tag --add {ADOPTED_TAG} ID): see the backup's output"
+    )
 
 
 class ResticSummary(TypedDict, total=False):

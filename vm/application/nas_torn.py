@@ -21,7 +21,18 @@ from vm.domain import (
     VmSettings,
     forget_args,
 )
-from vm.domain.backup import ResticSnapshot, Stop, TornEntry, is_restic_snapshot, snapshot_names
+from vm.domain.backup import (
+    STRAYS_TITLE,
+    BackupMode,
+    ResticSnapshot,
+    Stop,
+    TornEntry,
+    is_restic_snapshot,
+    snapshot_names,
+    stray_snapshots,
+    strays_alert,
+    strays_text,
+)
 from vm.ports import ResticPort
 
 if TYPE_CHECKING:
@@ -193,14 +204,48 @@ def forget_snapshot(p: NasBackup, nas: NasRepo, snap: str) -> str | None:
     return None if rc == 0 else first_line(err) or f"exit {rc}"
 
 
-def retention_after_torn(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
-    """The retention, once the torn snapshots of earlier runs are forgotten (retry_torn); skipped when
-    one is not: a torn snapshot would take a good backup's place among those kept."""
+def unaccounted(p: NasBackup, vm: str, nas: NasRepo, made: str) -> tuple[str, bool] | None:
+    """Why the retention waits for snapshots of vm in this repository that no record names
+    (stray_snapshots; made: this run's own snapshot), and whether that names them (the alert then
+    names them too); None when none is left. With no NAS entry of vm in this repository in the index
+    (no backup indexed yet, or the index moved aside), nothing is compared and restic is not asked."""
+    try:
+        indexed = [
+            snap
+            for e in p.store.read_index()
+            if e["vm"] == vm and e.get("mode") == BackupMode.NAS and e.get("repository") == nas["repo"]
+            if (snap := e.get("snapshot")) is not None and snap
+        ]
+        torn = [e["snapshot"] for e in p.store.read_torn() if e["vm"] == vm and e["repository"] == nas["repo"]]
+    except (OSError, Refused) as e:
+        return f"the snapshots no record names were not checked ({e})", False
+    if not indexed:
+        return None
+    listed = nas_snapshots(p.restic, vm, nas)
+    if listed is None:
+        return (
+            f"restic snapshots did not list the snapshots of {vm}, so the snapshots no record names were not checked",
+            False,
+        )
+    strays = stray_snapshots(listed, indexed, torn, made)
+    if not strays:
+        return None
+    p.alert(STRAYS_TITLE, strays_alert(vm, strays))
+    return strays_text(vm, strays), True
+
+
+def retention_after_torn(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo, *, made: str = "") -> None:
+    """The retention, once the torn snapshots of earlier runs are forgotten (retry_torn) and no snapshot
+    of vm that no record names is left (unaccounted; made: this run's own snapshot); skipped while one
+    is: a torn snapshot would take a good backup's place among those kept."""
     why = retry_torn(p, vm, nas)
-    if why is None:
+    strays = unaccounted(p, vm, nas, made)
+    if why is None and strays is None:
         retention(cfg, p, vm, nas)
-    else:
-        p.out.say(f"  retention skipped: {why}; the repository keeps more until the next backup")
+        return
+    reasons = "; ".join([*([why] if why is not None else []), *([strays[0]] if strays is not None else [])])
+    until = "each is forgotten or kept" if strays is not None and strays[1] else "the next backup"
+    p.out.say(f"  retention skipped: {reasons}; the repository keeps more until {until}")
 
 
 def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:

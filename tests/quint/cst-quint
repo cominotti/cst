@@ -168,8 +168,10 @@ NAS_PROPERTIES: Final = (
     "keepKept",
     "consistentRead",
     "indexInRepo",
+    "strayNotCounted",
+    "goodKeptAll",
 )
-NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial")
+NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial", "nas_strays")
 CHECKS: Final[tuple[Check, ...]] = (
     *(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES),
     *(Check(NAS_SPEC, main, NAS_PROPERTIES) for main in NAS_INSTANCES),
@@ -215,6 +217,8 @@ NAS_WITNESSES: Final = (
     ("late_switch", "nas_mixed", "neverLateSwitch"),
     ("indexed", "nas_mixed", "neverIndexed"),
     ("ready_failed", "nas_mixed", "neverReadyFailed"),
+    ("backup_failed", "nas_mixed", "neverBackupFailed"),
+    ("state_unreadable", "nas_mixed", "neverStateUnreadable"),
     ("listings_unreadable", "nas_mixed", "neverListingsUnreadable"),
     ("live_listing_unreadable", "nas_mixed", "neverLiveListingUnreadable"),
     ("inactive_listing_unreadable", "nas_mixed", "neverInactiveListingUnreadable"),
@@ -232,13 +236,20 @@ NAS_WITNESSES: Final = (
     ("shut_off_same", "nas_shutoff", "neverShutOffSame"),
     ("torn_forget_failed", "nas_shutoff", "neverTornForgetFailed"),
     ("torn_drop_failed", "nas_shutoff", "neverTornDropFailed"),
-    ("torn_list_failed", "nas_shutoff", "neverTornListFailed"),
 )
 # Witnesses a run of step_ reaches only after several runs (a torn snapshot recorded, then retried): walks of
 # step_calm, the protocol without the environment's steps.
 NAS_CALM_WITNESSES: Final = (
     ("torn_retried", "nas_shutoff", "neverTornRetried"),
     ("retention_skipped", "nas_shutoff", "neverRetentionSkipped"),
+    ("torn_list_failed", "nas_shutoff", "neverTornListFailed"),
+)
+# Witnesses of the check of the snapshots no record names (nas_strays: a backup indexed, then a stray a kill
+# left), within 60 steps. The quiet run after the user adopted or forgot a named one (neverStrayAdoptedQuiet,
+# neverStrayForgottenQuiet) is one TLC reaches but no walk of the simulator does within these bounds: no trace.
+NAS_STRAY_WITNESSES: Final = (
+    ("stray_named", "nas_strays", "neverStrayNamed"),
+    ("stray_list_failed", "nas_strays", "neverStrayListFailed"),
 )
 TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
     TraceJob("walk_ab", NOCOW_SPEC, "nocow_ab", "simulator", 40, seed=1),
@@ -275,6 +286,10 @@ TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
     *(
         TraceJob(name, NAS_SPEC, main, "simulator", 40, seed=7, invariant=invariant, samples=100000, step="step_calm")
         for name, main, invariant in NAS_CALM_WITNESSES
+    ),
+    *(
+        TraceJob(name, NAS_SPEC, main, "simulator", 60, seed=7, invariant=invariant, samples=100000)
+        for name, main, invariant in NAS_STRAY_WITNESSES
     ),
 )
 TRACES_DIR: Final[Mapping[str, str]] = {NOCOW_SPEC: "btrfs/tests/quint/traces", NAS_SPEC: "vm/tests/quint/traces"}

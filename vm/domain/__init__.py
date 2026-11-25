@@ -49,6 +49,7 @@ OVERLAY_MARK = ".cst-overlay-"  # in the name of the snapshot overlay: <image>.c
 TAG = "cst-vm"  # every VM backup; plus vm:<name>
 
 KEEP_TAG = "cst-keep"  # --keep-tag: never forgotten by the retention
+ADOPTED_TAG: Final = "cst-adopted"  # added only by hand: a snapshot no record names, kept as a backup
 
 RETRY_LOCK = "30m"  # the /home NAS job may hold the repository's lock
 

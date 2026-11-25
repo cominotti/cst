@@ -269,7 +269,7 @@ def nas_run(
         f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
         f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
     )
-    retention_after_torn(cfg, p, vm, nas)
+    retention_after_torn(cfg, p, vm, nas, made=snap)
     refused = _index_nas_backup(p, vm, nas, nas_index_entry(run, nas, snap, consistency, keep))
     for line in nas_done_lines(run.notes, snap, vm, consistency, keep):
         p.out.say(line)
