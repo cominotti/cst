@@ -2746,6 +2746,24 @@ class LeftoversTest(GameProfileCase):
         out, actions = self.run_profile("tick")
         self.assertEqual((out, self.sets(actions)), ("", []))
 
+    def test_a_file_that_cannot_be_read_is_left_alone(self) -> None:
+        # A folder in game.leftovers' place (also what an EIO or a denied read does): 'off' and the tick neither
+        # take it for a missing file nor remove it; 'off' still undoes game.state's records and removes it.
+        os.makedirs(os.path.join(self.paths.leftovers, "inside"))
+        self.prior_machine_weight()
+        self.run_profile("on")
+        out, _ = self.run_profile("off")
+        self.assertIn(f"<4>game-profile: {self.paths.leftovers}: cannot be read (Is a directory): left alone, neither", out)
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "70")
+        self.assertTrue(os.path.isdir(os.path.join(self.paths.leftovers, "inside")))
+        self.no_game()
+        out, actions = self.run_profile("tick")
+        self.assertEqual((out, self.sets(actions)), ("", []))
+        out, _ = self.run_profile("off")
+        self.assertIn("cannot be read (Is a directory): left alone", out)
+        self.assertTrue(os.path.isdir(os.path.join(self.paths.leftovers, "inside")))
+
     def test_state_names_them(self) -> None:
         self.failed_off()
         out, _ = self.run_profile("state")

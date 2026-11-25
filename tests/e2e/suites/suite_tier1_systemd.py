@@ -7148,7 +7148,8 @@ PY
         tries a kept record of tester's user manager for tester and still does not start cpu-game.service (a
         stub): the old tick then acted for tester and started it. A kept record of a uid with no account is
         never set in tester's manager: kept while that uid's runtime folder is there, done once it is gone.
-        An override that cannot be removed stays kept, and the ticks that retry it run no daemon-reload."""
+        An override that cannot be removed stays kept, and the ticks that retry it run no daemon-reload. A
+        game.leftovers that cannot be read (a folder) is left alone: 'off' exits 0 and removes game.state."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -7293,6 +7294,18 @@ PY
             rm -rf /run/systemd/system.control/e2e182.slice.d
             rm -f "$flag" "$lo"
             systemctl daemon-reload
+            # A game.leftovers that cannot be read (a folder in its place) is left alone, never taken for a
+            # missing file: 'off' exits 0, says so, removes game.state and leaves the folder. The old 'off'
+            # crashed on it (IsADirectoryError) after its undos and left game.state: the profile stayed on.
+            mkdir -p "$lo/inside"
+            gp on >/dev/null
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "$lo: cannot be read (Is a directory): left alone, neither undone nor removed" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            test -d "$lo/inside"
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
+            rm -rf "$lo"
             echo E2E-OK
             """,
         ).stdout

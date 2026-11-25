@@ -13,7 +13,7 @@ import contextlib
 import os
 from typing import TYPE_CHECKING
 
-from cst_core.adapters.files import read_text, write_atomic
+from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.domain.units import LoadState
 from cpu.game.domain import Manager, show_values, transient_unit
 from cpu.game.domain.leftovers import (
@@ -31,9 +31,16 @@ if TYPE_CHECKING:
 
 def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
     """game.leftovers' entries ([] when it is not there); None for one this CST does not read (a newer
-    format, or a first line that names no version), which is left alone (say: in one warning line)."""
+    format, or a first line that names no version) or cannot read (a folder in its place, EIO, a denied
+    read), which is left alone (say: in one warning line). It is read byte for byte, as keep writes it
+    back: a file there that cannot be read is never taken for a missing one."""
     path = profile.paths.leftovers
-    text = read_text(path)
+    try:
+        text = LocalFileSystemAdapter().read_existing_text(path)
+    except OSError as e:
+        if say:
+            profile.log(4, f"{path}: cannot be read ({e.strerror}): left alone, neither undone nor removed")
+        return None
     if text is None:
         return []
     newer = newer_leftovers(path, text)
