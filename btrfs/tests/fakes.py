@@ -1554,7 +1554,9 @@ class CacheWorld(FaultPoints):
     text, None for no file, or a folder at its path, which every read, write and removal fails on with
     EISDIR), /etc/crypttab, the accounts (passwd entries by name and the caller's name, and the folder links
     the home is resolved through, as /home -> /var/home on Silverblue), the file system as paths (folders,
-    files and links; the folders ensure_private made with their owner, the tags ensure_tag wrote), the
+    files and links, each named by where it is: entry_path follows the links among its folders, as the
+    kernel walks a path, for every store and every check; the folders ensure_private made with their
+    owner, the tags ensure_tag wrote), the
     mounts (a MountTable, shared with FakeMountRunner) and what systemd has loaded of /etc/fstab (an
     FstabSystemdView, shared with FakeMountRunner, fed a new identity per write and None after a removal,
     taken at the first call of any fake as a systemd that booted with what was there).
@@ -1580,11 +1582,14 @@ class CacheWorld(FaultPoints):
         self.crypttab: str | None = None
         self.users: dict[str, CacheMountUser] = {}
         self.caller = ""
+        # The paths below are each entry's own place (entry_path: the links among its folders followed), so
+        # an entry put or asked for through a linked folder is the one at the end of the link.
         self.links: dict[str, str] = {}  # path -> the path it points to
         self.dirs: set[str] = {"/"}
-        self.files: set[str] = set()
+        self.files: dict[str, int] = {}  # path -> its write's number (a new one per write, as a new inode)
+        self.file_writes = 0
         self.made: dict[str, tuple[int, int]] = {}  # the folders ensure_private made private: path -> (uid, gid)
-        self.tags: dict[str, tuple[int, int]] = {}  # the sources whose CACHEDIR.TAG ensure_tag wrote -> its owner
+        self.tags: dict[str, tuple[int, int]] = {}  # the folders ensure_tag wrote a CACHEDIR.TAG in -> its owner
         self.table = MountTable()
         self.systemd = FstabSystemdView()
         self.reloads = 0  # the daemon-reloads that took effect
@@ -1644,6 +1649,11 @@ class CacheWorld(FaultPoints):
                 out, hops = posixpath.normpath(self.links[out]), hops + 1
         return out
 
+    def entry_path(self, path: str) -> str:
+        """Where the entry named path is: the links among its folders followed, its last part not (what
+        os.lstat looks at). Every store and every check of the world names an entry by it."""
+        return self.real_path(path, follow_last=False)
+
     def mkdirs(self, path: str) -> None:
         """The folder path and its parents, made where its links lead (os.makedirs)."""
         p = self.real_path(path)
@@ -1652,12 +1662,14 @@ class CacheWorld(FaultPoints):
             p = posixpath.dirname(p)
 
     def put_file(self, path: str) -> None:
+        """A file written at path (a new one, as a new inode, where one was), its folders made."""
         self.mkdirs(posixpath.dirname(path))
-        self.files.add(path)
+        self.file_writes += 1
+        self.files[self.entry_path(path)] = self.file_writes
 
     def put_link(self, path: str, to: str) -> None:
         self.mkdirs(posixpath.dirname(path))
-        self.links[path] = to
+        self.links[self.entry_path(path)] = to
 
     def mount_bind(self, source: str, target: str) -> None:
         """A bind of source at target in place (its target folder made), recorded as no call."""
@@ -1675,8 +1687,12 @@ class CacheWorld(FaultPoints):
 
     def exists(self, path: str) -> bool:
         """Anything at path, a dangling link too (os.path.lexists), through the links among its folders."""
-        p = self.real_path(path, follow_last=False)
+        p = self.entry_path(path)
         return p in self.dirs or p in self.files or p in self.links
+
+    def is_link(self, path: str) -> bool:
+        """A link at path, through the links among its folders (os.path.islink)."""
+        return self.entry_path(path) in self.links
 
     def is_dir(self, path: str) -> bool:
         """A folder at path, through its links (os.path.isdir)."""
@@ -1684,12 +1700,13 @@ class CacheWorld(FaultPoints):
 
     def nonempty(self, path: str) -> bool:
         """_dir_is_nonempty's answer: not there or a link is False (asked only for a non-link), a file
-        is True, a folder whether anything is in it."""
-        if path in self.files:
+        is True, a folder whether anything is in it (os.lstat, then os.scandir)."""
+        p = self.entry_path(path)
+        if p in self.files:
             return True
-        if path not in self.dirs:
+        if p not in self.dirs:
             return False
-        inside = f"{path.rstrip('/')}/"
+        inside = f"{p.rstrip('/')}/"
         return any(p.startswith(inside) for p in (*self.dirs, *self.files, *self.links))
 
     def look(self) -> None:
@@ -1832,13 +1849,15 @@ class FakeCacheFolders:
 
         def ensure() -> None:
             p = posixpath.normpath(path)
-            in_the_way = [q for q in _self_and_parents(p) if q in w.files or (q in w.links and not w.is_dir(q))]
+            in_the_way = [
+                q for q in _self_and_parents(p) if w.entry_path(q) in w.files or (w.is_link(q) and not w.is_dir(q))
+            ]
             if in_the_way:
                 raise _os_error(errno.EEXIST, in_the_way[-1])
-            if p in w.links:
+            if w.is_link(p):
                 raise _os_error(errno.ENOTDIR, p)  # O_NOFOLLOW with O_DIRECTORY on a link
             w.mkdirs(p)
-            w.made[p] = (user.uid, user.gid)
+            w.made[w.real_path(p)] = (user.uid, user.gid)
 
         w.step(f"folder {path}", ensure)
 
@@ -1850,12 +1869,12 @@ class FakeCacheFolders:
             return
 
         def write() -> None:
-            in_the_way = [q for q in _self_and_parents(source) if q in w.files]
+            in_the_way = [q for q in _self_and_parents(source) if w.entry_path(q) in w.files]
             if in_the_way:
                 raise _os_error(errno.EEXIST, in_the_way[-1])  # ensure_dir's mkdir of a file's path
             w.mkdirs(source)  # write_atomic makes the folder it writes in
-            w.files.add(tag)
-            w.tags[source] = (user.uid, user.gid)
+            w.put_file(tag)
+            w.tags[w.real_path(source)] = (user.uid, user.gid)
 
         w.step(f"tag {source}", write)
 
@@ -1882,14 +1901,14 @@ class FakeCacheHostView:
         w = self.world
         w.look()
         src, tgt = binding.source, binding.target
-        is_link = tgt in w.links
+        is_link = w.is_link(tgt)
         exists = w.exists(tgt)
         return BindingPaths(
             target_is_link=is_link,
             target_exists=exists,
             target_nonempty=False if is_link else w.nonempty(tgt),
             source_is_dir=w.is_dir(src),
-            source_is_link=src in w.links,
+            source_is_link=w.is_link(src),
             target_is_dir=exists and not is_link and w.is_dir(tgt),
         )
 
@@ -1913,8 +1932,4 @@ class FakeCacheAccounts:
             return None, f"user {name!r} does not exist"
         if user.uid < MIN_HUMAN_UID:
             return None, f"refusing system user {user.name!r} (uid={user.uid} < {MIN_HUMAN_UID})"
-        home = user.home
-        for link, to in w.links.items():
-            if home.startswith(f"{link}/"):
-                home = to + home.removeprefix(link)
-        return CacheMountUser(user.name, user.uid, user.gid, home), None
+        return CacheMountUser(user.name, user.uid, user.gid, w.real_path(user.home)), None  # os.path.realpath

@@ -93,6 +93,7 @@ class Side(Protocol):
     def is_dir(self, path: str) -> bool: ...
     def is_link(self, path: str) -> bool: ...
     def exists(self, path: str) -> bool: ...
+    def file_id(self, path: str) -> object: ...
     def add_user(self, name: str, uid: int, home: str) -> None: ...
     def caller(self, name: str) -> None: ...
     def mount_bases(self) -> None: ...
@@ -160,10 +161,14 @@ class FakeSide:
         return self.world.is_dir(path)
 
     def is_link(self, path: str) -> bool:
-        return path in self.world.links
+        return self.world.is_link(path)
 
     def exists(self, path: str) -> bool:
         return self.world.exists(path)
+
+    def file_id(self, path: str) -> object:
+        """The write that put the file at path there (a new one per write, as an inode)."""
+        return self.world.files[self.world.entry_path(path)]
 
     def add_user(self, name: str, uid: int, home: str) -> None:
         self.world.add_user(name, uid, home)
@@ -285,6 +290,11 @@ class RealSide:
 
     def exists(self, path: str) -> bool:
         return os.path.lexists(self.at(path))
+
+    def file_id(self, path: str) -> object:
+        """The file's inode (write_atomic's rename puts a new one there)."""
+        st = os.lstat(self.at(path))
+        return (st.st_dev, st.st_ino)
 
     def add_user(self, name: str, uid: int, home: str) -> None:
         with open(self.at("/etc/passwd"), "a", encoding="utf-8") as fh:
@@ -499,6 +509,19 @@ class _PortsContract(unittest.TestCase):
         f.ensure_tag(other, USER)
         self.assertTrue(self.side.is_link(f"{other}/{CACHE_TAG}"))
 
+    def test_the_tag_through_a_linked_folder_is_written_once(self) -> None:
+        self.side.mkdir("/var/elsewhere")
+        self.side.put_link(SCRATCHPAD.source, "/var/elsewhere")
+        f = self.side.folders()
+        f.ensure_tag(SCRATCHPAD.source, USER)
+        tag = f"{SCRATCHPAD.source}/{CACHE_TAG}"
+        self.assertTrue(self.side.exists(tag))
+        self.assertTrue(self.side.exists(f"/var/elsewhere/{CACHE_TAG}"))
+        first = self.side.file_id(tag)
+        f.ensure_tag(SCRATCHPAD.source, USER)  # there already, through the link: nothing
+        self.assertEqual(self.side.file_id(tag), first)
+        self.assertEqual(self.side.file_id(f"/var/elsewhere/{CACHE_TAG}"), first)
+
     def test_a_tag_in_a_missing_folder_makes_the_folder(self) -> None:
         self.side.folders().ensure_tag(SCRATCHPAD.source, USER)
         self.assertTrue(self.side.exists(f"{SCRATCHPAD.source}/{CACHE_TAG}"))
@@ -565,6 +588,26 @@ class _PortsContract(unittest.TestCase):
         )
         self.assertTrue(self.side.host().home_exists("/var/home/carol"))
         self.assertTrue(self.side.host().home_exists("/home/carol"))
+
+    def test_what_is_put_through_a_linked_home_is_there_by_both_names(self) -> None:
+        self.side.mkdir("/var/home")
+        self.side.put_link("/home", "/var/home")  # Silverblue
+        self.side.put_file("/home/carol/x")
+        self.assertTrue(self.side.exists("/home/carol/x"))
+        self.assertTrue(self.side.exists("/var/home/carol/x"))
+        self.side.mkdir("/var/elsewhere")
+        self.side.put_link("/home/carol/l", "/var/elsewhere")
+        self.assertTrue(self.side.is_link("/home/carol/l"))
+        self.assertTrue(self.side.is_link("/var/home/carol/l"))
+        carol = build_user_bindings(CacheMountUser("carol", 1002, 1002, "/home/carol"), include_scratchpad=False)[0]
+        self.side.put_file(f"/var{carol.target}/old")
+        self.assertEqual(
+            self.side.host().binding_paths(carol),
+            _paths("target_exists", "target_nonempty", "target_is_dir"),
+        )
+        dave = build_user_bindings(CacheMountUser("dave", 1003, 1003, "/home/dave"), include_scratchpad=False)[0]
+        self.side.put_link(f"/var{dave.target}", "/var/elsewhere")
+        self.assertEqual(self.side.host().binding_paths(dave), _paths("target_is_link", "target_exists"))
 
 
 class FakePortsContractTest(_PortsContract):
