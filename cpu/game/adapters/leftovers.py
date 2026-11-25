@@ -71,8 +71,9 @@ def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
 def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: Reloads, *, say: bool) -> list[Entry]:
     """Undo the entries, the last first (a property touched twice ends at its oldest value), each record of
     the user manager for the user its entry names; the ones whose undo failed, in their order, each with the
-    uid it was for (say: each named in a warning line). An entry whose uid no account has now is never
-    undone in another user's manager: it is done when that uid's user manager is gone, else kept."""
+    uid it was for (keep says them). An entry whose uid no account has now is never undone in another
+    user's manager: it is done when that uid's user manager is gone, else kept. say: see
+    GameProfile.undo_record."""
     failed: list[Entry] = []
     for uid, rec in reversed(entries):
         if uid is not None and not profile.act_for(uid, say=False):
@@ -84,18 +85,16 @@ def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: Reloads
         else:
             user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
         failed.append((user, rec))
-        if say:
-            what = undo_text(rec, profile.paths.epp)
-            profile.log(4, f"off: could not undo {what}: kept in {profile.paths.leftovers} for the next off and tick")
     failed.reverse()
     return failed
 
 
 def keep(profile: GameProfile, failed: Sequence[Entry], *, readable: bool, off: bool = True) -> bool:
     """game.leftovers holds the failed entries afterwards (removed when there are none); whether it holds
-    them. With a file this CST does not read (readable False), left as it is, or one it cannot write (a full
-    /run), each failed one is said lost (off: in 'off''s words, else the tick's). The old file goes then: it
-    would have each entry it holds, undone or not, undone and said again at every tick."""
+    them, each then said kept in a warning line (off: 'off' says them; the tick does not). With a file this
+    CST does not read (readable False), left as it is, or one it cannot write (a full /run), each failed one
+    is said lost instead, once (off: in 'off''s words, else the tick's). The old file goes then: it would
+    have each entry it holds, undone or not, undone and said again at every tick."""
     path = profile.paths.leftovers
     if readable and not failed:
         with contextlib.suppress(FileNotFoundError):
@@ -108,6 +107,10 @@ def keep(profile: GameProfile, failed: Sequence[Entry], *, readable: bool, off: 
             with contextlib.suppress(OSError):
                 os.unlink(path)
         else:
+            if off:
+                for _uid, rec in failed:
+                    what = undo_text(rec, profile.paths.epp)
+                    profile.log(4, f"off: could not undo {what}: kept in {path} for the next off and tick")
             return True
     who = "off: " if off else ""
     for _uid, rec in failed:

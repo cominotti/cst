@@ -2791,6 +2791,7 @@ class LeftoversTest(GameProfileCase):
             out,
         )
         self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)  # none is kept
+        self.assertNotIn("kept in", out)  # said not undone, once: never kept first
         self.assertFalse(os.path.exists(self.state))
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
@@ -2840,6 +2841,7 @@ class LeftoversTest(GameProfileCase):
         self.systemd.fail_set.add(("sys", "machine.slice"))
         out, _ = self.run_profile("off")
         self.assertIn(f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {self.paths.leftovers}", out)
+        self.assertNotIn("kept in", out)  # said not undone, once: never kept first
         self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)
         self.assertEqual(self.read(self.paths.leftovers), newer)
 

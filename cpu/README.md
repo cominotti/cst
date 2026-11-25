@@ -900,10 +900,10 @@ and deletes `game.state` and `game.intended` (section 7.5).
 written, a runtime override that cannot be removed), `off` still undoes
 every other record and removes `game.state`, so the profile is off. An
 override that is still there gets no `daemon-reload` of its own, neither
-from `off` nor from the ticks that retry it. It names the failed step in the journal
+from `off` nor from the ticks that retry it. It writes its record
+to `/run/cpu-setup/game.leftovers`, then names the failed step in the journal
 (`<4>off: could not undo machine.slice CPUWeight=70: kept in
-/run/cpu-setup/game.leftovers for the next off and tick`), writes its record
-to `/run/cpu-setup/game.leftovers`, and ends with `..., except N setting(s)
+/run/cpu-setup/game.leftovers for the next off and tick`), and ends with `..., except N setting(s)
 kept in /run/cpu-setup/game.leftovers`. The next `off` and every watchdog
 `tick` while the profile is off undo the kept records again and keep only
 those that fail again; the file is removed when none is left. An `off` with
@@ -933,7 +933,7 @@ kept settings (`leftovers: N setting(s) 'off' could not undo, ...`), and
 `cst doctor` warns about them, by name
 ([doctor/README.md, section 8.4](../doctor/README.md#84-settings-off-could-not-undo)). When
 `game.leftovers` cannot be written (`/run` full) the journal says each
-setting is not undone (`<3>off: could not keep ... in
+setting is not undone, once, instead of kept (`<3>off: could not keep ... in
 /run/cpu-setup/game.leftovers: not undone`, without `off:` from the tick)
 and the old file is removed, so what it held is neither undone nor said
 again at every tick; `off` then ends with `..., except N setting(s) not
