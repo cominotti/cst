@@ -600,6 +600,7 @@ class UserFiles:
         this is a child process of its own (as_user): it lowers its own
         priority for the copy and the comparison."""
         for p in parts:
+            self.drop_marked(p["new"])  # what a cut u_drop left, without its journal (as u_prepare)
             for x in (p["new"], p["dst"]):
                 if kind(x) != LstatKind.ABSENT:
                     raise Unexpected(f"{x} exists already: remove it or move it back")
@@ -698,11 +699,12 @@ class UserFiles:
         return as_user(self.pw, self.home, is_bool, self.u_steam_new_written, j)
 
     def u_steam_rollback(self, j: SteamJournal) -> bool:
-        """Undo a switch, or what an interruption left of one: the manifest
-        leaves the new library first, the game comes back first. If a source
-        path was created again meanwhile, nothing is deleted (Unexpected)."""
+        """Undo a switch, or what an interruption left of one: the manifest leaves the new library
+        first, the game comes back first; a copy a cut u_drop left (marked) goes first, unchecked. If
+        a source path was created again meanwhile, nothing is deleted (Unexpected)."""
         parts = j["parts"]
         for p in parts:
+            self.drop_marked(p["new"])
             if kind(p["old"]) != LstatKind.ABSENT and kind(p["src"]) != LstatKind.ABSENT:
                 raise Unexpected(
                     f"{p['src']} was created again while the data waited in {p['old']}: move what you "
@@ -720,7 +722,7 @@ class UserFiles:
         return True
 
     def drop_steam_copies(self, j: SteamJournal) -> None:
-        """u_steam_rollback's last step: the copies go, unless one was written to."""
+        """u_steam_rollback's last step: the copies go (u_drop), unless one was written to."""
         for p in j["parts"]:
             if kind(p["new"]) != LstatKind.ABSENT:
                 if "stamp2" in j and self.written_since(p["new"], j["stamp2"]):
@@ -728,14 +730,14 @@ class UserFiles:
                         f"the data is back at {p['src']}, but the copy {p['new']} was written to as well: "
                         f"copy what you need from it, delete it, then run 'bulk steam apply' again"
                     )
-                self.u_rmtree(p["new"])
+                self.u_drop(p["new"])
 
     def steam_rollback(self, j: SteamJournal) -> bool:
         return as_user(self.pw, self.home, is_bool, self.u_steam_rollback, j)
 
     def u_steam_finish(self, j: SteamJournal) -> bool:
-        for p in j["parts"]:
-            for x in (p["old"], p["new"]):
+        for p in j["parts"]:  # the old copies, and a copy still there (marked or not)
+            for x in (p["old"], p["new"], p["new"] + DROP_MARK):
                 if kind(x) != LstatKind.ABSENT:
                     self.u_rmtree(x)
         return True
