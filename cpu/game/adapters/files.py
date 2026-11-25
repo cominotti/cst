@@ -9,6 +9,7 @@ import os
 from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cpu.game.adapters.host import read_snapshot
+from cpu.game.domain import RUN_FOLDER_MODE
 
 
 class GameStateFiles:
@@ -108,16 +109,16 @@ class GameUnitFiles:
 class GameRunLock:
     """The run lock: the run folder made (0755, also when it is there), the lock taken within its wait."""
 
-    def __init__(self, run: str, lock: str, *, timeout: float) -> None:
-        self._run, self._lock = run, lock
+    def __init__(self, run: str, lock: str, *, timeout: float, run_mode: int = RUN_FOLDER_MODE) -> None:
+        self._run, self._lock, self._run_mode = run, lock, run_mode
         self._timeout = timeout  # how long take() waits for a lock held elsewhere, in seconds
         self._fd: int | None = None
 
     def take(self) -> bool:
         """Held now; False when it stays busy or cannot be taken."""
         try:
-            ensure_dir(self._run, 0o755)
-            os.chmod(self._run, 0o755)  # install -d -m 0755 sets the mode of a folder already there too
+            ensure_dir(self._run, self._run_mode)
+            os.chmod(self._run, self._run_mode)  # install -d -m 0755 sets the mode of a folder already there too
             self._fd = take_lock(self._lock, wait=True, mode=0o644, timeout=self._timeout)
         except OSError:
             self._fd = None
