@@ -30,6 +30,7 @@ from vm.domain.backup import (
     MANIFEST_JSON,
     NO_BACKUPS_LIST,
     NO_TORN_LIST,
+    INDEX_LOCK_TIMEOUT,
     TORN_LOCK_TIMEOUT,
     BackupMode,
     Fingerprint,
@@ -160,6 +161,38 @@ def write_index(entries: Sequence[IndexEntry], path: str, carried: Sequence[obje
     doc = {"version": INDEX_FORMAT.version, "backups": [*entries, *carried]}
     text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     write_atomic(path, text, mode=0o644, relabel=False)
+
+
+# The lock of the index, in RUN_DIR: the index is shared by every VM's backups (local and NAS), and two
+# of them (two timers) can end at once; the per-VM lock does not cover that. Outside the nas-<vm>.lock
+# names of VmLock (cst doctor reads only those), as TORN_LOCK.
+INDEX_LOCK: Final = "backup-index.lock"
+
+
+def update_index(
+    cfg: VmSettings,
+    change: Callable[[list[IndexEntry]], list[IndexEntry]],
+    *,
+    lock_timeout: float = INDEX_LOCK_TIMEOUT,
+) -> None:
+    """Read the index, change its entries, write it back (write_index, the stored entries this cst vm does
+    not understand carried): under the index's lock (RUN_DIR/INDEX_LOCK, 0644), so two VMs' backups never
+    lose each other's entry. IndexRefused when the lock stays taken lock_timeout seconds, or as
+    stored_backups; OSError when it cannot be written."""
+    ensure_dir(cfg.paths.run_dir, 0o755)
+    lock = os.path.join(cfg.paths.run_dir, INDEX_LOCK)
+    fd = take_lock(lock, wait=True, mode=0o644, timeout=lock_timeout)
+    if fd is None:
+        raise IndexRefused(
+            f"{lock} stayed taken for {lock_timeout:g} s (another backup writing the index)",
+            "nothing is wrong with the index; the next backup of the VM does not add this one",
+        )
+    try:
+        stored = stored_backups(cfg)
+        entries = change([e for e in stored if is_index_entry(e)])
+        write_index(entries, cfg.paths.index, [e for e in stored if not is_index_entry(e)])
+    finally:
+        os.close(fd)
 
 
 # The lock of the torn record, in RUN_DIR: the record is shared by every VM, and the NAS backups of two
@@ -373,11 +406,8 @@ class BackupFiles(LocalFileSystemAdapter):
     def drop_torn(self, entries: Sequence[TornEntry]) -> None:
         drop_torn(self.cfg, entries)
 
-    def write_index(self, entries: Sequence[IndexEntry]) -> None:
-        # Read again (the caller holds the VM's lock, as when it read): the entries this cst vm does
-        # not understand were never shown to the caller, so none of them is dropped.
-        carried = [e for e in stored_backups(self.cfg) if not is_index_entry(e)]
-        write_index(entries, self.cfg.paths.index, carried)
+    def update_index(self, change: Callable[[list[IndexEntry]], list[IndexEntry]]) -> None:
+        update_index(self.cfg, change)
 
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)

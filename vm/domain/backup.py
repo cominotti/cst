@@ -181,6 +181,9 @@ NO_TORN_LIST = 'no "torn" list'
 
 # How long a change of the torn record waits for another one (a NAS backup of another VM) to end.
 TORN_LOCK_TIMEOUT: Final = MINUTE
+# How long a backup waits for the index's lock (another VM's backup writing the index) before it leaves
+# its backup out of the index.
+INDEX_LOCK_TIMEOUT: Final = MINUTE
 
 
 def stored_torn(data: object) -> list[object] | None:

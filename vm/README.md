@@ -134,7 +134,13 @@ of the backups with the VM, time, path, mode, package versions and
 deployment, and **no secrets**. `cst vm list`, `cst vm status` and
 `cst doctor` read it as your user. It is replaced atomically and written to
 disk (fsync) at once, so a power loss right after a backup cannot hide it.
-Its `"version"` (format 1; an index without it is read as before) tells the
+Every backup (local or NAS, of any VM) reads, changes and writes it under one
+lock, `/run/cst-vm/backup-index.lock`: two VMs' backups that end at the same
+time (two timers) never lose each other's entry. A NAS backup asks restic for
+its listing before it takes the lock, so a slow NAS never holds another VM's
+backup. A backup that waits a minute for the lock (another backup still
+writing the index) is kept but left out of the index, with exit 1 and a
+message that says so. Its `"version"` (format 1; an index without it is read as before) tells the
 readers which format they read: an index of a newer `cst vm` (after you went
 back to an older CST) is left as it is, and `backup`, `backup --nas`, `list` and
 `status` stop with exit 1 and a message that names the format, before anything

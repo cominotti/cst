@@ -637,7 +637,7 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
     or that the index is not this cst vm's."""
     snap = entry["snapshot"]
     try:
-        p.store.write_index(nas_index(p.store.read_index(), entry, None))
+        p.store.update_index(lambda entries: nas_index(entries, entry, None))
     except IndexRefused as e:
         return Stop(f"{stop}; {_not_indexed(snap, vm, e)}")
     except OSError as e:
@@ -678,10 +678,12 @@ def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) ->
     # since: the snapshot stays, and its notes and restore line are printed before the refusal.
     snap = entry["snapshot"]
     try:
-        entries = p.store.read_index()
+        # An index this cst vm cannot write refuses before restic is asked. The listing comes before the
+        # index's lock: a restic call never holds another VM's backup.
+        p.store.read_index()
         listing = nas_snapshot_ids(p.restic, vm, nas)
         alive, unkept = (None, frozenset[str]()) if listing is None else listing
-        p.store.write_index(nas_index(entries, entry, alive, unkept=unkept))
+        p.store.update_index(lambda entries: nas_index(entries, entry, alive, unkept=unkept))
     except IndexRefused as e:
         return Refused(_not_indexed(snap, vm, e))
     except OSError as e:

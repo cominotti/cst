@@ -6,17 +6,21 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import fcntl
 import json
 from dataclasses import dataclass, field, replace
 import os
+import stat
 import tempfile
+import threading
 from typing import override
 import unittest
 
 from cst_core.domain.errors import Refused
 from vm import domain as vm_domain, wiring as vm_wiring
 from vm.adapters import conf_number
-from vm.adapters.backup import describe_entry
+from vm.adapters.backup import describe_entry, read_index, update_index
+from vm.application.backup import index_local_backup
 from vm.application import nas as vm_app_nas
 from vm.domain import backup as vm_domain_backup
 from vm.tests.test_vm_nas import (
@@ -298,6 +302,130 @@ class NasKeepFollowsTagsTest(unittest.TestCase):
         self.assertEqual(
             [(e["snapshot"], e.get("keep")) for e in run.store.written[-1]], [("new22222", None), (SNAP_ID, None)]
         )
+
+
+class _SharedIndex(FakeNasStore):
+    """The index every VM's backups share, as a list; another VM's backup may write it meanwhile."""
+
+    def __init__(self) -> None:
+        super().__init__([DISK])
+        self.index: list[vm_domain_backup.IndexEntry] = []
+
+    @override
+    def read_index(self) -> list[vm_domain_backup.IndexEntry]:
+        return list(self.index)
+
+    @override
+    def write_index(self, entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+        super().write_index(entries)
+        self.index = list(entries)
+
+
+class IndexLockTest(unittest.TestCase):
+    """One lock for the index every VM's backups share, around each read-modify-write (update_index):
+    two VMs' timers ending at once never lose an entry."""
+
+    def test_the_index_is_read_after_the_listing(self) -> None:
+        # VM b's backup writes its entry while restic lists VM a's snapshots (outside the index's lock).
+        store = _SharedIndex()
+        theirs = _kept_entry("b0000000") | {"vm": "b", "keep": None}
+
+        class _Meanwhile(FakeNasRestic):
+            @override
+            def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+                if args[0] == "snapshots":
+                    store.index = [*store.index, theirs]
+                return super().run(env, args, timeout)
+
+        _Run(store=store, restic=_Meanwhile()).go()
+        self.assertEqual(sorted(e["snapshot"] for e in store.index), sorted(["b0000000", SNAP_ID]))
+
+    def _cfg(self, tmp: str) -> vm_domain.VmSettings:
+        return vm_wiring.vm_settings(
+            {"CST_VM_INDEX": os.path.join(tmp, "lib", "vm-backups.json"), "CST_VM_RUN_DIR": os.path.join(tmp, "run")}
+        )
+
+    def test_a_second_writer_waits_for_the_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            inside, go_on, errors = threading.Event(), threading.Event(), list[Exception]()
+
+            def first(entries: list[vm_domain_backup.IndexEntry]) -> list[vm_domain_backup.IndexEntry]:
+                inside.set()
+                go_on.wait(10)
+                return [*entries, _kept_entry("a0000000")]
+
+            def writer(
+                change: Callable[[list[vm_domain_backup.IndexEntry]], list[vm_domain_backup.IndexEntry]],
+            ) -> None:
+                try:
+                    update_index(cfg, change, lock_timeout=10)
+                except (OSError, vm_domain_backup.IndexRefused) as e:  # handed to the test's thread
+                    errors.append(e)
+
+            a = threading.Thread(target=writer, args=(first,))
+            b = threading.Thread(target=writer, args=(lambda entries: [*entries, _kept_entry("b0000000")],))
+            a.start()
+            self.assertTrue(inside.wait(10))
+            b.start()
+            b.join(0.5)
+            b_waited = b.is_alive()
+            go_on.set()
+            a.join(10)
+            b.join(10)
+            self.assertTrue(b_waited, "the second writer did not wait for the lock")
+            self.assertEqual(errors, [])
+            got = sorted(e["snapshot"] for e in read_index(cfg))
+            self.assertEqual(got, ["a0000000", "b0000000"])
+
+    def test_a_lock_that_stays_taken_leaves_the_backup_out_and_says_why(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            old = os.umask(0o077)
+            self.addCleanup(os.umask, old)
+            update_index(cfg, lambda entries: entries)
+            lock = os.path.join(tmp, "run", "backup-index.lock")
+            self.assertEqual(stat.S_IMODE(os.stat(lock).st_mode), 0o644)
+            fd = os.open(lock, os.O_WRONLY)
+            self.addCleanup(os.close, fd)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with self.assertRaises(vm_domain_backup.IndexRefused) as e:
+                update_index(cfg, lambda entries: [*entries, _kept_entry("a0000000")], lock_timeout=0.2)
+            self.assertEqual(e.exception.problem, f"{lock} stayed taken for 0.2 s (another backup writing the index)")
+            self.assertNotIn("move it aside", str(e.exception))
+            self.assertEqual(read_index(cfg), [])
+
+    def test_the_local_backup_writes_the_index_under_its_lock(self) -> None:
+        class _Recorded(FakeNasStore):
+            updates = 0
+
+            @override
+            def write_index(self, entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+                if not self.updates:
+                    raise AssertionError("the index written without its lock")
+                super().write_index(entries)
+
+            @override
+            def update_index(
+                self, change: Callable[[list[vm_domain_backup.IndexEntry]], list[vm_domain_backup.IndexEntry]]
+            ) -> None:
+                self.updates += 1
+                super().update_index(change)
+
+        store = _Recorded([DISK])
+        manifest: vm_domain_backup.Manifest = {
+            "vm": "win",
+            "uuid": "u",
+            "timestamp": STAMP,
+            "epoch": NOW,
+            "mode": "reflink",
+            "files": [],
+            "versions": {},
+            "deployment": None,
+            "notes": [],
+        }
+        self.assertIsNone(index_local_backup(store, manifest, "/b/win-1"))
+        self.assertEqual((store.updates, [[e.get("path") for e in w] for w in store.written]), (1, [["/b/win-1"]]))
 
 
 if __name__ == "__main__":

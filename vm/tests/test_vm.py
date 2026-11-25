@@ -242,6 +242,7 @@ class Scratch(unittest.TestCase):
             "CST_VM_NOW": str(NOW),
             "CST_VM_BACKUP_DIR": self.backups,
             "CST_VM_INDEX": self.index,
+            "CST_VM_RUN_DIR": os.path.join(self.tmp, "run"),
             "CST_VM_SWTPM_DIR": self.swtpm,
             "CST_PROG": "cst vm",
             "CST_VM_CPU_CONF": os.path.join(self.tmp, "cpu-setup.conf"),

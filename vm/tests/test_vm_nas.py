@@ -2660,7 +2660,13 @@ class FakeNasStore:
         return []
 
     def write_index(self, entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+        """A helper of update_index (no longer a port call): each index written, recorded."""
         self.written.append(list(entries))
+
+    def update_index(
+        self, change: Callable[[list[vm_domain_backup.IndexEntry]], list[vm_domain_backup.IndexEntry]]
+    ) -> None:
+        self.write_index(change(self.read_index()))
 
     def read_torn(self) -> list[vm_domain_backup.TornEntry]:
         return []
