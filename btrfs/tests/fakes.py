@@ -1603,7 +1603,8 @@ class CacheWorld(FaultPoints):
 
     def fail_at(self, point: str, n: int, err: OSError) -> None:
         """The n-th call of point from now fails with err (once); a failure fail() armed there answers the
-        other calls, before and after it, as it would have without this one."""
+        other calls, before and after it, as it would have without this one (the n-th call, when it runs,
+        uses up one call of a counted one, as a call that failure answered would)."""
         self.failing_at[point] = (n, err)
         self.seen[point] = 0
 
@@ -1619,10 +1620,12 @@ class CacheWorld(FaultPoints):
                 try:
                     return super().step(point, effect, failed)
                 finally:
+                    ran = self.failing[point][1] == 0  # the call ran (not a plan's FAIL there, nor a dead run)
                     if kept is None:
                         del self.failing[point]
                     else:
-                        self.failing[point] = kept
+                        err, left = kept
+                        self.failing[point] = (err, left - 1 if ran and left is not None and left > 0 else left)
         return super().step(point, effect, failed)
 
     # ---- the start state ---------------------------------------------------------------------------

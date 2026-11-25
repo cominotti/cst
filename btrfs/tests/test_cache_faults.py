@@ -422,3 +422,34 @@ class CacheWorldStagingTest(unittest.TestCase):
             answers,
             ["umount: target is busy", "Failed to reload daemon", "umount: target is busy", "umount: target is busy"],
         )
+
+    def test_a_one_shot_fault_uses_up_one_call_of_a_counted_failure(self) -> None:
+        busy, reload, unmounted = "umount: target is busy", "Failed to reload daemon", "unmounted"
+        # without the fail_at: busy, busy, unmounted, unmounted; the other calls answer as they would
+        for n, expected in (
+            (1, [reload, busy, unmounted, unmounted]),
+            (2, [busy, reload, unmounted, unmounted]),
+            (3, [busy, busy, reload, unmounted]),
+        ):
+            with self.subTest(n=n):
+                world = CacheWorld()
+                world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY, times=2)
+                world.fail_at("umount /var/home/danilo/.cache", n, RELOAD_FAILED)
+                answers = [
+                    world.step("umount /var/home/danilo/.cache", lambda: unmounted, lambda err: str(err.strerror))
+                    for _ in range(4)
+                ]
+                self.assertEqual(answers, expected)
+
+    def test_a_one_shot_fault_the_plan_failed_first_uses_up_nothing(self) -> None:
+        world = CacheWorld()
+        world.plan.arm((FaultMode.FAIL, 1))  # the plan's own failure, before the call runs
+        world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY, times=2)
+        world.fail_at("umount /var/home/danilo/.cache", 1, RELOAD_FAILED)
+        answers = [
+            world.step("umount /var/home/danilo/.cache", lambda: "unmounted", lambda err: str(err.strerror))
+            for _ in range(4)
+        ]
+        self.assertEqual(
+            answers, ["No space left on device", "umount: target is busy", "umount: target is busy", "unmounted"]
+        )
