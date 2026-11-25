@@ -775,14 +775,19 @@ not derive from it.
 - `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
   unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
   hand-edited settings, crypttab and fstab lines (CST's, an older CST's,
-  twice, other options, written by hand, a folder), kernels, partitions,
-  zram and install records: each refusal leaves every file as it was and
+  twice, other options, written by hand, a folder), the five files apply
+  writes whole (absent, CST's, someone else's, a folder), kernels,
+  partitions, zram and install records: each refusal leaves every file as it was and
   runs no systemctl, sysctl or zram call, and an apply that exits 0 records
   swap's files and changes nothing more when run again. Its first run, on
   the code before, found that apply wrote crypttab before it refused an
   fstab it could not read, and that with an install record of a newer CST
   it wrote crypttab and fstab and started swap0 before the installer
-  refused; apply now refuses both before its first write. `mbt_game_state.py`,
+  refused; apply now refuses both before its first write. Run on the code
+  before R17's fix, it found that a folder in place of
+  `/etc/tmpfiles.d/zswap.conf` was refused only after crypttab and fstab
+  were written and swap0 started; apply now refuses a file it writes whole
+  that it cannot read before its first write too. `mbt_game_state.py`,
   `mbt_game_profile.py` and `mbt_swap_apply.py` took 6.2 s together at
   `--jobs 1` and 2.8 s at `--jobs 4` (`--profile ci`, a shared workstation).
 - `mbt_bulk_items.py`: btrfs-bulk's classify, apply and recover over four

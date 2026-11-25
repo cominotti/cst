@@ -10476,3 +10476,233 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_187_swap_apply_refuses_a_path_in_the_way_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, four times: a
+        folder where /etc/tmpfiles.d/zswap.conf goes (plan's row of the file is "?" and says apply refuses
+        it), a folder where /etc/systemd/zram-generator.conf goes (apply renames a link over it), a folder
+        where the legacy /etc/sysctl.d/99-zram-tuning.conf is (apply unlinks it), and a file in place of
+        /etc/systemd/system/machine.slice.d (the folder of the drop-in apply writes; the real one moved
+        aside). The test's own trap puts each back before swap_cleanup runs. Each time apply exits 1 with
+        "<file>: cannot be read: nothing was changed", "<file>: a folder is in its place: nothing was
+        changed" or "<file>: <folder> is not a folder: nothing was changed" on stderr, and every file,
+        link, mode and owner under /etc and the scratch tree, and the install record, are as before (no
+        crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply wrote crypttab and fstab and
+        started swap0's step first, and failed later (at the zswap step, or with "Is a directory" or "Not
+        a directory"). With each one put back, the same apply works and a second one changes nothing."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/tmpfiles.d/zswap.conf
+ZRAM=/etc/systemd/zram-generator.conf
+OLD=/etc/sysctl.d/99-zram-tuning.conf
+DROPIN="$DROPIN_DIR/10-swap-memory-low.conf"
+NOTE="cannot be read, even as root: apply refuses before it writes anything"
+made=""
+put_back() {
+    case "$made" in
+        conf) rm -rf "$CONF" ;;
+        zram) rmdir "$ZRAM" ;;
+        old) rmdir "$OLD" ;;
+        dropin) rm -f "$DROPIN_DIR"; mv "$W/dropin.real" "$DROPIN_DIR" ;;
+    esac
+    made=""
+}
+trap 'put_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+refused() {
+    s0="$(snap)"
+    r0="$(record)"
+    : >"$W/calls"
+    swap_run apply
+    [[ $rc == 1 ]] || fail "apply with $1 exited $rc"
+    grep -qF "swap: ERROR: $2" <<<"$err" || fail "apply's message with $1"
+    [[ "$out" != *"written:"* ]] || fail "apply with $1 wrote before it refused"
+    [[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply with $1 reached swap0's step"
+    [[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+    [[ "$(snap)" == "$s0" ]] || fail "a refused apply with $1 changed /etc or the scratch tree"
+    [[ "$(record)" == "$r0" ]] || fail "a refused apply with $1 changed the install record"
+    if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply with $1 ran sysctl"; fi
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there before the test"
+[[ ! -d "$ZRAM" && ! -e "$OLD" && ! -L "$OLD" && -d "$DROPIN_DIR" && ! -L "$DROPIN_DIR" ]] \
+    || fail "the container's files are not as the test expects"
+mkdir -p "$CONF"
+made=conf
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a folder in place of $CONF exited $rc"
+grep -qE "^  \?  +tmpfiles\.d/zswap\.conf +$NOTE\$" <<<"$out" || fail "plan's row of $CONF"
+refused "a folder in place of $CONF" "$CONF: cannot be read: nothing was changed"
+put_back
+rm -f "$ZRAM"  # the image's own, if any: swap_cleanup puts it back
+mkdir "$ZRAM"
+made=zram
+refused "a folder in place of $ZRAM" "$ZRAM: a folder is in its place: nothing was changed"
+put_back
+mkdir "$OLD"
+made=old
+refused "a folder in place of $OLD" "$OLD: a folder is in its place: nothing was changed"
+put_back
+mv "$DROPIN_DIR" "$W/dropin.real"
+: >"$DROPIN_DIR"
+made=dropin
+refused "a file in place of $DROPIN_DIR" "$DROPIN: $DROPIN_DIR is not a folder: nothing was changed"
+put_back
+
+# Each one put back: the same apply works, and a second one changes nothing.
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with each one put back exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+grep -qF "written:   $CONF" <<<"$out" || fail "$CONF written"
+[[ -f "$CONF" ]] || fail "$CONF is not a file"
+[[ "$(readlink "$ZRAM")" == /dev/null ]] || fail "$ZRAM is not masked"
+[[ -f "$DROPIN" ]] || fail "$DROPIN is not a file"
+s1="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_188_swap_apply_refuses_an_uresourced_conf_it_cannot_copy_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and, where
+        /etc/uresourced.conf goes (the image's own moved aside first; the test's trap removes what it put
+        there and puts it back before swap_cleanup runs), first a folder, then a link to a folder, then a
+        link to a FIFO (apply copies the file aside through the link before it writes it; plan, bounded by
+        a timeout, reads nothing through the link): plan's row of the file is "?" and says apply refuses
+        it; apply exits 1 with "<file>: cannot be read: nothing was changed" on stderr, and every file,
+        link, mode and owner under /etc and the scratch tree, and the install record, are as before (no
+        crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply wrote crypttab and fstab,
+        started swap0's step, set zswap, masked zram and ran sysctl first, and failed at the copy with
+        "Is a directory"; with the FIFO, plan blocked in its open. With the image's file back, the same
+        apply works and a second one changes nothing. Last, on a machine not yet applied again
+        (swap_cleanup, then swap_setup), a link there to /dev/null (a masked vendor file) and no .bak:
+        plan's row is "update", apply exits 0 with an empty regular .pre-swap-config.bak of mode 0644
+        and CST's file in place, and a second apply changes nothing; the image's file is put back.
+        Before, plan said "?" there too and apply refused the link."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/uresourced.conf
+NOTE="cannot be read, even as root: apply refuses before it writes anything"
+conf_made=""
+conf_back() {
+    if [[ -n "$conf_made" ]]; then rm -rf "$CONF"; fi
+    if [[ -e "$W/uresourced.real" ]]; then mv "$W/uresourced.real" "$CONF"; fi
+}
+trap 'conf_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+refused() {
+    swap_run plan
+    [[ $rc == 0 ]] || fail "plan with $1 exited $rc"
+    grep -qE "^  \?  +uresourced\.conf +$NOTE\$" <<<"$out" || fail "plan's row of $CONF with $1"
+    s0="$(snap)"
+    r0="$(record)"
+    : >"$W/calls"
+    swap_run apply
+    [[ $rc == 1 ]] || fail "apply with $1 exited $rc"
+    grep -qF "ERROR: $CONF: cannot be read: nothing was changed" <<<"$err" || fail "apply's message with $1"
+    [[ "$out" != *"written:"* ]] || fail "apply with $1 wrote before it refused"
+    [[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply with $1 reached swap0's step"
+    [[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+    [[ ! -e "$CONF.pre-swap-config.bak" && ! -L "$CONF.pre-swap-config.bak" ]] || fail "$CONF's .bak was written"
+    [[ "$(snap)" == "$s0" ]] || fail "a refused apply with $1 changed /etc or the scratch tree"
+    [[ "$(record)" == "$r0" ]] || fail "a refused apply with $1 changed the install record"
+    if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply with $1 ran sysctl"; fi
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -d "$CONF" && ! -L "$CONF" ]] || fail "$CONF is a folder or a link before the test"
+if [[ -e "$CONF" ]]; then mv "$CONF" "$W/uresourced.real"; fi
+mkdir "$CONF"
+conf_made=1
+refused "a folder in its place"
+rmdir "$CONF"
+mkdir "$W/ures-dir"
+ln -s "$W/ures-dir" "$CONF"
+refused "a link to a folder in its place"
+rm "$CONF"
+mkfifo "$W/ures-fifo"
+ln -s "$W/ures-fifo" "$CONF"
+# Bounded: plan read the file through the link before, and blocked in the FIFO's open.
+rc=0
+timeout 60 "$CST" swap plan >"$W/out" 2>"$W/err" || rc=$?
+[[ $rc != 124 ]] || fail "plan blocked on a link to a FIFO"
+refused "a link to a FIFO in its place"
+
+# The image's file back (or none): the same apply works, and a second one changes nothing.
+conf_back
+conf_made=""
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with $CONF back exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file"
+s1="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+
+# A link at $CONF to /dev/null (a masked vendor file), no .bak, on a machine not yet applied
+# (swap_cleanup, then swap_setup again): plan's row is "update"; apply copies it aside as an empty
+# 0644 .bak, reading nothing from the device, writes CST's file and exits 0; a second apply changes
+# nothing. Before, plan said "?" and apply refused it as a link to anything but a file.
+BAK="$CONF.pre-swap-config.bak"
+swap_cleanup
+swap_setup
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -d "$CONF" && ! -L "$CONF" && ! -e "$BAK" && ! -L "$BAK" ]] || fail "$CONF or its .bak is not as the test left it"
+if [[ -e "$CONF" ]]; then mv "$CONF" "$W/uresourced.real"; fi
+ln -s /dev/null "$CONF"
+conf_made=1
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a link to /dev/null in its place exited $rc"
+grep -qE "^  update +uresourced\.conf " <<<"$out" || fail "plan's row of $CONF with a link to /dev/null"
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with a link to /dev/null in its place exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written with a link to /dev/null"
+[[ -f "$BAK" && ! -L "$BAK" && ! -s "$BAK" ]] || fail "$BAK is not an empty file"
+[[ "$(stat -c %a "$BAK")" == 644 ]] || fail "$BAK's mode is $(stat -c %a "$BAK")"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file after apply"
+cmp -s "$SRC/units/uresourced.conf" "$CONF" || fail "$CONF is not CST's file"
+s2="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply after the link to /dev/null exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply after the link to /dev/null wrote"
+[[ "$(snap)" == "$s2" ]] || fail "a second apply after the link to /dev/null changed /etc or the scratch tree"
+# What the test found back in place (the image's file, or none); swap_cleanup removes the .bak.
+conf_back
+conf_made=""
+if [[ -e "$W/orig/uresourced.conf" ]]; then
+    cmp -s "$W/orig/uresourced.conf" "$CONF" || fail "$CONF is not the image's file again"
+else
+    [[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there, where the image had none"
+fi
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
