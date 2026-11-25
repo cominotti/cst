@@ -116,8 +116,7 @@ class GameRunLock:
     def take(self) -> bool:
         """Held now; False when it stays busy or cannot be taken."""
         try:
-            ensure_dir(self._run, 0o755)
-            os.chmod(self._run, 0o755)  # install -d -m 0755 sets the mode of a folder already there too
+            ensure_dir(self._run, 0o755, set_mode=True)  # as install -d -m 0755: a folder already there too
             self._fd = take_lock(self._lock, wait=True, mode=0o644, timeout=self._timeout)
         except OSError:
             self._fd = None
