@@ -9,8 +9,8 @@ import sys
 from typing import assert_never
 
 from btrfs.bulk.application.commands import boot_run, keep_ids, keep_report, steam_apply, steam_print, steam_survey
-from btrfs.bulk.application.items import apply, exit_status, report
-from btrfs.bulk.domain import BY_ID, BadSettings, BulkCommand, NoUser, bulk_command, split_user_args
+from btrfs.bulk.application.items import apply, exit_status, new_request, report
+from btrfs.bulk.domain import BY_ID, BadSettings, BootCountKeptError, BulkCommand, NoUser, bulk_command, split_user_args
 from btrfs.bulk.domain.steam import MAKE_DEFAULT, SteamArgs, parse_steam_args
 from btrfs.bulk.wiring import Wiring
 
@@ -64,13 +64,13 @@ def keep_cmd(w: Wiring, cmd: str, args: Sequence[str]) -> int:
 def main(argv: Sequence[str], entry_file: str, *, wiring: Wiring | None = None) -> int:
     """btrfs-bulk with argv (argv[0] the program); entry_file is the running
     entry point's __file__ (where btrfs-snapshot is found). Whose home it is
-    unknown (a bad bulk.conf line, no user as root, a name no account has):
-    the message on stderr,
+    unknown (a bad bulk.conf line, no user as root, a name no account has),
+    or a boot count apply cannot reset (BootCountKeptError): the message on stderr,
     exit 1 (BOOT_REFUSED_EXIT at boot, from boot_run)."""
     w = Wiring.from_environment(entry_file) if wiring is None else wiring
     try:
         return run(w, argv)
-    except (BadSettings, NoUser) as e:
+    except (BadSettings, NoUser, BootCountKeptError) as e:
         print(e, file=sys.stderr)
         return 1
 
@@ -97,7 +97,7 @@ def run(w: Wiring, argv: Sequence[str]) -> int:
             pass  # below
         case _:
             assert_never(cmd)
-    b.boots.forget()  # a new request gets its two boots again
+    new_request(b)  # a new request gets its two boots again
     deferred, problems = apply(b)
     if deferred:
         print(
