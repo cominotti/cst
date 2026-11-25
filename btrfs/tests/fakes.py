@@ -2208,7 +2208,7 @@ class CompressWorld(FaultPoints):
         return self.uuid
 
     def read_fstab(self) -> str | None:
-        return None if "fstab write" in self.unreadable else self.fstab
+        return None if "fstab write" in self.unreadable else _fresh(self.fstab)
 
     def read_proc_mounts(self) -> str | None:
         return None if "remount" in self.unreadable else self.mounts
