@@ -112,6 +112,9 @@ exit 1
 SYSTEMCTL = """#!/bin/sh
 echo "systemctl $*" >>"$STUB_LOG"
 case " $* " in
+  *" show -p UnitPath --value "*) mgr=sys; case " $* " in *" --user "*) mgr=usr ;; esac
+              [ -f "$FIX_SHOW/$mgr/UnitPath" ] && exec cat "$FIX_SHOW/$mgr/UnitPath"
+              echo "Failed to connect to bus" >&2; exit 1 ;;
   *" show "*) for a in "$@"; do last="$a"; done
               mgr=sys; case " $* " in *" --user "*) mgr=usr ;; esac
               case " $* " in *" --state="*) ;; *) [ -f "$FIX_SHOW/$mgr/$last.active" ] && exec cat "$FIX_SHOW/$mgr/$last.active" ;; esac
@@ -268,6 +271,7 @@ class Scratch(unittest.TestCase):
             "systemctl --user -M tester@ show -p LoadState ",
             "systemctl show --state=loaded -p Id -p LoadState -p NeedDaemonReload ",
             "systemctl --user show --state=loaded -p Id -p LoadState -p NeedDaemonReload ",
+            "systemctl --user show -p UnitPath --value",
         )
         for c in self.calls():
             self.assertTrue(c.startswith(allowed), f"unexpected call: {c}")
@@ -4625,18 +4629,37 @@ class UnitsLoadedTest(Scratch):
         for dest, h, want in cases:
             with self.subTest(dest=dest, home=h):
                 self.assertEqual(doc_domain.recorded_unit(dest, h), want)
-        # XDG_CONFIG_HOME's folder (cst bluetooth writes the LDAC watcher's unit there when it is set).
-        ldac = "/home/u/.cfg/systemd/user/cst-bt-ldac48.service"
-        for dest, h, config, want in (
-            (ldac, home, "/home/u/.cfg", (usr, "cst-bt-ldac48.service")),
-            (ldac, home, "/home/u/.cfg/", (usr, "cst-bt-ldac48.service")),
-            ("/home/u/.cfg/systemd/user/x.service.d/10.conf", home, "/home/u/.cfg", (usr, "x.service")),
+        # The folder the user's manager names (its UnitPath): cst bluetooth writes the LDAC watcher's unit there.
+        cfg = "/home/u/.cfg/systemd/user"
+        ldac = cfg + "/cst-bt-ldac48.service"
+        for dest, h, user_dir, want in (
+            (ldac, home, cfg, (usr, "cst-bt-ldac48.service")),
+            (ldac, home, cfg + "/", (usr, "cst-bt-ldac48.service")),
+            (cfg + "/x.service.d/10.conf", home, cfg, (usr, "x.service")),
             (ldac, home, "", None),
-            (ldac, "", "/home/u/.cfg", None),  # root's record: no folder of a user
-            ("/home/u/.config/systemd/user/x.service", home, "/home/u/.cfg", (usr, "x.service")),
+            (ldac, home, "/home/u/.cfg", None),  # the config folder itself loads no unit
+            (ldac, "", cfg, None),  # root's record: no folder of a user
+            ("/home/u/.config/systemd/user/x.service", home, cfg, (usr, "x.service")),
         ):
-            with self.subTest(dest=dest, home=h, config=config):
-                self.assertEqual(doc_domain.recorded_unit(dest, h, config), want)
+            with self.subTest(dest=dest, home=h, user_dir=user_dir):
+                self.assertEqual(doc_domain.recorded_unit(dest, h, user_dir), want)
+
+    def test_needs_user_unit_dir(self) -> None:
+        home = "/home/u"
+        for dest, h, want in (
+            ("/home/u/.cfg/systemd/user/cst-bt-ldac48.service", home, True),
+            ("/home/u/.cfg/systemd/user/x.service.d/10.conf", home, True),
+            ("/home/u/.config/systemd/user/x.service", home, False),  # placed without asking
+            ("/etc/systemd/user/x.service", home, False),
+            ("/home/u/.cfg/systemd/user/x.service", "", False),  # root's record
+            ("/home/u/.cfg/systemd/user/README", home, False),  # no unit file
+            ("/home/u/.cfg/systemd/user/x.service.d/README", home, False),  # no drop-in
+            ("/home/u/.cfg/systemd/user/x.service.d/sub/10.conf", home, False),
+            ("/home/u/.cfg/systemd/user.control/x.service", home, False),
+            ("/home/u/.local/bin/x.service", home, False),
+        ):
+            with self.subTest(dest=dest, home=h):
+                self.assertEqual(doc_domain.needs_user_unit_dir(dest, h), want)
 
     def test_unit_applies(self) -> None:
         for name, unit_id, want in (
@@ -4726,16 +4749,82 @@ class UnitsLoadedTest(Scratch):
         self.assertIn("fix: systemctl --user daemon-reload", r.stdout)
         self.assert_read_only()
 
-    def test_a_user_unit_under_xdg_config_home_is_checked(self) -> None:
-        config = self.home + "/.cfg"
-        self.env["XDG_CONFIG_HOME"] = config
+    UNIT_PATH_QUERY = "systemctl --user show -p UnitPath --value"
+
+    def unit_path(self, *folders: str) -> None:
+        """What the user manager answers for its UnitPath: its control folder, then folders, then the
+        global one (no file: it does not answer)."""
+        folder = os.path.join(self.env["FIX_SHOW"], "usr")
+        os.makedirs(folder, exist_ok=True)
+        entries = [self.home + "/.config/systemd/user.control", *folders, "/etc/systemd/user", "/usr/lib/systemd/user"]
+        with open(os.path.join(folder, "UnitPath"), "w") as f:
+            f.write(" ".join(entries) + "\n")
+
+    def test_a_user_unit_in_the_folder_the_user_manager_names_is_checked(self) -> None:
+        # The manager reads HOME/xdg/systemd/user (its own XDG_CONFIG_HOME); this doctor's environment has no
+        # XDG_CONFIG_HOME at all, as under `sudo cst status`'s step down.
+        self.env.pop("XDG_CONFIG_HOME", None)
         self.host = doc_adapters.Host(self.env, repo=REPO)
-        unit = config + "/systemd/user/cst-bt-ldac48.service"
-        self.record(unit, user=True)
-        self.answer(("cst-bt-ldac48.service", "yes"), user=True)
+        folder = self.home + "/xdg/systemd/user"
+        unit, dropin = folder + "/cst-bt-ldac48.service", folder + "/x.service.d/10-cst.conf"
+        self.record(unit, dropin, user=True)
+        self.unit_path(folder, self.home + "/.config/systemd/user")
+        self.answer(("cst-bt-ldac48.service", "yes"), ("x.service", "yes"), user=True)
         self.assertEqual(
-            self.results(), [self.warning("cst-bt-ldac48.service", unit, fix="systemctl --user daemon-reload")]
+            self.results(),
+            [
+                self.warning("cst-bt-ldac48.service", unit, fix="systemctl --user daemon-reload"),
+                self.warning("x.service", dropin, fix="systemctl --user daemon-reload"),
+            ],
         )
+        self.assertEqual(self.calls().count(self.UNIT_PATH_QUERY), 1)  # asked once per check-up
+        r = self.run_tool()
+        self.assertIn("cst-bt-ldac48.service: systemd has not loaded", r.stdout)
+        self.assert_read_only()
+
+    def test_a_folder_the_user_manager_does_not_name_is_not_checked(self) -> None:
+        # The shell's XDG_CONFIG_HOME names the folder, the manager does not read it: no unit there is loaded.
+        self.env["XDG_CONFIG_HOME"] = self.home + "/xdg"
+        self.host = doc_adapters.Host(self.env, repo=REPO)
+        unit = self.home + "/xdg/systemd/user/cst-bt-ldac48.service"
+        self.record(unit, user=True)
+        self.unit_path(self.home + "/.config/systemd/user")
+        self.answer(("cst-bt-ldac48.service", "yes"), user=True)
+        self.assertEqual(self.results(), [])
+        self.assertIn(self.UNIT_PATH_QUERY, self.calls())
+        self.assertNotIn(self.USER_QUERY, self.calls())  # no unit of the user's manager recorded
+
+    def test_a_user_manager_that_does_not_answer_leaves_its_two_folders(self) -> None:
+        unit, ours = (
+            self.home + "/xdg/systemd/user/cst-bt-ldac48.service",
+            "/etc/systemd/user/cst-pending-alerts.service",
+        )
+        self.record(unit, user=True)
+        self.record(ours)
+        self.answer(("cst-bt-ldac48.service", "yes"), ("cst-pending-alerts.service", "yes"), user=True)
+        self.assertEqual(
+            self.results(), [self.warning("cst-pending-alerts.service", ours, fix="systemctl --user daemon-reload")]
+        )
+        self.assertIn(self.UNIT_PATH_QUERY, self.calls())
+
+    def test_the_user_manager_s_folder_is_asked_only_for_a_unit_no_other_folder_places(self) -> None:
+        self.record(
+            self.home + "/.config/systemd/user/cst-toolchains-prune.timer", self.home + "/.local/bin/x", user=True
+        )
+        self.record("/etc/systemd/user/cst-pending-alerts.service")
+        self.unit_path(self.home + "/.config/systemd/user")
+        self.answer(("cst-toolchains-prune.timer", "no"), user=True)
+        self.assertEqual(self.results(), [])
+        self.assertNotIn(self.UNIT_PATH_QUERY, self.calls())
+
+    def test_as_root_the_user_manager_s_folder_is_not_asked(self) -> None:
+        unit = self.home + "/xdg/systemd/user/cst-bt-ldac48.service"
+        self.record(unit, user=True)
+        self.unit_path(self.home + "/xdg/systemd/user")
+        self.answer(("cst-bt-ldac48.service", "yes"), user=True)
+        self.host.uid = 0
+        self.assertEqual(self.results(), [])
+        self.assertNotIn(self.UNIT_PATH_QUERY, self.calls())
 
     def test_a_unit_of_root_s_record_in_etc_systemd_user_asks_the_user_manager(self) -> None:
         unit = "/etc/systemd/user/cst-pending-alerts.service"

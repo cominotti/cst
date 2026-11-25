@@ -11479,7 +11479,11 @@ EOF
         only and an older CST's copy of the watcher's unit recorded under it: apply writes the unit to
         ~/.config/systemd/user, the manager loads it from there (FragmentPath), enables and starts it,
         the older copy is removed and forgotten, plan says the unit is up to date, revert removes it
-        (before, apply wrote under the shell's folder and stopped at `systemctl --user enable`). tester's
+        (before, apply wrote under the shell's folder and stopped at `systemctl --user enable`). Then cst
+        doctor: tester's names the watcher's unit after a hand edit with no reload, with the shell's
+        XDG_CONFIG_HOME and without it; e2e220's manager reads ~/xdg/systemd/user (XDG_CONFIG_HOME set for
+        user@1220.service), and a drop-in written there through the installer with no reload is named by
+        e2e220's doctor, whose environment has no XDG_CONFIG_HOME (before, it said nothing). tester's
         manager is never restarted; e2e220's account goes."""
         c = self.SYSTEMD_CONTAINER
         if exec_bash(c, "getent passwd e2e220 || getent passwd 1220 || true").stdout.strip():
@@ -11583,6 +11587,8 @@ EOF
         self.addCleanup(
             as_tester_bash,
             c,
+            "if [[ -e /home/tester/.e2e220-unit ]]; then "
+            "mv /home/tester/.e2e220-unit /home/tester/.config/systemd/user/cst-bt-ldac48.service; fi; "
             "XDG_CONFIG_HOME=/home/tester/xdg220 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
             "rm -rf /home/tester/xdg220",
             check=False,
@@ -11622,9 +11628,64 @@ EOF
             show plan "$out"
             grep -qE '^  ok +systemd/user/cst-bt-ldac48.service +up to date' <<<"$out"
             if grep -qF "older CST" <<<"$out"; then echo "plan still names an older copy" >&2; exit 1; fi
+            # Part 3 (doctor): a hand edit of the unit and no reload; tester's doctor names it with the
+            # shell's XDG_CONFIG_HOME and without it (as `sudo cst status` steps down).
+            cp -p "$unit" "$H/.e2e220-unit"
+            echo "# e2e220: a hand edit" >>"$unit"
+            [[ "$(systemctl --user show -P NeedDaemonReload cst-bt-ldac48.service)" == yes ]] ||
+                { echo "cannot bite: cst-bt-ldac48.service not flagged" >&2; exit 1; }
+            doc() { "$@" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true; }
+            for how in with without; do
+                if [[ $how == with ]]; then d="$(doc env)"; else d="$(doc env -u XDG_CONFIG_HOME)"; fi
+                grep -qF "cst-bt-ldac48.service: systemd has not loaded its files as they are on disk (CST installed $unit)" <<<"$d" ||
+                    { echo "doctor $how XDG_CONFIG_HOME did not name the unit: $d" >&2; exit 1; }
+            done
+            mv "$H/.e2e220-unit" "$unit"
+            systemctl --user daemon-reload
             out="$(bt revert --yes --no-restart 2>&1)"
             show revert "$out"
             [[ ! -e "$unit" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Part 3, e2e220: its manager has XDG_CONFIG_HOME=~/xdg (a drop-in of user@1220.service), so it reads
+        # ~/xdg/systemd/user. A drop-in written there through the installer for a running unit, and no
+        # reload: e2e220's doctor, whose environment has no XDG_CONFIG_HOME, warns for it. Before, doctor
+        # placed a user unit by the shell's XDG_CONFIG_HOME and said nothing.
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            E=/home/e2e220
+            X="$E/xdg"
+            dropin="$X/systemd/user/e2e220d.service.d/10-cst.conf"
+            ue() {
+                runuser -u e2e220 -- env HOME="$E" USER=e2e220 LOGNAME=e2e220 XDG_RUNTIME_DIR=/run/user/1220 \
+                    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1220/bus "$@"
+            }
+            rm -f "$E/.config/environment.d/50-e2e220.conf"
+            mkdir -p /etc/systemd/system/user@1220.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s\n' "$X" >/etc/systemd/system/user@1220.service.d/zz-e2e220.conf
+            systemctl daemon-reload
+            systemctl restart user@1220.service
+            ue mkdir -p "$X/systemd/user"
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' |
+                ue tee "$X/systemd/user/e2e220d.service" >/dev/null
+            ue systemctl --user daemon-reload
+            ue systemctl --user start e2e220d.service
+            [[ "$(ue systemctl --user show -P FragmentPath e2e220d.service)" == "$X/systemd/user/e2e220d.service" ]]
+            printf '[Service]\nEnvironment=E2E220=1\n' |
+                ue /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py text "$dropin" 0644 --home "$E" \
+                    --component toolchains:auto --keep-state >/dev/null
+            [[ "$(ue systemctl --user show -P NeedDaemonReload e2e220d.service)" == yes ]] ||
+                { echo "cannot bite: e2e220d.service not flagged" >&2; exit 1; }
+            d="$(ue env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true)"
+            w="$(grep -A1 -F "e2e220d.service: systemd has not loaded its files as they are on disk (CST installed $dropin)" <<<"$d" || true)"
+            grep -qE '^ *WARN' <<<"$w" && grep -qF 'fix: systemctl --user daemon-reload' <<<"$w" ||
+                { echo "e2e220's doctor did not warn: $d" >&2; exit 1; }
             echo E2E-OK
             """,
         ).stdout

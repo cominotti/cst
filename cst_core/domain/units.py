@@ -22,8 +22,8 @@ MASK_TARGET = "/dev/null"
 # every user manager reads (root writes it), and a user's own, relative to the home.
 SYSTEM_UNIT_DIR: Final = "/etc/systemd/system"
 GLOBAL_USER_UNIT_DIR: Final = "/etc/systemd/user"
-_CONFIG_UNIT_DIR_REL: Final = "systemd/user"  # below the user's config folder ($XDG_CONFIG_HOME or ~/.config)
-USER_UNIT_DIR_REL: Final = f".config/{_CONFIG_UNIT_DIR_REL}"  # systemd's default, relative to the home
+CONFIG_UNIT_DIR_REL: Final = "systemd/user"  # below the user's config folder ($XDG_CONFIG_HOME or ~/.config)
+USER_UNIT_DIR_REL: Final = f".config/{CONFIG_UNIT_DIR_REL}"  # systemd's default, relative to the home
 # A manager's own property: the folders it loads unit files from, highest priority first.
 UNIT_PATH_PROP: Final = "UnitPath"
 # Folders of systemd's own and the system's, never the user's own: where a UnitPath split in the wrong place
@@ -73,7 +73,7 @@ def user_unit_dir(unit_path: str | None, home: str) -> str:
     entries = unit_path.split()
     if any(not e.startswith("/") for e in entries):
         return default
-    found = next((e for e in entries if e.endswith("/" + _CONFIG_UNIT_DIR_REL)), None)
+    found = next((e for e in entries if e.endswith("/" + CONFIG_UNIT_DIR_REL)), None)
     if found is None or found.startswith(_SYSTEM_UNIT_ROOTS):
         return default
     return posixpath.normpath(found)
