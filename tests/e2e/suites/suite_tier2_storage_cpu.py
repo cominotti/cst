@@ -2504,7 +2504,7 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    def test_11_bulk_steam_plan_changes_nothing(self) -> None:
+    def test_11_bulk_steam_plan_changes_nothing_and_apply_drops_a_marked_copy(self) -> None:
         """`cst btrfs bulk steam plan` on a Steam (Flatpak) library built from
         btrfs/tests/fixtures/steam (a game, Dota 2, and a tool, the Steam Linux
         Runtime), after `bulk apply` made ~/Bulk/steam. flatpak itself is a
@@ -2513,7 +2513,12 @@ echo E2E-OK
         skipped, ~/Bulk/steam as library 1 to add and the shader cache that
         stays, exits 0 and changes nothing. With a process named steam
         running, the plan says so, and `bulk steam apply` exits 5 with
-        nothing changed. A bad argument exits 2."""
+        nothing changed. With Steam closed and, in ~/Bulk/steam, what a cut
+        deletion of an older run left with no journal (the game's copy and
+        its manifest's under their .bulk-new.bulk-drop names), `bulk steam
+        apply` exits 0: it deletes both before it copies, as the tester
+        user, and moves the game (before fa4e3ef0 the marked copy stayed). A
+        bad argument exits 2."""
         out = exec_bash(
             self.PRIV_CONTAINER,
             r"""
@@ -2535,9 +2540,11 @@ echo E2E-OK
             steam_pid=""
             made_T=0
             unkept=0
+            added_lib=0
             cleanup() {
                 if [[ -n "$steam_pid" ]]; then kill "$steam_pid" 2>/dev/null || true; fi
                 rm -rf "$fake" "$fp" "$steam_dir" "$app_root"
+                if (( added_lib )); then rm -rf "$T/steamapps" "$T/libraryfolder.vdf"; fi
                 if (( made_T )); then rmdir "$T" 2>/dev/null || true; fi
                 if (( unkept )); then cst btrfs bulk keep steam >/dev/null 2>&1 || true; fi
             }
@@ -2640,7 +2647,38 @@ echo E2E-OK
             grep -qF 'Steam is running: nothing done.' <<<"$out"
             same "bulk steam apply with Steam running" "$before"
 
-            # 3. A bad argument.
+            # 3. Steam closed, and what a cut deletion of an older run left in ~/Bulk/steam with no
+            # journal: the game's copy and its manifest's under their .bulk-drop names (u_drop's
+            # mark). apply deletes both before it copies (as the user) and moves the game.
+            kill "$steam_pid"
+            for _ in $(seq 1 50); do
+                pgrep -x -u tester steam >/dev/null || break
+                sleep 0.1
+            done
+            if pgrep -x -u tester steam >/dev/null; then echo "the stand-in steam is still running" >&2; exit 1; fi
+            steam_pid=""
+            [[ ! -e "$T/steamapps" && ! -e "$T/libraryfolder.vdf" ]]
+            added_lib=1
+            mark=.bulk-new.bulk-drop
+            game_mark="$T/steamapps/common/dota 2 beta$mark"
+            acf_mark="$T/steamapps/appmanifest_570.acf$mark"
+            as_tester mkdir -p "$game_mark/game/dota"
+            as_tester sh -c 'echo half >"$1/game/dota/pak01_dir.vpk"; echo half >"$2"' sh "$game_mark" "$acf_mark"
+            rc=0
+            out="$(cst btrfs bulk steam apply 2>&1)" || rc=$?
+            show "apply, marked copies" "$out"
+            [[ "$rc" == 0 ]]
+            [[ ! -e "$game_mark" && ! -L "$game_mark" ]]
+            [[ ! -e "$acf_mark" && ! -L "$acf_mark" ]]
+            test -f "$T/steamapps/common/dota 2 beta/game/dota/pak01_dir.vpk"
+            test -f "$T/steamapps/appmanifest_570.acf"
+            [[ ! -e "$sa/common/dota 2 beta" && ! -e "$sa/appmanifest_570.acf" ]]
+            grep -qF Bulk/steam "$root/config/libraryfolders.vdf"
+            if compgen -G '/var/lib/btrfs-bulk/journal-steam-*' >/dev/null; then echo "apply left a journal" >&2; exit 1; fi
+            leftovers="$(find "$T" "$root" -name '*.bulk-*' 2>/dev/null || true)"
+            [[ -z "$leftovers" ]] || { echo "leftovers: $leftovers" >&2; exit 1; }
+
+            # 4. A bad argument.
             rc=0
             out="$(cst btrfs bulk steam bogus 2>&1)" || rc=$?
             [[ "$rc" == 2 ]]
