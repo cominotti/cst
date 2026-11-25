@@ -918,8 +918,11 @@ still judged for `TARGET_USER` as the settings file has it, so a kept
 record never makes the tick start a `cpu-game.service` whose `on`
 refuses. A record whose unit is gone is done, not kept: a
 transient unit that is no longer loaded, or a user manager whose runtime
-folder is gone (a logout), took its runtime override with it. A fixed unit's
-override outlives the unit, so it stays kept. `cst cpu game state` lists the
+folder is gone (a logout), took its runtime override with it; so is a
+cgroup, sysfs or EPP file whose folder is gone (a cgroup that ended, a CPU
+taken offline), so a folder made again later (the next login's cgroup) never
+gets the old session's value. A fixed unit's override outlives the unit, so
+it stays kept. `cst cpu game state` lists the
 kept settings (`leftovers: N setting(s) 'off' could not undo, ...`). When
 `game.leftovers` cannot be written (`/run` full) the journal says each
 setting is not undone (`<3>off: could not keep ... in

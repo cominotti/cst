@@ -89,6 +89,13 @@ from cpu.game.domain import (
 _ONCE: Final = " (fix it; said once per boot)"
 
 
+def write_back(path: str, old: str) -> bool:
+    """An undo's write of a cgroup, sysfs or EPP file's old value: also done (True) when the write failed
+    because the file's folder is gone (a cgroup that ended at a logout, a CPU taken offline): nothing is left
+    to undo, and a folder made again later (the next login's cgroup) must not get the old session's value."""
+    return write_sysfs_line(path, old) or not os.path.lexists(os.path.dirname(path))
+
+
 def load_profile(paths: GamePaths, runner: CommandRunnerPort) -> GameProfile:
     """The game profile over paths.conf's settings (and its problem lines)."""
     settings, problems = read_settings(paths.conf)
@@ -573,12 +580,13 @@ class GameProfile:
     def undo_record(self, rec: Sequence[str], reload: dict[str, bool]) -> bool:
         """Undo one record of game.state (as state_undo reads it); False when the undo failed: a file write
         or set-property that failed, an override file there that cannot be removed. A unit that is gone is
-        no failure (unit_gone), nor is a record it cannot read (it is skipped)."""
+        no failure (unit_gone), nor is a file whose folder is gone (write_back), nor a record it cannot read
+        (it is skipped)."""
         match state_undo(rec):
             case CgroupUndo(file=f, old=old) | SysfsUndo(file=f, old=old):
-                return write_sysfs_line(f, old)
+                return write_back(f, old)
             case EppUndo(cpu=cpu, old=old):
-                return write_sysfs_line(self.paths.epp(cpu), old)
+                return write_back(self.paths.epp(cpu), old)
             case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
                 if mode == "new":
                     f = self.ctl_file(mgr, unit, prop, say=True)

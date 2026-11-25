@@ -2693,6 +2693,33 @@ class LeftoversTest(GameProfileCase):
         self.assertNotIn(f"{SYS} daemon-reload", actions)
         self.assertEqual(self.read(self.paths.leftovers), text)
 
+    def test_a_file_whose_folder_is_gone_is_no_leftover(self) -> None:
+        # A cgroup file 'on' wrote, whose cgroup ended before 'off' (a logout took user@UID.service's tree).
+        gone = os.path.join(self.ucg, "user.slice", "cpuset.cpus")
+        self.run_profile("on")
+        with open(self.state, "a") as f:
+            f.write(f"cgw {gone} 0-23\n")
+        out, _ = self.run_profile("off")
+        self.assertNotIn("could not undo", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        # The same for a kept one, also an EPP file of a CPU taken offline; the folder made again later (the
+        # next login) does not get the old value.
+        epp_gone = self.paths.epp("7")
+        self.write(self.paths.leftovers, f"cst-game-leftovers 1\ncgw {gone} 0-23\nepp 7 balance_performance\n")
+        self.no_game()
+        out, _ = self.run_profile("tick")
+        self.assertEqual(out.count("undid"), 2, out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        os.makedirs(os.path.dirname(gone))
+        self.run_profile("tick")
+        self.assertFalse(os.path.exists(gone))
+        self.assertFalse(os.path.exists(epp_gone))
+        # A folder that is a file is no folder gone: that undo is kept (ENOTDIR).
+        self.write(os.path.join(self.tmp, "plain"), "a file\n")
+        self.write(self.paths.leftovers, f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n")
+        self.run_profile("tick")
+        self.assertEqual(self.read(self.paths.leftovers), f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n")
+
     def test_a_file_that_cannot_be_written_is_said_lost_and_game_state_still_goes(self) -> None:
         self.prior_machine_weight()
         self.run_profile("on")

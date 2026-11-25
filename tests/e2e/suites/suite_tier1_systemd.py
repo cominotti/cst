@@ -7140,7 +7140,8 @@ PY
         file under a path whose folder is a plain file (the write fails, ENOTDIR), and machine.slice's
         CPUWeight set back to a value the real systemd refuses. 'off' exits 0, undoes everything else
         (machine.slice gets its own CPUWeight back from on's record), removes game.state, names both in the
-        journal and keeps exactly the two records in game.leftovers; 'state' lists them. A tick while off
+        journal and keeps exactly the two records in game.leftovers; 'state' lists them. A third record, of a
+        cgroup file whose cgroup is gone (ENOENT from the real cgroupfs), is done: neither named nor kept. A tick while off
         keeps both (the file byte for byte); once the folder is a folder, the next tick writes the old value
         and keeps only the CPUWeight record, which the next 'off' keeps too. The old 'off' removed game.state
         with both records in it and kept nothing. With TARGET_USER unset and a GameMode client running, a tick
@@ -7187,8 +7188,12 @@ PY
             knob=/run/e2e182/dir/knob
             sys_rec="sysfs $knob OLD"
             prop_rec='prop sys machine.slice CPUWeight existed bogus'
-            printf '%s\n' "$sys_rec" "$prop_rec" >>"$st"
+            # And a cgroup file whose cgroup is gone (the real cgroupfs answers ENOENT): no leftover.
+            gone_rec='cgw /sys/fs/cgroup/e2e182-gone.slice/cpu.weight 42'
+            test ! -e /sys/fs/cgroup/e2e182-gone.slice
+            printf '%s\n' "$sys_rec" "$gone_rec" "$prop_rec" >>"$st"
             got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            if grep -qF e2e182-gone <<<"$got"; then echo "off named the gone cgroup: $got" >&2; exit 1; fi
             test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
                 || { echo "machine.slice CPUWeight: $(systemctl show -P CPUWeight machine.slice), not $own" >&2; exit 1; }
