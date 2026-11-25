@@ -926,11 +926,15 @@ it stays kept. `cst cpu game state` lists the
 kept settings (`leftovers: N setting(s) 'off' could not undo, ...`). When
 `game.leftovers` cannot be written (`/run` full) the journal says each
 setting is not undone (`<3>off: could not keep ... in
-/run/cpu-setup/game.leftovers: not undone`); a file in a newer format is left
-alone, neither undone nor removed, and so is one that cannot be read (a
-folder in its place, a read error: `<4>... cannot be read (...): left alone,
-neither undone nor removed`), which is never taken for a missing one. The
-file is read byte for byte, as it is written back. (Versions before 2026-11 removed
+/run/cpu-setup/game.leftovers: not undone`, without `off:` from the tick)
+and the old file is removed, so what it held is neither undone nor said
+again at every tick; `off` then ends with `..., except N setting(s) not
+undone`. A file in a newer format is left alone, neither undone nor removed
+(a failed setting is said not undone in the same words), and so is one that
+cannot be read (a folder in its place, a read error: `<4>... cannot be read
+(...): left alone, neither undone nor removed`), which is never taken for a
+missing one. The file is read byte for byte, as it is written back.
+(Versions before 2026-11 removed
 `game.state` with the failed record in it, and the setting kept the game's
 value until a reboot.)
 

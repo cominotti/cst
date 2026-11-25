@@ -74,23 +74,28 @@ def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: dict[st
     return failed
 
 
-def keep(profile: GameProfile, failed: Sequence[Entry], *, readable: bool) -> None:
-    """game.leftovers holds the failed entries afterwards (removed when there are none); with a file this CST
-    does not read (readable False) or one it cannot write (a full /run), each failed one is said lost."""
+def keep(profile: GameProfile, failed: Sequence[Entry], *, readable: bool, off: bool = True) -> bool:
+    """game.leftovers holds the failed entries afterwards (removed when there are none); whether it holds
+    them. With a file this CST does not read (readable False), left as it is, or one it cannot write (a full
+    /run), each failed one is said lost (off: in 'off''s words, else the tick's). The old file goes then: it
+    would have each entry it holds, undone or not, undone and said again at every tick."""
     path = profile.paths.leftovers
     if readable and not failed:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
-        return
+        return True
     if readable:
         try:
             write_atomic(path, leftovers_text(failed), mode=0o644, durable=False, relabel=False)
         except OSError:
-            pass
+            with contextlib.suppress(OSError):
+                os.unlink(path)
         else:
-            return
+            return True
+    who = "off: " if off else ""
     for _uid, rec in failed:
-        profile.log(3, f"off: could not keep {undo_text(rec, profile.paths.epp)} in {path}: not undone")
+        profile.log(3, f"{who}could not keep {undo_text(rec, profile.paths.epp)} in {path}: not undone")
+    return False
 
 
 def user_manager_gone(profile: GameProfile, uid: str) -> bool:
@@ -129,6 +134,6 @@ def retry_kept(profile: GameProfile, *, say: bool) -> None:
                 what = undo_text(rec, profile.paths.epp)
                 profile.log(5, f"undid {what}, kept in {profile.paths.leftovers} by an earlier off")
         profile.reload_managers(reload)
-        keep(profile, failed, readable=True)
+        keep(profile, failed, readable=True, off=say)
     finally:
         profile.s = settings

@@ -2433,6 +2433,8 @@ class LeftoversFormatTest(unittest.TestCase):
             off_text(0, "/l"), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
         )
         self.assertTrue(off_text(2, "/l").endswith("restored, except 2 setting(s) kept in /l"))
+        self.assertTrue(off_text(2, "/l", kept=False).endswith("restored, except 2 setting(s) not undone"))
+        self.assertEqual(off_text(0, "/l"), off_text(0, "/l", kept=False))
 
 
 class LeftoversTest(GameProfileCase):
@@ -2731,8 +2733,45 @@ class LeftoversTest(GameProfileCase):
             f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {self.paths.leftovers}: not undone\n",
             out,
         )
+        self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)  # none is kept
         self.assertFalse(os.path.exists(self.state))
         self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_tick_that_cannot_write_the_file_says_the_lost_ones_once(self) -> None:
+        # game.leftovers holds two records: machine.slice's undo works now, user.slice's fails again; /run is
+        # full. The old file goes (else both would be undone and said again at every tick), and the lost one
+        # is said once, in the tick's words.
+        self.prior_machine_weight()
+        text = (
+            "cst-game-leftovers 1\nprop sys machine.slice CPUWeight existed 70\n"
+            f"user {UID}\nprop usr user.slice CPUWeight existed 30\n"
+        )
+        self.write(self.paths.leftovers, text)
+        os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)
+        self.systemd.fail_set.add(("usr", "user.slice"))
+        self.no_game()
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+            out, _ = self.run_profile("tick")
+            self.assertEqual(
+                out,
+                f"<5>game-profile: undid machine.slice CPUWeight=70, kept in {self.paths.leftovers} by an earlier off\n"
+                f"<3>game-profile: could not keep user.slice CPUWeight=30 in {self.paths.leftovers}: not undone\n",
+            )
+            self.assertFalse(os.path.exists(self.paths.leftovers))
+            out, actions = self.run_profile("tick")
+            self.assertEqual((out, self.sets(actions)), ("", []))
+
+    def test_a_newer_file_and_a_failed_undo_end_with_not_undone(self) -> None:
+        newer = "cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n"
+        self.write(self.paths.leftovers, newer)
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        out, _ = self.run_profile("off")
+        self.assertIn(f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {self.paths.leftovers}", out)
+        self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)
+        self.assertEqual(self.read(self.paths.leftovers), newer)
 
     def test_a_newer_file_is_left_alone(self) -> None:
         newer = "cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n"

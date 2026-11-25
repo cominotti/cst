@@ -7149,7 +7149,8 @@ PY
         stub): the old tick then acted for tester and started it. A kept record of a uid with no account is
         never set in tester's manager: kept while that uid's runtime folder is there, done once it is gone.
         An override that cannot be removed stays kept, and the ticks that retry it run no daemon-reload. A
-        game.leftovers that cannot be read (a folder) is left alone: 'off' exits 0 and removes game.state."""
+        game.leftovers that cannot be read (a folder) is left alone: 'off' exits 0 and removes game.state. With
+        one of a newer format, a failed undo is said not undone, in 'off''s closing line too."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -7306,6 +7307,20 @@ PY
             test -d "$lo/inside"
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
             rm -rf "$lo"
+            # A game.leftovers of a newer format is left alone; a setting 'off' could not undo then is said not
+            # undone, and the closing line says so. The old 'off' ended with the plain "restored" line.
+            printf 'cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n' >"$lo"
+            sum=$(sha256sum "$lo")
+            gp on >/dev/null
+            printf '%s\n' "$prop_rec" >>"$st"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "off: could not keep machine.slice CPUWeight=bogus in $lo: not undone" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(tail -n 1 <<<"$got")" == *"settings restored, except 1 setting(s) not undone" ]] \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "game.leftovers changed:" >&2; cat "$lo" >&2; exit 1; }
+            test ! -e "$st"
+            rm -f "$lo"
             echo E2E-OK
             """,
         ).stdout

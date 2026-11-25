@@ -536,11 +536,11 @@ class GameProfile:
         kept = read_kept(self, say=True)
         failed = undo_entries(self, merged_entries(kept or [], recs), reload, say=True)
         self.reload_managers(reload)
-        keep(self, failed, readable=kept is not None)
+        held = keep(self, failed, readable=kept is not None)
         for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(f)
-        self.log(5, off_text(len(failed) if kept is not None else 0, p.leftovers))
+        self.log(5, off_text(len(failed), p.leftovers, kept=held))
         return 0
 
     def reload_managers(self, reload: dict[str, bool]) -> None:
