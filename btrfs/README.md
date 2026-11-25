@@ -1593,7 +1593,12 @@ top-mount unit first). For the kernel arguments it first waits, up to 3
 minutes, until `rpm-ostree status --json` names no running transaction: a
 client that timed out leaves its transaction running, and the change it
 stages later would otherwise be missed. A transaction still running after
-that counts as a layer it cannot read again (below). The error ends with
+that counts as a layer it cannot read again (below). A change that
+rpm-ostree refused because another transaction was running (an automatic
+update, an upgrade someone started: `Transaction in progress: ...`)
+started no transaction of its own and staged nothing: the run reads the
+kernel arguments at once, without waiting, and ends with `previous
+configuration restored.`. The error ends with
 `previous configuration restored.`, or with `ROLLBACK INCOMPLETE (...)`
 naming each layer that could not be put back. An undo of `/etc/fstab` or of
 the top-mount unit keeps the old value it wrote even when the

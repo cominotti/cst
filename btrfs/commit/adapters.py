@@ -38,6 +38,7 @@ from btrfs.compress.domain import (
     pick_root_mounts,
     top_mount_changed,
 )
+from btrfs.compress.domain.rpm_ostree import kargs_refused
 from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
 from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines, format_status_note_lines
 from cst_core.adapters.runtime import ManagedCliEnv
@@ -145,8 +146,9 @@ def _step_kargs(run: _Run) -> str | None:
     ok, kerr = host.update_kargs(edits)
     if not ok:
         # rpm-ostree can stage the change and still answer a failure (a client that timed out while its
-        # transaction went on): the kernel arguments are read once no transaction runs.
-        read = host.read_settled_kargs()
+        # transaction went on): the kernel arguments are read once no transaction runs. A change refused
+        # while another transaction runs staged nothing: they are read at once.
+        read = host.read_kargs() if kargs_refused(kerr) else host.read_settled_kargs()
         if not read[0]:
             run.undo.append(_unknown(kargs_unread(read[2])))
         elif kargs_edits_staged(read, edits):

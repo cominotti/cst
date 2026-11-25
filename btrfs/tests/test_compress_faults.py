@@ -75,6 +75,7 @@ from btrfs.compress.domain import (
     transaction_running,
 )
 from btrfs.compress.domain.args import CompressArgs, CompressCommand
+from btrfs.compress.domain.rpm_ostree import kargs_refused
 from btrfs.tests.fakes import CompressWorld, kernel_remount_options
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.application.install import InstallRequest, InstallService
@@ -1200,18 +1201,20 @@ class UnreadableAfterFailureTest(unittest.TestCase):
         self.assertEqual(cases, 54)
 
 
+def kargs_starts() -> Iterator[tuple[Start, list[str]]]:
+    """Each start state whose run has a kargs step, with the points its run makes before that step."""
+    for s in STARTS:
+        w = start_world(s)
+        forward = cut_points(w.plan, functools.partial(run_tool, s, w, s.command))
+        if "kargs" in forward:
+            yield s, forward[: forward.index("kargs")]
+
+
 class KargsStillStagingTest(unittest.TestCase):
     """A kargs change that answers a failure while its transaction goes on (CompressWorld.lagging_kargs): the
     run reads the kernel arguments once no transaction runs, so it sees the change staged and undoes it; when
     the transaction still runs after the wait (stuck_kargs), or the kernel arguments cannot be read back, the
     run names them as unknown and undoes the layers before them."""
-
-    def cases(self) -> Iterator[tuple[Start, list[str]]]:
-        for s in STARTS:
-            w = start_world(s)
-            forward = cut_points(w.plan, functools.partial(run_tool, s, w, s.command))
-            if "kargs" in forward:
-                yield s, forward[: forward.index("kargs")]
 
     def world(self, s: Start) -> CompressWorld:
         w = start_world(s)
@@ -1222,7 +1225,7 @@ class KargsStillStagingTest(unittest.TestCase):
 
     def test_a_change_staged_after_its_failure_is_undone(self) -> None:
         cases = 0
-        for s, done in self.cases():
+        for s, done in kargs_starts():
             with self.subTest(start=s.name):
                 cases += 1
                 w = self.world(s)
@@ -1237,7 +1240,7 @@ class KargsStillStagingTest(unittest.TestCase):
 
     def test_a_transaction_still_running_or_kargs_unread_are_named_unknown(self) -> None:
         cases = 0
-        for s, done in self.cases():
+        for s, done in kargs_starts():
             for why in ("stuck", "unreadable"):
                 with self.subTest(start=s.name, why=why):
                     cases += 1
@@ -1264,6 +1267,67 @@ class KargsStillStagingTest(unittest.TestCase):
                     self.assertEqual(run_tool(s, w, s.command)[0], 0)
                     self.assertTrue(coherent(s, w), s.name)
         self.assertEqual(cases, 14)
+
+
+# rpm-ostree's answer to a change while another transaction runs (rpmostreed_sysroot_prep_for_txn).
+REFUSED = "error: Transaction in progress: upgrade\n You can cancel the current transaction with `rpm-ostree cancel`"
+
+
+class KargsRefusedTest(unittest.TestCase):
+    """A kargs change rpm-ostree refused because another transaction runs (an automatic update, a user's
+    upgrade; stuck_kargs: it does not end while the run would wait) started no transaction and staged
+    nothing: the run reads the kernel arguments back at once and ends with the previous configuration
+    restored. A change that failed in another way still waits for the transaction."""
+
+    def world(self, s: Start, err: str) -> CompressWorld:
+        w = start_world(s)
+        w.stuck_kargs = True
+        w.fail("kargs", OSError(errno.EBUSY, err), times=1)
+        return w
+
+    def test_a_refused_change_is_read_back_at_once_and_restored(self) -> None:
+        cases = 0
+        for s, done in kargs_starts():
+            with self.subTest(start=s.name):
+                cases += 1
+                w = self.world(s, REFUSED)
+                start = layers(s.tool, w)
+                rc, out, err = run_tool(s, w, s.command)
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"Failed to update rpm-ostree kargs: {REFUSED}", err)
+                self.assertTrue(err.endswith("; previous configuration restored."), err)
+                self.assertEqual(w.calls, [*done, "kargs", *reversed(done)])
+                self.assertEqual(layers(s.tool, w), start)
+                w.stuck_kargs = False
+                self.assertEqual(run_tool(s, w, s.command)[0], 0)
+                self.assertTrue(coherent(s, w), s.name)
+        self.assertEqual(cases, 7)
+
+    def test_a_change_that_failed_otherwise_still_waits(self) -> None:
+        cases = 0
+        for s, done in kargs_starts():
+            with self.subTest(start=s.name):
+                cases += 1
+                rc, out, err = run_tool(s, w := self.world(s, "error: timed out"), s.command)
+                self.assertEqual(rc, 1, out)
+                self.assertTrue(
+                    err.endswith(
+                        f"; {INCOMPLETE} (kargs: cannot read rpm-ostree kargs back ({KARGS_STILL_RUNNING}), its state "
+                        "is unknown)"
+                    ),
+                    err,
+                )
+                self.assertEqual(w.calls, [*done, "kargs", *reversed(done)])
+        self.assertEqual(cases, 7)
+
+    def test_kargs_refused_reads_rpm_ostrees_refusal(self) -> None:
+        gdbus = "error: GDBus.Error:org.gtk.GDBus.UnmappedGError.Quark._g_2dio_2derror_2dquark.Code26: Transaction in progress: kargs"
+        for err in (REFUSED, gdbus):
+            with self.subTest(err=err):
+                self.assertTrue(kargs_refused(err))
+        for err in ("error: timed out", "No space left on device", "", "error: No karg 'rootflags=x' found"):
+            with self.subTest(err=err):
+                self.assertFalse(kargs_refused(err))
 
 
 class _Clock:

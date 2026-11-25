@@ -30,6 +30,7 @@ from btrfs.compress.domain import (
     top_mount_changed,
 )
 from btrfs.compress.domain.args import CompressArgs, CompressCommand
+from btrfs.compress.domain.rpm_ostree import kargs_refused
 from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
 from cst_core.domain.errors import Refused
 from cst_core.ports import CommandFailed
@@ -273,8 +274,9 @@ class CompressService:
             ok, kerr = self._host.update_kargs(plan.kargs_edits)
             if not ok:
                 # rpm-ostree can stage the change and still answer a failure (a client that timed out while
-                # its transaction went on): the kernel arguments are read once no transaction runs.
-                read = self._host.read_settled_kargs()
+                # its transaction went on): the kernel arguments are read once no transaction runs. A change
+                # refused while another transaction runs staged nothing: they are read at once.
+                read = self._host.read_kargs() if kargs_refused(kerr) else self._host.read_settled_kargs()
                 if not read[0]:
                     prog.unknown.append(kargs_unread(read[2]))
                 elif kargs_edits_staged(read, plan.kargs_edits):

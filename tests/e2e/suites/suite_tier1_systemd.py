@@ -10766,11 +10766,14 @@ EOF
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_240_btrfs_commit_interval_stops_at_a_failed_kargs_step(self) -> None:
-        """`cst btrfs commit-interval apply` with an rpm-ostree whose `kargs --delete... --append...` fails: the
-        run exits 1 saying the previous configuration was restored, /etc/fstab is back at its bytes, no remount
-        runs, and the top-mount unit, really installed, verified and recorded in installed.json and loaded by
-        PID 1, keeps its bytes, as installed.json does (B0: the run used to remount and to write commit=60 into
-        the unit after the failure, and never undo the unit)."""
+        """`cst btrfs commit-interval apply` with an rpm-ostree whose `kargs --delete... --append...` is refused
+        with rpm-ostreed's words while another transaction runs (`status --json` names an Upgrade throughout):
+        the run exits 1 saying the previous configuration was restored, without waiting for that transaction or
+        asking status (the refused change staged nothing), /etc/fstab is back at its bytes, no remount runs, and
+        the top-mount unit, really installed, verified and recorded in installed.json and loaded by PID 1, keeps
+        its bytes, as installed.json does (B0: the run used to remount and to write commit=60 into the unit after
+        the failure, and never undo the unit; and it used to wait 3 minutes for the other transaction, then end
+        ROLLBACK INCOMPLETE naming the kernel arguments unknown)."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-commit-b0"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
@@ -10808,12 +10811,17 @@ EOF
             printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
             cp {w}/kargs {w}/proc/cmdline
 
-            # rpm-ostree: kargs reads answer; every change fails with no effect.
+            # rpm-ostree: kargs reads answer; another transaction (an Upgrade) runs throughout, so every change is
+            # refused with no effect, in rpmostreed's words; each status call is written down.
             cat >{w}/bin/rpm-ostree <<'EOF'
 #!/usr/bin/env bash
 if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
-if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
-echo "error: Transaction in progress" >&2
+if [[ "${{1:-}}" == "status" ]]; then
+    echo status >>{w}/status-calls
+    echo '{{"deployments": [], "transaction": ["Upgrade", ":1.42", "/org/projectatomic/rpmostree1/fedora/Transaction"]}}'
+    exit 0
+fi
+printf 'error: Transaction in progress: upgrade\\n You can cancel the current transaction with `rpm-ostree cancel`\\n' >&2
 exit 1
 EOF
             cat >{w}/bin/findmnt <<'EOF'
@@ -10845,7 +10853,9 @@ EOF
             if apply_out="$(/opt/cst-rw/cst btrfs commit-interval apply --yes 2>&1)"; then
                 echo "apply exited 0: $apply_out" >&2; exit 1
             fi
-            grep -qF "Failed to update rpm-ostree kargs: error: Transaction in progress; previous configuration restored." <<<"$apply_out"
+            grep -qF "Failed to update rpm-ostree kargs: error: Transaction in progress: upgrade" <<<"$apply_out"
+            grep -qF ' You can cancel the current transaction with `rpm-ostree cancel`; previous configuration restored.' <<<"$apply_out" || {{ echo "not restored: $apply_out" >&2; exit 1; }}
+            if [[ -e {w}/status-calls ]]; then echo "the run waited on the other transaction: $apply_out" >&2; exit 1; fi
             cmp -s /etc/fstab {w}/fstab.before
             cmp -s "/etc/systemd/system/{top_unit}" {w}/unit.before
             cmp -s /var/lib/cst/installed.json {w}/record.before
