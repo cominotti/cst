@@ -1328,8 +1328,13 @@ class MountTable:
         fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
         self.add_mount(dev, tgt, fsroot=fsroot, uuid=held["uuid"], bind=True)
 
+    def mounted(self, tgt: str) -> bool:
+        """Whether anything is mounted at tgt (an umount of tgt has a mount to take off)."""
+        return any(m["target"] == tgt for m in self.mounts)
+
     def unbind(self, tgt: str) -> None:
-        """umount tgt: its top mount taken off (nothing when nothing is mounted there)."""
+        """umount tgt: its top mount taken off (nothing when nothing is mounted there: the fakes answer that
+        umount with NOT_MOUNTED_TEXT before they call this)."""
         for i in range(len(self.mounts) - 1, -1, -1):
             if self.mounts[i]["target"] == tgt:
                 del self.mounts[i]
@@ -1405,6 +1410,11 @@ def mount_units_listing(loaded: str | None, *, need_reload: bool, mounted: Seque
 # error's text): the contract, the fault matrix and the machine expect the same ERROR lines.
 MOUNT_DENIED_TEXT: Final = "mount: permission denied"
 UMOUNT_BUSY_TEXT: Final = "umount: target is busy"
+# What util-linux's umount and mount answer (exit 32) for an umount of a target nothing is mounted at and a
+# mount --bind onto a target folder that does not exist; {} is the target as the user sees it (FakeMountRunner
+# leaves its test root out, so the fakes and the real adapters word it the same).
+NOT_MOUNTED_TEXT: Final = "umount: {}: not mounted."
+NO_MOUNT_POINT_TEXT: Final = "mount: {}: mount point does not exist."
 RELOAD_FAILED_TEXT: Final = "Failed to reload daemon"
 MOUNT_DENIED: Final = OSError(errno.EPERM, MOUNT_DENIED_TEXT)
 UMOUNT_BUSY: Final = OSError(errno.EBUSY, UMOUNT_BUSY_TEXT)
@@ -1414,7 +1424,8 @@ RELOAD_FAILED: Final = OSError(errno.EIO, RELOAD_FAILED_TEXT)
 class FakeMountRunner:
     """findmnt, mount and umount over a MountTable, and systemctl over an FstabSystemdView of the test root's
     /etc/fstab. findmnt answers `-J -l -o FINDMNT_COLUMNS` as the real one does: a bind mount's source is
-    "DEVICE[FSROOT]", its fsroot the folder it shows."""
+    "DEVICE[FSROOT]", its fsroot the folder it shows. As util-linux, an umount of a target nothing is mounted at
+    and a mount --bind onto a target folder that does not exist fail with exit 32."""
 
     def __init__(self, root: str, *, same_uuid: bool = False) -> None:
         self.root = root
@@ -1483,6 +1494,8 @@ class FakeMountRunner:
         self.fstab_at_mount.append(self._fstab_now())
         if tgt_path.removeprefix(self.root) in self.mount_fails:
             return CommandResult(32, "", MOUNT_DENIED_TEXT)
+        if not os.path.isdir(tgt_path):
+            return CommandResult(32, "", NO_MOUNT_POINT_TEXT.format(tgt_path.removeprefix(self.root)))
         self.table.bind(src_path.removeprefix(self.root), tgt_path.removeprefix(self.root))
         return CommandResult(0, "", "")
 
@@ -1491,6 +1504,8 @@ class FakeMountRunner:
         logical_tgt = tgt_path.removeprefix(self.root)
         if logical_tgt in self.umount_fails:
             return CommandResult(32, "", UMOUNT_BUSY_TEXT)
+        if not self.table.mounted(logical_tgt):
+            return CommandResult(32, "", NOT_MOUNTED_TEXT.format(logical_tgt))
         self.table.unbind(logical_tgt)
         return CommandResult(0, "", "")
 
@@ -1586,7 +1601,8 @@ class CacheWorld(FaultPoints):
     Every error the fakes model (a link at a private folder: ENOTDIR, as O_NOFOLLOW with O_DIRECTORY gives;
     a file or a dangling link in its way: EEXIST; a file at or above a tag's folder: EEXIST, as write_atomic's
     ensure_dir gives; /etc/fstab a folder: EISDIR) raises inside the call, before a
-    kill armed there fires. before_reload runs before a reload takes effect (a kill there leaves systemd
+    kill armed there fires; an umount of a target nothing is mounted at and a mount --bind onto a target that
+    is not a folder answer as util-linux does (NOT_MOUNTED_TEXT, NO_MOUNT_POINT_TEXT), inside the call too. before_reload runs before a reload takes effect (a kill there leaves systemd
     behind); a KILL of the plan at the reload point is one after it took effect. Reads are not points;
     each read gives a new object, never the one the world holds."""
 
@@ -1806,6 +1822,8 @@ class FakeCacheMountTable:
         what = f"mount --bind {binding.source} {binding.target}"
 
         def bind() -> str | None:
+            if not w.is_dir(binding.target):
+                return f"{what} failed: {NO_MOUNT_POINT_TEXT.format(binding.target)}"
             w.table.bind(binding.source, binding.target)
             return None
 
@@ -1817,6 +1835,8 @@ class FakeCacheMountTable:
         what = f"umount {binding.target}"
 
         def unbind() -> str | None:
+            if not w.table.mounted(binding.target):
+                return f"{what} failed: {NOT_MOUNTED_TEXT.format(binding.target)}"
             w.table.unbind(binding.target)
             return None
 

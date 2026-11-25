@@ -417,6 +417,32 @@ class _PortsContract(unittest.TestCase):
         self.side.umount_fails(SCRATCHPAD)
         self.assertEqual(m.unbind(SCRATCHPAD), "umount /var/home/alice/Scratchpad failed: umount: target is busy")
 
+    def test_an_umount_of_nothing_and_a_bind_onto_no_folder_fail_as_the_commands_do(self) -> None:
+        self.side.mount_bases()
+        self.side.mkdir(CACHE.source)
+        m = self.side.mounts()
+        cases = (
+            (
+                "umount of nothing",
+                lambda: m.unbind(CACHE),
+                "umount /var/home/alice/.cache failed: umount: /var/home/alice/.cache: not mounted.",
+            ),
+            (
+                "bind onto no folder",
+                lambda: m.bind(CACHE),
+                (
+                    "mount --bind /var/mnt/cache/alice /var/home/alice/.cache failed: "
+                    "mount: /var/home/alice/.cache: mount point does not exist."
+                ),
+            ),
+        )
+        for name, call, want in cases:
+            with self.subTest(name):
+                self.assertEqual(call(), want)
+        mounts, error = m.read()
+        self.assertIsNone(error)
+        self.assertEqual([x for x in mounts if x.target == CACHE.target], [])
+
     def test_findmnt_failing_is_no_mount_and_a_reason(self) -> None:
         self.side.findmnt_fails()
         self.assertEqual(self.side.mounts().read(), ((), "findmnt failed: findmnt: cannot read the mount table"))
