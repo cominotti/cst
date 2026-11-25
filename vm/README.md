@@ -568,7 +568,9 @@ details keep a stop from cutting the merge short:
   overlay, the backup goes on (marked crash-consistent). If they do not
   all show it, libvirt might still switch later: nothing is deleted, and
   you get `DISK NOT MERGED BACK` with the commands to look, plus a critical
-  alert.
+  alert. That alert names every overlay file there is also when a stop
+  came while virsh was waited for (the refusal then gives the stop as the
+  backup's own failure), and when the merge back of another disk failed.
 - The merge has its own time limit: 4 hours for all disks together
   (`virsh blockcommit --timeout`). If it hits that limit, virsh cancels the
   merge cleanly: the disk stays on the overlay, with no job half done, and
@@ -1058,12 +1060,17 @@ the keep tag, `forget`'s arguments, the index entries, the timer's units
 (the stop budget covers the merge's limit), and that the NAS constants match
 `btrfs/btrfs-snapshot`. They also check what a manual run can meet: a closed
 terminal during restic (on a pseudo-terminal) and a pipe without a reader
-still merge and alert, a second Ctrl-C does not reach the merging virsh
+still merge and alert, a SIGTERM while the alert is sent cuts neither the
+alert nor the refusal short, a second Ctrl-C does not reach the merging virsh
 (the fake cancels on SIGINT as the real one does), a VM paused at merge time
 is merged, a `snapshot-create-as` that does not answer (snapshot in place
 later: the backup goes on; never in place: the files are kept and an alert
-is sent), the recovery text per case (a definition still on a stale overlay:
-`virsh edit`, never `qemu-img commit`), and the note for UEFI variables
+is sent), a stop held through a quiesced call that timed out or failed with
+the snapshot in place (the guest is thawed before the stop ends the read),
+the recovery text per case (a definition still on a stale overlay:
+`virsh edit`, never `qemu-img commit`; no commands for a disk the merge back
+put back, unless no other disk is left to name: then the look-first
+commands), and the note for UEFI variables
 written during the read. The torn record (`TornRecordTest`, its path a
 scratch file through `CST_VM_TORN`): a torn snapshot restic does not forget
 is recorded (once, 0644, atomically), one it forgets leaves no entry, a
@@ -1080,6 +1087,26 @@ torn-snapshot retry, the retention after it and `forget_torn` against the
 real restic over SFTP to its NAS container (restic's own `snapshots --json`,
 a short recorded ID, the record and its lock as root). No E2E test runs a
 whole NAS backup: neither tier has libvirt with a running guest.
+
+A model of the NAS backup's protocol, `vm/tests/quint/nas.qnt` (a Quint spec
+that TLC checks over every state of its instances: `invowk cmd test quint`),
+adds the runs nobody wrote a test for: a stop, a kill, the guest shutting
+down or pausing, or libvirt answering late, between any two steps. Its
+properties: each disk is merged back or the alert names its overlay
+(`mergedOrAlerted`); an overlay file is never removed while in use or
+holding writes (`noOverlayLost`); a stale definition is never named for
+`qemu-img commit` (`staleNamed`); an unreachable NAS leaves no overlay
+(`unreachableNoOverlay`); a leftover overlay is refused, never stacked
+(`noStacking`); a torn snapshot is recorded or named (`tornHandled`, with
+its known gaps); the index holds no torn snapshot and loses an entry only
+on a listing it read (`indexClean`, `indexInRepo`); the retention never
+lets a torn snapshot take a good one's place and keeps the kept ones
+(`goodKept`, `keepKept`); only a consistent read is indexed
+(`consistentRead`). Its traces are replayed against the real code
+(`vm/tests/test_vm_nas_replay.py`, in the unit suite), so a change of order
+in `nas.py` fails the unit tests until the spec follows it. What it models,
+its gaps and its numbers:
+[docs/dev-tools.md, "Model checking with Quint"](../docs/dev-tools.md#model-checking-with-quint-optional).
 
 For `tune`: the transform of a copy of the real `win11-devbox` definition
 (no diff), of the same VM before its migration (SATA, plain driver,
@@ -1168,8 +1195,9 @@ The Python code inside `vm/` (standard library only at run time):
   from the cli, over the same ports plus `SettingsPort` (vm.conf and
   the NAS settings), `ResticPort` (`vm/adapters/restic.py`'s `Restic`, generic:
   the /home NAS backup can use it), `SignalsPort` (the stop signals: caught,
-  held during the snapshot call, ignored during the merge back), the per-VM
-  lock and the critical alert. `__init__.py`: `backup-timer on` and
+  held during the snapshot call, ignored during the merge back and what
+  follows it: the unclear snapshot's problems, the alert and the building
+  of the refusal), the per-VM lock and the critical alert. `__init__.py`: `backup-timer on` and
   `off` (`TimerFilesPort`: the timer's files through the installer and the
   links that say which timer is on, its adapter `vm/adapters/timer.py`'s
   `TimerFiles`; systemd through cst_core's `SystemdPort`), and `tune` (plan,

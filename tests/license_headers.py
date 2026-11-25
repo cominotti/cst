@@ -59,6 +59,7 @@ LICENSE_EXEMPT: Final[dict[str, str]] = {
     "tests/quint/package.json": "JSON has no comments (npm's manifest of the quint pin, for npm ci)",
     "tests/quint/package-lock.json": "JSON has no comments (npm's lock of the quint pin: every package and its hash)",
     "btrfs/tests/quint/traces/*.itf.json": "JSON has no comments (ITF traces quint writes; the replay reads them)",
+    "vm/tests/quint/traces/*.itf.json": "JSON has no comments (ITF traces quint writes; the replay reads them)",
     "doctor/tests/fixtures/db-booted.txt": (
         "captured `rpm-ostree db list` output, copied whole into a fake package database"
     ),

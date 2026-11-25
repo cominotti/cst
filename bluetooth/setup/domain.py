@@ -410,6 +410,38 @@ def resolve(
     )
 
 
+# A backup of main.conf: main.conf.bak-YYYYmmdd-HHMMSS (the old script's names too), and -1, -2, ...
+# after it when a backup of that second has the name already (two runs in one second).
+BACKUP_SUFFIX: Final = re.compile(r"(.*\.bak-[0-9]{8}-[0-9]{6})-([0-9]+)")
+BACKUP_NAME_TRIES: Final = 100  # the names apply and revert try for one backup before they give up
+
+
+def backup_name(base: str, n: int) -> str:
+    """The n-th name of a backup taken in the second of base: base itself, then base-1, base-2, ..."""
+    return f"{base}-{n}" if n else base
+
+
+def backup_name_taken(cp_stderr: str) -> bool:
+    """GNU cp (C locale) refused a backup's name because a file has it: there when it looked
+    (--update=none-fail: "not replacing"), or created between its look and its exclusive create
+    ("File exists"). Not a failure that left a part of the copy (a full disk: "error writing")."""
+    return any(
+        line.startswith("cp: ") and (line.startswith("cp: not replacing ") or line.endswith(": File exists"))
+        for line in cp_stderr.splitlines()
+    )
+
+
+def backup_order(mtime: float, name: str) -> tuple[int, str, int, str]:
+    """What the oldest backup is chosen by: its time (whole seconds), then its name without its -N,
+    then N (so base-2 comes before base-10). A name without -N sorts by its time and name alone, as
+    every backup did before the -N names."""
+    m = BACKUP_SUFFIX.fullmatch(name)
+    n = None if m is None else parse_whole_number(group(m, 2))
+    if m is None or n is None:
+        return int(mtime), name, 0, name
+    return int(mtime), group(m, 1), n, name
+
+
 # A WirePlumber rule CST writes for one headset: 50-bluez-<its address, _ for :>.conf, in capitals
 # (as every version wrote it: Config.device is upper case).
 RULE_NAME: Final = re.compile(r"50-bluez-((?:[0-9A-F]{2}_){5}[0-9A-F]{2})\.conf")

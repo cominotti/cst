@@ -242,5 +242,6 @@ class SignalsPort(Protocol):
         ...
 
     def ignored(self) -> AbstractContextManager[None]:
-        """While it lasts, the stops are ignored (the merge back); the handlers before it after."""
+        """While it lasts, the stops are ignored (the merge back, the unclear snapshot's problems, the
+        alert and the building of the refusal with its recovery lines); the handlers before it after."""
         ...

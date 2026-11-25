@@ -31,8 +31,8 @@ from btrfs.bulk.adapters.child import (
     is_str,
     is_user_read,
 )
-from btrfs.bulk.adapters.machine import HomeTree, Primitives, Progress, kind
-from btrfs.bulk.domain import NOCOW_TOP, TAG_TEXT, FlatpakAccess, ItemJournal, LstatKind, Unexpected
+from btrfs.bulk.adapters.machine import HomeTree, Primitives, Progress, kind, listing
+from btrfs.bulk.domain import DROP_MARK, NOCOW_TOP, TAG_TEXT, FlatpakAccess, ItemJournal, LstatKind, Unexpected
 from btrfs.bulk.domain.steam import (
     CHUNK,
     STEAM_BACKUPS,
@@ -54,27 +54,6 @@ def idle_priority(machine: Primitives) -> None:
         os.nice(19)
     if shutil.which("ionice") is not None:
         machine.run(["ionice", "-c3", "-p", str(os.getpid())])
-
-
-def listing(top: str) -> list[tuple[str, str, int, int, int, str]]:
-    """(relpath, type, size, mtime_ns, mode, link target) of top and all
-    below it (lstat, no link followed)."""
-    out: list[tuple[str, str, int, int, int, str]] = []
-    stack = [(top, "")]
-    while stack:
-        path, rel = stack.pop()
-        st = os.lstat(path)
-        m, mode = st.st_mode, stat.S_IMODE(st.st_mode)
-        if stat.S_ISLNK(m):
-            out.append((rel, "l", 0, 0, mode, os.readlink(path)))
-        elif stat.S_ISREG(m):
-            out.append((rel, "f", st.st_size, st.st_mtime_ns, mode, ""))
-        elif stat.S_ISDIR(m):
-            out.append((rel, "d", 0, st.st_mtime_ns, mode, ""))
-            stack.extend((os.path.join(path, n), f"{rel}/{n}" if rel else n) for n in os.listdir(path))
-        else:
-            out.append((rel, "o", 0, st.st_mtime_ns, mode, str(stat.S_IFMT(m))))
-    return sorted(out)
 
 
 def read_full(fd: int, view: memoryview) -> int:
@@ -319,6 +298,7 @@ class UserFiles:
         Returns the ctime stamp (ns) taken before the copy."""
         if kind(new) != LstatKind.ABSENT:
             self.u_rmtree(new)
+        self.drop_marked(new)
         # Timestamps advance in clock ticks (a few ms): wait one out, so nothing
         # done before the stamp (by us, e.g. a recovery rename) shares its tick,
         # and ">=" below then means "changed after the copy started".
@@ -380,7 +360,7 @@ class UserFiles:
         (nothing changed) if src was written to since the copy started."""
         src, target, new, old, link = j["src"], j["target"], j["new"], j["old"], j["link"]
         if self.tree.changed_since(src, j["stamp"]):
-            self.u_rmtree(new)
+            self.u_drop(new)  # after the journal with stamp2: a cut deletion must not read as a write
             return False
         os.rename(src, old)
         try:
@@ -430,6 +410,7 @@ class UserFiles:
         was created again meanwhile (by an app, while the data waited in old),
         nothing is deleted: Unexpected, and the journal stays."""
         src, target, new, old, link = j["src"], j["target"], j["new"], j["old"], j["link"]
+        self.drop_marked(new)
         if link is not None and link != "" and kind(link) == LstatKind.LINK and self.tree.link_target(link) == target:
             os.unlink(link)
         if kind(old) == LstatKind.DIR:
@@ -467,17 +448,34 @@ class UserFiles:
                 f"the data is back at {src}, but the copy {new} was written to as well: copy what you "
                 f"need from it into {src}, delete {new}, then run bulk apply again"
             )
-        self.u_rmtree(new)
+        self.u_drop(new)
+
+    def u_drop(self, path: str) -> None:
+        """Delete a checked copy: renamed to PATH + DROP_MARK first (on disk before the first
+        deletion), so a deletion cut short (a kill, a power loss, a failed deletion) leaves a
+        folder known by its name, which the next repair deletes (drop_marked), not a partly
+        deleted copy whose times say it was written to."""
+        marked = path + DROP_MARK
+        self.drop_marked(path)  # a rename onto a folder that is not empty fails
+        os.rename(path, marked)
+        fsync_dir(os.path.dirname(marked))
+        self.u_rmtree(marked)
+
+    def drop_marked(self, new: str) -> None:
+        """What is left of a copy u_drop was deleting: it passed its check, so it goes unchecked."""
+        if new != "" and kind(new + DROP_MARK) != LstatKind.ABSENT:
+            self.u_rmtree(new + DROP_MARK)
 
     def rollback(self, j: ItemJournal) -> bool:
         return as_user(self.pw, self.home, is_bool, self.u_rollback, j)
 
     def u_finish(self, j: ItemJournal) -> bool:
-        """Delete the old tree of a completed switch."""
+        """Delete the old tree of a completed switch, and a copy still there (marked or not)."""
         if kind(j["old"]) != LstatKind.ABSENT:
             self.u_rmtree(j["old"])
         if kind(j["new"]) != LstatKind.ABSENT:
             self.u_rmtree(j["new"])
+        self.drop_marked(j["new"])
         return True
 
     def finish(self, j: ItemJournal) -> bool:

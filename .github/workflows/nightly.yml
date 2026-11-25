@@ -114,7 +114,7 @@ jobs:
   # of the runner (its JDK or node) or of a download between such changes. A job
   # of its own, on the runner host as its own non-root user; no GitHub cache.
   quint-nightly:
-    name: Quint Spec, TLC (docker-volumes-nocow)
+    name: Quint Specs, TLC
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

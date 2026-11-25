@@ -416,13 +416,18 @@ class NasRun:
     deployment: BootedDeployment | None
     before: dict[str, Fingerprint] = field(default_factory=dict)
     overlaid: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # The snapshot's unclear outcome (virsh did not answer, and some disk never showed its overlay): the
+    # words of the alert (one at most), which nas_run sends however the read ended.
+    unclear: list[str] = field(default_factory=list)
 
 
 class NasMergeBack(NamedTuple):
-    """What the merge back after a NAS backup could not do (problems) and how each overlay stood (how)."""
+    """What the merge back after a NAS backup could not do (problems), how each overlay stood (how),
+    and the disks it put back on their image (back: both listings show the image)."""
 
     problems: list[str]
     how: dict[str, VmOverlayKind]
+    back: frozenset[str]
 
 
 def nas_tags(vm: str, keep: str | None) -> list[str]:

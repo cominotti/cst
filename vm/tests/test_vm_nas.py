@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator, Mapping, Sequence
 import contextlib
+import dataclasses
 import fcntl
 import io
 import json
@@ -45,7 +46,7 @@ if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
 from cst_core.adapters.zipapp import build_python_zipapp
-from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.errors import ExitStatus, Refused, Usage
 from cst_core.domain.shapes import items_of
 from btrfs.tests.snapshot_fakes import RuntimeTest
 from cst_core.ports import ClockPort
@@ -276,6 +277,10 @@ RPM_OSTREE = """#!/bin/sh
 echo '{"deployments": [{"booted": true, "checksum": "bbbb", "version": "45.1", "timestamp": 1794000000}]}'
 """
 NOTIFY = """#!/bin/sh
+if [ -e "$FIX/notify-term" ]; then
+  # A stop (the timer's unit stopped) while the alert is sent: SIGTERM to cst-vm, which runs it.
+  kill -TERM "$PPID"; sleep 1
+fi
 echo "notify $*" >>"$STUB_LOG"
 """
 SYSTEMCTL = """#!/bin/sh
@@ -943,6 +948,19 @@ class RobustnessTest(Nas):
         p = self.popen_tool(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=w)
         os.close(w)
         self.assertEqual(p.wait(60), 1)
+        self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
+        self.assertTrue(os.path.exists(self.overlay))
+
+    def test_a_stop_while_the_alert_is_sent_still_alerts_and_refuses(self) -> None:
+        # No stop came before (on_signal is still caught): a SIGTERM during btrfs-notify must not cut
+        # the alert or the refusal with the recovery lines short.
+        self.vm(agent="connected", fail=["commit"])
+        open(os.path.join(self.fix, "notify-term"), "w").close()
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("DISK NOT MERGED BACK:\n  sda: virsh blockcommit: error: block commit failed", r.stderr)
+        self.assertIn("domblklist win --details --inactive", r.stderr)
+        self.assertNotIn("stopped by signal", r.stderr)
         self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
         self.assertTrue(os.path.exists(self.overlay))
 
@@ -2261,8 +2279,8 @@ class SetupRoutingTest(unittest.TestCase):
         self.assertIn("backup [VM] --nas [--keep-tag NAME] [--no-quiesce]", r.stdout)
 
 
-class _NasCommands:
-    def __init__(self, handler: Callable[[Sequence[str]], tuple[int, str, str]], signals: _NasSignals) -> None:
+class FakeNasCommands:
+    def __init__(self, handler: Callable[[Sequence[str]], tuple[int, str, str]], signals: FakeNasSignals) -> None:
         self.handler = handler
         self.signals = signals
         self.in_detached = False
@@ -2293,7 +2311,7 @@ class _NasCommands:
         return None
 
 
-class _NasStore:
+class FakeNasStore:
     def __init__(self, disks: Sequence[str]) -> None:
         self.disk_paths = set(disks)
         self.overlays: set[str] = set()
@@ -2378,7 +2396,7 @@ class _NasStore:
         del entries
 
 
-class _NasSettings:
+class FakeNasSettings:
     def number(self, key: str) -> int:
         del key
         return 0
@@ -2399,7 +2417,7 @@ class _NasSettings:
         return "win"
 
 
-class _NasRestic:
+class FakeNasRestic:
     def __init__(self, backup_fn: Callable[[], tuple[int, vm_domain_backup.ResticSummary]] | None = None) -> None:
         self.backup_fn = backup_fn
 
@@ -2418,7 +2436,7 @@ class _NasRestic:
         return 0, {"snapshot_id": SNAP_ID, "total_bytes_processed": 1024, "data_added": 512}
 
 
-class _NasSignals:
+class FakeNasSignals:
     def __init__(self) -> None:
         self.ignored_active = False
 
@@ -2438,7 +2456,7 @@ class _NasSignals:
             self.ignored_active = was
 
 
-class _NasOut:
+class FakeNasOut:
     def __init__(self) -> None:
         self.lines: list[str] = []
 
@@ -2450,7 +2468,7 @@ class _NasOut:
         self.lines.append(text)
 
 
-class _NasClock:
+class FakeNasClock:
     def now(self) -> float:
         return float(NOW)
 
@@ -2461,26 +2479,26 @@ class _NasClock:
         del seconds
 
 
-def _nas_xml(disks: Sequence[tuple[str, str]]) -> str:
+def fake_nas_xml(disks: Sequence[tuple[str, str]]) -> str:
     nodes = "".join(f"<disk type='file' device='disk'><source file='{p}'/><target dev='{t}'/></disk>" for t, p in disks)
     return f"<domain type='kvm'><name>win</name><uuid>{UUID}</uuid><os/><devices>{nodes}</devices></domain>"
 
 
-def _blklist(disks: Sequence[tuple[str, str]]) -> str:
+def fake_blklist(disks: Sequence[tuple[str, str]]) -> str:
     rows = "\n".join(f" file   disk   {t}   {p}" for t, p in disks)
     return f" Type   Device   Target   Source\n{'-' * 40}\n{rows}\n"
 
 
 def _default_virsh(
-    args: Sequence[str], disks: Sequence[tuple[str, str]], live: dict[str, str], store: _NasStore
+    args: Sequence[str], disks: Sequence[tuple[str, str]], live: dict[str, str], store: FakeNasStore
 ) -> tuple[int, str, str]:
     cmd = args[0]
     if cmd == "dumpxml":
-        return 0, _nas_xml([(t, live[t]) for t, _ in disks]), ""
+        return 0, fake_nas_xml([(t, live[t]) for t, _ in disks]), ""
     if cmd == "domstate":
         return 0, "running", ""
     if cmd == "domblklist":
-        return 0, _blklist([(t, live[t]) for t, _ in disks]), ""
+        return 0, fake_blklist([(t, live[t]) for t, _ in disks]), ""
     if cmd == "snapshot-create-as":
         for i, a in enumerate(args):
             if a == "--diskspec" and "snapshot=external" in args[i + 1]:
@@ -2504,31 +2522,33 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         disks: Sequence[tuple[str, str]],
         *,
         on_virsh: Callable[
-            [Sequence[str], _NasCommands, _NasSignals, dict[str, str], _NasStore], tuple[int, str, str] | None
+            [Sequence[str], FakeNasCommands, FakeNasSignals, dict[str, str], FakeNasStore], tuple[int, str, str] | None
         ],
         backup_fn: Callable[[], tuple[int, vm_domain_backup.ResticSummary]] | None = None,
-    ) -> tuple[vm_app_nas.NasBackup, _NasCommands, _NasStore, _NasSignals, list[tuple[str, str]]]:
+        signals: FakeNasSignals | None = None,
+        clock: ClockPort | None = None,
+    ) -> tuple[vm_app_nas.NasBackup, FakeNasCommands, FakeNasStore, FakeNasSignals, list[tuple[str, str]]]:
         live: dict[str, str] = dict(disks)
-        store = _NasStore([p for _, p in disks])
-        signals = _NasSignals()
+        store = FakeNasStore([p for _, p in disks])
+        signals = FakeNasSignals() if signals is None else signals
         alerts: list[tuple[str, str]] = []
 
         def handle(args: Sequence[str]) -> tuple[int, str, str]:
             custom = on_virsh(args, commands, signals, live, store)
             return _default_virsh(args, disks, live, store) if custom is None else custom
 
-        commands = _NasCommands(handle, signals)
-        clock: ClockPort = _NasClock()
+        commands = FakeNasCommands(handle, signals)
+        clock = FakeNasClock() if clock is None else clock
         port = vm_app_nas.NasBackup(
             commands=commands,
             store=store,
-            settings=_NasSettings(),
-            restic=_NasRestic(backup_fn),
+            settings=FakeNasSettings(),
+            restic=FakeNasRestic(backup_fn),
             signals=signals,
             lock=lambda _vm: contextlib.nullcontext(),
             alert=lambda title, body: alerts.append((title, body)),
             clock=clock,
-            out=_NasOut(),
+            out=FakeNasOut(),
             root=True,
         )
         return port, commands, store, signals, alerts
@@ -2539,10 +2559,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             _live: dict[str, str],
-            _store: _NasStore,
+            _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             # Only fail the initial find_overlays lookup (the commit_back verification after blockcommit runs normally).
             if (
@@ -2580,10 +2600,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             live: dict[str, str],
-            store: _NasStore,
+            store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if args[0] == "snapshot-create-as":
                 store.overlays.add(overlay_a)
@@ -2612,10 +2632,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             _live: dict[str, str],
-            _store: _NasStore,
+            _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if cmds.in_detached and sigs.ignored_active and args[0] == "domstate":
                 raise OSError("libvirt vanished")
@@ -2644,10 +2664,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             _live: dict[str, str],
-            _store: _NasStore,
+            _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if cmds.in_detached and sigs.ignored_active and args[0] == "domblklist":
                 raise RuntimeError("list failed")
@@ -2707,10 +2727,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         # End-to-end 2-disk partial switch: snapshot-create-as fails after switching vda only; vda merges cleanly.
         def partial_hook(
             args: Sequence[str],
-            _cmds: _NasCommands,
-            _sigs: _NasSignals,
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
             live: dict[str, str],
-            st: _NasStore,
+            st: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if args[0] == "snapshot-create-as":
                 st.overlays.update((overlay_a, overlay_b))
@@ -2728,6 +2748,289 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         self.assertEqual(store2.removed, [overlay_a])
         commits = [c[0][2] for c in commands2.virsh_log if c[0][0] == "blockcommit"]
         self.assertEqual(commits, ["vda"])
+
+
+class _HeldStop(contextlib.AbstractContextManager[object]):
+    """A held block that a stop came during: raised at its end, as signals_held delivers it."""
+
+    @override
+    def __exit__(self, *_: object) -> None:
+        raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+
+class _StopAtHeldEnd(FakeNasSignals):
+    """SignalsPort whose first held block ends with a stop that came during it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.helds = 0
+
+    @override
+    def held(self) -> contextlib.AbstractContextManager[object]:
+        self.helds += 1
+        return _HeldStop() if self.helds == 1 else contextlib.nullcontext()
+
+
+class FakeNasMovingClock(FakeNasClock):
+    """A clock whose sleep moves monotonic on, so a poll until a deadline ends."""
+
+    def __init__(self) -> None:
+        self.t = 100.0
+
+    @override
+    def monotonic(self) -> float:
+        return self.t
+
+    @override
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
+class NasUnclearSnapshotTest(unittest.TestCase):
+    """A snapshot whose outcome stays unclear (virsh timed out, a disk never showed its overlay) alerts and
+    names the overlay files however the read ends: libvirt may still switch a disk to one."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+
+    def _timeout_hook(
+        self, switched: Mapping[str, str], made: Sequence[str]
+    ) -> Callable[
+        [Sequence[str], FakeNasCommands, FakeNasSignals, dict[str, str], FakeNasStore], tuple[int, str, str] | None
+    ]:
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "snapshot-create-as":
+                store.overlays.update(made)
+                live.update(switched)
+                return 124, "", ""  # virsh's timeout: no answer
+            return None
+
+        return hook
+
+    def test_a_stop_held_through_an_unclear_snapshot_still_alerts_and_names_the_overlay(self) -> None:
+        disk_a = "/img/a.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        port, commands, store, _signals, alerts = self._make_backup(
+            [("vda", disk_a)],
+            on_virsh=self._timeout_hook({}, [overlay_a]),
+            signals=_StopAtHeldEnd(),
+            clock=FakeNasMovingClock(),
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        msg = str(ctx.exception)
+        self.assertIn("DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within", msg)
+        self.assertIn(f"(kept: {overlay_a})", msg)
+        self.assertIn(overlay_a, msg.split("by hand (read each line first):", 1)[1])
+        self.assertIn("(the backup itself: stopped by signal SIGTERM)", msg)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("may still switch to it", alerts[0][1])
+        self.assertEqual((store.dropped, store.removed), ([], []))
+        self.assertTrue(store.exists(overlay_a), "never removed while libvirt may still switch to it")
+        self.assertEqual([c for c in commands.virsh_log if c[0][0] == "blockcommit"], [])
+
+    def test_a_stop_while_the_alert_of_an_unclear_snapshot_is_sent_still_refuses(self) -> None:
+        disk_a = "/img/a.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        port, _commands, store, signals, alerts = self._make_backup(
+            [("vda", disk_a)], on_virsh=self._timeout_hook({}, [overlay_a]), clock=FakeNasMovingClock()
+        )
+
+        def alert(title: str, body: str) -> None:
+            alerts.append((title, body))
+            if not signals.ignored_active:  # on_signal still caught: a SIGTERM now raises Stop
+                raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(
+                self._cfg(), dataclasses.replace(port, alert=alert), "win", None, nas, quiesce=False, live=True
+            )
+        msg = str(ctx.exception)
+        self.assertIn("DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within", msg)
+        self.assertIn(overlay_a, msg.split("by hand (read each line first):", 1)[1])
+        self.assertEqual(len(alerts), 1)
+        self.assertTrue(store.exists(overlay_a))
+
+    def test_an_unclear_snapshot_is_named_when_the_merge_back_of_another_disk_fails(self) -> None:
+        disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+        timeout = self._timeout_hook({"vda": overlay_a}, [overlay_a, overlay_b])
+
+        def hook(
+            args: Sequence[str], cmds: FakeNasCommands, sigs: FakeNasSignals, live: dict[str, str], store: FakeNasStore
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "blockcommit":
+                return 1, "", "error: block commit timed out"
+            return timeout(args, cmds, sigs, live, store)
+
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", disk_a), ("vdb", disk_b)], on_virsh=hook, clock=FakeNasMovingClock()
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        msg = str(ctx.exception)
+        self.assertIn("vda: virsh blockcommit: error: block commit timed out", msg)
+        self.assertIn(f"may still switch to it. Nothing was removed (kept: {overlay_b})", msg)
+        self.assertIn(overlay_b, msg.split("by hand (read each line first):", 1)[1])
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("may still switch to it", alerts[0][1])
+        self.assertTrue(store.exists(overlay_b))
+
+
+class NasRecoveryLinesTest(unittest.TestCase):
+    """DISK NOT MERGED BACK gives the commands only for the disks still on an overlay: one the merge
+    back put back (both listings show its image, its overlay removed) is not named again."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    _timeout_hook = NasUnclearSnapshotTest._timeout_hook
+    disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+    overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+    overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+
+    def _refusal(self, port: vm_app_nas.NasBackup) -> str:
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        return str(ctx.exception)
+
+    def test_a_disk_merged_back_is_not_named_when_another_disks_commit_fails(self) -> None:
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            _live: dict[str, str],
+            _store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "blockcommit" and args[2] == "vdb":
+                return 1, "", "error: block commit failed"
+            return None
+
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", self.disk_a), ("vdb", self.disk_b)], on_virsh=hook
+        )
+        msg = self._refusal(port)
+        self.assertIn("vdb: virsh blockcommit: error: block commit failed", msg)
+        recovery = msg.split("by hand (read each line first):", 1)[1]
+        self.assertIn(f"# vdb: the VM still runs on {self.overlay_b}", recovery)
+        self.assertNotIn("vda", recovery)
+        self.assertNotIn(self.overlay_a, recovery)
+        self.assertEqual(store.removed, [self.overlay_a])
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_disk_merged_back_is_not_named_after_an_unclear_snapshot(self) -> None:
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", self.disk_a), ("vdb", self.disk_b)],
+            on_virsh=self._timeout_hook({"vda": self.overlay_a}, [self.overlay_a, self.overlay_b]),
+            clock=FakeNasMovingClock(),
+        )
+        msg = self._refusal(port)
+        self.assertIn(f"may still switch to it. Nothing was removed (kept: {self.overlay_b})", msg)
+        recovery = msg.split("by hand (read each line first):", 1)[1]
+        self.assertIn(self.overlay_b, recovery)
+        self.assertNotIn(self.overlay_a, recovery)
+        self.assertNotIn("vda", recovery)
+        self.assertEqual(store.removed, [self.overlay_a])
+        self.assertTrue(store.exists(self.overlay_b))
+        self.assertEqual(len(alerts), 1)
+
+    def test_the_look_first_commands_stay_when_no_disk_is_left_to_name(self) -> None:
+        # vda shows its overlay and is merged back; vdb never shows its overlay, and its file is not there.
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", self.disk_a), ("vdb", self.disk_b)],
+            on_virsh=self._timeout_hook({"vda": self.overlay_a}, [self.overlay_a]),
+            clock=FakeNasMovingClock(),
+        )
+        msg = self._refusal(port)
+        self.assertIn("may still switch to it", msg)
+        recovery = msg.split("by hand (read each line first):", 1)[1]
+        v = f"sudo virsh -c {vm_domain.URI}"
+        self.assertIn("# vda: the VM's state or the files could not be read: look first", recovery)
+        for line in (
+            f"{v} domstate win",
+            f"{v} domblklist win --details",
+            f"{v} domblklist win --details --inactive",
+            f"sudo ls -l --time-style=full-iso {self.disk_a} {self.overlay_a}",
+        ):
+            self.assertIn(line, recovery)
+        self.assertEqual(store.removed, [self.overlay_a])
+        self.assertEqual(len(alerts), 1)
+
+
+class NasHeldStopThawTest(unittest.TestCase):
+    """A stop held through a quiesced snapshot call is raised when the held block ends: the best-effort
+    domfsthaw still runs before it whenever the call did not settle the guest's freeze."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a = "/img/a.qcow2"
+    overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+
+    def _run(
+        self, rc: int, *, switched: bool
+    ) -> tuple[Refused | vm_domain_backup.Stop, list[str], list[tuple[str, str]]]:
+        """nas_run of a running VM with a connected guest agent whose quiesced snapshot call answers rc
+        (switching the disk or only making its file) while a stop is held; (what it raised, the virsh
+        commands, the alerts)."""
+        disks = [("vda", self.disk_a)]
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "dumpxml":
+                chan = "<channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0' state='connected'/></channel>"
+                return 0, fake_nas_xml([(t, live[t]) for t, _ in disks]).replace("</devices>", f"{chan}</devices>"), ""
+            if args[0] == "snapshot-create-as":
+                self.assertIn("--quiesce", args)
+                store.overlays.add(self.overlay_a)
+                if switched:
+                    live["vda"] = self.overlay_a
+                return rc, "", ("" if rc == ExitStatus.TIMED_OUT else "error: internal error: unexpected answer")
+            return None
+
+        port, commands, _store, _signals, alerts = self._make_backup(
+            disks, on_virsh=hook, signals=_StopAtHeldEnd(), clock=FakeNasMovingClock()
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises((Refused, vm_domain_backup.Stop)) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=True, live=True)
+        return ctx.exception, [c[0][0] for c in commands.virsh_log], alerts
+
+    def test_an_unclear_quiesced_snapshot_is_thawed_before_the_held_stop(self) -> None:
+        raised, cmds, alerts = self._run(int(ExitStatus.TIMED_OUT), switched=False)
+        self.assertIsInstance(raised, Refused)
+        self.assertIn("may still switch to it", str(raised))
+        self.assertEqual(cmds.count("domfsthaw"), 1)
+        self.assertLess(cmds.index("snapshot-create-as"), cmds.index("domfsthaw"))
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_quiesced_snapshot_that_timed_out_in_place_is_thawed_before_the_held_stop(self) -> None:
+        raised, cmds, alerts = self._run(int(ExitStatus.TIMED_OUT), switched=True)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)
+        self.assertEqual(cmds.count("domfsthaw"), 1)
+        self.assertLess(cmds.index("domfsthaw"), cmds.index("blockcommit"))
+        self.assertEqual(alerts, [])
+
+    def test_a_quiesced_snapshot_that_failed_in_place_is_thawed_before_the_held_stop(self) -> None:
+        raised, cmds, alerts = self._run(1, switched=True)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)
+        self.assertEqual(cmds.count("domfsthaw"), 1)
+        self.assertLess(cmds.index("domfsthaw"), cmds.index("blockcommit"))
+        self.assertEqual(alerts, [])
 
 
 class _LingeringTimer(threading.Timer):

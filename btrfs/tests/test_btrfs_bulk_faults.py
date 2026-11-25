@@ -23,7 +23,8 @@ apply() with no fault, and apply() once more.
 To bound the module's time: after a kill the second fault is of every mode, after a failure or a
 full disk a kill only (a kill during the repair is the hazard; a second failure after a full disk
 is what FAIL_FROM's first fault covers already); and LateWrite and Conflict put their first fault
-from the switch on (before it their apply is MoveBase's, which its own classes cover).
+from the switch on (before it their apply is MoveBase's, which its own classes cover), Changed
+from the journal's write before the switch.
 
 Checked after the fault, after the recovery and at the end:
 - no data lost: every file of the item, with its content, is at its path in /home (through the
@@ -36,17 +37,13 @@ Checked after the fault, after the recovery and at the end:
 The Conflict start state ends as documented instead: both sides kept, the journal names the old
 tree, status says "written to on both sides", and a further apply changes nothing.
 
-One known gap is let through by name (F1; a fix needs a design choice): a fault that cuts the
-deletion of the copy (`<target>.bulk-new`) while a rollback deletes it leaves a partly deleted
-copy whose times postdate the journal's stamp2 (our own deletions), and every later repair
-reports "the copy ... was written to as well" and keeps the journal. For exactly those cases (a
-fault at "rmtree-part" or "rmtree" of a `.bulk-new`, ending with the journal kept), the end
-checked is: the data back at its path in /home, intact and nothing else there; the journal kept;
-that message logged; a further apply changes nothing. Their number is pinned per class next to
-its cases; every other case is checked exactly.
+A rollback's deletion of the copy, and the switch's when the source changed during the copy
+(Changed), is cut like any other point: the copy is renamed to
+`<target>.bulk-new.bulk-drop` first (UserFiles.u_drop), so what a cut deletion leaves is known by
+its name, and the next repair goes on deleting it: those cases converge too.
 
 Not modelled: Steam's journals, the child process of as_user (no user to drop to), real btrfs and
-+C, and writes during a call other than the late writes of LateWrite and Conflict.
++C, and writes during a call other than the late writes of LateWrite, Changed and Conflict.
 """
 
 from __future__ import annotations
@@ -75,7 +72,6 @@ from btrfs.tests.bulk_fakes import (
 from tests.fault_injection import ALL_MODES, FaultMode, FaultPlan, cut_points, every_fault, stub_fsync
 
 EVERY_ID: Final = frozenset(i.id for i in ITEMS)
-COPY_WRITTEN: Final = "was written to as well"
 CONFLICT: Final = "written to on both sides"
 # The second fault's modes, in recover(), after a first fault of each mode (the module's docstring).
 SECOND_MODES: Final[Mapping[FaultMode, tuple[FaultMode, ...]]] = {
@@ -84,32 +80,34 @@ SECOND_MODES: Final[Mapping[FaultMode, tuple[FaultMode, ...]]] = {
     FaultMode.FAIL_FROM: (FaultMode.KILL,),
 }
 
-# The cases each class runs, and how many of them end in F1 (a change of the protocol's calls moves
-# them: pinned so it is seen).
-CASES_MOVE_KILL = (85, 9)
-CASES_MOVE_FAIL = (38, 3)
-CASES_MOVE_FAIL_FROM = (41, 3)
-CASES_NOCOW_REWRITE_KILL = (69, 6)
-CASES_NOCOW_REWRITE_FAIL = (34, 2)
-CASES_NOCOW_REWRITE_FAIL_FROM = (35, 2)
-CASES_NOCOW_FROM_HOME_KILL = (86, 9)
-CASES_NOCOW_FROM_HOME_FAIL = (39, 3)
-CASES_NOCOW_FROM_HOME_FAIL_FROM = (42, 3)
-CASES_SUBVOLUME_KILL = (25, 0)
-CASES_SUBVOLUME_FAIL = (15, 0)
-CASES_SUBVOLUME_FAIL_FROM = (15, 0)
-CASES_STALE_KILL = (85, 9)
-CASES_STALE_FAIL = (38, 3)
-CASES_STALE_FAIL_FROM = (41, 3)
-CASES_EMPTY_KILL = (6, 0)
-CASES_EMPTY_FAIL = (6, 0)
-CASES_EMPTY_FAIL_FROM = (6, 0)
-CASES_LATE_WRITE_KILL = (120, 22)
-CASES_LATE_WRITE_FAIL = (50, 9)
-CASES_LATE_WRITE_FAIL_FROM = (53, 9)
-CASES_CONFLICT_KILL = (38, 6)
-CASES_CONFLICT_FAIL = (18, 3)
-CASES_CONFLICT_FAIL_FROM = (21, 3)
+# The cases each class runs (a change of the protocol's calls moves them: pinned so it is seen).
+CASES_MOVE_KILL = 103
+CASES_MOVE_FAIL = 44
+CASES_MOVE_FAIL_FROM = 47
+CASES_NOCOW_REWRITE_KILL = 81
+CASES_NOCOW_REWRITE_FAIL = 38
+CASES_NOCOW_REWRITE_FAIL_FROM = 39
+CASES_NOCOW_FROM_HOME_KILL = 104
+CASES_NOCOW_FROM_HOME_FAIL = 45
+CASES_NOCOW_FROM_HOME_FAIL_FROM = 48
+CASES_SUBVOLUME_KILL = 25
+CASES_SUBVOLUME_FAIL = 15
+CASES_SUBVOLUME_FAIL_FROM = 15
+CASES_STALE_KILL = 103
+CASES_STALE_FAIL = 44
+CASES_STALE_FAIL_FROM = 47
+CASES_EMPTY_KILL = 6
+CASES_EMPTY_FAIL = 6
+CASES_EMPTY_FAIL_FROM = 6
+CASES_LATE_WRITE_KILL = 188
+CASES_LATE_WRITE_FAIL = 76
+CASES_LATE_WRITE_FAIL_FROM = 79
+CASES_CHANGED_KILL = 52
+CASES_CHANGED_FAIL = 24
+CASES_CHANGED_FAIL_FROM = 24
+CASES_CONFLICT_KILL = 50
+CASES_CONFLICT_FAIL = 24
+CASES_CONFLICT_FAIL_FROM = 27
 
 
 def quiet(fn: Callable[[], object]) -> str:
@@ -146,11 +144,6 @@ def put_layout(fx: BulkHome) -> None:
         link = fx.ctx.link(item)
         if link is not None and os.path.isdir(os.path.dirname(link)):
             os.symlink(fx.ctx.target(item), link)
-
-
-def is_f1_point(name: str) -> bool:
-    """A point that deletes (part of) a copy: where F1 starts."""
-    return name.startswith(("rmtree-part ", "rmtree ")) and name.endswith(".bulk-new")
 
 
 class BulkFaultBase(unittest.TestCase):
@@ -243,28 +236,13 @@ class BulkFaultBase(unittest.TestCase):
         self.assertEqual(files_under(fx.home_path(self.link())), dict(self.FILES) | {"linked": "linked"}, when)
         self.assertIn(CONFLICT, fx.report()[1], when)
 
-    def assert_f1(self, fx: BulkHome, when: str, fired: list[str]) -> None:
-        """The known gap F1 (the module's docstring): only after a fault that cut a copy's deletion."""
-        self.assertTrue(any(is_f1_point(n) for n in fired), f"{when}: journal kept: {fx.out}")
-        self.assertIn(COPY_WRITTEN, fx.out, when)
-        j = fx.item_journal(self.ITEM)
-        assert j is not None
-        if j["src"] != j["target"]:  # a move out of /home: the data is back there, in a real folder
-            self.assertFalse(os.path.islink(fx.home_path(self.link())), when)
-        self.assertEqual(files_under(fx.home_path(self.link())), self.expected(), when)
-
-    def settle(self, fx: BulkHome, plan: FaultPlan, when: str, fired: list[str]) -> int:
-        """recover() and apply() with no fault, the end checks, apply() again; 1 for an F1 case."""
+    def settle(self, fx: BulkHome, plan: FaultPlan, when: str) -> None:
+        """recover() and apply() with no fault, the end checks, apply() again."""
         plan.arm()
         quiet(lambda: bulk_items.recover(fx.bulk))
         for _ in range(self.SETTLE_APPLIES):
             fx.apply()
-        f1 = 0
-        j = fx.item_journal(self.ITEM)
-        if j is not None and not j.get("conflict", False):
-            self.assert_f1(fx, when, fired)
-            f1 = 1
-        elif self.ENDS_IN_CONFLICT:
+        if self.ENDS_IN_CONFLICT:
             self.assert_conflict(fx, when)
         else:
             self.assert_converged(fx, when)
@@ -272,36 +250,35 @@ class BulkFaultBase(unittest.TestCase):
         fx.apply()
         self.assertEqual(fx.tree(), before, f"{when}: a further apply changed files")
         self.assertNotIn("done:", fx.out, when)
-        return f1
 
-    def every_fault_then_recover(self, mode: FaultMode) -> tuple[int, int]:
+    def every_fault_then_recover(self, mode: FaultMode) -> int:
         """Each point of one apply failing in mode, then recover() (alone, and with a second fault
-        of every mode at each of its points), then the end; (cases run, F1 cases among them)."""
+        of every mode at each of its points), then the end; the number of cases run."""
         with self.home() as (fx, plan):
             points = cut_points(plan, fx.apply)
-            self.assertEqual(self.settle(fx, plan, "no fault", []), 0)
+            self.settle(fx, plan, "no fault")
         after = 0 if self.FIRST_FAULT_AT is None else points.index(self.FIRST_FAULT_AT)
-        cases = f1 = 0
+        cases = 0
         recover = bulk_items.recover
         for _mode, k in every_fault(len(points), (mode,), after=after):
             steps: list[str] = []
             when = f"{mode} at {k}"
             with self.subTest(k=k), self.home() as (fx, plan):
                 cases += 1
-                first = run_armed(plan, fx.apply, (mode, k))
+                run_armed(plan, fx.apply, (mode, k))
                 self.assert_safe(fx, when)
                 steps = run_armed(plan, lambda fx=fx: recover(fx.bulk))
                 self.assert_safe(fx, f"{when}, recovered")
-                f1 += self.settle(fx, plan, when, [first[k - 1]])
+                self.settle(fx, plan, when)
             for mode2, j in every_fault(len(steps), SECOND_MODES[mode]):
                 when2 = f"{when}, then {mode2} at recover step {j} ({steps[j - 1]})"
                 with self.subTest(k=k, then=mode2.value, j=j), self.home() as (fx, plan):
                     cases += 1
-                    first = run_armed(plan, fx.apply, (mode, k))
-                    rec = run_armed(plan, lambda fx=fx: recover(fx.bulk), (mode2, j))
+                    run_armed(plan, fx.apply, (mode, k))
+                    run_armed(plan, lambda fx=fx: recover(fx.bulk), (mode2, j))
                     self.assert_safe(fx, when2)
-                    f1 += self.settle(fx, plan, when2, [first[k - 1], rec[j - 1]])
-        return cases, f1
+                    self.settle(fx, plan, when2)
+        return cases
 
 
 # ---- the start states ---------------------------------------------------------------------------
@@ -404,6 +381,28 @@ class LateWriteBase(MoveBase):
         self.extra["late"] = "late"
 
 
+class ChangedBase(MoveBase):
+    """MoveBase, and a write into ~/Programs just before the switch (once): the switch finds it
+    changed since the copy started and deletes the copy instead (UserFiles.u_commit), with the
+    journal (and its stamp2) on disk; the next apply moves it."""
+
+    SETTLE_APPLIES = 2
+    FIRST_FAULT_AT = "write journal-apps.json"
+
+    @override
+    def hook(self, fx: BulkHome) -> None:
+        real = fx.user.u_commit
+
+        def commit(j: ItemJournal) -> bool:
+            if "late" not in self.extra:
+                with open(os.path.join(j["src"], "late"), "w") as f:
+                    f.write("late")
+                self.extra["late"] = "late"
+            return real(j)
+
+        fx.fake(fx.user, "u_commit", commit)
+
+
 class ConflictBase(LateWriteBase):
     """LateWriteBase, and a write through the link as well: the conflict journal, both sides kept."""
 
@@ -456,7 +455,7 @@ class MoveCutPointsTest(MoveBase):
             # A dead process runs no cleanup: the copy stays, with no journal (the next prepare deletes it).
             self.assertEqual(files_under(fx.bulk_path("apps.bulk-new")), dict(self.FILES))
             self.assertEqual(fx.journals(), [])
-            self.assertEqual(self.settle(fx, plan, "kill at cp", []), 0)
+            self.settle(fx, plan, "kill at cp")
 
 
 class LayoutTest(unittest.TestCase):
@@ -606,6 +605,21 @@ class LateWriteFailTest(LateWriteBase):
 class LateWriteFailFromTest(LateWriteBase):
     def test_every_fault_then_recover(self) -> None:
         self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_LATE_WRITE_FAIL_FROM)
+
+
+class ChangedKillTest(ChangedBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.KILL), CASES_CHANGED_KILL)
+
+
+class ChangedFailTest(ChangedBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL), CASES_CHANGED_FAIL)
+
+
+class ChangedFailFromTest(ChangedBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_CHANGED_FAIL_FROM)
 
 
 class ConflictKillTest(ConflictBase):

@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -421,6 +422,37 @@ class NormalizeTest(unittest.TestCase):
             M.normalize("[]", "x")
 
 
+class ChecksTest(unittest.TestCase):
+    """The checks cst-quint runs name real files and modules: a typo fails here, not only in CI's quint job."""
+
+    def test_every_check_is_a_module_of_its_spec(self) -> None:
+        self.assertEqual({c.spec for c in M.CHECKS}, {M.NOCOW_SPEC, M.NAS_SPEC})
+        for check in M.CHECKS:
+            with self.subTest(check=check.main):
+                with open(os.path.join(_CHECKOUT, check.spec), encoding="utf-8") as f:
+                    modules = re.findall(r"^module (\w+) \{", f.read(), re.MULTILINE)
+                self.assertIn(check.main, modules)
+                self.assertTrue(check.invariants)
+
+    def test_every_spec_has_its_traces_folder_and_its_replay(self) -> None:
+        specs = {c.spec for c in M.CHECKS} | {job.spec for job in M.TRACE_JOBS}
+        self.assertEqual(set(M.TRACES_DIR), specs)
+        self.assertEqual(set(M.REPLAYS), specs)
+        for spec, module in M.REPLAYS.items():
+            with self.subTest(spec=spec):
+                self.assertTrue(os.path.isfile(os.path.join(_CHECKOUT, *module.split(".")) + ".py"), module)
+        names = [(job.spec, job.name) for job in M.TRACE_JOBS]
+        self.assertEqual(len(names), len(set(names)), "two trace jobs of one spec write one file")
+
+    def test_a_check_of_a_missing_module_is_found(self) -> None:
+        # The test above reads the spec's modules with this pattern: it finds a module that is there, and
+        # no other.
+        modules = re.findall(
+            r"^module (\w+) \{", "module nas {\n}\nmodule nas_a {\n  // module nas_b {\n}\n", re.MULTILINE
+        )
+        self.assertEqual(modules, ["nas", "nas_a"])
+
+
 class MainTest(Base):
     def test_every_instance_holds(self) -> None:
         self.assertEqual(self.main(), 0)
@@ -455,6 +487,28 @@ class MainTest(Base):
         self.assertEqual(argv[argv.index("verify") + 1], planted)
         self.assertEqual(self.main("--instance", "nope"), 2)
         self.assertIn("cst-quint: no instance 'nope'", self.lines)
+
+    def test_a_planted_spec_over_two_specs_needs_an_instance(self) -> None:
+        checks = (*self.checks, M.Check(spec="specs/t.qnt", main="inst_t", invariants=("r",)))
+        planted = os.path.join(self.tmp, "planted.qnt")
+        self.assertEqual(self.main("--spec", planted, checks=checks), 2)
+        self.assertEqual(
+            self.lines, ["cst-quint: --spec needs --instance: the checks come from specs/s.qnt, specs/t.qnt"]
+        )
+        self.assertEqual(self.run_.commands("tlc"), [])
+
+    def test_a_planted_spec_with_an_instance_replaces_only_its_spec(self) -> None:
+        checks = (*self.checks, M.Check(spec="specs/t.qnt", main="inst_t", invariants=("r",)))
+        planted = os.path.join(self.tmp, "planted.qnt")
+        self.assertEqual(self.main("--instance", "inst_t", "--spec", planted, checks=checks), 0)
+        [argv] = self.run_.commands("tlc")
+        self.assertEqual(argv[argv.index("--main") + 1], "inst_t")
+        self.assertEqual(argv[argv.index("verify") + 1], planted)
+        self.assertEqual(argv[argv.index("--invariant") + 1], "r")
+        self.run_.calls.clear()
+        self.assertEqual(self.main(checks=checks), 0, "without --spec every check runs against its own spec")
+        verified = [argv[argv.index("verify") + 1] for argv in self.run_.commands("tlc")]
+        self.assertEqual(verified, [os.path.join(self.checkout, "specs", n) for n in ("s.qnt", "s.qnt", "t.qnt")])
 
     def test_the_tlc_config_and_keep(self) -> None:
         self.assertEqual(self.main("--keep"), 0)

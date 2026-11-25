@@ -23,7 +23,7 @@ from cst_core.domain.contracts import Urgency
 from cst_core.ports import CommandResult, CommandRunnerPort
 from btrfs.bulk.domain import BIG, BulkPaths, Ctx, LstatKind, PathChain
 from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP, STEAM_COMMS
-from btrfs.snapshot_runtime.domain import guard_number
+from btrfs.snapshot_runtime.domain import guard_limit
 from cst_core.domain.text import parse_snapshots_conf
 
 
@@ -241,8 +241,7 @@ class Host:
         conf = parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
         for key, name in names.items():
             if name in conf:
-                n = guard_number(conf[name])
-                vals[key] = n if isinstance(n, int) and n > 0 else 0
+                vals[key] = guard_limit(conf[name])
         return {k: v * BIG for k, v in vals.items()}
 
     @staticmethod

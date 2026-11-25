@@ -139,13 +139,14 @@ def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
 
 def commit_back(
     cfg: VmSettings, p: NasBackup, vm: str, overlaid: Mapping[str, tuple[str, str]]
-) -> tuple[list[str], dict[str, VmOverlayKind]]:
+) -> tuple[list[str], dict[str, VmOverlayKind], set[str]]:
     """virsh blockcommit --active --pivot for each overlay (also on a paused
     VM), then a check of the live and the persistent definition, then the
-    overlay file removed. Returns (problems, {target: how to recover}); no
-    problems: every disk is back on its image."""
+    overlay file removed. Returns (problems, {target: how to recover}, the
+    targets put back on their image); no problems: every disk is back on its image."""
     problems: list[str] = []
     how: dict[str, VmOverlayKind] = {}
+    back: set[str] = set()
     state = domain_state_or_none(p.commands, vm)
     if state not in LIVE_STATES:
         problems.append(
@@ -155,7 +156,7 @@ def commit_back(
         )
         for t, (base, _overlay) in overlaid.items():
             how[t] = overlay_kind(state, None, base)
-        return problems, how
+        return problems, how, back
     if state != "running":
         p.out.say(f"  {vm} is {state}: merging back anyway (a block job works on it)", flush=True)
     deadline = p.clock.monotonic() + cfg.commit_timeout
@@ -190,12 +191,13 @@ def commit_back(
                 "until both listings show the image"
             )
         else:
+            back.add(t)
             why = p.store.remove_overlay(overlay)
             if why is not None:
                 p.out.say(f"  note: {overlay}: not removed ({why}); {t} is back on {base}: remove it by hand")
             continue
         how[t] = overlay_kind(state, live_src, base)
-    return problems, how
+    return problems, how, back
 
 
 def find_overlays(p: NasBackup, vm: str, specs: Mapping[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
@@ -255,14 +257,18 @@ def nas_run(
     # Any failure, a stop included: the overlays are merged back first, then it is raised again.
     except BaseException as e:  # noqa: BLE001
         failure = e
-    # From here on no signal may cut the cleanup short, and no child may get one.
+    # From here on no signal may cut the cleanup short (the merge back, the alert and the refusal with
+    # the recovery lines), and no child may get one.
     with p.signals.ignored():
         merge = _nas_merge_back(cfg, p, run)
-    if isinstance(failure, Uncertain) and not merge.problems:
-        merge.problems.append(str(failure))
-        _add_overlay_files(p, run)
-    if merge.problems:
-        raise _nas_not_merged_back(cfg, p, run, merge, failure)
+        # The snapshot's unclear outcome, also when a stop held through its call came first or the merge
+        # back of another disk failed: libvirt may still switch a disk to an overlay file, so the alert names it.
+        if run.unclear:
+            merge.problems.extend(run.unclear)
+            _add_overlay_files(p, run)
+        refused = _nas_not_merged_back(cfg, p, run, merge, failure) if merge.problems else None
+    if refused is not None:
+        raise refused
     if failure is not None:
         raise failure
     p.out.say(
@@ -440,6 +446,7 @@ def _nas_merge_back(cfg: VmSettings, p: NasBackup, run: NasRun) -> NasMergeBack:
     ignored by the caller): what it could not do."""
     problems: list[str] = []
     how: dict[str, VmOverlayKind] = {}
+    back: set[str] = set()
     with p.commands.detached():
         if run.live:
             # What the VM really runs on, not only what take_snapshot saw.
@@ -450,11 +457,11 @@ def _nas_merge_back(cfg: VmSettings, p: NasBackup, run: NasRun) -> NasMergeBack:
                 problems.append(f"the disks could not be listed: {e!r}")
         if run.overlaid:
             try:
-                more, how = commit_back(cfg, p, run.vm, run.overlaid)
+                more, how, back = commit_back(cfg, p, run.vm, run.overlaid)
                 problems += more
             except Exception as e:  # noqa: BLE001 - reported loudly below
                 problems.append(f"the merge back failed: {e!r}")
-    return NasMergeBack(problems, how)
+    return NasMergeBack(problems, how, frozenset(back))
 
 
 def _nas_not_merged_back(
@@ -470,7 +477,11 @@ def _nas_not_merged_back(
     p.alert("VM backup: disk left on a snapshot overlay", body)
     if not run.overlaid:  # nothing known: the files this run could have made
         _add_overlay_files(p, run)
-    lines = overlay_recovery(run.vm, run.overlaid.items(), merge.how)
+    # A disk the merge back put back (both listings show its image) needs no command. When none is left
+    # to name (a disk that never showed its overlay, a listing that could not be read), the look-first
+    # commands of the disks the run knows (no recovery kind) still show where the VM stands.
+    left = [(t, spec) for t, spec in run.overlaid.items() if t not in merge.back] or list(run.overlaid.items())
+    lines = overlay_recovery(run.vm, left, merge.how)
     msg = (
         "DISK NOT MERGED BACK:\n  "
         + "\n  ".join(merge.problems)
@@ -515,10 +526,8 @@ def take_snapshot(cfg: VmSettings, p: NasBackup, run: NasRun) -> str:
         rc, err, unsure = _snapshot_attempt(cfg, p, run, quiesce=True)
         if run.overlaid:
             if rc != 0 or unsure:
-                if rc != 0:
+                if rc != 0:  # _snapshot_attempt thawed the guest
                     run.notes.append(f"virsh reported an error but the snapshot is in place: {err}")
-                    # best effort: never leave the guest frozen
-                    p.commands.virsh(("domfsthaw", run.vm), 60, detach=None)
                 return "crash-consistent"
             p.out.say("  snapshot taken with the guest's file systems frozen (quiesced, QEMU guest agent)")
             return "quiesced"
@@ -548,17 +557,23 @@ def _snapshot_attempt(cfg: VmSettings, p: NasBackup, run: NasRun, *, quiesce: bo
         settled = rc != ExitStatus.TIMED_OUT and rc >= 0  # not a timeout, and virsh not killed by a signal
         deadline = p.clock.monotonic() + (0 if settled else cfg.snapshot_settle)
         _poll_overlays(p, run, deadline, settled=settled)
-    if not settled and len(run.overlaid) != len(specs):
-        if quiesce:
+        if not settled and len(run.overlaid) != len(specs):
+            # In run before the block ends: a stop held through the call is raised there, and nas_run
+            # still alerts on this.
+            kept = ", ".join(o for t, (_, o) in specs.items() if t not in run.overlaid and p.store.lexists(o))
+            run.unclear.append(
+                f"virsh snapshot-create-as {vm} did not answer within {cfg.snapshot_timeout} s and, "
+                f"{cfg.snapshot_settle} s later, the VM's disks still do not all show the overlay: libvirt "
+                f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}"
+            )
+        # In the block too: a stop held through the call is raised at its end, and the guest must not
+        # stay frozen. A quiesced call that did not answer, or that failed with a disk in place, leaves
+        # the freeze unknown.
+        if quiesce and (not settled or (rc != 0 and run.overlaid)):
             p.commands.virsh(("domfsthaw", vm), 60, detach=None)  # best effort: never leave the guest frozen
-        kept = ", ".join(o for t, (_, o) in specs.items() if t not in run.overlaid and p.store.lexists(o))
-        raise Uncertain(
-            f"virsh snapshot-create-as {vm} did not answer within {cfg.snapshot_timeout} s and, "
-            f"{cfg.snapshot_settle} s later, the VM's disks still do not all show the overlay: libvirt "
-            f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}"
-        )
+    if run.unclear:
+        raise Uncertain(run.unclear[0])
     if not settled and quiesce:
-        p.commands.virsh(("domfsthaw", vm), 60, detach=None)
         run.notes.append(
             "virsh did not answer in time; the snapshot is in place, but whether the guest was frozen is unknown"
         )

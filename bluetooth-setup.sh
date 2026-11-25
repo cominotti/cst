@@ -58,9 +58,12 @@
 #                          backup has them (the old script's backups count),
 #                          the WirePlumber rule, the LE Audio drop-in (so
 #                          LE Audio is on again) and the LDAC rate watcher
-#                          removed; restarts as apply.
+#                          removed; restarts as apply. It also makes the
+#                          restarts still owed (see --no-restart), even
+#                          when nothing is left to revert.
 #                          --check: only show what it would do (also
-#                          works in a toolbox)
+#                          works in a toolbox); each restart still owed
+#                          is an owed: line, and exit 10
 #   help
 #
 # Options of plan and apply:
@@ -78,7 +81,8 @@
 #                          restarting Bluetooth
 #   --no-restart           (apply, revert, le-audio) write the files, restart nothing,
 #                          print the commands instead; the restarts stay owed
-#                          (plan lists them, the next apply makes them) until
+#                          (plan and revert --check list them, the next
+#                          apply or revert makes them) until
 #                          the service restarts or stops
 #
 # Settings: bluetooth/bluetooth.conf in CST (the defaults), then
