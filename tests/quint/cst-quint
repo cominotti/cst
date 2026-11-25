@@ -171,6 +171,8 @@ NAS_PROPERTIES: Final = (
     "strayNotCounted",
     "goodKeptAll",
     "checkedIndexed",
+    "pcClassified",
+    "envOutsideFrozen",
 )
 NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial", "nas_strays")
 CHECKS: Final[tuple[Check, ...]] = (

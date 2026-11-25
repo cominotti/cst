@@ -1314,12 +1314,12 @@ settled answer can switch some disks only), and a shut-off VM with four
 runs, one kill and one step of the user and no stop or guest event
 (`nas_strays`: a backup indexed, a snapshot the kill left that no record
 names, the run that names it, the user adopting or forgetting it, and a
-quiet run); `KEEP = 2`. Together about 9.0 million distinct states in
-about 3 minutes, each run of TLC at most about 2 GB: `nas_live1` 5.93
-million states, depth 47, 54 s, 1.7 GiB; `nas_live2` 998 thousand, depth
-35, 21 s; `nas_shutoff` 613 thousand, depth 34, 17 s; `nas_mixed` 330
-thousand, depth 33, 18 s; `nas_partial` 1.06 million, depth 35, 25 s, 1.6
-GiB; `nas_strays` 24 thousand, depth 40, 17 s (measured on a workstation;
+quiet run); `KEEP = 2`. Together about 8.8 million distinct states in
+a little over 2 minutes, each run of TLC at most about 2 GB: `nas_live1`
+5.81 million states, depth 48, 49 s, 1.6 GiB; `nas_live2` 984 thousand,
+depth 36, 18 s; `nas_shutoff` 571 thousand, depth 34, 16 s; `nas_mixed`
+326 thousand, depth 34, 16 s; `nas_partial` 1.04 million, depth 36, 20 s,
+1.3 GiB; `nas_strays` 24 thousand, depth 40, 13 s (measured on a workstation;
 each instance far under `TLC_TIMEOUT`).
 
 **The properties:**
@@ -1369,6 +1369,28 @@ each instance far under `TLC_TIMEOUT`).
   run's check of the snapshots no record names does not name a backup; the
   same for a stop after a good read's merge back (in the retention, a
   listing or the index's write).
+- `pcClassified` and `envOutsideFrozen`: where the environment may act.
+  The replay applies an environment step (a stop, a kill, the guest, a late
+  switch) at the code's next port call outside a frozen stretch (before
+  `catch_stops`, in a held block that freezes, in the shut-off VM's check
+  after the read, at the second listing of a pair). Every pc a run reaches
+  is in `ENV_OPEN` or in `ENV_FROZEN` (`pcClassified`), each with a
+  comment that names the call or the replay's flag that decides it; kill,
+  guest and the late switch are not enabled at a pc of `ENV_FROZEN`, and
+  no environment label carries one (`envOutsideFrozen`: `~stop` and
+  `~kill` carry the pc in `outcome`, `~guest` and `~late_switch` in
+  `ctx`). A new pc (a new step of the spec) fails `pcClassified` until it
+  is classified: look at where the code takes its step in the replay. It
+  is frozen when no port call before it lets the environment act; then
+  either the replay is wrong (it misses a point where the real code can be
+  killed or stopped: fix the replay) or the pc goes into `ENV_FROZEN`.
+  Today every pc is open (`ENV_FROZEN` is empty). A probe found the one
+  stretch that was not: the record that follows the shut-off VM's check
+  (the replay's check ran on into the record's held block), now ended by
+  the replay's `Signals.held`. The probe: a copy of the spec whose
+  `~kill` label carries the step before it, and for each pc and
+  instance a simulator trace with a kill there after each step found
+  leading to it, each replayed through `CST_NAS_TRACES`.
 
 **Known gaps.** A torn snapshot restic committed can stay in the repository,
 neither recorded nor named, after a kill before its record (nothing more
