@@ -19,8 +19,6 @@ from cst_core.domain.text import YES_WORDS, enum_member
 from cst_core.domain.units import LoadState, parse_show_units
 from doctor.application.shared import check, refresh, runs
 from doctor.domain import (
-    GAME_DROPIN,
-    GAME_DROPIN_DIR,
     INFO,
     OK,
     SCRUB_UNIT,
@@ -29,6 +27,7 @@ from doctor.domain import (
     Result,
     UnitScope,
     ViewPath,
+    game_dropin_of,
     host_join,
     is_unit_file,
     recorded_unit,
@@ -46,9 +45,14 @@ PENDING_REMOVALS: Final = {Component.BTRFS_IOCOST: "cst btrfs iocost revert"}
 
 # What check_units_loaded asks of every unit a manager has loaded, and the reload that loads its files again.
 LOADED_UNIT_PROPS: Final = ("Id", "LoadState", "NeedDaemonReload")
-# How many of a unit's files check_units_loaded names before ", ...".
+# How many paths a line names before ", ..." (_shown).
 FILES_SHOWN: Final = 3
 RELOAD_FIX: Final = {UnitScope.SYSTEM: "sudo systemctl daemon-reload", UnitScope.USER: "systemctl --user daemon-reload"}
+
+
+def _shown(paths: list[str]) -> str:
+    """The first FILES_SHOWN paths, then ", ..." when there are more."""
+    return f"{', '.join(paths[:FILES_SHOWN])}{', ...' if len(paths) > FILES_SHOWN else ''}"
 
 
 @dataclass(slots=True)
@@ -172,8 +176,8 @@ def _record_results(
     for component, dests in sorted(out.older.items()):
         yield Result(
             INFO,
-            f"{component}: {len(dests)} file(s) older than this checkout ({', '.join(dests[:3])}"
-            f"{', ...' if len(dests) > 3 else ''}): {refresh(host, component)} installs them again",
+            f"{component}: {len(dests)} file(s) older than this checkout ({_shown(dests)}): "
+            f"{refresh(host, component)} installs them again",
         )
     if out.fine:
         yield Result(OK, f"{out.fine} file(s) as CST installed them ({where})")
@@ -222,7 +226,7 @@ def _without_record(
             yield Result(
                 INFO,
                 f"{component}: installed before the install record; {len(differ)} of {found} file(s) differ from "
-                f"this checkout ({', '.join(differ[:3])}{', ...' if len(differ) > 3 else ''}): "
+                f"this checkout ({_shown(differ)}): "
                 f"{refresh(host, component)} installs them again and records them",
             )
 
@@ -303,7 +307,7 @@ def _units_not_loaded(host: DoctorHostPort, scope: UnitScope) -> list[str]:
 def _has_game_dropin(host: DoctorHostPort, unit_id: str) -> bool:
     """The game profile's runtime drop-in of a system unit is there: the profile writes it without a reload on
     purpose, so the unit's NeedDaemonReload says nothing about CST's files (the cpu rows cover it)."""
-    return host.isfile(host.path(host_join(GAME_DROPIN_DIR, f"{unit_id}.d", GAME_DROPIN)))
+    return host.isfile(host.path(game_dropin_of(unit_id)))
 
 
 @check(CHECKS, "install")
@@ -325,10 +329,9 @@ def check_units_loaded(host: DoctorHostPort, *, installed: InstalledFilesPort | 
             dests = sorted({d for name, ds in names.items() if unit_applies(name, unit_id) for d in ds})
             if not dests or (scope == UnitScope.SYSTEM and _has_game_dropin(host, unit_id)):
                 continue
-            shown = f"{', '.join(dests[:FILES_SHOWN])}{', ...' if len(dests) > FILES_SHOWN else ''}"
             yield Result(
                 WARN,
-                f"{unit_id}: systemd has not loaded its files as they are on disk (CST installed {shown}): a "
+                f"{unit_id}: systemd has not loaded its files as they are on disk (CST installed {_shown(dests)}): a "
                 "change stopped before its daemon-reload, or an edit; systemd runs it as it loaded it before",
                 RELOAD_FIX[scope],
             )

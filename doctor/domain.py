@@ -152,6 +152,12 @@ GAME_DROPIN_DIR = HostPath("/run/systemd/system")
 GAME_DROPIN = "zz-cst-game.conf"
 GAME_PROFILE_HOST = _BY_SRC["cpu/game-profile"].dest
 
+
+def game_dropin_of(unit: str) -> HostPath:
+    """The game profile's MemoryLow drop-in of a system unit: GAME_DROPIN_DIR/UNIT.d/GAME_DROPIN."""
+    return host_join(GAME_DROPIN_DIR, f"{unit}.d", GAME_DROPIN)
+
+
 # The top-level slices of the user manager that CST knows: app.slice (desktop
 # apps and the game), session.slice (gnome-shell), background.slice (GNOME's
 # background tasks: the file indexer), user.slice (the toolboxes) and
