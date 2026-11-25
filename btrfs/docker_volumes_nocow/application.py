@@ -14,6 +14,7 @@ from btrfs.docker_volumes_nocow.domain import (
     NocowCommand,
     NocowOutcome,
     NocowPaths,
+    OutcomeRead,
     PendingVolume,
     copy_check_failed,
     config_reason,
@@ -358,11 +359,12 @@ class DockerVolumesNocow:
             self.out.say(f"{self.paths.config_problem}: the boot's migration waits until it is fixed")
         flagged = self.state.flag_exists()
         # With the flag there a migration is scheduled: a record beside it (a removal that failed) is old.
-        recorded = "" if flagged else outcome_line(self.state.read_outcome())
-        if recorded:
-            self.out.say(recorded)
+        read = OutcomeRead() if flagged else self.state.read_outcome()
+        recorded = outcome_line(read)  # a detail of the folder's line: printed under it
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent")
+            if recorded:
+                self.out.say(recorded)
             return
         on = self.tree.is_nocow(vols)
         todo = self.pending()
@@ -376,9 +378,12 @@ class DockerVolumesNocow:
             self.out.say(
                 f"  {len(todo)} with copy-on-write data ({sum(t.size for t in todo) >> 20} MiB), migration {when}"
             )
-            if on and not flagged and not recorded:
-                # +C, no flag, no record: no boot looks again (a boot asks only for a folder without +C).
+            if on and not flagged and read.record is None:
+                # +C, no flag, no outcome known (no record, or one it cannot read): no boot looks again
+                # (a boot asks only for a folder without +C).
                 self.out.say("  no boot asks for it: run cst btrfs install")
+        if recorded:
+            self.out.say(recorded)
         line = postponed_line(self.state.read_postponed())
         if line:
             self.out.say(line)

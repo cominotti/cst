@@ -635,14 +635,13 @@ class MarkUnmarkTest(Base):
         self.assertEqual(stat.S_IMODE(os.stat(self.outcome).st_mode), 0o644)
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
         _rc, status = self.call(self.cli.status)
-        self.assertTrue(
-            status.startswith(
-                f"  migration not scheduled by the install at {when} (cannot schedule the migration: [Errno 5] "
-                "Input/output error); no boot asks for it: fix that, then run cst btrfs install\n"
-            ),
+        self.assertEqual(
             status,
+            f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
+            "  1 with copy-on-write data (2 MiB), migration not scheduled\n"
+            f"  migration not scheduled by the install at {when} (cannot schedule the migration: [Errno 5] "
+            "Input/output error); no boot asks for it: fix that, then run cst btrfs install\n",
         )
-        self.assertNotIn("  no boot asks for it: run cst btrfs install\n", status)
         # Fixed: the next install writes the request and removes the record.
         rc, _out, _err = self.main("mark")
         self.assertEqual(rc, 1)
@@ -2507,14 +2506,15 @@ class OutcomeRecordTest(Base):
         line = f"  migration gave up {when}: it did not finish; run cst btrfs install to try again\n"
         rc, out = self.call(self.cli.status)
         self.assertEqual(rc, 0)
+        # Under the folder's line it belongs to (it came before it, as a detail of the section above).
         self.assertEqual(
             out,
-            line + f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
-            "  1 with copy-on-write data (2 MiB), migration not scheduled\n",
+            f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
+            "  1 with copy-on-write data (2 MiB), migration not scheduled\n" + line,
         )
-        # The volumes folder gone: the record is still shown.
+        # The volumes folder gone: the record is still shown, under that line.
         shutil.rmtree(self.vols)
-        self.assertEqual(self.call(self.cli.status), (0, line + f"{self.vols}: absent\n"))
+        self.assertEqual(self.call(self.cli.status), (0, f"{self.vols}: absent\n" + line))
 
     def test_status_hides_the_record_beside_the_flag(self) -> None:
         self.fs.set(self.vols, nocow=True)
@@ -2527,7 +2527,18 @@ class OutcomeRecordTest(Base):
         self.assertNotIn("no boot asks", out)
 
     def test_status_of_a_record_it_cannot_read_or_of_a_newer_cst(self) -> None:
+        # +C, copy-on-write data, no flag: no outcome is known, so the install hint stays (it was hidden
+        # whenever the record's line was there, a problem line included).
         self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+
+        def shown(problem: str) -> str:
+            return (
+                f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
+                "  1 with copy-on-write data (2 MiB), migration not scheduled\n"
+                f"  no boot asks for it: run cst btrfs install\n  {problem}\n"
+            )
+
         for text in (
             "not json",
             "[1]",
@@ -2542,21 +2553,21 @@ class OutcomeRecordTest(Base):
                 os.makedirs(os.path.dirname(self.outcome), exist_ok=True)
                 with open(self.outcome, "w") as f:
                     f.write(text)
-                _rc, out = self.call(self.cli.status)
-                self.assertTrue(out.startswith(f"  cannot read {self.outcome}\n"), out)
+                self.assertEqual(self.call(self.cli.status), (0, shown(f"cannot read {self.outcome}")))
         os.remove(self.outcome)
         os.mkdir(self.outcome)
-        _rc, out = self.call(self.cli.status)
-        self.assertTrue(out.startswith(f"  cannot read {self.outcome}\n"), out)
+        self.assertEqual(self.call(self.cli.status), (0, shown(f"cannot read {self.outcome}")))
         os.rmdir(self.outcome)
         self.gave_up(version=99)
-        _rc, out = self.call(self.cli.status)
-        self.assertTrue(
-            out.startswith(
-                f"  {self.outcome} is format 99 of the docker-nocow-outcome (this CST reads format 1 and older): "
-                "written by a newer CST\n"
+        self.assertEqual(
+            self.call(self.cli.status),
+            (
+                0,
+                shown(
+                    f"{self.outcome} is format 99 of the docker-nocow-outcome (this CST reads format 1 and older): "
+                    "written by a newer CST"
+                ),
             ),
-            out,
         )
 
     def test_a_new_request_removes_the_record(self) -> None:
