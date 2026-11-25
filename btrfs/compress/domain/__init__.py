@@ -384,8 +384,10 @@ def kargs_edits_staged(read: tuple[bool, str, str], edits: Sequence[tuple[str, s
     `rootflags=` token of edits and none of the old ones: a change that answered a failure but was staged
     (rpm-ostree runs a transaction it started to its end). False when the read fails."""
     ok, text, _err = read
-    toks = set(extract_rootflags_tokens(text)) if ok else set()
-    return bool(edits) and all(new in toks and old not in toks for old, new in edits)
+    if not ok or not edits:
+        return False
+    toks = set(extract_rootflags_tokens(text))
+    return all(new in toks and old not in toks for old, new in edits)
 
 
 def top_mount_changed(top: TopMountInfo | None, new_options: str | None) -> bool:

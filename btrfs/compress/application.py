@@ -232,11 +232,12 @@ class CompressService:
             try:
                 self._host.write_fstab(plan.new_fstab_text)
             except (OSError, CommandFailed) as exc:
+                failure = f"Failed to update {FSTAB_PATH}: {exc}"
                 # A write that failed after the new text was in place is undone like one that worked.
                 if self._host.read_fstab() != plan.new_fstab_text:
-                    return tuple(msgs), f"Failed to update {FSTAB_PATH}: {exc}"
+                    return tuple(msgs), failure
                 prog.fstab_written = True
-                return tuple(msgs), f"Failed to update {FSTAB_PATH}: {exc}; {self._rollback_layers(snap, plan, prog)}"
+                return tuple(msgs), f"{failure}; {self._rollback_layers(snap, plan, prog)}"
             prog.fstab_written = True
             msgs.append(f"Updated {FSTAB_PATH} ({plan.target_option}) and reloaded systemd.")
 

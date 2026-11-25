@@ -126,10 +126,10 @@ def _step_fstab(run: _Run) -> str | None:
 
 def _step_kargs(run: _Run) -> str | None:
     host, plan = run.host, run.plan
-    if not plan.kargs_edits:
-        return None
-    ok, kerr = host.update_kargs(plan.kargs_edits)
     edits = plan.kargs_edits
+    if not edits:
+        return None
+    ok, kerr = host.update_kargs(edits)
     if not ok:
         # rpm-ostree can stage the change and still answer a failure (a timed-out client).
         if kargs_edits_staged(host.read_kargs(), edits):
