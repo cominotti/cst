@@ -36,6 +36,7 @@ from cpu.game.application.leftovers import unit_gone, user_manager_gone
 from cpu.game.application.profile import GameProfileSteps
 from cst_core.adapters import files as cst_files
 from cst_core.adapters.files import read_text
+from tests.probes import time_bound
 from cpu.game.domain import (
     GamePaths,
     GameSettings,
@@ -248,6 +249,29 @@ class PureRulesTest(unittest.TestCase):
         # A range end of more digits than int() reads is no number either (main: ValueError).
         self.assertEqual(expand_cpus("1" * 5000 + "-1,7"), ["7"])
         self.assertEqual(expand_cpus("0-" + "1" * 5000 + ",7"), ["7"])
+
+    def test_expand_cpus_takes_ascii_blanks_only_and_no_range_past_the_cpu_limit(self) -> None:
+        # seq's blanks around a range end are spaces and tabs; a no-break space is none (before: Unicode
+        # \s, and str.split() then split at it). A range end at or above CPU_INDEX_LIMIT (8192: no CPU has
+        # that index) gives nothing, as a bad end does (before: every number up to it).
+        nbsp = "\N{NO-BREAK SPACE}"
+        for spec, want in (
+            (f"0-{nbsp}3", []),
+            (f"{nbsp}0-3", []),
+            (f"5{nbsp},7", [f"5{nbsp}", "7"]),
+            ("0-8191", [str(n) for n in range(8192)]),
+            ("0-8192", []),
+            ("8190-9000,3", ["3"]),
+            ("0-3,6", ["0", "1", "2", "3", "6"]),
+            ("1\t-\t2", ["1", "2"]),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(expand_cpus(spec), want)
+
+    def test_a_huge_range_end_gives_nothing_at_once(self) -> None:
+        # Never run against the old code: it would build a list of 10**11 numbers.
+        with time_bound(5):
+            self.assertEqual(expand_cpus("0-99999999999,4"), ["4"])
 
     def test_vm_io_weight(self) -> None:
         for value, weight in (("25", "25"), ("1", "1"), ("10000", "10000"), ("0", "10"), ("10001", "10")):

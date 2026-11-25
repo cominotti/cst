@@ -22,7 +22,8 @@ from typing import Final, Literal
 
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, first_line_version, state_format
 from cst_core.domain.text import enum_member, file_lines, group, printf_q, printf_q_words, strip_ascii_blanks
-from cst_core.domain.values import MINUTE, parse_whole_number
+from cst_core.domain.text import split_ascii_blanks
+from cst_core.domain.values import CPU_INDEX_LIMIT, MINUTE, parse_whole_number
 
 # How long a writer under the run lock (/run/cpu-setup/lock: the game profile's on, off and tick,
 # cpu-power's apply and revert) waits for it before it gives up.
@@ -235,18 +236,17 @@ def vm_io_weight(vm_weight: str) -> str:
     return "10"
 
 
-_RANGE_END_RE: Final = re.compile(r"\s*\+?((?a:\d+))\s*")
+_RANGE_END_RE: Final = re.compile(r"[ \t]*\+?([0-9]+)[ \t]*")
 
 
 def _range_end(text: str) -> int | None:
-    """A P_CORES range end as seq read it (blanks around, an optional "+", ASCII digits), or None."""
+    """A P_CORES range end as seq read it (blanks or tabs around, an optional "+", ASCII digits), or None."""
     m = _RANGE_END_RE.fullmatch(text)
     return None if m is None else parse_whole_number(group(m, 1))
 
 
 def expand_cpus(spec: str) -> list[str]:
-    """ "0-3,6" -> ["0", "1", "2", "3", "6"]. A range whose ends are not whole numbers (or have more
-    digits than int() reads) gives nothing, as `seq` did."""
+    """ "0-3,6" -> ["0", "1", "2", "3", "6"]; a bad range end (as seq saw it) or one >= CPU_INDEX_LIMIT: none."""
     out: list[str] = []
     parts = spec.split(",")
     if parts and parts[-1] == "":
@@ -255,11 +255,11 @@ def expand_cpus(spec: str) -> list[str]:
         if "-" in part:
             lo, hi = part[: part.rfind("-")], part[part.find("-") + 1 :]
             first, last = _range_end(lo), _range_end(hi)
-            if first is not None and last is not None:
+            if first is not None and last is not None and last < CPU_INDEX_LIMIT:
                 out.extend(str(n) for n in range(first, last + 1))
         else:
             out.append(part)
-    return " ".join(out).split()
+    return split_ascii_blanks(" ".join(out))
 
 
 def transient_unit(unit: str) -> bool:
