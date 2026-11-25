@@ -90,6 +90,11 @@ def recorded_uid(host: DoctorHostPort) -> str | None:
         return None
 
 
+def _no_account(host: DoctorHostPort, uid: str | None) -> bool:
+    """True when game.state records UID (recorded_uid) and no account has it now."""
+    return uid is not None and not host.user_name(int(uid))
+
+
 def _user_of(host: DoctorHostPort, uid: str | None) -> str:
     """The name of the account with that uid, else TARGET_USER ("" when not set)."""
     target = conf_value(host, CPU_CONF, "TARGET_USER") or ""
@@ -109,7 +114,7 @@ def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
     None when no account has the uid game.state records: as the tick and 'state', the drift of that uid's
     user manager is not compared in TARGET_USER's, which is another user's."""
     uid = recorded_uid(host)
-    if uid is not None and not host.user_name(int(uid)):
+    if _no_account(host, uid):
         return None, f"no account has uid {uid}, the user 'on' acted for"
     target = _user_of(host, uid)
     if host.uid == 0:
