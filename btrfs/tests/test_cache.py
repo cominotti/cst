@@ -15,7 +15,7 @@ from typing import override
 import unittest
 import unittest.mock
 
-from btrfs.cache.adapters import CacheMountTable, cache_runtime
+from btrfs.cache import adapters as cache_adapters
 from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,
@@ -588,6 +588,27 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             data = fh.read()
         self.assertIn(b"# caf\xe9 \xff written by an old tool\n", data)
         self.assertIn(b"user=danilo kind=cache", data)
+
+    def test_a_link_put_in_place_of_a_folder_after_the_probe_fails_cleanly(self) -> None:
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.mkdir(elsewhere, 0o755)
+        os.chmod(elsewhere, 0o755)
+        real_ensure_dir = cache_adapters.ensure_dir
+
+        def swap(path: str, mode: int, *, relabel: bool) -> list[str]:
+            if path.endswith("/var/mnt/cache/danilo"):
+                os.symlink(elsewhere, path)
+                return []
+            return real_ensure_dir(path, mode, relabel=relabel)
+
+        before = self._fstab()
+        with unittest.mock.patch.object(cache_adapters, "ensure_dir", side_effect=swap):
+            rc, out, err = self._run(["attach"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache:", err)
+        self.assertNotIn("Traceback", out + err)
+        self.assertEqual(stat.S_IMODE(os.stat(elsewhere).st_mode), 0o755)
+        self.assertEqual(self._fstab(), before)
 
     def test_the_tags_owner_is_never_given_through_a_link(self) -> None:
         # The user owns /var/mnt/scratchpad/<user> by then: a CACHEDIR.TAG swapped for a link right
@@ -1311,15 +1332,16 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
     def test_a_findmnt_failure_is_worded_as_a_mount_failure(self) -> None:
         # One wording for every failed command (CommandResult.failure): its stderr, or the exit status;
         # findmnt's own copy also took its stdout.
-        class FindmntExit2(FakeMountRunner):
-            @override
-            def run(self, argv: Sequence[str], **kwargs: object) -> CommandResult:
-                if list(argv)[:1] == ["findmnt"]:
-                    return CommandResult(2, '{"filesystems": [', "")
-                return super().run(argv, **kwargs)
+        real_run = self.runner.run
 
-        rt = cache_runtime({"CST_BTRFS_CACHE_ROOT": self.tmp}, CacheTestCtx(), FindmntExit2(self.tmp))
-        self.assertEqual(CacheMountTable(rt).read(), ((), "findmnt failed: exit 2"))
+        def run(argv: Sequence[str], **kwargs: object) -> CommandResult:
+            if list(argv)[:1] == ["findmnt"]:
+                return CommandResult(2, '{"filesystems": [', "")
+            return real_run(argv, **kwargs)
+
+        with unittest.mock.patch.object(self.runner, "run", side_effect=run):
+            _, out, _ = self._run(["status"])
+        self.assertIn("  cannot list mounts: findmnt failed: exit 2", out)
 
     def test_safety_guards_nonempty_symlink_uuid_and_container(self) -> None:
         cache_d = os.path.join(self.tmp, "var", "home", "danilo", ".cache")

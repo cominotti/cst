@@ -354,7 +354,8 @@ class ProtocolFaultTest(unittest.TestCase):
 
     def test_a_link_put_in_place_of_a_folder_after_the_probe_fails_cleanly(self) -> None:
         # The private folder's O_NOFOLLOW open refuses a link put there after the probe (ENOTDIR: the
-        # adapter's half, that the link's target keeps its mode, is in test_cache_ports.py).
+        # adapter's half, that the link's target keeps its mode when the link comes after the folder
+        # check, is the test of the same name in test_cache.py).
         before = self.world.fstab
         self.world.fail("folder /var/mnt/cache/danilo", OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)))
         rc, lines = self._run(["attach"])
