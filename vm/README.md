@@ -965,8 +965,19 @@ In `/etc/cst/vm.conf` (all optional):
 | `VM_NAS_KEEP_MONTHLY` | 3 | monthly restic snapshots kept |
 | `VM_NAS_TIMEOUT_HOURS` | 6 | restic is stopped after this long (the overlay is merged back) |
 
-A value that is not a whole number in ASCII digits (`bad`, `²`, digits of
-another script) uses the default.
+A missing or empty value uses the default. A value that is not a whole number
+in ASCII digits (`bad`, `4w`, `²`, digits of another script) is never read
+as the default:
+
+- `VM_NAS_TIMEOUT_HOURS`: the NAS backup refuses to start, before anything is
+  changed (nothing backed up), and names the setting;
+- `VM_NAS_KEEP_WEEKLY` or `VM_NAS_KEEP_MONTHLY`: the NAS backup runs and is
+  indexed, its retention is skipped (`retention skipped: ...`, nothing
+  forgotten), and the run ends with exit 1, naming the setting, until it is
+  fixed.
+
+Every other `cst vm` command (status, list, the plans, `backup-timer`, a
+local backup) prints the same line on stderr and goes on.
 
 `cst-vm` reads these files with CST's one settings reader
 (`cst_core.domain.text.parse_shell_assignments`); the last line of a key wins,

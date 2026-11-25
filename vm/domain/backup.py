@@ -17,6 +17,7 @@ from cst_core.domain.values import MINUTE, Json
 from vm.domain import (
     ADOPTED_TAG,
     KEEP_TAG,
+    NAS_DEFAULTS,
     ON_CALENDAR,
     TAG,
     DomainParts,
@@ -540,6 +541,38 @@ def nas_done_lines(notes: Sequence[str], snap: str, vm: str, consistency: str, k
     ]
 
 
+# What a NAS backup does while a number of NAS_DEFAULTS is set in vm.conf and does not read.
+NAS_NUMBER_STEPS: Final = {
+    "VM_NAS_KEEP_WEEKLY": "a NAS backup skips its retention (nothing forgotten) and ends with exit 1 until it is fixed",
+    "VM_NAS_KEEP_MONTHLY": "a NAS backup skips its retention (nothing forgotten) and ends with exit 1 until it is fixed",
+    "VM_NAS_TIMEOUT_HOURS": "a NAS backup refuses to start (nothing backed up) until it is fixed",
+}
+
+
+def unreadable_nas_number(key: str, path: str, value: str | None = None) -> str:
+    """The words for KEY of vm.conf (path), set to VALUE (when given), that is not a whole number in ASCII
+    digits: a NAS backup's own words go on after them, and a command that only reads vm.conf adds
+    NAS_NUMBER_STEPS[KEY]."""
+    shown = key if value is None else f"{key}={value!r}"
+    return f"{shown} in {path} is not a whole number in ASCII digits"
+
+
+class NasNumbers(NamedTuple):
+    """The numbers of vm.conf a NAS backup reads once, before anything changes (SettingsPort.number):
+    the time limit of restic's read in hours (0: the default), and the weekly and monthly snapshots the
+    retention keeps; None: set to a value that is not a whole number in ASCII digits."""
+
+    timeout_hours: int = NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"]
+    keep_weekly: int | None = NAS_DEFAULTS["VM_NAS_KEEP_WEEKLY"]
+    keep_monthly: int | None = NAS_DEFAULTS["VM_NAS_KEEP_MONTHLY"]
+
+
+def unreadable_keep_keys(numbers: NasNumbers) -> list[str]:
+    """The keep numbers of vm.conf that do not read: the retention is skipped while one is."""
+    keep = (("VM_NAS_KEEP_WEEKLY", numbers.keep_weekly), ("VM_NAS_KEEP_MONTHLY", numbers.keep_monthly))
+    return [k for k, v in keep if v is None]
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NasRun:
     """One NAS backup: what its checks read before restic is asked anything (the definition, the
@@ -562,6 +595,7 @@ class NasRun:
     agent: str
     versions: dict[str, str]
     deployment: BootedDeployment | None
+    numbers: NasNumbers = field(default_factory=NasNumbers)
     before: dict[str, Fingerprint] = field(default_factory=dict)
     overlaid: dict[str, tuple[str, str]] = field(default_factory=dict)
     # The snapshot's unclear outcome (virsh did not answer, and some disk never showed its overlay): the

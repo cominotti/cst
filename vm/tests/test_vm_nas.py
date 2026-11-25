@@ -2674,7 +2674,7 @@ class FakeNasStore:
 
 
 class FakeNasSettings:
-    def number(self, key: str) -> int:
+    def number(self, key: str) -> int | None:
         del key
         return 0
 
@@ -2780,7 +2780,7 @@ def fake_blklist(disks: Sequence[tuple[str, str]]) -> str:
     return f" Type   Device   Target   Source\n{'-' * 40}\n{rows}\n"
 
 
-def _default_virsh(
+def default_virsh(
     args: Sequence[str], disks: Sequence[tuple[str, str]], live: dict[str, str], store: FakeNasStore
 ) -> tuple[int, str, str]:
     cmd = args[0]
@@ -2826,7 +2826,7 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def handle(args: Sequence[str]) -> tuple[int, str, str]:
             custom = on_virsh(args, commands, signals, live, store)
-            return _default_virsh(args, disks, live, store) if custom is None else custom
+            return default_virsh(args, disks, live, store) if custom is None else custom
 
         commands = FakeNasCommands(handle, signals)
         clock = FakeNasClock() if clock is None else clock
@@ -3691,7 +3691,7 @@ class NasStraySnapshotTest(unittest.TestCase):
             root=True,
         )
         cfg = vm_wiring.vm_settings({"CST_PROG": "cst vm", "CST_VM_NONROOT_OK": "1"})
-        vm_app_nas_torn.retention_after_torn(cfg, port, "win", _NAS_REPO, made=made)
+        vm_app_nas_torn.retention_after_torn(cfg, port, "win", _NAS_REPO, vm_domain_backup.NasNumbers(), made=made)
         return out.lines, alerts, restic.calls
 
     def assert_retention_ran(self, lines: Sequence[str], calls: Sequence[Sequence[str]]) -> None:

@@ -24,6 +24,7 @@ from vm.domain import (
 from vm.domain.backup import (
     STRAYS_TITLE,
     BackupMode,
+    NasNumbers,
     ResticSnapshot,
     Stop,
     TornEntry,
@@ -33,6 +34,8 @@ from vm.domain.backup import (
     stray_snapshots,
     strays_alert,
     strays_text,
+    unreadable_keep_keys,
+    unreadable_nas_number,
 )
 from vm.ports import ResticPort
 
@@ -249,22 +252,30 @@ def unaccounted(p: NasBackup, vm: str, nas: NasRepo, made: str) -> tuple[str, bo
     return strays_text(vm, strays), True
 
 
-def retention_after_torn(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo, *, made: str = "") -> None:
-    """The retention, once the torn snapshots of earlier runs are forgotten (retry_torn) and no snapshot
+def retention_after_torn(
+    cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo, numbers: NasNumbers, *, made: str = ""
+) -> None:
+    """The retention (numbers: the run's keep numbers), once the torn snapshots of earlier runs are forgotten (retry_torn) and no snapshot
     of vm that no record names is left (unaccounted; made: this run's own snapshot); skipped while one
     is: a torn snapshot would take a good backup's place among those kept."""
     why = retry_torn(p, vm, nas)
     strays = unaccounted(p, vm, nas, made)
     if why is None and strays is None:
-        retention(cfg, p, vm, nas)
+        retention(cfg, p, vm, nas, numbers)
         return
     reasons = "; ".join([*([why] if why is not None else []), *([strays[0]] if strays is not None else [])])
     until = "each is forgotten or kept" if strays is not None and strays[1] else "the next backup"
     p.out.say(f"  retention skipped: {reasons}; the repository keeps more until {until}")
 
 
-def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
-    weekly, monthly = p.settings.number("VM_NAS_KEEP_WEEKLY"), p.settings.number("VM_NAS_KEEP_MONTHLY")
+def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo, numbers: NasNumbers) -> None:
+    """restic forget by the keep policy of numbers (the run's, read once); skipped while a keep number of
+    vm.conf does not read (the run then ends with exit 1, naming it)."""
+    weekly, monthly = numbers.keep_weekly, numbers.keep_monthly
+    if weekly is None or monthly is None:
+        unread = "; ".join(unreadable_nas_number(k, cfg.paths.vm_conf) for k in unreadable_keep_keys(numbers))
+        p.out.say(f"  retention skipped: {unread}: nothing forgotten until it is fixed")
+        return
     if weekly + monthly == 0:
         p.out.say(
             f"  retention: VM_NAS_KEEP_WEEKLY and VM_NAS_KEEP_MONTHLY are 0 in {cfg.paths.vm_conf}: nothing forgotten"

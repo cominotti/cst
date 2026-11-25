@@ -16,7 +16,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, ExitStack
+from contextlib import AbstractContextManager, ExitStack, redirect_stderr
 from dataclasses import replace
 import datetime
 import errno
@@ -2290,11 +2290,13 @@ class PackageTest(unittest.TestCase):
                 vm_adapters.knobs(replace(PATHS, vm_conf=conf)),
                 {"VM_NOCOW": False, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": False, "VM_TUNE_NIC": False},
             )
-            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [8, 3, 12])
+            # VM_NAS_KEEP_MONTHLY=bad does not read: None (a NAS backup names it and skips its retention).
+            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [8, None, 12])
 
-    def test_vm_conf_numbers_in_other_digits_use_the_default(self) -> None:
+    def test_vm_conf_numbers_in_other_digits_do_not_read(self) -> None:
         # str.isdigit() takes them all; int() refuses the first and past its digit limit, and reads the
-        # Arabic-Indic eight as 8, a number bash does not read.
+        # Arabic-Indic eight as 8, a number bash does not read. None: a NAS backup names each (it used
+        # to take the default without a word).
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "vm.conf")
             with open(conf, "w", encoding="utf-8") as f:
@@ -2304,7 +2306,41 @@ class PackageTest(unittest.TestCase):
                     f"VM_NAS_TIMEOUT_HOURS={'1' * 5000}\n"
                 )
             numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
-            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 3, 6])
+            self.assertEqual(
+                [vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [None, None, None]
+            )
+            with open(conf, "w", encoding="utf-8") as f:
+                f.write("VM_NAS_KEEP_WEEKLY=''\n")  # empty: the default, as a missing key
+            self.assertEqual(vm_adapters.conf_number(replace(PATHS, vm_conf=conf), "VM_NAS_KEEP_WEEKLY"), 4)
+
+    def test_a_nas_number_that_does_not_read_is_printed_by_the_commands_that_only_read(self) -> None:
+        # No problem line: a NAS backup runs and names it in its run (vm.tests.test_vm_nas); every other
+        # command prints it on stderr and goes on, also one that changes the machine.
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "vm.conf")
+            with open(conf, "w", encoding="utf-8") as f:
+                f.write("VM_NAS_KEEP_WEEKLY='4w'\nVM_NAS_KEEP_MONTHLY=3\nVM_NAS_TIMEOUT_HOURS='1 x'\n")
+            paths = replace(PATHS, vm_conf=conf, cpu_conf=os.path.join(tmp, "cpu"), nas_conf=os.path.join(tmp, "nas"))
+            weekly = (
+                f"VM_NAS_KEEP_WEEKLY='4w' in {conf} is not a whole number in ASCII digits: a NAS backup skips its "
+                "retention (nothing forgotten) and ends with exit 1 until it is fixed"
+            )
+            timeout = (
+                f"VM_NAS_TIMEOUT_HOURS='1 x' in {conf} is not a whole number in ASCII digits: a NAS backup refuses "
+                "to start (nothing backed up) until it is fixed"
+            )
+            for cmd, sub, nas, shown in (
+                (vm_domain.VmCommand.STATUS, None, False, True),
+                (vm_domain.VmCommand.LIST, None, False, True),
+                (vm_domain.VmCommand.BACKUP_TIMER, vm_domain.VmSub.ON, False, True),
+                (vm_domain.VmCommand.BACKUP, None, False, True),
+                (vm_domain.VmCommand.BACKUP, None, True, False),
+            ):
+                with self.subTest(cmd=cmd, sub=sub, nas=nas):
+                    err = io.StringIO()
+                    with redirect_stderr(err), mock.patch.object(vm_adapters, "restore_default_signals"):
+                        vm_adapters.prepare_command(paths, cmd, sub, nas=nas, vm="win")
+                    self.assertEqual(err.getvalue(), f"{weekly}\n{timeout}\n" if shown else "")
 
     def test_a_vm_conf_number_with_a_no_break_space_is_a_problem_line(self) -> None:
         # The reader trims ASCII blanks only, and a no-break space beside a value makes the line a problem

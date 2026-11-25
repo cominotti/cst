@@ -49,7 +49,7 @@ from vm.domain import (
     URI,
     VIRT_PACKAGES,
 )
-from vm.domain.backup import BootedDeployment
+from vm.domain.backup import NAS_NUMBER_STEPS, BootedDeployment, unreadable_nas_number
 
 
 NAME = "cst-vm"
@@ -238,14 +238,30 @@ def prepare_command(paths: VmPaths, cmd: VmCommand, sub: VmSub | None, nas: bool
         raise Refused("\n".join(found) + "\nFix these lines first; nothing was changed.")
     if found:
         print("\n".join(found), file=sys.stderr)
+    # A NAS number that does not read is no problem line (a NAS backup runs, and names it in its run):
+    # every other command prints it.
+    if not (cmd == VmCommand.BACKUP and nas) and (numbers := unreadable_nas_numbers(paths)):
+        print("\n".join(numbers), file=sys.stderr)
     if not changes:
         restore_default_signals()
 
 
-def conf_number(paths: VmPaths, key: str) -> int:
-    """A whole number of /etc/cst/vm.conf in ASCII digits (NAS_DEFAULTS when missing or anything else)."""
-    v = parse_whole_number(read_conf(paths.vm_conf, nas_conf=paths.nas_conf).get(key, ""))
-    return NAS_DEFAULTS[key] if v is None else v
+def conf_number(paths: VmPaths, key: str) -> int | None:
+    """A whole number of /etc/cst/vm.conf in ASCII digits: NAS_DEFAULTS when missing or empty; None for
+    a value that is set and does not read (a NAS backup names it: unreadable_nas_number)."""
+    text = read_conf(paths.vm_conf, nas_conf=paths.nas_conf).get(key, "")
+    return NAS_DEFAULTS[key] if text == "" else parse_whole_number(text)
+
+
+def unreadable_nas_numbers(paths: VmPaths) -> list[str]:
+    """A line for each number of NAS_DEFAULTS that vm.conf sets to a value that does not read, with what
+    a NAS backup then does: what a command that only reads vm.conf prints."""
+    conf = read_conf(paths.vm_conf, nas_conf=paths.nas_conf)
+    return [
+        f"{unreadable_nas_number(k, paths.vm_conf, conf[k])}: {NAS_NUMBER_STEPS[k]}"
+        for k in NAS_DEFAULTS
+        if conf.get(k, "") != "" and parse_whole_number(conf[k]) is None
+    ]
 
 
 def default_vm(paths: VmPaths) -> str:
@@ -319,7 +335,7 @@ class VmConfFiles:
     def __init__(self, cfg: VmSettings) -> None:
         self.cfg = cfg
 
-    def number(self, key: str) -> int:
+    def number(self, key: str) -> int | None:
         return conf_number(self.cfg.paths, key)
 
     def nas_repo(self) -> NasRepo:

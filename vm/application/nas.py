@@ -48,6 +48,7 @@ from vm.domain.backup import (
     IndexRefused,
     Manifest,
     NasMergeBack,
+    NasNumbers,
     NasRun,
     CopiedFile,
     ResticSummary,
@@ -65,6 +66,8 @@ from vm.domain.backup import (
     restic_failure_why,
     snapshot_args,
     torn_entry,
+    unreadable_keep_keys,
+    unreadable_nas_number,
 )
 from vm.ports import (
     BackupStorePort,
@@ -288,7 +291,7 @@ def _nas_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, en
     (_index_stopped_backup): else the next run names that backup as a snapshot no record names."""
     snap, vm = entry["snapshot"], run.vm
     try:
-        retention_after_torn(cfg, p, vm, nas, made=snap)
+        retention_after_torn(cfg, p, vm, nas, run.numbers, made=snap)
         refused = _index_nas_backup(p, vm, nas, entry)
     except Stop as e:
         with p.signals.ignored():
@@ -296,13 +299,29 @@ def _nas_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, en
             raise _index_stopped_backup(p, vm, e, entry) from None
     for line in nas_done_lines(run.notes, snap, vm, entry["consistency"], entry["keep"]):
         p.out.say(line)
-    if refused is not None:
-        raise refused
+    # A keep number that does not read: the backup is done, its retention skipped (retention), exit 1.
+    unread = [
+        f"{unreadable_nas_number(k, cfg.paths.vm_conf)}: the backup is done; its retention is skipped until it is fixed"
+        for k in unreadable_keep_keys(run.numbers)
+    ]
+    if refused is not None or unread:
+        raise Refused("\n".join([*([str(refused)] if refused is not None else []), *unread]))
+
+
+def _nas_numbers(cfg: VmSettings, settings: SettingsPort) -> NasNumbers:
+    """The numbers of vm.conf the run reads, once, before anything changes: Refused, with nothing backed up,
+    when the time limit does not read (a keep number that does not read is named at the end of the run)."""
+    timeout = settings.number("VM_NAS_TIMEOUT_HOURS")
+    if timeout is None:
+        raise Refused(f"{unreadable_nas_number('VM_NAS_TIMEOUT_HOURS', cfg.paths.vm_conf)}: nothing backed up; fix it")
+    return NasNumbers(timeout, settings.number("VM_NAS_KEEP_WEEKLY"), settings.number("VM_NAS_KEEP_MONTHLY"))
 
 
 def _nas_preflight(cfg: VmSettings, p: NasBackup, vm: str, *, live: bool, quiesce: bool) -> NasRun:
     """What a NAS backup reads and checks before restic is asked anything: Refused, with nothing
-    changed, for a definition, a disk or a running VM it cannot back up."""
+    changed, for a definition, a disk or a running VM it cannot back up, or a time limit of vm.conf that
+    does not read (read first: _nas_numbers)."""
+    numbers = _nas_numbers(cfg, p.settings)
     xml_text, parts = read_backup_definition(p.commands, vm, "nothing backed up")
     notes = list(parts.skipped)
     sources = nas_sources(cfg, p.store, vm, parts, notes)
@@ -314,6 +333,7 @@ def _nas_preflight(cfg: VmSettings, p: NasBackup, vm: str, *, live: bool, quiesc
         quiesce=quiesce,
         xml_text=xml_text,
         parts=parts,
+        numbers=numbers,
         versions=p.commands.package_versions(),
         deployment=p.commands.booted_deployment(),
         notes=notes,
@@ -473,7 +493,7 @@ def _nas_restic_backup(
     store, out = p.store, p.out
     stage = store.stage(run.vm, run.xml_text, manifest_text(manifest))
     paths = [src for src, _ in run.sources] + [stage]
-    timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * HOUR or NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"] * HOUR
+    timeout = run.numbers.timeout_hours * HOUR or NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"] * HOUR
     for src, k in run.sources:
         a, s = store.sizes(src)
         out.say(
