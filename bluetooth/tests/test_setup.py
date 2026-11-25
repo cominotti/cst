@@ -191,6 +191,10 @@ BAP_REGISTERED = "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink
 HELP_SHA256 = "024e16e4bf3bf117be2240efc15cb17a6f007bcaae54113ab9ab55d918420a08"
 USAGE_SHA256 = "9dd2a72a99899fde725a9245c38af75e42d2a058658c2e7d3757c2802563a128"
 LW = "cst-bt-ldac48.service"
+# plan's reasons for bluetoothd's restart, and the note under a row whose restart the record owes too.
+BT_MAIN_CONF_ROW = "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
+BT_OWED_ROW = "still owed: an earlier run did not restart it; apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
+OWED = "(still owed: an earlier run did not restart it)"
 
 
 def row(word: str, label: str, note: str = "") -> str:
@@ -841,21 +845,42 @@ class RestartOwedTest(SetupCase):
         self.assertEqual(stat.S_IMODE(os.stat(m.pending).st_mode), 0o644)
         r = m.run("plan")
         self.assertEqual(r.returncode, 10)
-        self.assertIn(
-            row(
-                "restart",
-                "bluetooth.service",
-                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
-            )
-            + row("", "", "(still owed: an earlier run did not restart it)"),
-            r.stdout,
-        )
-        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2)
+        # main.conf is already as apply wants it: only the record owes bluetoothd's restart. Before,
+        # the row said "main.conf changes", with "(still owed: ...)" under it.
+        self.assertIn(row("restart", "bluetooth.service", BT_OWED_ROW), r.stdout)
+        self.assertNotIn("main.conf changes", r.stdout)
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 1)  # WirePlumber's
         r = m.run("apply", "--yes")
         self.order(r.calls, "sudo systemctl restart bluetooth", "systemctl --user restart wireplumber")
         self.assertFalse(os.path.exists(m.pending))
         r = m.run("plan")
         self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_a_forced_run_that_did_not_restart(self) -> None:
+        # apply --force --no-restart on a machine already applied: main.conf is not touched, yet the
+        # record owes bluetoothd's restart. plan has no --force and sees only the record; before, its
+        # row said "main.conf changes", which never changed.
+        m = self.machine(DONE)
+        m.run("apply", "--yes")
+        r = m.run("apply", "--yes", "--force", "--no-restart")
+        self.assertIn("Not restarted (--no-restart).", r.stdout)  # the checks find no adapter: exit 1
+        self.assertEqual(json.loads(self.text(m.pending)).get("bluetooth.service"), m.unit_inv("system", "bluetooth"))
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(row("restart", "bluetooth.service", BT_OWED_ROW), r.stdout)
+        self.assertNotIn("main.conf changes", r.stdout)
+        self.assertNotIn("\n== main.conf, as apply would write it\n", r.stdout)
+
+    def test_revert_that_did_not_restart(self) -> None:
+        m = self.machine()
+        m.run("apply", "--yes")
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertEqual(r.returncode, 0, r.text)
+        # plan now finds main.conf to change back (apply's keys are gone) and the record owes the
+        # restart too: both reasons, the main.conf one first.
+        r = m.run("plan")
+        self.assertIn(row("restart", "bluetooth.service", BT_MAIN_CONF_ROW) + row("", "", OWED), r.stdout)
+        self.assertNotIn(BT_OWED_ROW, r.stdout)
 
     def test_a_restart_by_hand_or_a_stop_ends_what_is_owed(self) -> None:
         m = self.machine()
@@ -944,15 +969,9 @@ class OwedBeforeTheWriteTest(SetupCase):
         self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
         r = m.run("plan")
         self.assertEqual(r.returncode, 10, r.text)
-        self.assertIn(
-            row(
-                "restart",
-                "bluetooth.service",
-                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
-            ),
-            r.stdout,
-        )
-        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2, r.stdout)
+        # main.conf has the keys: the restart is owed, not a main.conf change (before: "main.conf changes").
+        self.assertIn(row("restart", "bluetooth.service", BT_OWED_ROW), r.stdout)
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 1, r.stdout)
         self.resume_twice(m, self.BT_RESTART, self.WP_RESTART)
 
     def test_stopped_after_wireplumbers_files(self) -> None:
@@ -988,7 +1007,10 @@ class OwedBeforeTheWriteTest(SetupCase):
                 "wireplumber.service": m.unit_inv("user", "wireplumber"),
             },
         )
-        self.assertEqual(m.run("plan").stdout.count("(still owed: an earlier run did not restart it)"), 2)
+        # main.conf lost apply's keys, so plan would write them again: that reason first, then the note.
+        r = m.run("plan")
+        self.assertIn(row("restart", "bluetooth.service", BT_MAIN_CONF_ROW) + row("", "", OWED), r.stdout)
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2, r.stdout)
 
 
 class RevertResumesTest(SetupCase):

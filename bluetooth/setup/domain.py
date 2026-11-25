@@ -36,6 +36,12 @@ SETUP_SCRIPT: Final = MODULE_BY_NAME["bluetooth"].script  # the shell front cst 
 REFUSED_CONFLICT_NOTE: Final = "not written by CST: apply refuses; move it away by hand"
 LDAC_WATCHER_LABEL: Final = "LDAC rate watcher"  # the watcher's row in plan and status
 LE_AUDIO_LABEL: Final = "LE Audio"  # LE Audio's row in plan and status (and status's section)
+# plan's reasons for bluetoothd's restart: main.conf changes, or only the record owes it (an earlier run
+# that did not restart it: --no-restart, --force --no-restart, a question answered no, a stopped run).
+_BT_RESTART_DROPS: Final = "apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
+BT_RESTART_MAIN_CONF: Final = f"main.conf changes: {_BT_RESTART_DROPS}"
+BT_RESTART_OWED: Final = f"still owed: an earlier run did not restart it; {_BT_RESTART_DROPS}"
+OWED_NOTE: Final = "(still owed: an earlier run did not restart it)"  # under a restart row whose reason is another
 # Which command takes which option (bluetooth-setup.sh's allowed()).
 _ALLOWED: Final = frozenset(
     {

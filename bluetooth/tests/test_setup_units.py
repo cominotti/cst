@@ -870,7 +870,9 @@ class OwedBeforeTheWriteUnitTest(InProcessCase):
         self.assertEqual(parse_pending(self.text(m.pending)).get("wireplumber.service"), "wp-by-itself")
         rc, out, _ = self.run_one(m, "plan")
         self.assertEqual(rc, 10, out)
-        self.assertEqual(out.count("(still owed: an earlier run did not restart it)"), 2, out)
+        # main.conf is written already: bluetoothd's row names the owed restart, WirePlumber's the note.
+        self.assertIn("still owed: an earlier run did not restart it; apply asks first", out)
+        self.assertEqual(out.count("(still owed: an earlier run did not restart it)"), 1, out)
 
 
 class SetupModelParityTest(unittest.TestCase):

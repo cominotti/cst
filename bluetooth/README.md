@@ -249,7 +249,13 @@ after a restart reads bluetoothd's at each look; the `services` rows of
 the checks use the same reading).
 While the service keeps running with that ID, `plan` lists the restart
 ("still owed", exit 10), `status` says so, `revert --check` lists it, and
-the next `apply` or `revert` makes it (asking first for Bluetooth). Any restart of the service (by `apply`, by
+the next `apply` or `revert` makes it (asking first for Bluetooth). `plan`'s
+`bluetooth.service` row names the reason that holds: "main.conf changes" when
+`apply` would write `main.conf` (with "(still owed: ...)" under it when the
+record owes the restart too), and "still owed: an earlier run did not restart
+it" when only the record owes it (after `--no-restart`,
+`--force --no-restart`, a question answered no or a stopped run, `main.conf`
+is already as wanted). Any restart of the service (by `apply`, by
 hand with the printed commands, or a reboot) or a stop ends it. The file
 goes with the next restart that `apply`, `revert` or `le-audio` makes;
 until then a record whose restarts were made is only ignored. A file that

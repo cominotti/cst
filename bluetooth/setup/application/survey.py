@@ -36,6 +36,8 @@ from bluetooth.domain import (
 )
 from bluetooth.ports import BluetoothHostPort
 from bluetooth.setup.domain import (
+    BT_RESTART_MAIN_CONF,
+    BT_RESTART_OWED,
     BapState,
     BearerState,
     BluetoothCommand,
@@ -47,6 +49,7 @@ from bluetooth.setup.domain import (
     Options,
     Paths,
     OLD_WP_MARKER,
+    OWED_NOTE,
     REFUSED_CONFLICT_NOTE,
     WpState,
     bap_state,
@@ -731,13 +734,11 @@ class Survey:
         """The restarts section of plan: what apply restarts, and why."""
         self.section("restarts")
         if self.bt_restart:
-            self.item(
-                "restart",
-                BLUETOOTH_UNIT,
-                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
-            )
-            if self.bt_owed:
-                self.item("", "", "(still owed: an earlier run did not restart it)")
+            # The reason that holds: a restart only the record owes is named as owed, not as a main.conf
+            # change (main.conf is already as wanted after --no-restart, or untouched after --force).
+            self.item("restart", BLUETOOTH_UNIT, BT_RESTART_MAIN_CONF if self.mc_changed else BT_RESTART_OWED)
+            if self.mc_changed and self.bt_owed:
+                self.item("", "", OWED_NOTE)
         else:
             self.item("ok", BLUETOOTH_UNIT, "no restart needed")
         if self.wp_restart:
@@ -745,7 +746,7 @@ class Survey:
             if self.le_change:
                 self.item("", "", "(the LE Audio change takes effect only with this restart)")
             if self.wp_owed:
-                self.item("", "", "(still owed: an earlier run did not restart it)")
+                self.item("", "", OWED_NOTE)
         else:
             self.item("ok", "wireplumber (your session)", "no restart needed")
 
