@@ -2598,7 +2598,8 @@ echo E2E-OK
             set -E
             trap 'echo "test_225 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w} conf={conf}
-            rm -rf "$w" && mkdir -p "$w/bin"
+            rm -rf "$w"
+            mkdir -p "$w/bin"
             [[ -d /etc/cpu-setup ]] || touch "$w/made-dir"
             [[ -d /run/cpu-setup ]] || touch "$w/made-run"
             if [[ -e "$conf" ]]; then cp -a "$conf" "$w/conf.bak"; fi
@@ -3425,7 +3426,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             f"""
             set -euo pipefail
             w={w}
-            rm -rf "$w" && mkdir -p "$w/sbin"
+            rm -rf "$w"
+            mkdir -p "$w/sbin"
             printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
             printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
             export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
@@ -3535,7 +3537,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             check=False,
         )
         docker_exec(
-            c, ["bash", "-c", f"rm -rf {w} && mkdir -p {w} && cat >{w}/fakes.bash"], input_text=DEGRADED_BOOT_FAKES
+            c,
+            ["bash", "-euo", "pipefail", "-c", f"rm -rf {w}\nmkdir -p {w}\ncat >{w}/fakes.bash"],
+            input_text=DEGRADED_BOOT_FAKES,
         )
         exec_bash(c, DEGRADED_BOOT_PREPARE)
 
@@ -4370,7 +4374,8 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
             self.SYSTEMD_CONTAINER,
             f"""
             w={w}
-            rm -rf "$w" && mkdir -p "$w/sbin"
+            rm -rf "$w"
+            mkdir -p "$w/sbin"
             printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
             printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
             export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
@@ -4947,7 +4952,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/tmpfiles/cst-nvme-apst.conf"
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/udev/65-cst-nvme-apst.rules"
             d=/var/tmp/e2e-126-tmpfiles
-            rm -rf "$d" && mkdir -p "$d/sys/module/nvme_core/parameters/default_ps_max_latency_us"
+            rm -rf "$d"
+            mkdir -p "$d/sys/module/nvme_core/parameters/default_ps_max_latency_us"
             systemd-tmpfiles --create --root="$d" - </opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf
             sed 's/^w- /w /' /opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf >"$d/old.conf"
             rc=0; systemd-tmpfiles --create --root="$d" - <"$d/old.conf" || rc=$?
@@ -5642,7 +5648,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             trap 'echo "test_113 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             w={w}
-            rm -rf "$w" && mkdir -p "$w"
+            rm -rf "$w"
+            mkdir -p "$w"
             export CST_PROG="cst vm" CST_VM_INDEX="$w/vm-backups.json"
             for text in '{{"backups": [' '{{"version": 1}}'; do
                 printf '%s' "$text" >"$CST_VM_INDEX"
@@ -5689,7 +5696,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             trap 'echo "{test} FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             w={w}
-            rm -rf "$w" && mkdir -p "$w/payload"
+            rm -rf "$w"
+            mkdir -p "$w/payload"
             if ! grep -qx 'Host btrfs-setup-nas' /root/.ssh/config 2>/dev/null; then
                 printf '%s\\n' 'Host btrfs-setup-nas' '    HostName {self.NAS_CONTAINER}' '    User root' \\
                     '    IdentityFile /root/.ssh/id_ed25519' '    StrictHostKeyChecking no' \\
@@ -6054,7 +6062,8 @@ EOF
             set -E
             trap 'echo "test_216 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w}
-            rm -rf "$w" && mkdir -p "$w/bin" "$w/units" "$w/sbin"
+            rm -rf "$w"
+            mkdir -p "$w/bin" "$w/units" "$w/sbin"
             for c in virsh restic systemctl rpm rpm-ostree flatpak-spawn; do
                 printf '#!/bin/sh\\necho "%s $*" >>%s/calls\\nexit 1\\n' "$c" "$w" >"$w/bin/$c"
                 chmod 0755 "$w/bin/$c"
@@ -12587,7 +12596,8 @@ EOF
             set -E
             trap 'echo "test_218 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w}
-            rm -rf "$w" && mkdir -p "$w"
+            rm -rf "$w"
+            mkdir -p "$w"
             # The bytes: \302\240 a no-break space, \343\200\200 U+3000, \014 a form feed, \013 a vertical tab.
             printf '/dev/a\302\240b /mnt/x\014y btrfs compress=zstd:1\343\200\200,noatime 0 0\n' >"$w/fstab"
             printf '\t/dev/b \t  /mnt/t\tbtrfs   rw,compress=zstd:3\013\t0\t0\r\n' >>"$w/fstab"
@@ -12652,7 +12662,8 @@ PY
             set -E
             trap 'echo "test_226 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w}
-            rm -rf "$w" && mkdir -p "$w"
+            rm -rf "$w"
+            mkdir -p "$w"
             # The bytes: \013 a vertical tab, \014 a form feed.
             printf 'UUID=u1 / btrfs noatime\013x,subvol=root 0 0\n' >"$w/fstab"
             printf 'UUID=u1 /var btrfs subvol=v,commit=30\013,noatime 0 0\n' >>"$w/fstab"

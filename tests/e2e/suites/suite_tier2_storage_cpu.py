@@ -2839,7 +2839,8 @@ echo E2E-OK
             # recorder has it. An event Docker sends before `docker events` subscribed is lost, so
             # one tag right after the start would race the recorder (the first CI run of this test
             # did not record it); a later tag cannot.
-            rm -rf /var/tmp/e2e-gc-probe && mkdir -p /var/tmp/e2e-gc-probe
+            rm -rf /var/tmp/e2e-gc-probe
+            mkdir -p /var/tmp/e2e-gc-probe
             echo probe >/var/tmp/e2e-gc-probe/probe.txt
             t_import="$(date +%s)"
             tar -C /var/tmp/e2e-gc-probe -cf - probe.txt | docker import - e2e-gc-probe:1 >/dev/null
@@ -3117,7 +3118,7 @@ assert d["samples"] >= 1, d["samples"]
             "systemctl stop virtqemud.service virtqemud.socket virtqemud-ro.socket virtqemud-admin.socket || true",
             check=False,
         )
-        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w} && mkdir -p {w}")
+        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w}\nmkdir -p {w}")
         for name, text in (("e2e-tune.xml", VM_TUNE_DOMAIN), ("pty-answer.py", PTY_ANSWER_DRIVER)):
             docker_exec(self.PRIV_CONTAINER, ["bash", "-c", f"cat >{w}/{name}"], input_text=text)
         exec_bash(
@@ -3153,7 +3154,7 @@ assert d["samples"] >= 1, d["samples"]
             f"rm -rf {w} {h}/.local/share/libvirt {h}/.local/share/gnome-boxes {h}/.var/app/org.gnome.Boxes",
             check=False,
         )
-        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w} && mkdir -p {w}")
+        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w}\nmkdir -p {w}")
         docker_exec(self.PRIV_CONTAINER, ["bash", "-c", f"cat >{w}/pty-answer.py"], input_text=PTY_ANSWER_DRIVER)
         out = exec_bash(self.PRIV_CONTAINER, VM_NOCOW_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
@@ -3298,7 +3299,8 @@ assert d["samples"] >= 1, d["samples"]
             set -euo pipefail
             keep=/etc/btrfs-setup/bulk-keep
             w=/var/tmp/e2e-24
-            rm -rf "$w" && mkdir -p "$w"
+            rm -rf "$w"
+            mkdir -p "$w"
             if [[ -e "$keep" ]]; then cp -a "$keep" "$w/keep.bak"; fi
             made_downloads=0 made_bulk_iso=0
             [[ -e /home/tester/Downloads ]] || made_downloads=1
