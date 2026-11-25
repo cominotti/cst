@@ -51,6 +51,11 @@ def repair_drift(profile: GameProfileSteps, *, user_manager: bool = True) -> Non
         r = d.record
         if d.is_cgroup_file:
             ok = profile.ports.kernel.write(r[1], r[2])
+            # The kernel shows the list in another form than the record says (a prediction of 'on' whose
+            # write failed): the form it shows now is recorded, so it is not written again every 30 s.
+            after = (profile.ports.kernel.read_stripped(r[1]) or "") if ok else ""
+            if after not in {"", r[3], d.now}:
+                profile.append_intended(*r[:3], after)
         else:
             mgr = manager_of(r[1]) or "usr"
             ok = profile.ctl(mgr, "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True) == 0

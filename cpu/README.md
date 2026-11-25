@@ -633,7 +633,7 @@ are the defaults from `/etc/cpu-setup/cpu-setup.conf` (`BUILD_CPUS`,
 | 1, 2 | Docker containers **outside** `builds.slice` (`docker-*.scope`) | `AllowedCPUs=12-23` (no weight change) |
 | 3 | Toolboxes (inner `user.slice`) | `CPUWeight=idle` |
 | 3 | The other boxes of your user manager next to the game (see below): `background.slice`, any other slice of its own at the top of the user manager, and `systemd-run --user` jobs straight in `app.slice` (`run-*.scope`, `run-*.service`); a box started after the profile gets it at the next watchdog run, within 30 s | `CPUWeight=idle`; with cpuset delegated (6.3) also `AllowedCPUs=12-23` |
-| 2 | Only if cpuset is delegated (6.3): toolboxes and `flatpak-session-helper.service` | `AllowedCPUs=12-23`; if your user manager is older than the delegation (no reboot since `install`), it ignores this, and the profile writes `12-23` straight into their cgroup file `cpuset.cpus` |
+| 2 | Only if cpuset is delegated (6.3): toolboxes and `flatpak-session-helper.service` | `AllowedCPUs=12-23`; if your user manager is older than the delegation (no reboot since `install`), it ignores this, and the profile writes `12-23` straight into their cgroup file `cpuset.cpus` (a write that fails is written again by the next tick, 7.5) |
 | 4 | Memory chain: system `user.slice`, `user-<uid>.slice`, `user@<uid>.service`, then `app.slice` in your user manager, and **every** Steam scope `app-flatpak-com.valvesoftware.Steam-*` (the client has one, and each game gets its own; a game started after the profile gets it at the next watchdog run, within 30 s) | `MemoryLow=16G`; for the first three also a drop-in, `/run/systemd/system/<unit>.d/zz-cst-game.conf`, that wins at every `daemon-reload` (7.5) |
 | 4 | Desktop apps and the game: `app.slice` in your user manager (only if `GAME_ZSWAP_WRITEBACK=no`, and only if systemd knows `MemoryZSwapWriteback`) | `MemoryZSwapWriteback=no` |
 | - | P-cores (`P_CORES`, 0-7) | EPP `performance`, and `cpuidle` states with `latency >= GAME_CSTATE_MAX_LATENCY_US` (`50 µs` -> disables `C2_ACPI` on P-cores only) |
@@ -1105,7 +1105,15 @@ What else the profile does about it:
   tried again at every tick. (An installed bash copy of an older CST, during
   an upgrade inside one game session, reads two lines of one setting as two
   records.) A `cpuset.cpus` file it
-  wrote directly (7.1) gets a `cgw` line. The transient units (the scopes
+  writes directly (7.1) gets a `cgw` line the same way: before the write,
+  with the list as the kernel shows it (commas and ranges, no blanks:
+  `cgw FILE 12-23 12-23`), and a second line when the file then reads back in
+  another form; the tick's write of it adds one too. So a write that fails in
+  `on` (`<4>user.slice: could not write FILE`) is a drift the next tick
+  writes (`drift: FILE was '...', wrote 12-23 again`). Until 2026-11 the
+  line came only after a write that worked, and the toolboxes kept every CPU,
+  the game's too, until `off`; the older bash copy reads two lines of one
+  file as two records too. The transient units (the scopes
   of Docker containers and Steam, the `run-*.service` of `systemd-run`) are
   not recorded: no drop-in can win over theirs; the watchdog's check of the
   boxes it handled (7.2) sets them again instead. The slices made idle in the

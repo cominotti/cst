@@ -2724,6 +2724,24 @@ class GameProfileTest(Scratch):
         self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
         self.assertIn("/sys/fs/cgroup/in\tner/cpuset.cpus is 0-3 (the profile wrote 12-23)", res[0].message)
 
+    def test_the_last_cgw_record_of_a_file_wins(self) -> None:
+        # 'on' writes the kernel's form of the list before the write, and a second record when the read-back
+        # differs: the last one is compared (here the file holds 12-23, the prediction said 12-15).
+        one = "cgw /sys/fs/cgroup/inner/cpuset.cpus 12-23 12-23\n"
+        predicted = "cgw /sys/fs/cgroup/inner/cpuset.cpus 12-23 12-15\n"
+        base = self.intended
+        self.intended = base.replace(one, predicted + one)
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+        self.assertIn("the 8 settings it made still hold", res[0].message)
+        # The other order: the last record says 12-15, which the file does not hold.
+        self.intended = base.replace(one, one + predicted)
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+        self.assertIn("/sys/fs/cgroup/inner/cpuset.cpus is 12-23 (the profile wrote 12-15)", res[0].message)
+
     def test_off_is_ok_and_absent_module_is_silent(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=True):
             res = list(doc_cpu.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO)))

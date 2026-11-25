@@ -57,7 +57,14 @@ from cpu.game.domain import (
     unit_name_valid,
     vm_io_weight,
 )
-from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
+from cpu.game.domain.boxes import (
+    Unset,
+    cpuset_file_form,
+    intended_covers,
+    set_again_text,
+    setting_holds,
+    unset_settings,
+)
 from cpu.game.domain.leftovers import (
     entry_key,
     leftover_entries,
@@ -70,6 +77,20 @@ from cpu.game.domain.leftovers import (
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
 from cpu.tests.fakes import SYS, UID, USER, USR, add_gamemode_pid, game_scratch, override_path
+
+
+class FailingOnceKernel(GameKernelFiles):
+    """The cgroup tree, whose first write of each of these files fails (False, as an OSError gives)."""
+
+    def __init__(self, failing: set[str]) -> None:
+        self.failing = set(failing)
+
+    @override
+    def write(self, path: str, value: str) -> bool:
+        if path in self.failing:
+            self.failing.discard(path)
+            return False
+        return super().write(path, value)
 
 
 class GameProfileCase(unittest.TestCase):
@@ -153,6 +174,13 @@ class GameProfileCase(unittest.TestCase):
 
 
 class PureRulesTest(unittest.TestCase):
+    def test_a_cpu_list_as_the_kernel_shows_it_in_cpuset_cpus(self) -> None:
+        self.assertEqual(cpuset_file_form("12-23"), "12-23")
+        self.assertEqual(cpuset_file_form("12,13,14"), "12-14")
+        self.assertEqual(cpuset_file_form("0-3,8 20-23"), "0-3,8,20-23")  # systemd's blanks too: no blank
+        self.assertEqual(cpuset_file_form("junk"), "junk")  # as it is: no CPU list
+        self.assertEqual(cpuset_file_form(""), "")
+
     def test_the_last_record_of_a_setting_in_game_intended_wins_at_its_place(self) -> None:
         one_each = "cst-game-intended 1\nprop sys a.slice CPUWeight 10 10\ncgw /cg/cpuset.cpus 1-2 1-2\n"
         self.assertEqual(
@@ -2186,6 +2214,82 @@ class GameProfileEscapesTest(GameProfileCase):
         self.assertIn(f"cgw {f} 12-23 12-23\n", self.read(self.intended))
         self.run_profile("off")
         self.assertEqual(self.read(f), "8-23\n")
+
+    def fallback_tree(self) -> str:
+        """cpuset delegated, and a user manager that ignores AllowedCPUs on user.slice: its cpuset.cpus (8-23)."""
+        self.tree(delegated=True)
+        cpus = self.cg("user.slice")
+        self.write(os.path.join(cpus, "cpuset.cpus"), "8-23\n")
+        self.set_now("usr", "user.slice", ControlGroup="/" + os.path.relpath(cpus, self.paths.cgroot))
+        return os.path.join(cpus, "cpuset.cpus")
+
+    def test_a_cpuset_fallback_whose_write_failed_in_on_is_written_by_the_next_tick(self) -> None:
+        # r26.1, G1's twin: the record of game.intended comes before the write, so the tick writes it; the old
+        # 'on' wrote it only after a write that worked, and the toolboxes kept the game's CPUs until 'off'.
+        f = self.fallback_tree()
+        kernel = FailingOnceKernel({f})
+        with self.ports(kernel=kernel):
+            out, _ = self.run_profile("on")
+        self.assertEqual(self.read(f), "8-23\n")  # the write failed
+        self.assertIn(f"<4>game-profile: user.slice: could not write {f}\n", out)
+        self.assertIn(f"cgw {f} 8-23\n", self.read(self.state))
+        self.assertEqual(
+            [r for r in intended_records(self.read(self.intended)) if r[1] == f], [("cgw", f, "12-23", "12-23")]
+        )
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick")
+        self.assertEqual(self.read(f), "12-23\n")
+        self.assertIn(f"<5>game-profile: drift: {f} was '8-23', wrote 12-23 again\n", out)
+        out, _ = self.run_profile("tick")
+        self.assertNotIn(f, out)  # held: nothing written again
+        self.run_profile("off")
+        self.assertEqual(self.read(f), "8-23\n")
+
+    def test_a_cpuset_fallback_the_kernel_shows_in_another_form_gets_a_second_record(self) -> None:
+        # The prediction is the kernel's form of the list (commas and ranges); a read-back in another form after
+        # a write that worked is recorded too, so the tick does not write it every 30 s. The same for the tick's
+        # own write of a prediction whose write failed in 'on'.
+        f = self.fallback_tree()
+        commas = dataclasses.replace(self.settings, build_cpus="12,13,14,15")
+        self.run_profile("on", commas)
+        self.assertEqual(
+            [r for r in intended_records(self.read(self.intended)) if r[1] == f],
+            [("cgw", f, "12,13,14,15", "12,13,14,15")],
+        )
+        self.assertEqual(  # the prediction first, then the read-back
+            [r for r in records(self.read(self.intended)) if r[:2] == ("cgw", f)],
+            [("cgw", f, "12,13,14,15", "12-15"), ("cgw", f, "12,13,14,15", "12,13,14,15")],
+        )
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick", commas)
+        self.assertNotIn(f, out)
+        self.run_profile("off", commas)
+        self.assertEqual(self.read(f), "8-23\n")
+        with self.ports(kernel=FailingOnceKernel({f})):
+            self.run_profile("on", commas)
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick", commas)
+        self.assertIn(f"<5>game-profile: drift: {f} was '8-23', wrote 12,13,14,15 again\n", out)
+        self.assertEqual(
+            [r for r in intended_records(self.read(self.intended)) if r[1] == f],
+            [("cgw", f, "12,13,14,15", "12,13,14,15")],
+        )
+        out, _ = self.run_profile("tick", commas)
+        self.assertNotIn(f, out)
+
+    def test_a_game_intended_of_the_previous_version_reads_the_same(self) -> None:
+        # Upgrade: the previous 'on' wrote one cgw record per file, after a write that worked.
+        f = self.fallback_tree()
+        self.write(self.state, f"prop sys user@{UID}.service MemoryLow new -\ncgw {f} 8-23\n")
+        self.write(self.intended, intended_header() + f"cgw {f} 12-23 12-23\n")
+        self.write(f, "12-23\n")
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick")
+        self.assertNotIn(f, out)
+        self.write(f, "8-23\n")
+        out, _ = self.run_profile("tick")
+        self.assertIn(f"<5>game-profile: drift: {f} was '8-23', wrote 12-23 again\n", out)
+        self.assertEqual(self.read(f), "12-23\n")
 
     def test_a_box_with_the_game_in_it_is_left_alone(self) -> None:
         self.tree()

@@ -21,7 +21,7 @@ from cpu.game.application.drift import repair_drift, settings_drift
 from cpu.game.application.leftovers import Reloads, keep, read_kept, retry_kept, undo_pass, unit_gone, user_side
 from cpu.game.application.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.application.report import show_state
-from cpu.game.domain.boxes import shown_form
+from cpu.game.domain.boxes import cpuset_file_form, shown_form
 from cpu.game.domain.leftovers import (
     LEFTOVER_DROPINS_TEXT,
     UserSide,
@@ -328,7 +328,10 @@ class GameProfileSteps:
 
     def cpus_fallback(self, unit: str) -> None:
         """A user manager started before cpuset was delegated to it accepts AllowedCPUs but never
-        writes cpuset.cpus: the cgroup file is written directly, and recorded for 'off'."""
+        writes cpuset.cpus: the cgroup file is written directly, and recorded for 'off'. game.intended gets
+        the value as the kernel shows it (cpuset_file_form) before the write, so the drift repair writes one
+        whose write failed (setp's rule); after a write that worked, a second record when the kernel shows
+        another form, never for an empty read-back."""
         cg = self.ask("usr", "show", "-P", "ControlGroup", unit).stdout.rstrip("\n")
         f = f"{self.paths.cgroot}{cg}/cpuset.cpus"
         if not cg or not self.ports.kernel.writable(f):
@@ -339,12 +342,13 @@ class GameProfileSteps:
         if not self._append(self.paths.state, GameRecordKind.CGW, f, old):
             self.report_unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
             return
-        if self.ports.kernel.write(f, self.s.build_cpus):
-            self._append(
-                self.paths.intended, GameRecordKind.CGW, f, self.s.build_cpus, self.ports.kernel.read_stripped(f) or ""
-            )
-        else:
+        predicted = cpuset_file_form(self.s.build_cpus)
+        self.append_intended(GameRecordKind.CGW, f, self.s.build_cpus, predicted)
+        if not self.ports.kernel.write(f, self.s.build_cpus):
             self.log(4, f"{unit}: could not write {f}")
+            return
+        if (now := self.ports.kernel.read_stripped(f) or "") not in {"", predicted}:
+            self.append_intended(GameRecordKind.CGW, f, self.s.build_cpus, now)
 
     def _recorded(self, unit: str, settings: Sequence[str]) -> bool:
         """game.state holds a whole record of each of settings for unit, a box of the user manager: setp
