@@ -122,8 +122,8 @@ def ensure_dir(path: str, mode: int = 0o755, *, relabel: bool = False, set_mode:
         if relabel and os.geteuid() == 0:
             _relabel(d)
         created.append(d)
-    if set_mode:
-        os.chmod(os.path.abspath(path), mode)  # the folder the loop above made or found
+    if set_mode and not missing:  # path was there already (a folder it made has mode above)
+        os.chmod(p, mode)
     return created
 
 
