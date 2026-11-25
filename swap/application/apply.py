@@ -54,6 +54,12 @@ _WRITABLE_LINE_STATES: Final[frozenset[ManagedState]] = frozenset(
 # What apply says of a file it writes whole that it cannot read (a folder in its place, a policy), refused before
 # the first write.
 _FILE_CANNOT_BE_READ: Final = "cannot be read: nothing was changed"
+# What apply says of a folder where it puts a link (zram-generator.conf) or removes a file (the legacy sysctl
+# file): the rename or the unlink would fail on it.
+_FOLDER_IN_PLACE: Final = "a folder is in its place: nothing was changed"
+# What apply says after the name of a folder above a file it writes whole that is there but is not a folder: the
+# installer cannot create the file in it.
+_NOT_A_FOLDER: Final = "is not a folder: nothing was changed"
 
 
 class _EventLog(list[ApplyEvent]):
@@ -280,7 +286,8 @@ class SwapApplicationService(SwapReports):
     def _check_before_writing(self, spec: SwapHardwareSpec, lines: _SwapLines, events: list[ApplyEvent]) -> str | None:
         """Every refusal, before the first write (the settings file too): the preconditions, an
         unmarked swap line among lines, a file of lines apply cannot read, a file apply writes whole that
-        it cannot read (or a source of one missing from swap/: MissingDesiredFileError), and an install
+        it cannot read (or a source of one missing from swap/: MissingDesiredFileError) or whose folder is
+        not a folder, a folder in place of zram-generator.conf or of the legacy sysctl file, and an install
         record of a newer CST (the installer's puts would refuse it only after swap0's lines were
         written). The desired tmpfiles text, or None when apply stops."""
         tmpfiles_text = self._check_preconditions(spec, events)
@@ -293,18 +300,44 @@ class SwapApplicationService(SwapReports):
             if refusal is not None:
                 events.append(ApplyEvent("err", ApplyEventKind.ERROR, refusal))
                 return None
+        prog = self._env.prog
         for src, dest in self._env.managed_files:
             if self._managed_state(src, dest) == OwnedState.UNREADABLE:
-                events.append(
-                    ApplyEvent("err", ApplyEventKind.ERROR, f"{self._env.prog}: ERROR: {dest}: {_FILE_CANNOT_BE_READ}")
-                )
+                events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {dest}: {_FILE_CANNOT_BE_READ}"))
                 return None
+        in_the_way = self._path_in_the_way()
+        if in_the_way is not None:
+            events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {in_the_way}"))
+            return None
         try:
             self._installer.check_record(self._env.install_record)
         except InstallRefused as e:
             events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{self._env.prog}: ERROR: {e}"))
             return None
         return tmpfiles_text
+
+    def _path_in_the_way(self) -> str | None:
+        """What a refusal says of a path apply cannot create or replace (None: none): a name above a file it
+        writes whole that is not a folder, or a folder in place of zram-generator.conf (apply renames a link over
+        it) or of the legacy sysctl file (apply unlinks it). A link to a folder at either is no obstacle."""
+        for _src, dest in self._env.managed_files:
+            above = self._non_folder_above(dest)
+            if above is not None:
+                return f"{dest}: {above} {_NOT_A_FOLDER}"
+        for path in (self._env.zram_conf, self._env.old_sysctl_conf):
+            if self._fs.is_dir(path) and not self._fs.is_symlink(path):
+                return f"{path}: {_FOLDER_IN_PLACE}"
+        return None
+
+    def _non_folder_above(self, path: str) -> str | None:
+        """The nearest name above path that is there, when it is not a folder (a file, a link that leads to none):
+        the installer cannot create path below it. None when that name is a folder, or nothing above is there."""
+        folder = posixpath.dirname(path)
+        while folder not in ("", "/"):
+            if self._fs.lexists(folder):
+                return None if self._fs.is_dir(folder) else folder
+            folder = posixpath.dirname(folder)
+        return None
 
     def _line_refusal(self, path: str, line_spec: MarkedLineSpec, st: ManagedState) -> str | None:
         """The error line apply stops with for a marked line in state st, None when apply may write it."""

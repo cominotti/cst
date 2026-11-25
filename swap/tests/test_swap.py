@@ -2902,6 +2902,70 @@ class SwapApplyBranchesTest(_SwapScratch):
             self.assertEqual(f.read(), "# the copy an earlier apply made\n")
         self.assertTrue(os.path.isdir(elsewhere))
 
+    def test_a_folder_where_apply_puts_a_link_or_removes_a_file_stops_apply_before_any_write(self) -> None:
+        # zram-generator.conf (apply renames a link over it) and the legacy sysctl file (apply unlinks it).
+        # Before, apply wrote crypttab and fstab, started swap0, set zswap (and, for the sysctl file, masked
+        # zram) and only then failed with "Is a directory". A link to a folder there is no reason to refuse:
+        # the rename replaces the link, the unlink removes it.
+        etc = self.env.etc_dir
+        for rel in (os.path.relpath(self.env.zram_conf, etc), os.path.relpath(self.env.old_sysctl_conf, etc)):
+            tmp = self._fresh_scratch()
+            path = os.path.join(self.env.etc_dir, rel)
+            with self.subTest(path=rel):
+                os.makedirs(path)
+                before = file_tree(tmp)
+                self._assert_refused_before_any_write(
+                    self._apply_on(self._fs()),
+                    f"cst swap: ERROR: {path}: a folder is in its place: nothing was changed",
+                )
+                self.assertEqual(file_tree(tmp), before)
+                self.assertTrue(os.path.isdir(path))
+                # A link to a folder in its place: apply works.
+                os.rmdir(path)
+                elsewhere = os.path.join(tmp, "elsewhere")
+                os.makedirs(elsewhere)
+                os.symlink(elsewhere, path)
+                rc, out, err, _systemd, _system = self._apply_on(self._fs())
+                self.assertEqual(rc, 0, out + err)
+                if path == self.env.zram_conf:
+                    self.assertEqual(os.readlink(path), "/dev/null")
+                else:
+                    self.assertFalse(os.path.lexists(path))
+                self.assertTrue(os.path.isdir(elsewhere))
+
+    def test_a_file_in_place_of_the_folder_of_a_file_apply_writes_whole_stops_apply_before_any_write(self) -> None:
+        # The installer creates a missing folder, and cannot create one below a file. Before, plan's row said
+        # "write", and apply wrote crypttab and fstab, started swap0 and the steps before that file, and
+        # only then failed with "Not a directory".
+        etc = self.env.etc_dir
+        cases: dict[str, str] = {}  # the name made a file -> the first file apply checks below it (relative to etc)
+        for _src, dest in self.env.managed_files:
+            if os.path.dirname(dest) != etc:
+                cases.setdefault(os.path.relpath(os.path.dirname(dest), etc), os.path.relpath(dest, etc))
+        cases[os.path.join("systemd", "system")] = os.path.relpath(self.env.slice_dropin, etc)  # one higher up
+        self.assertEqual(len(cases), 4)
+        for rel_blocked, rel_dest in cases.items():
+            tmp = self._fresh_scratch()
+            blocked = os.path.join(self.env.etc_dir, rel_blocked)
+            dest = os.path.join(self.env.etc_dir, rel_dest)
+            with self.subTest(blocked=rel_blocked):
+                if os.path.isdir(blocked):
+                    shutil.rmtree(blocked)
+                os.makedirs(os.path.dirname(blocked), exist_ok=True)
+                with open(blocked, "w", encoding="utf-8") as f:
+                    f.write("# not a folder\n")
+                before = file_tree(tmp)
+                self._assert_refused_before_any_write(
+                    self._apply_on(self._fs()),
+                    f"cst swap: ERROR: {dest}: {blocked} is not a folder: nothing was changed",
+                )
+                self.assertEqual(file_tree(tmp), before)
+                # The file gone, the same apply works.
+                os.remove(blocked)
+                rc, out, err, _systemd, _system = self._apply_on(self._fs())
+                self.assertEqual(rc, 0, out + err)
+                self.assertTrue(os.path.isfile(dest))
+
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the
         # earlier files first, and stopped only at that step.

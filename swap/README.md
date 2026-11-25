@@ -327,7 +327,13 @@ What `apply` does, in order:
    `/etc/uresourced.conf` to anything but a file it can read, such as a
    folder or a FIFO, while step 7 has still to copy it aside: while no
    `/etc/uresourced.conf.pre-swap-config.bak` is there; nothing is read
-   through the link), and that
+   through the link) and that no name above one of them is a file, where
+   the installer could not create its folder (refused with
+   `<file>: <name> is not a folder: nothing was changed`), that no folder
+   is in place of `/etc/systemd/zram-generator.conf`, where step 4 puts a
+   link, or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, which step 5
+   removes (refused with `<file>: a folder is in its place: nothing was
+   changed`), and that
    root's install record (`/var/lib/cst/installed.json`) was not written by
    a newer CST (a downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
    `/etc/cst/swap.conf` (section 5).

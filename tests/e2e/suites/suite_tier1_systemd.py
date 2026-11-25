@@ -9668,59 +9668,94 @@ echo E2E-OK
         self.assertIn("E2E-OK", r.stdout)
 
     @e2e_tags(E2ETag.SWAP)
-    def test_187_swap_apply_refuses_a_folder_in_place_of_zswap_conf_before_any_write(self) -> None:
+    def test_187_swap_apply_refuses_a_path_in_the_way_before_any_write(self) -> None:
         """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
-        set before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and a folder where
-        /etc/tmpfiles.d/zswap.conf goes (the test's own trap removes it before swap_cleanup runs): plan's
-        row of the file is "?" and says apply refuses it; apply exits 1 with "<file>: cannot be read:
-        nothing was changed" on stderr, and every file, link, mode and owner under /etc and the scratch
-        tree, and the install record, are as before (no crypttab line, no .pre-swap-config.bak, no
-        sysctl run). Before, apply wrote crypttab and fstab and started swap0's step first, and failed at
-        the zswap step. With the folder removed, the same apply works and a second one changes nothing."""
+        set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, four times: a
+        folder where /etc/tmpfiles.d/zswap.conf goes (plan's row of the file is "?" and says apply refuses
+        it), a folder where /etc/systemd/zram-generator.conf goes (apply renames a link over it), a folder
+        where the legacy /etc/sysctl.d/99-zram-tuning.conf is (apply unlinks it), and a file in place of
+        /etc/systemd/system/machine.slice.d (the folder of the drop-in apply writes; the real one moved
+        aside). The test's own trap puts each back before swap_cleanup runs. Each time apply exits 1 with
+        "<file>: cannot be read: nothing was changed", "<file>: a folder is in its place: nothing was
+        changed" or "<file>: <folder> is not a folder: nothing was changed" on stderr, and every file,
+        link, mode and owner under /etc and the scratch tree, and the install record, are as before (no
+        crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply wrote crypttab and fstab and
+        started swap0's step first, and failed later (at the zswap step, or with "Is a directory" or "Not
+        a directory"). With each one put back, the same apply works and a second one changes nothing."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
             + r"""
 CONF=/etc/tmpfiles.d/zswap.conf
+ZRAM=/etc/systemd/zram-generator.conf
+OLD=/etc/sysctl.d/99-zram-tuning.conf
+DROPIN="$DROPIN_DIR/10-swap-memory-low.conf"
 NOTE="cannot be read, even as root: apply refuses before it writes anything"
-conf_dir_made=""
-conf_back() {
-    if [[ -n "$conf_dir_made" ]]; then rm -rf "$CONF"; fi
+made=""
+put_back() {
+    case "$made" in
+        conf) rm -rf "$CONF" ;;
+        zram) rmdir "$ZRAM" ;;
+        old) rmdir "$OLD" ;;
+        dropin) rm -f "$DROPIN_DIR"; mv "$W/dropin.real" "$DROPIN_DIR" ;;
+    esac
+    made=""
 }
-trap 'conf_back; swap_cleanup' EXIT
+trap 'put_back; swap_cleanup' EXIT
 swap_setup
 trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
 fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
 record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+refused() {
+    s0="$(snap)"
+    r0="$(record)"
+    : >"$W/calls"
+    swap_run apply
+    [[ $rc == 1 ]] || fail "apply with $1 exited $rc"
+    grep -qF "swap: ERROR: $2" <<<"$err" || fail "apply's message with $1"
+    [[ "$out" != *"written:"* ]] || fail "apply with $1 wrote before it refused"
+    [[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply with $1 reached swap0's step"
+    [[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+    [[ "$(snap)" == "$s0" ]] || fail "a refused apply with $1 changed /etc or the scratch tree"
+    [[ "$(record)" == "$r0" ]] || fail "a refused apply with $1 changed the install record"
+    if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply with $1 ran sysctl"; fi
+}
 
 mkdir -p /etc/cst
 printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
 [[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there before the test"
+[[ ! -d "$ZRAM" && ! -e "$OLD" && ! -L "$OLD" && -d "$DROPIN_DIR" && ! -L "$DROPIN_DIR" ]] \
+    || fail "the container's files are not as the test expects"
 mkdir -p "$CONF"
-conf_dir_made=1
+made=conf
 swap_run plan
 [[ $rc == 0 ]] || fail "plan with a folder in place of $CONF exited $rc"
 grep -qE "^  \?  +tmpfiles\.d/zswap\.conf +$NOTE\$" <<<"$out" || fail "plan's row of $CONF"
-s0="$(snap)"
-r0="$(record)"
-swap_run apply
-[[ $rc == 1 ]] || fail "apply with a folder in place of $CONF exited $rc"
-grep -qF "ERROR: $CONF: cannot be read: nothing was changed" <<<"$err" || fail "apply's message"
-[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
-[[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply reached swap0's step"
-[[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
-[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
-[[ "$(record)" == "$r0" ]] || fail "a refused apply changed the install record"
-if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply ran sysctl"; fi
+refused "a folder in place of $CONF" "$CONF: cannot be read: nothing was changed"
+put_back
+rm -f "$ZRAM"  # the image's own, if any: swap_cleanup puts it back
+mkdir "$ZRAM"
+made=zram
+refused "a folder in place of $ZRAM" "$ZRAM: a folder is in its place: nothing was changed"
+put_back
+mkdir "$OLD"
+made=old
+refused "a folder in place of $OLD" "$OLD: a folder is in its place: nothing was changed"
+put_back
+mv "$DROPIN_DIR" "$W/dropin.real"
+: >"$DROPIN_DIR"
+made=dropin
+refused "a file in place of $DROPIN_DIR" "$DROPIN: $DROPIN_DIR is not a folder: nothing was changed"
+put_back
 
-# The folder removed: the same apply works, and a second one changes nothing.
-conf_back
-conf_dir_made=""
+# Each one put back: the same apply works, and a second one changes nothing.
 swap_run apply
-[[ $rc == 0 ]] || fail "apply with the folder removed exited $rc"
+[[ $rc == 0 ]] || fail "apply with each one put back exited $rc"
 grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
 grep -qF "written:   $CONF" <<<"$out" || fail "$CONF written"
 [[ -f "$CONF" ]] || fail "$CONF is not a file"
+[[ "$(readlink "$ZRAM")" == /dev/null ]] || fail "$ZRAM is not masked"
+[[ -f "$DROPIN" ]] || fail "$DROPIN is not a file"
 s1="$(snap)"
 swap_run apply
 [[ $rc == 0 ]] || fail "a second apply exited $rc"
