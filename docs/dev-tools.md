@@ -180,10 +180,11 @@ run (recovery), and at the end (the same command again converges).
 - Wrap each mutating call: subclass the real adapter and send each method
   through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
   send each mutating method of an in-memory fake of a use case's ports
-  through it (`ScrubWorld` in `btrfs/tests/fakes.py`, which
-  `btrfs/tests/test_scrub_limit_faults.py` drives; a contract test runs
-  the same body on the fake and on the real adapter, so the fake cannot
-  drift: `btrfs/tests/test_scrub_limit_ports.py`),
+  through it (`ScrubWorld` and `IocostWorld` in `btrfs/tests/fakes.py`,
+  which `btrfs/tests/test_scrub_limit_faults.py` and
+  `btrfs/tests/test_iocost_faults.py` drive; a contract test runs the same
+  body on the fake and on the real adapter, so the fake cannot drift:
+  `btrfs/tests/test_scrub_limit_ports.py`, `btrfs/tests/test_iocost_ports.py`),
   patch the names an adapter module calls (`ensure_dir`, `write_atomic`:
   `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
@@ -191,7 +192,7 @@ run (recovery), and at the end (the same command again converges).
   whose errors the code does not handle: a failure armed there does not
   fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
-  `reads` naming the commands that only read (`btrfs/tests/test_iocost_faults.py`).
+  `reads` naming the commands that only read (`btrfs/tests/test_cache_faults.py`).
 - Model the outside state the invariants need in the fake under it: what
   systemd has loaded and whether it needs a reload, the install record,
   the service, what a daemon read at its last start. When the usual fake
@@ -757,13 +758,12 @@ not derive from it.
 - `mbt_iocost_apply.py`: `cst btrfs iocost` apply (after an upgrade of
   CST or not) and revert, live or not, with any one step failing (a file's write or removal, the
   io.cost.qos write, daemon-reload, enable, disable, the udev rules' reload,
-  the installer's mark), through a model of the installer (the real
-  `InstallService` in memory), systemd, udev and io.cost.qos: the component
-  is marked done only after every step it stands for (a7c5e92), exit 0
-  leaves the whole target, a vendor's io.cost.qos line stays, and apply or
-  revert again converges. One known gap is let through by name: a full
-  revert whose removal fails after its disable leaves btrfs:iocost done
-  with the service disabled, until the next full apply or revert.
+  the installer's mark), over the in-memory fakes of iocost's ports
+  (`IocostWorld` in `btrfs/tests/fakes.py`: the installer and the removal
+  through the real `InstallService` in memory, what systemd and udev have
+  loaded, and io.cost.qos): the component is marked done only after every
+  step it stands for (a7c5e92), exit 0 leaves the whole target, a vendor's
+  io.cost.qos line stays, and apply or revert again converges.
 - `mbt_game_state.py`: the game profile's `game.state` and
   `game.intended`, whose fields are written as bash's `printf %q` writes
   them, over fields generated as bytes (any but NUL, as a bash variable
@@ -830,11 +830,11 @@ depend on `TMPDIR`. A machine over adapters that write through
 than on tmpfs (the pilot measured about 20 times; see
 [Test performance on a workstation](#test-performance-on-a-workstation)).
 The cache machine writes real files under a temporary
-folder (the scrub-limit machine runs over in-memory port fakes); the bulk machine too, and it runs `cp` there. The iocost machine writes only io.cost.qos, its sysfs tree and
-the managed-devices file there: btrfs:iocost's installed files and the
-install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
-does not cover how `LocalInstallTarget` writes them (modes, fsync,
-relabel). Each machine's TestCase stubs fsync
+folder; the bulk machine too, and it runs `cp` there. The scrub-limit and
+iocost machines run over in-memory port fakes, so they cover neither how
+the adapters write their files (modes, fsync, relabel) nor the commands
+they run: the ports' contract tests (`btrfs/tests/test_scrub_limit_ports.py`,
+`btrfs/tests/test_iocost_ports.py`) do. Each machine over real files stubs fsync
 (`tests.fault_injection.stub_fsync` in its `setUp`), so they do not
 depend on `TMPDIR` either.
 

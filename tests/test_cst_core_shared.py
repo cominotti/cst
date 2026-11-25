@@ -353,6 +353,21 @@ class AdaptersTest(unittest.TestCase):
         self.assertIsNone(fs.read_text(folder))
         self.assertEqual(fs.read_text(self.path("missing"), "d"), "d")
 
+    def test_write_text_direct_writes_into_the_file_that_is_there(self) -> None:
+        # For sysfs and procfs files (io.cost.qos), which refuse a rename over them: the same inode
+        # takes the text, a descriptor opened before the write reads it, the longer old text is cut,
+        # and no temporary file is left beside it. A temporary file renamed over the path (write_atomic)
+        # gives a new inode and leaves the earlier descriptor on the old text.
+        fs = core_files.LocalFileSystemAdapter()
+        p = self.path("io.cost.qos", b"an older text, longer than the new one\n")
+        inode = os.stat(p).st_ino
+        fd = os.open(p, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        fs.write_text_direct(p, "259:1 enable=1 ctrl=auto\n")
+        self.assertEqual(os.stat(p).st_ino, inode)
+        self.assertEqual(os.pread(fd, 4096, 0), b"259:1 enable=1 ctrl=auto\n")
+        self.assertEqual(os.listdir(self.tmp), ["io.cost.qos"])
+
     def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
         existing = self.path("existing")
         os.mkdir(existing, 0o700)

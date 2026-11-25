@@ -24,6 +24,9 @@ A port whose contract reports a failure in another way (a command result with a 
 FaultyRunner does that for a command runner: the commands that only read go to the inner runner
 as they are, the others are points of the plan and answer exit 1 at a fault.
 
+no_file_may_grow stages a full disk for a real adapter (RLIMIT_FSIZE 0: a write of a byte fails with
+EFBIG), for the contract tests that run one body against a fake and its real adapter.
+
 stub_fsync makes os.fsync a no-op for one test: these tests check what a kill or a failure leaves,
 not durability (KILL keeps every finished call), and an fsync per write makes them many times
 slower on a btrfs home. tests/probes.py keeps the fsync probes for the tests that check durability.
@@ -35,12 +38,15 @@ target.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 import errno
 import functools
 import os
+import resource
+import signal
 from typing import Protocol
 import unittest
 from unittest import mock
@@ -110,6 +116,21 @@ class FaultPlan:
             self.dead = self.dead_after_kill
             raise Killed(f"killed after call {n}: {name}")
         return result
+
+
+@contextmanager
+def no_file_may_grow() -> Generator[None]:
+    """RLIMIT_FSIZE 0 for this process: a write of a byte to a file fails (EFBIG), as a full disk's does;
+    making a folder or an empty file still works. Python starts with SIGXFSZ ignored, which turns the
+    kernel's signal into that error."""
+    if signal.getsignal(signal.SIGXFSZ) != signal.SIG_IGN:
+        raise AssertionError("SIGXFSZ is not ignored: RLIMIT_FSIZE would kill the test process")
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
 
 
 def ignore_error(_err: OSError) -> None:
