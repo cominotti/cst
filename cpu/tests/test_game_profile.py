@@ -2430,11 +2430,11 @@ class LeftoversFormatTest(unittest.TestCase):
         self.assertEqual(undo_text(("epp", "3", "balance_power"), epp), "/cpu3/epp = balance_power")
         self.assertEqual(undo_text(("cgw", "/cg/cpuset.cpus", ""), epp, short=True), "/cg/cpuset.cpus")
         self.assertEqual(
-            off_text(0, "/l"), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
+            off_text(0, "/l", kept=0), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
         )
-        self.assertTrue(off_text(2, "/l").endswith("restored, except 2 setting(s) kept in /l"))
-        self.assertTrue(off_text(2, "/l", kept=False).endswith("restored, except 2 setting(s) not undone"))
-        self.assertEqual(off_text(0, "/l"), off_text(0, "/l", kept=False))
+        self.assertTrue(off_text(2, "/l", kept=2).endswith("restored, except 2 setting(s) kept in /l"))
+        self.assertTrue(off_text(2, "/l", kept=0).endswith("restored, except 2 setting(s) not undone"))
+        self.assertTrue(off_text(3, "/l", kept=2).endswith("restored, except 3 setting(s): 2 kept in /l, 1 not undone"))
 
 
 class LeftoversTest(GameProfileCase):
@@ -2819,6 +2819,43 @@ class LeftoversTest(GameProfileCase):
             self.assertFalse(os.path.exists(self.paths.leftovers))
             out, actions = self.run_profile("tick")
             self.assertEqual((out, self.sets(actions)), ("", []))
+
+    def test_a_full_run_leaves_a_file_that_holds_no_record_undone_since(self) -> None:
+        # game.leftovers holds a record that still fails (a sysfs file under a plain file: ENOTDIR); /run is
+        # full during one tick, which undid nothing: the file is right as it is, so it stays, the tick says
+        # nothing, and the next tick retries the record.
+        self.write(os.path.join(self.tmp, "plain"), "a file\n")
+        text = f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n"
+        self.write(self.paths.leftovers, text)
+        self.no_game()
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full) as writes:
+            out, _ = self.run_profile("tick")
+        self.assertTrue(writes.called)
+        self.assertEqual(out, "")
+        self.assertEqual(self.read(self.paths.leftovers), text)
+        os.unlink(os.path.join(self.tmp, "plain"))  # the next tick, with room in /run: its folder is gone, done
+        out, _ = self.run_profile("tick")
+        self.assertIn(f"undid {self.tmp}/plain/knob = OLD", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_full_run_at_off_keeps_the_old_file_and_says_the_rest_not_undone(self) -> None:
+        # The same in an 'off' whose own machine.slice record fails too: the old file still holds its record,
+        # which stays kept; machine.slice's, which it cannot hold, is said not undone.
+        self.write(os.path.join(self.tmp, "plain"), "a file\n")
+        text = f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n"
+        self.write(self.paths.leftovers, text)
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+            out, _ = self.run_profile("off")
+        left = self.paths.leftovers
+        self.assertEqual(self.read(left), text)
+        self.assertIn(f"<4>game-profile: off: could not undo {self.tmp}/plain/knob = OLD: kept in {left}", out)
+        self.assertIn(f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {left}: not undone\n", out)
+        self.assertTrue(out.endswith(f"restored, except 2 setting(s): 1 kept in {left}, 1 not undone\n"), out)
 
     def test_the_tick_prints_no_id_line_for_a_kept_record(self) -> None:
         # Kept while TARGET_USER named no account (no "user" line); it still names none. The tick says nothing

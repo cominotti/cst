@@ -99,17 +99,17 @@ def undo_text(rec: Record, epp: Callable[[str], str], *, short: bool = False) ->
             return " ".join(rec)
 
 
-def off_text(failed: int, path: str, *, kept: bool = True) -> str:
-    """The journal line at the end of 'off' (failed: the settings it could not undo; kept: whether path
-    holds them now, False when it could not be written or is of a format this CST does not read)."""
+def off_text(failed: int, path: str, *, kept: int) -> str:
+    """The journal line at the end of 'off' (failed: the settings it could not undo; kept: how many of them
+    path holds now, fewer when it could not be written or is of a format this CST does not read)."""
     done = "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
     if not failed:
         return done
-    return (
-        f"{done}, except {failed} setting(s) kept in {path}"
-        if kept
-        else f"{done}, except {failed} setting(s) not undone"
-    )
+    if kept == failed:
+        return f"{done}, except {failed} setting(s) kept in {path}"
+    if not kept:
+        return f"{done}, except {failed} setting(s) not undone"
+    return f"{done}, except {failed} setting(s): {kept} kept in {path}, {failed - kept} not undone"
 
 
 def leftovers_line(entries: Sequence[Entry], epp: Callable[[str], str]) -> str:

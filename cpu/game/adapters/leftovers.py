@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.domain.units import LoadState
-from cpu.game.domain import Manager, show_values, transient_unit
+from cpu.game.domain import Manager, Record, show_values, transient_unit
 from cpu.game.domain.leftovers import (
     Entry,
     leftover_entries,
@@ -89,33 +89,40 @@ def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: Reloads
     return failed
 
 
-def keep(profile: GameProfile, failed: Sequence[Entry], *, readable: bool, off: bool = True) -> bool:
-    """game.leftovers holds the failed entries afterwards (removed when there are none); whether it holds
-    them, each then said kept in a warning line (off: 'off' says them; the tick does not). With a file this
-    CST does not read (readable False), left as it is, or one it cannot write (a full /run), each failed one
-    is said lost instead, once (off: in 'off''s words, else the tick's). The old file goes then: it would
-    have each entry it holds, undone or not, undone and said again at every tick."""
+def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | None, *, off: bool = True) -> int:
+    """game.leftovers holds the failed entries afterwards (removed when there are none); how many of them it
+    holds, each said kept in a warning line (off: 'off' says them; the tick does not). kept: the entries the
+    file held before (None: a file this CST does not read, left as it is). When the file cannot be written (a
+    full /run), the old one is left as it is while it holds no entry undone since (a tick that undid nothing,
+    an 'off' whose own records failed too): its entries are still kept and retried. Else it goes: it would
+    have an entry undone now undone and said again at every tick. Each failed entry the file does not hold is
+    said lost instead, once (off: in 'off''s words, else the tick's)."""
     path = profile.paths.leftovers
-    if readable and not failed:
+    if kept is not None and not failed:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
-        return True
-    if readable:
+        return 0
+    held: set[Record] = set()
+    if kept is not None:
         try:
             write_atomic(path, leftovers_text(failed), mode=0o644, durable=False, relabel=False)
         except OSError:
-            with contextlib.suppress(OSError):
-                os.unlink(path)
+            still = {rec for _uid, rec in failed}
+            if all(rec in still for _uid, rec in kept):
+                held = {rec for _uid, rec in kept}
+            else:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
         else:
-            if off:
-                for _uid, rec in failed:
-                    what = undo_text(rec, profile.paths.epp)
-                    profile.log(4, f"off: could not undo {what}: kept in {path} for the next off and tick")
-            return True
+            held = {rec for _uid, rec in failed}
     who = "off: " if off else ""
     for _uid, rec in failed:
-        profile.log(3, f"{who}could not keep {undo_text(rec, profile.paths.epp)} in {path}: not undone")
-    return False
+        what = undo_text(rec, profile.paths.epp)
+        if rec not in held:
+            profile.log(3, f"{who}could not keep {what} in {path}: not undone")
+        elif off:
+            profile.log(4, f"off: could not undo {what}: kept in {path} for the next off and tick")
+    return sum(1 for _uid, rec in failed if rec in held)
 
 
 def user_manager_gone(profile: GameProfile, uid: str) -> bool:
@@ -155,6 +162,6 @@ def retry_kept(profile: GameProfile, *, say: bool) -> None:
                 what = undo_text(rec, profile.paths.epp)
                 profile.log(5, f"undid {what}, kept in {profile.paths.leftovers} by an earlier off")
         profile.reload_managers(reload)
-        keep(profile, failed, readable=True, off=say)
+        keep(profile, failed, kept, off=say)
     finally:
         profile.s = settings

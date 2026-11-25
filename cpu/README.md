@@ -932,12 +932,17 @@ it stays kept. `cst cpu game state` lists the
 kept settings (`leftovers: N setting(s) 'off' could not undo, ...`), and
 `cst doctor` warns about them, by name
 ([doctor/README.md, section 8.4](../doctor/README.md#84-settings-off-could-not-undo)). When
-`game.leftovers` cannot be written (`/run` full) the journal says each
-setting is not undone, once, instead of kept (`<3>off: could not keep ... in
-/run/cpu-setup/game.leftovers: not undone`, without `off:` from the tick)
-and the old file is removed, so what it held is neither undone nor said
-again at every tick; `off` then ends with `..., except N setting(s) not
-undone`. A file in a newer format is left alone, neither undone nor removed
+`game.leftovers` cannot be written (`/run` full), the old file is left as
+it is while none of its records was undone since (a tick that undid
+nothing, an `off` whose own records failed too): its records stay kept and
+are retried once `/run` has room. Otherwise it is removed, so a record
+undone now is neither undone nor said again at every tick. The journal says
+each failed setting the file does not hold is not undone, once, instead of
+kept (`<3>off: could not keep ... in /run/cpu-setup/game.leftovers: not
+undone`, without `off:` from the tick); `off` then ends with `..., except N
+setting(s) not undone` (`..., except N setting(s): K kept in
+/run/cpu-setup/game.leftovers, M not undone` when the old file still holds
+some of them). A file in a newer format is left alone, neither undone nor removed
 (a failed setting is said not undone in the same words), and so is one that
 cannot be read (a folder in its place, a read error: `<4>... cannot be read
 (...): left alone, neither undone nor removed`), which is never taken for a
