@@ -2359,7 +2359,9 @@ echo E2E-OK
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
             w=/home/tester/work/knob
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             conf=/home/tester/.config/cst/toolchains.conf
             rm -rf "$w" "$conf"
             mkdir -p "$w/bin" "$w/pathdep/src" "$w/gitdep/src" "$w/ws/app/src" "$w/ws/.cargo" \
@@ -5978,7 +5980,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             scc_setup
 
             "$cst" toolchains config apply --sccache >/dev/null
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
 
             build 1
@@ -10630,7 +10634,9 @@ EOF
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
             w=/home/tester/work/e2e-169
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             conf=/home/tester/.config/cst/toolchains.conf
             rm -rf "$w"
             mkdir -p "$w" /home/tester/.config/cst
