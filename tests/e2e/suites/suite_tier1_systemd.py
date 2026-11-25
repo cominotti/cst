@@ -11461,6 +11461,116 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH, E2ETag.DOCTOR)
+    def test_220_user_units_go_where_the_user_manager_reads_them(self) -> None:
+        """Which folder a user manager loads its own units from, with the real systemd: a unit of one
+        name planted in ~/.config/systemd/user and in an XDG_CONFIG_HOME folder (each with its folder as
+        its Description), then a daemon-reload; the folder of its FragmentPath is the manager's, and it
+        is the first entry of `systemctl --user show -p UnitPath --value` that ends in /systemd/user,
+        while show-environment's XDG_CONFIG_HOME is not always it. (a) tester, XDG_CONFIG_HOME only in
+        the shell: ~/.config/systemd/user, also for a systemctl run with the shell's variable; the
+        manager's environment has none. (b) e2e220, XDG_CONFIG_HOME set for user@1220.service by a
+        drop-in: that folder; show-environment says it too. (c) e2e220, XDG_CONFIG_HOME only in
+        ~/.config/environment.d (the manager restarted): ~/.config/systemd/user, though
+        show-environment names the other folder. (d) tester, `systemctl --user set-environment
+        XDG_CONFIG_HOME=...` and a daemon-reload: ~/.config/systemd/user, though show-environment names
+        the other folder. So CST names the folder after UnitPath (cst_core's user_unit_dir), not after
+        show-environment or the shell. tester's manager is never restarted; e2e220's account goes."""
+        c = self.SYSTEMD_CONTAINER
+        if exec_bash(c, "getent passwd e2e220 || getent passwd 1220 || true").stdout.strip():
+            self.skipTest("the account e2e220 or the uid 1220 is taken")
+        planted = (
+            "/home/tester/.config/systemd/user/e2e220p.service /home/tester/xdgA /home/tester/xdgD "
+            "/etc/systemd/system/user@1220.service.d"
+        )
+        if exec_bash(c, f"for f in {planted}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a file of this test already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            systemctl --user -M tester@ unset-environment XDG_CONFIG_HOME
+            systemctl stop user@1220.service user-runtime-dir@1220.service 2>/dev/null
+            rm -rf {planted}
+            systemctl daemon-reload
+            userdel -rf e2e220 2>/dev/null
+            systemctl --user -M tester@ daemon-reload""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            show() { sed "s/^/test_220 $1: /" <<<"$2" >&2; }   # the CI log
+            plant() {  # plant M USER DIR...: e2e220p.service in each DIR, then M's daemon-reload
+                local m="$1" who="$2" d
+                shift 2
+                for d in "$@"; do
+                    runuser -u "$who" -- mkdir -p "$d"
+                    printf '[Unit]\nDescription=%s\n[Service]\nType=oneshot\nExecStart=/bin/true\n' "$d" |
+                        runuser -u "$who" -- tee "$d/e2e220p.service" >/dev/null
+                done
+                systemctl --user -M "$m" daemon-reload
+            }
+            loaded_from() {
+                local f
+                f="$(systemctl --user -M "$1" show -P FragmentPath e2e220p.service)"
+                [[ -n "$f" ]] || { echo "e2e220p.service not loaded in $1's manager" >&2; exit 1; }
+                dirname "$f"
+            }
+            first_unit_dir() { tr ' ' '\n' <<<"$1" | grep -m1 '/systemd/user$' || true; }
+            unit_dir() { first_unit_dir "$(systemctl --user -M "$1" show -p UnitPath --value)"; }
+            env_xdg() { systemctl --user -M "$1" show-environment | sed -n 's/^XDG_CONFIG_HOME=//p'; }
+            same() {  # same SETUP WANT M: the folder loaded from is WANT, and UnitPath's first .../systemd/user
+                local got ud
+                got="$(loaded_from "$3")"
+                ud="$(unit_dir "$3")"
+                show "$1" "loaded from $got; UnitPath's $ud; show-environment's XDG_CONFIG_HOME: $(env_xdg "$3")"
+                [[ "$got" == "$2" ]] || { echo "($1) loaded from $got, not $2" >&2; exit 1; }
+                [[ "$ud" == "$2" ]] || { echo "($1) UnitPath names $ud, not $2" >&2; exit 1; }
+            }
+            T=/home/tester
+            E=/home/e2e220
+            # (a) tester, XDG_CONFIG_HOME in the shell only.
+            plant tester@ tester "$T/.config/systemd/user" "$T/xdgA/systemd/user"
+            same a "$T/.config/systemd/user" tester@
+            [[ -z "$(env_xdg tester@)" ]]
+            shell_up="$(runuser -u tester -- env HOME="$T" XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_CONFIG_HOME="$T/xdgA" \
+                systemctl --user show -p UnitPath --value)"
+            [[ "$(first_unit_dir "$shell_up")" == "$T/.config/systemd/user" ]]
+            # (b) e2e220, XDG_CONFIG_HOME set for its user@.service.
+            useradd -m -u 1220 e2e220
+            mkdir -p /etc/systemd/system/user@1220.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s\n' "$E/xdgB" >/etc/systemd/system/user@1220.service.d/zz-e2e220.conf
+            systemctl daemon-reload
+            systemctl start user@1220.service
+            plant 1220@ e2e220 "$E/.config/systemd/user" "$E/xdgB/systemd/user"
+            same b "$E/xdgB/systemd/user" 1220@
+            [[ "$(env_xdg 1220@)" == "$E/xdgB" ]]
+            # (c) e2e220, XDG_CONFIG_HOME only in environment.d: the manager's environment names it, the
+            # manager reads ~/.config.
+            rm -rf /etc/systemd/system/user@1220.service.d
+            systemctl daemon-reload
+            runuser -u e2e220 -- mkdir -p "$E/.config/environment.d"
+            echo "XDG_CONFIG_HOME=$E/xdgC" | runuser -u e2e220 -- tee "$E/.config/environment.d/50-e2e220.conf" >/dev/null
+            systemctl restart user@1220.service
+            plant 1220@ e2e220 "$E/xdgC/systemd/user"
+            same c "$E/.config/systemd/user" 1220@
+            [[ "$(env_xdg 1220@)" == "$E/xdgC" ]] || { echo "(c) show-environment: $(env_xdg 1220@)" >&2; exit 1; }
+            # (d) tester, set-environment (as a desktop's import-environment does).
+            systemctl --user -M tester@ set-environment XDG_CONFIG_HOME="$T/xdgD"
+            plant tester@ tester "$T/xdgD/systemd/user"
+            same d "$T/.config/systemd/user" tester@
+            [[ "$(env_xdg tester@)" == "$T/xdgD" ]] || { echo "(d) show-environment: $(env_xdg tester@)" >&2; exit 1; }
+            systemctl --user -M tester@ unset-environment XDG_CONFIG_HOME
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_195_doctor_names_a_cst_user_unit_the_user_manager_has_not_loaded(self) -> None:
         """tester's real install record (copied aside and put back) with a drop-in of a running user unit
