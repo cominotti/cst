@@ -2,11 +2,10 @@
 """The game profile's output: the journal's line format on stdout (or the stream given), errors on stderr
 (cpu.game.ports.GameOutputPort)."""
 
-import sys
 from typing import TextIO
 
 from cst_core.adapters.journal import log as journal_log
-from cst_core.adapters.terminal import stdout
+from cst_core.adapters.terminal import stderr, stdout
 from cst_core.ports import CommandResult
 from cpu.game.domain import TAG
 
@@ -38,14 +37,14 @@ class GameStreamOutput:
             self._stream().write(res.stdout)
             self._stream().flush()
         if res.stderr:
-            sys.stderr.write(res.stderr)
-            sys.stderr.flush()
+            stderr().write(res.stderr)
+            stderr().flush()
 
     def error(self, text: str) -> None:
         """One line on stderr."""
-        print(text, file=sys.stderr, flush=True)
+        print(text, file=stderr(), flush=True)
 
     def stderr_text(self, text: str) -> None:
         """text on stderr as it is."""
-        sys.stderr.write(text)
-        sys.stderr.flush()
+        stderr().write(text)
+        stderr().flush()
