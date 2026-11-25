@@ -556,6 +556,22 @@ class CacheRootTest(Base):
         self.assertEqual(self.run_.calls, [])
         self.assertFalse(os.path.exists(os.path.join(self.checkout, "rel")))
 
+    def test_no_cache_folder_says_the_password_database_has_no_absolute_home(self) -> None:
+        # cache_base gives None also for a home folder the password database has but that is relative or empty:
+        # what the tool prints then must not say there is none.
+        env = {"XDG_CACHE_HOME": "rel", "HOME": "", "PATH": "/usr/bin:/bin"}
+        want = (
+            "cst-quint: no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, "
+            "and the password database has no absolute home folder for this user"
+        )
+        for pw_dir in ("", "rel"):
+            entry = pwd.struct_passwd(("u", "x", 1000, 1000, "", pw_dir, "/bin/sh"))
+            self.lines.clear()
+            with self.subTest(pw_dir=pw_dir), mock.patch("tests.xdg_cache.pwd.getpwuid", return_value=entry):
+                self.assertEqual(self.main(env=env), 2)
+                self.assertEqual(self.lines, [want])
+                self.assertEqual(self.run_.calls, [])
+
 
 class MainTest(Base):
     def test_every_instance_holds(self) -> None:

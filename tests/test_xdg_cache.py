@@ -6,7 +6,7 @@ import pwd
 import unittest
 from unittest import mock
 
-from tests.xdg_cache import NO_CACHE_BASE, cache_base
+from tests.xdg_cache import cache_base
 
 # The password database's entry of the user, as the tests give it.
 _ENTRY = pwd.struct_passwd(("u", "x", 1000, 1000, "", "/pw/home", "/bin/sh"))
@@ -45,17 +45,6 @@ class CacheBaseTest(unittest.TestCase):
                 self.assertIsNone(cache_base({"HOME": ""}))
                 self.assertIsNone(cache_base({"XDG_CACHE_HOME": "rel"}))
                 self.assertEqual(cache_base({"XDG_CACHE_HOME": "/c", "HOME": ""}), "/c")
-
-
-class NoCacheBaseTest(unittest.TestCase):
-    def test_the_message_names_a_home_folder_that_is_not_absolute(self) -> None:
-        # cache_base gives None also for a home folder the password database has but that is relative or
-        # empty (the test above): the message the tools print then must not say there is none.
-        self.assertEqual(
-            NO_CACHE_BASE,
-            "no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, "
-            "and the password database has no absolute home folder for this user",
-        )
 
 
 if __name__ == "__main__":
