@@ -3587,6 +3587,71 @@ class ResticBackupOutputTest(unittest.TestCase):
         self.assertTrue(child.stdout.closed)
 
 
+class ResticBackupStartStopTest(unittest.TestCase):
+    """A stop that waited while the timeout timer started is raised when the stops are let in again: restic
+    is ended and the timer cancelled and joined, as for a stop while restic is read."""
+
+    class _Child:  # restic backup --json that keeps running until it is ended
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"")
+            self.terminated = False
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return -signal.SIGTERM
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            pass
+
+    class _Out:
+        def say(self, text: str, *, flush: bool = False) -> None:
+            pass
+
+        def warn(self, text: str) -> None:
+            pass
+
+    def test_a_stop_let_in_after_the_timer_started_ends_restic_and_the_timer(self) -> None:
+        made: list[threading.Timer] = []
+        real_timer = threading.Timer
+
+        def timer(interval: float, function: Callable[[], object]) -> threading.Timer:
+            made.append(real_timer(interval, function))
+            self.addCleanup(made[-1].cancel)
+            return made[-1]
+
+        unmasks: list[int] = []
+
+        class _StopAtFirstUnmask(contextlib.AbstractContextManager[object]):
+            # signals_held: a stop that came while the stops were held is raised at the unmask (once: the
+            # stops are ignored after it, on_signal).
+            @override
+            def __exit__(self, *_: object) -> None:
+                unmasks.append(1)
+                if len(unmasks) == 1:
+                    raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+        child = self._Child()
+        with (
+            mock.patch.object(vm_adapters_restic.subprocess, "Popen", return_value=child),
+            mock.patch.object(vm_adapters_restic.threading, "Timer", timer),
+            mock.patch.object(vm_adapters_restic, "signals_held", _StopAtFirstUnmask),
+            self.assertRaises(vm_domain_backup.Stop) as ctx,
+        ):
+            vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, self._Out())
+        self.assertIs(type(ctx.exception), vm_domain_backup.Stop)
+        self.assertTrue(child.terminated, "restic is still running")
+        self.assertEqual(len(made), 1)
+        self.assertTrue(made[0].finished.is_set(), "the timer was not cancelled")
+        self.assertFalse(made[0].is_alive(), "the timer's thread is still running")
+        self.assertTrue(child.stdout.closed)
+
+
 SUMMARY_LINE = (
     json.dumps({"message_type": "summary", "snapshot_id": SNAP_ID, "total_bytes_processed": 2048, "data_added": 1024})
     + "\n"

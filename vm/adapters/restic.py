@@ -151,6 +151,15 @@ class _Output:
                 return {}
 
 
+def _end_timer(timer: threading.Timer | None) -> None:
+    """The timeout timer cancelled and, once started, joined (None: a stop came before it was made)."""
+    if timer is None:
+        return
+    timer.cancel()
+    if timer.ident is not None:  # started
+        timer.join()
+
+
 def _ended(p: subprocess.Popen[bytes]) -> int:
     """restic's exit status once it is gone: its own when it had exited already, else after a
     terminate (and a kill when it is still there RESTIC_STOP_WAIT later)."""
@@ -196,6 +205,10 @@ class Restic:
         answered is called once restic has exited, when its summary names its snapshot: the caller
         holds the stops from there (restic is never waited for with the stops held); a stop it raises
         is carried as one that came after the snapshot."""
+        summary: ResticSummary = {}
+        shown = 0.0
+        output: _Output | None = None
+        timer: threading.Timer | None = None
         try:
             # Unbuffered: each read takes what restic wrote so far (_Output's chunks).
             p = subprocess.Popen(
@@ -203,16 +216,16 @@ class Restic:
             )
         except FileNotFoundError:
             return ExitStatus.NOT_FOUND, {}
-        timer = threading.Timer(timeout, p.kill)
-        # A thread starts with its creator's signal mask: the timer's blocks the stops for good, so a stop
-        # always goes to the main thread, and never while it holds them (signals_held: _Output's reads).
-        with signals_held():
-            timer.start()
-        summary: ResticSummary = {}
-        shown = 0.0
-        assert p.stdout is not None
-        output = _Output(p.stdout)
+        # From restic's start on, every stop ends restic and the timer: also one that waited while the timer
+        # started and is raised when the stops are let in again.
         try:
+            assert p.stdout is not None
+            output = _Output(p.stdout)
+            timer = threading.Timer(timeout, p.kill)
+            # A thread starts with its creator's signal mask: the timer's blocks the stops for good, so a stop
+            # always goes to the main thread, and never while it holds them (signals_held: _Output's reads).
+            with signals_held():
+                timer.start()
             while True:
                 while (line := output.line()) is not None:
                     summary, shown = _backup_json_line(line, summary, shown, out)
@@ -226,7 +239,7 @@ class Restic:
         except Stop as e:
             # The stops are ignored from here on (on_signal): the reading of the last lines is not cut.
             rc = _ended(p)
-            found = summary if "snapshot_id" in summary else output.summary_left()
+            found = summary if "snapshot_id" in summary or output is None else output.summary_left()
             if "snapshot_id" in found:
                 raise StopAfterSnapshot(str(e), rc, found) from None
             raise
@@ -238,8 +251,7 @@ class Restic:
             # can go to any thread that does not block it, and Python then runs its handler in the main
             # thread even inside signals_held (whose mask is the main thread's only): a thread that let the
             # stops in would cut a read of _Output or the torn record short.
-            timer.cancel()
-            timer.join()
+            _end_timer(timer)
             p.stdout.close()
         if rc == -signal.SIGKILL:
             rc = ExitStatus.TIMED_OUT
