@@ -15,17 +15,12 @@ import tempfile
 import unittest
 from typing import override
 
-from cpu.game.adapters.leftovers import GameLeftoversFile
+from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFiles, GameUnitFiles
+from cpu.game.adapters.kernel import GameKernelFiles
+from cpu.game.adapters.output import GameStreamOutput
 from cpu.game.adapters.power import GameSysfsFiles
-from cpu.game.adapters.profile import (
-    GameKernelFiles,
-    GameRunLock,
-    GameStateFiles,
-    GameStreamOutput,
-    GameSystemctl,
-    GameUnitFiles,
-    machine_ports,
-)
+from cpu.game.adapters.profile import machine_ports
+from cpu.game.adapters.systemd import GameSystemctl
 from cpu.game.domain import GamePaths
 from cpu.tests.fakes import (
     FaultyKernelFiles,

@@ -44,7 +44,7 @@ frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
 and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
-doctor, `perf`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, compress, docker-gc,
+doctor, `perf`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/game`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, compress, docker-gc,
 docker-volumes-nocow, iocost, scrub-limit and snapshot have the full profile (the list is `HEXAGONAL_PACKAGES`); in the other packages `cli.py` orchestrates the commands and some
 still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
@@ -92,14 +92,23 @@ recording loop of `cpu-watch watch`, vm-pin's virsh calls and saved
 definition are in `cpu/adapters.py`; the rules and records in
 `cpu/domain.py`; the `quiet` loop stays in `cli.py` with its clock, pause
 and sampler passed in, and the apply prompt is cst_core's `confirm`. The
-game profile (`cpu-game-profile`) is a light package of its own,
+game profile (`cpu-game-profile`) is a full-profile package of its own,
 `cpu/game`: the records of `game.state` and `game.intended` (written as
 bash's `printf %q` writes them, since an installed bash copy of an older CST
 reads them) and the drift rules in `domain/`; its protocol (`on`, `off`,
 `tick` and `state`: `GameProfileSteps` in `application/`, which carries the
 paths, the settings and the ports across the steps) runs behind the ports
-of `ports.py`, and `GameProfile` in `adapters/profile.py` is its front over
-the real adapters. `cpu/setup` (`cst cpu`'s own
+of `ports.py`, one per thing on the machine (systemctl for both managers,
+the state files, `game.leftovers`, the runtime unit files, the cgroup tree
+and `/proc`, sysfs, the run lock, the output). It pays there: `on` records
+each change before it makes it, `off` undoes them and keeps in
+`game.leftovers` what it could not undo and the reloads due, and the tick
+and the next `off` resume, so the tests inject each failure and each kill
+at one port call over the real adapters instead of patching module names.
+The adapters are laid out by boundary in `adapters/` (`systemd.py`,
+`files.py`, `kernel.py`, `power.py`, `output.py`), `GameProfile` in
+`adapters/profile.py` is the front over them, and `wiring.py` is the
+composition root the CLI calls. `cpu/setup` (`cst cpu`'s own
 commands) is in `HEXAGONAL_PACKAGES` with only the full profile's `wiring.py` (no
 `ports.py` or `application/`): it reads what the shim
 hands over and the environment and re-runs the script through sudo;
@@ -201,7 +210,7 @@ with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
 the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
-`HEXAGONAL_PACKAGES` (swap, doctor, `perf`, cst_core, toolchains, vm, `bluetooth/setup`, `cpu/setup`, `btrfs/bulk`, `btrfs/compress`, `btrfs/docker_gc`,
+`HEXAGONAL_PACKAGES` (swap, doctor, `perf`, cst_core, toolchains, vm, `bluetooth/setup`, `cpu/game`, `cpu/setup`, `btrfs/bulk`, `btrfs/compress`, `btrfs/docker_gc`,
 `btrfs/docker_volumes_nocow`, `btrfs/iocost`, `btrfs/scrub_limit` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other

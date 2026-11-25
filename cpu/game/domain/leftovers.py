@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
 """game.leftovers: the records 'off' could not undo, kept for the next 'off' and the watchdog's tick while the
-profile is off (cpu/game/adapters/leftovers.py reads and writes it). No I/O.
+profile is off (cpu/game/adapters/files.py reads and writes it). No I/O.
 
 Its first line names its format, "cst-game-leftovers 2". Then its entries, oldest first: the records whose
 undo failed, written as game.state's are (record_line), and "reload MGR" when a daemon-reload of that

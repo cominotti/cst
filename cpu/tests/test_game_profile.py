@@ -28,17 +28,10 @@ sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
 from cpu.game.adapters.host import read_settings, read_snapshot, user_id, user_name
-from cpu.game.adapters.leftovers import GameLeftoversFile
+from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFiles, GameUnitFiles
+from cpu.game.adapters.kernel import GameKernelFiles
 from cpu.game.adapters.power import GameSysfsFiles
-from cpu.game.adapters.profile import (
-    GameKernelFiles,
-    GameProfile,
-    GameRunLock,
-    GameStateFiles,
-    GameUnitFiles,
-    load_profile,
-    machine_ports,
-)
+from cpu.game.adapters.profile import GameProfile, load_profile, machine_ports
 from cpu.game.application.profile import GameProfileSteps
 from cst_core.adapters import files as cst_files
 from cst_core.adapters.files import read_text

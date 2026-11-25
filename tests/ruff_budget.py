@@ -148,7 +148,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "cpu tests FBT002": 1,
     "cpu tests FBT003": 2,
     "cpu/game PLR0913": 1,
-    "cpu/game PLR2004": 5,
+    "cpu/game PLR2004": 4,
     "cpu/setup N": 1,
     "cpu/setup PLR0911": 2,
     "cpu/setup PLR0913": 2,

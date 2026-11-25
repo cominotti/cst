@@ -20,9 +20,9 @@ import functools
 import os
 from typing import Final, override
 
-from cpu.game.adapters.leftovers import GameLeftoversFile
+from cpu.game.adapters.files import GameLeftoversFile, GameStateFiles, GameUnitFiles
+from cpu.game.adapters.kernel import GameKernelFiles
 from cpu.game.adapters.power import GameSysfsFiles
-from cpu.game.adapters.profile import GameKernelFiles, GameStateFiles, GameUnitFiles
 from cpu.game.domain import GamePaths, GameSettings
 from cst_core.ports import CommandResult
 from tests.fault_injection import FaultPlan
