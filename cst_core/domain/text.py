@@ -87,6 +87,42 @@ def unescape_mount_field(field: str) -> str:
     return _OCTAL_ESCAPE.sub(lambda m: chr(int(group(m, 1), 8)), field)
 
 
+# What libmount splits an /etc/fstab or /proc/mounts line at (util-linux libmount/src/tab_parse.c,
+# skip_separator and skip_nonspearator: ' ' and '\t' only). A no-break space, \f, \v or U+3000 is part of a
+# field; str.split() would split there.
+_MOUNT_FIELD_BLANKS: Final = " \t"
+_MOUNT_FIELD: Final = re.compile(r"[^ \t]+")
+
+
+def _mount_line_body(line: str) -> str:
+    """A mount table line without its newline and the one carriage return libmount drops before it."""
+    return line.removesuffix("\n").removesuffix("\r")
+
+
+def mount_field_spans(line: str) -> list[tuple[int, int]]:
+    """Where each field of an /etc/fstab or /proc/mounts line is ((start, end) in LINE), as libmount splits
+    it: at runs of spaces and tabs only."""
+    return [m.span() for m in _MOUNT_FIELD.finditer(_mount_line_body(line))]
+
+
+def mount_fields(line: str) -> list[str]:
+    """The fields of an /etc/fstab or /proc/mounts line, as libmount splits it (mount_field_spans); still
+    escaped (unescape_mount_field)."""
+    return [group(m, 0) for m in _MOUNT_FIELD.finditer(_mount_line_body(line))]
+
+
+def is_mount_comment(line: str) -> bool:
+    """A mount table line libmount skips: nothing but spaces and tabs, or "#" after them."""
+    body = _mount_line_body(line).lstrip(_MOUNT_FIELD_BLANKS)
+    return not body or body.startswith("#")
+
+
+def strip_mount_blanks(token: str) -> str:
+    """An option token of a mount table field trimmed of spaces and tabs only (a no-break space stays: the
+    kernel reads "commit=30<NBSP>" as it is, and refuses it)."""
+    return token.strip(_MOUNT_FIELD_BLANKS)
+
+
 def cgroup_v2_path(text: str) -> str | None:
     """The cgroup v2 ("unified") path in the text of a /proc/PID/cgroup: the rest of the first line
     that starts with "0::/", from its "/" on (on a hybrid system the cgroup v1 lines,

@@ -18,7 +18,7 @@ from btrfs.compress.domain import (
     extract_rootflags_tokens,
     plan_root_option_layers,
 )
-from cst_core.domain.text import HELP_WORDS, parse_subcommand_head
+from cst_core.domain.text import HELP_WORDS, parse_subcommand_head, strip_mount_blanks
 from cst_core.domain.values import parse_whole_number
 
 KERNEL_DEFAULT_COMMIT_S: Final = 30
@@ -149,7 +149,7 @@ def extract_commit_seconds(options_str: str) -> tuple[int, ...]:
     """Extract every explicit `commit=N` integer value from an option string."""
     out: list[int] = []
     for tok in options_str.split(","):
-        parsed = parse_commit_token(tok.strip())
+        parsed = parse_commit_token(strip_mount_blanks(tok))
         if parsed is not None:
             out.append(parsed)
     return tuple(out)
@@ -167,7 +167,7 @@ def has_malformed_commit(options_str: str) -> bool:
     rewrite_commit_options replaces it."""
     return any(
         tok.startswith(_COMMIT_PREFIX) and parse_commit_token(tok) is None
-        for tok in (t.strip() for t in options_str.split(","))
+        for tok in (strip_mount_blanks(t) for t in options_str.split(","))
     )
 
 

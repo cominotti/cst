@@ -92,13 +92,17 @@ from cst_core.domain.text import (
     first_line,
     group,
     group_or_none,
+    is_mount_comment,
     is_yes,
+    mount_field_spans,
+    mount_fields,
     parse_shell_assignments,
     parse_snapshots_conf,
     printf_q,
     printf_q_words,
     read_fields,
     split,
+    strip_mount_blanks,
     unescape_mount_field,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
@@ -2129,6 +2133,41 @@ class RegexTextTest(unittest.TestCase):
         self.assertEqual(unescape_mount_field("a\\134b\\011c\\012d\\040e"), "a\\b\tc\nd e")
         self.assertEqual(unescape_mount_field("/plain"), "/plain")
         self.assertEqual(unescape_mount_field("\\0401\\9"), " 1\\9")
+
+
+class MountFieldsTest(unittest.TestCase):
+    """The mount table field splitter: spaces and tabs only, as libmount (util-linux tab_parse.c)."""
+
+    def test_only_spaces_and_tabs_separate_fields(self) -> None:
+        nbsp, ideo = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}"
+        line = f"UUID=a  /var/a{nbsp}b\tbtrfs \t rw,x{ideo}y,\x0cz\x0b 0 0"
+        self.assertEqual(mount_fields(line), ["UUID=a", f"/var/a{nbsp}b", "btrfs", f"rw,x{ideo}y,\x0cz\x0b", "0", "0"])
+        self.assertEqual(line.split()[1:3], ["/var/a", "b"], "str.split() splits at the no-break space")
+        self.assertEqual(mount_fields("\t a b \t"), ["a", "b"])
+        self.assertEqual(mount_fields(""), [])
+
+    def test_one_carriage_return_before_the_newline_is_dropped(self) -> None:
+        self.assertEqual(mount_fields("a b c d 0 0\r\n"), ["a", "b", "c", "d", "0", "0"])
+        self.assertEqual(mount_fields("a b\r"), ["a", "b"])
+        self.assertEqual(mount_fields("a b\r\r\n"), ["a", "b\r"])
+
+    def test_spans_name_each_field_in_the_line(self) -> None:
+        line = " a\t\tbb  c\n"
+        self.assertEqual(mount_field_spans(line), [(1, 2), (4, 6), (8, 9)])
+        self.assertEqual([line[s:e] for s, e in mount_field_spans(line)], mount_fields(line))
+
+    def test_comments_and_blank_lines(self) -> None:
+        for line in ("", "\n", " \t ", "#x", "\t\t# x", "  #", "\r\n"):
+            with self.subTest(line=line):
+                self.assertTrue(is_mount_comment(line))
+        for line in ("a #", "\x0c#", "\N{NO-BREAK SPACE}# x", "x"):
+            with self.subTest(line=line):
+                self.assertFalse(is_mount_comment(line))
+
+    def test_option_tokens_are_trimmed_of_spaces_and_tabs_only(self) -> None:
+        self.assertEqual(strip_mount_blanks(" \tcommit=30 \t"), "commit=30")
+        self.assertEqual(strip_mount_blanks("commit=30\N{NO-BREAK SPACE}"), "commit=30\N{NO-BREAK SPACE}")
+        self.assertEqual(strip_mount_blanks("\x0bx\x0c"), "\x0bx\x0c")
 
 
 class StdStreamsTest(unittest.TestCase):

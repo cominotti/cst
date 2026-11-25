@@ -9,7 +9,13 @@ from enum import StrEnum
 import re
 from typing import Final
 
-from cst_core.domain.text import unescape_mount_field
+from cst_core.domain.text import (
+    is_mount_comment,
+    mount_field_spans,
+    mount_fields,
+    strip_mount_blanks,
+    unescape_mount_field,
+)
 
 DEFAULT_LEVEL: Final[int] = 1
 BTRFS_ZSTD_DEFAULT_LEVEL: Final[int] = 3
@@ -39,7 +45,6 @@ _SUBVOL_SUFFIX_RE: Final = re.compile(r"\[[^\]]*\]$")
 ROOTFLAGS_PREFIX: Final[str] = "rootflags="
 _BTRFS_FSTYPE: Final[str] = "btrfs"
 _ZSTD_ALGO: Final[str] = "zstd"
-_NON_WS_RE = re.compile(r"\S+")
 
 
 class CompressMode(StrEnum):
@@ -206,7 +211,7 @@ def extract_compress_specs(options_str: str) -> tuple[CompressSpec, ...]:
     """Return every compression option token from a comma-separated option string."""
     out: list[CompressSpec] = []
     for tok in options_str.split(","):
-        spec = parse_compress_spec(tok.strip())
+        spec = parse_compress_spec(strip_mount_blanks(tok))
         if spec is not None:
             out.append(spec)
     return tuple(out)
@@ -270,12 +275,13 @@ def _is_root_btrfs_entry(source: str, target: str, root_uuid: str, root_sources:
 
 
 def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
-    """Parse btrfs entries from `/proc/mounts`, decoding standard octal escapes."""
+    """Parse btrfs entries from `/proc/mounts` (or `/etc/fstab`), decoding standard octal escapes; the fields
+    split at spaces and tabs only, as libmount splits them (mount_fields)."""
     entries: list[MountEntry] = []
     for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
+        if is_mount_comment(line):
             continue
-        match line.split():
+        match mount_fields(line):
             case [raw_src, raw_tgt, fstype, opts, *_] if fstype == _BTRFS_FSTYPE:
                 entries.append(
                     MountEntry(
@@ -324,16 +330,16 @@ def rewrite_fstab_options(fstab_text: str, option_rewriter: Callable[[str], str]
     sources = _root_fstab_sources(parse_proc_mounts(fstab_text), root_uuid)
     out_lines: list[str] = []
     for raw_line in fstab_text.splitlines(keepends=True):
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
+        if is_mount_comment(raw_line):
             out_lines.append(raw_line)
             continue
-        match list(_NON_WS_RE.finditer(raw_line)):
-            case [s_src, s_tgt, s_type, s_opt, *_] if s_type.group() == _BTRFS_FSTYPE and _is_root_btrfs_entry(
-                unescape_mount_field(s_src.group()), unescape_mount_field(s_tgt.group()), root_uuid, sources
+        fields = [(raw_line[start:end], start, end) for start, end in mount_field_spans(raw_line)]
+        match fields:
+            case [(src, _, _), (tgt, _, _), (fstype, _, _), (opts, start, end), *_] if (
+                fstype == _BTRFS_FSTYPE
+                and _is_root_btrfs_entry(unescape_mount_field(src), unescape_mount_field(tgt), root_uuid, sources)
             ):
-                new_opts = option_rewriter(s_opt.group())
-                out_lines.append(raw_line[: s_opt.start()] + new_opts + raw_line[s_opt.end() :])
+                out_lines.append(raw_line[:start] + option_rewriter(opts) + raw_line[end:])
             case _:
                 out_lines.append(raw_line)
     return "".join(out_lines)

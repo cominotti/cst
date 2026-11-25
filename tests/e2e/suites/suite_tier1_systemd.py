@@ -11610,6 +11610,71 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_218_mount_fields_split_as_libmount_splits_an_fstab(self) -> None:
+        """The real libmount (findmnt --tab-file) as the oracle of cst_core's mount table splitter: an fstab
+        file (a scratch file, not /etc/fstab) whose fields hold a no-break space, U+3000, a form feed and a
+        vertical tab, between tabs and runs of spaces, with a trailing carriage return, an escaped blank (backslash
+        040), and comment lines after blanks.
+        The checkout's mount_fields (the system python, -I -B) gives the four fields findmnt lists for each
+        line, and btrfs cache's readers (parse_all_mounts, unmanaged_fstab_targets) the same sources, targets,
+        types and options. Before, str.split() also cut a field at the no-break space, U+3000, the form feed and
+        the vertical tab (cannot bite otherwise: that split differs from findmnt on the same file). A fake cannot show how
+        libmount splits a line."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-mount-fields"
+        self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_218 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w}
+            rm -rf "$w" && mkdir -p "$w"
+            # The bytes: \302\240 a no-break space, \343\200\200 U+3000, \014 a form feed, \013 a vertical tab.
+            printf '/dev/a\302\240b /mnt/x\014y btrfs compress=zstd:1\343\200\200,noatime 0 0\n' >"$w/fstab"
+            printf '\t/dev/b \t  /mnt/t\tbtrfs   rw,compress=zstd:3\013\t0\t0\r\n' >>"$w/fstab"
+            printf '  \t# a comment\n \t \n' >>"$w/fstab"
+            printf '/dev/c /mnt/c\\040d ext4 defaults 0 0\n' >>"$w/fstab"
+            printf 'UUID=1234\302\240 /mnt/\343\200\200e  btrfs\tsubvol=@home\302\240,compress=zstd:1 0 0\n' >>"$w/fstab"
+            findmnt --tab-file "$w/fstab" -J -o SOURCE,TARGET,FSTYPE,OPTIONS >"$w/findmnt.json"
+            cat "$w/findmnt.json" >&2
+            cd /opt/cst-rw
+            /usr/bin/python3 -I -B - "$w/fstab" "$w/findmnt.json" <<'PY'
+import json
+import sys
+
+sys.path.insert(0, ".")
+from btrfs.cache.domain import parse_all_mounts, unmanaged_fstab_targets
+from cst_core.domain.text import is_mount_comment, mount_fields, unescape_mount_field
+
+with open(sys.argv[1], encoding="utf-8", errors="surrogateescape", newline="") as f:
+    tab = f.read()
+with open(sys.argv[2], encoding="utf-8") as f:
+    listed = json.load(f)["filesystems"]
+want = [[fs["source"], fs["target"], fs["fstype"], fs["options"]] for fs in listed]
+lines = [line for line in tab.split("\n") if not is_mount_comment(line)]
+ours = []
+for line in lines:
+    src, tgt, fstype, opts = mount_fields(line)[:4]
+    ours.append([unescape_mount_field(src), unescape_mount_field(tgt), fstype, opts])
+cache = [[m.source, m.target, m.fstype, m.options] for m in parse_all_mounts(tab)]
+old = [[unescape_mount_field(x) for x in line.split()[:2]] + line.split()[2:4] for line in lines]
+print("findmnt", ascii(want), file=sys.stderr)
+print("mount_fields", ascii(ours), file=sys.stderr)
+print("cache", ascii(cache), file=sys.stderr)
+print("str.split", ascii(old), file=sys.stderr)
+assert len(want) == 4, want
+assert ours == want, "mount_fields differs from findmnt"
+assert cache == want, "parse_all_mounts differs from findmnt"
+assert unmanaged_fstab_targets(tab) == frozenset(row[1] for row in want), "unmanaged_fstab_targets differs"
+assert old != want, "str.split agrees with findmnt: the file does not bite"
+print("E2E-OK")
+PY
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:
         """`cst btrfs scrub-limit set` and `off` after an earlier run that wrote both files and died before

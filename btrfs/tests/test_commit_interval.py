@@ -259,6 +259,20 @@ class CommitDomainTests(unittest.TestCase):
         self.assertTrue(has_malformed_commit(both))
         self.assertEqual(rewrite_commit_options(both, 60), "commit=60")
 
+    def test_a_commit_with_a_no_break_space_is_malformed(self) -> None:
+        # The options field is split at spaces and tabs only (libmount): a no-break space stays in the token,
+        # and the kernel refuses "commit=30<NBSP>"; str.strip() read 30. A space or tab around it is trimmed.
+        nbsp = "\N{NO-BREAK SPACE}"
+        for opts in (f"commit=30{nbsp},noatime", f"noatime,commit=30{nbsp}"):
+            with self.subTest(opts=opts):
+                self.assertEqual(extract_commit_seconds(opts), ())
+                self.assertTrue(has_malformed_commit(opts))
+                self.assertEqual(effective_commit_seconds(opts), 30)
+        for opts in ("noatime, commit=60", "noatime,\tcommit=60 "):
+            with self.subTest(opts=opts):
+                self.assertEqual(extract_commit_seconds(opts), (60,))
+                self.assertFalse(has_malformed_commit(opts))
+
     def test_a_commit_is_read_as_the_kernel_reads_it(self) -> None:
         # btrfs reads commit= with kstrtouint(value, 0): C's number forms, ASCII only, at most 2**32 - 1.
         for opts, want in (
