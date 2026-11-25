@@ -327,6 +327,16 @@ def cgroup_units(host: DoctorHostPort, path: ViewPath) -> list[tuple[str, ViewPa
     return [(n.removeprefix("_"), view_join(path, n)) for n in names if host.isdir(view_join(path, n))]
 
 
+def _profile_clause(host: DoctorHostPort, ordinary: str) -> str:
+    """What the game profile does with the boxes the check names, after "the game profile": ORDINARY, or, while
+    game.state records a uid no account has, that the profile leaves this user manager alone until 'off' (its
+    'on' acted for that uid; the tick and 'off' call no user manager for a user with no account)."""
+    uid = recorded_uid(host)
+    if not _no_account(host, uid):
+        return ordinary
+    return f", on for uid {uid}, which no account has now, leaves this user manager alone until 'off'"
+
+
 @check(CHECKS, "cpu")
 def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
     """WARN for each top-level slice of the user manager that CST does not
@@ -344,9 +354,9 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
             WARN,
             f"user manager: {unit} is a slice of its own next to app.slice, where the game runs "
             f"({cpu_time(cpu_seconds(host, d))} since it was created). Outside games it runs at the default "
-            "weight on every CPU, without the toolboxes' limits; the game profile only makes it idle "
-            f"while a game runs. Name it user-{name}.slice so it nests under the toolboxes' user.slice, or "
-            f"start it with --slice=user-{name}.slice",
+            "weight on every CPU, without the toolboxes' limits; the game profile"
+            f"{_profile_clause(host, ' only makes it idle while a game runs')}. Name it user-{name}.slice so it "
+            f"nests under the toolboxes' user.slice, or start it with --slice=user-{name}.slice",
         )
     jobs = [
         (u, cpu_seconds(host, d)) for u, d in cgroup_units(host, view_join(base, "app.slice")) if TRANSIENT.match(u)
@@ -357,9 +367,9 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
             INFO,
             f"user manager: {len(jobs)} systemd-run job(s) run straight in app.slice, next to the "
             f"game, at the default weight on every CPU: "
-            f"{name_list([f'{u} ({cpu_time(s)})' for u, s in jobs])}. The game profile makes them idle "
-            "while a game runs; for builds, start them with --slice=user-<name>.slice to get the "
-            "toolboxes' limits always",
+            f"{name_list([f'{u} ({cpu_time(s)})' for u, s in jobs])}. The game profile"
+            f"{_profile_clause(host, ' makes them idle while a game runs')}; for builds, start them with "
+            "--slice=user-<name>.slice to get the toolboxes' limits always",
         )
     if not loose and not jobs:
         yield Result(OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")

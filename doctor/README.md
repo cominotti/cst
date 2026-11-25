@@ -597,7 +597,10 @@ sccache server, started by `toolchains/rustc-wrapper`) are known and not reporte
 user manager looked at is your own, or, when the doctor runs as root, the
 user the game profile acts for: the one `game.state` names while the
 profile is on (as the drift check asks, and as the tick demotes that user's
-boxes), else the `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
+boxes), else the `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`. While no account
+has the uid the profile is on for, the profile calls no user manager until
+`off`, and the check says it leaves that manager alone instead of making
+its boxes idle while a game runs.
 
 ### 8.4 Settings 'off' could not undo
 

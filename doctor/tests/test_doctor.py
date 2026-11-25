@@ -3145,6 +3145,50 @@ class UserManagerBoxesTest(Scratch):
         self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
         self.assertIn("x.slice is a slice of its own", res[0].message)
 
+    def as_root_with_game_state_uid(self, uid: str) -> None:
+        """As root: TARGET_USER is this user's account (its boxes are looked at) and game.state records UID."""
+        me = pwd.getpwuid(os.getuid())
+        mine = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", f"user-{me.pw_uid}.slice")
+        if not os.path.isdir(mine):
+            shutil.move(self.ucg, os.path.join(mine, f"user@{me.pw_uid}.service"))
+            self.ucg = os.path.join(mine, f"user@{me.pw_uid}.service")
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write(f"TARGET_USER='{me.pw_name}'\n")
+        os.makedirs(os.path.join(self.root, "run", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "run", "cpu-setup", "game.state"), "w") as f:
+            f.write(f"prop sys user@{uid}.service MemoryLow new -\n")
+
+    def test_a_uid_no_account_has_is_left_alone_by_the_profile(self) -> None:
+        # game.state records a uid no account has: the profile's tick and 'off' call no user manager, so the
+        # boxes of TARGET_USER's manager are not made idle while a game runs; the lines say so.
+        self.as_root_with_game_state_uid("999999")
+        self.cg("x.slice", usage_usec=1_000_000)
+        self.cg("app.slice/run-u1.service", usage_usec=1_000_000)
+        res = self.results(uid=0)
+        self.assertEqual([r.status for r in res], [doc_domain.WARN, doc_domain.INFO], res)
+        alone = "game profile, on for uid 999999, which no account has now, leaves this user manager alone until 'off'"
+        warn, info = res[0].message, res[1].message
+        self.assertIn(f"without the toolboxes' limits; the {alone}. Name it user-x.slice", warn)
+        self.assertNotIn("idle", warn)
+        self.assertIn(f"The {alone}; for builds", info)
+        self.assertNotIn("idle", info)
+
+    def test_a_uid_an_account_has_keeps_the_idle_words(self) -> None:
+        self.as_root_with_game_state_uid(str(os.getuid()))
+        self.cg("x.slice", usage_usec=1_000_000)
+        self.cg("app.slice/run-u1.service", usage_usec=1_000_000)
+        res = self.results(uid=0)
+        self.assertEqual([r.status for r in res], [doc_domain.WARN, doc_domain.INFO], res)
+        self.assertIn(
+            "without the toolboxes' limits; the game profile only makes it idle while a game runs. Name it user-x.slice",
+            res[0].message,
+        )
+        self.assertIn(
+            "The game profile makes them idle while a game runs; for builds, start them with --slice=user-<name>.slice",
+            res[1].message,
+        )
+
     def test_only_known_boxes_is_ok(self) -> None:
         res = self.results()
         self.assertEqual(
