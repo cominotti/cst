@@ -1194,7 +1194,6 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
             fh.write("nas:/export /var/mnt/nas nfs defaults,nofail 0 0\n")
         self.runner.loaded_fstab = ((0, 0), "nas:/old /var/mnt/nas nfs defaults 0 0\n")
-        show = MOUNT_UNITS_SHOW
         for show_fails in (False, True):
             with self.subTest(show_fails=show_fails):
                 self.runner.show_fails = show_fails
@@ -1203,7 +1202,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
                 self.assertEqual(rc, 0, err)
                 self.assertIn("  /var/mnt/cache     not provisioned", out)
                 self.assertNotIn("  systemd  ", out)
-                self.assertNotIn(show, self.runner.calls)
+                self.assertNotIn(MOUNT_UNITS_SHOW, self.runner.calls)
         # The cache drive's base line alone (no user attached yet) is a cache set up: status says it.
         self.runner.show_fails = False
         with open(os.path.join(self.tmp, "etc", "fstab"), "a", encoding="utf-8") as fh:
