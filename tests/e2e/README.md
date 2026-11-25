@@ -273,9 +273,13 @@ checks its status), or a line ending in `|| { ...; exit 1; }`.
 `tests/e2e/test_suite_scripts.py`, run with the unit tests, reads both suite
 files and names, file:line, each line that starts with `!` and each check
 (`[[`, `[`, `test`, `grep`, `cmp`, `!`) followed by `&&` and a second check,
-unless the line has an `||` list operator (one in quotes, in `[[ ... ]]` or in
-parentheses handles nothing) or is a one-line function. It does not see a check
-chained to a function (`[[ ... ]] && unchanged`): write those on two lines too.
+and each line that holds `rm -rf X && mkdir ...` anywhere (a script line, or a
+Python string an `exec_bash` or `docker_exec` call runs: set -e does not stop
+on the rm, and the script goes on over the old folder; write `rm -rf X` and
+`mkdir -p X` on two lines, see below), unless the line has an `||` list
+operator (one in quotes, in `[[ ... ]]` or in parentheses handles nothing) or
+is a one-line function. It does not see a check chained to a function
+(`[[ ... ]] && unchanged`): write those on two lines too.
 
 ### Cleanups of the container's files
 

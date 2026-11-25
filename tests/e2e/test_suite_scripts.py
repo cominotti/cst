@@ -5,7 +5,9 @@ The suites run their scripts under `bash -euo pipefail`, and set -e does not sto
 negation (`! grep ...`) or on the first command of an `A && B` list: such a line checks nothing when
 it fails. This gate reads the suite files as text and names, file:line, each such check: a line that
 starts with `!`, and a line that starts with a check (`[[`, `[`, `test`, `grep`, `cmp`, `!`) followed by
-`&&` and a second check. A line with an `||` list operator on it (not one in quotes, in `[[ ... ]]` or in
+`&&` and a second check. It also names a line that holds `rm -rf X && mkdir ...` anywhere (a script line, or
+a Python string an exec_bash or docker_exec call runs): a rm that fails goes on to the mkdir, and the script
+goes on over the old folder. A line with an `||` list operator on it (not one in quotes, in `[[ ... ]]` or in
 parentheses) handles the failure itself and passes. The forms that
 do stop the script: `absent NEEDLE FILE` (a function, whose status is its last command's),
 `if grep ...; then exit 1; fi`, one check per line, or one `[[ ... && ... ]]`.
@@ -27,6 +29,8 @@ _CHECK_WORDS: Final = frozenset({"[[", "[", "test", "grep", "cmp", "!"})
 # A one-line function body (`name() { a && b; }`, braces doubled in an f-string): its status is the
 # chain's, and the line that calls it stops the script.
 _FUNCTION_LINE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\(\)\s*\{")
+# rm -rf, then && and mkdir: set -e does not stop on the rm (tests/e2e/README.md).
+_RM_THEN_MKDIR: Final = re.compile(r"\brm -rf\b[^;&|]*&&\s*mkdir\b")
 _CONTINUED: Final = "\\"
 _AND: Final = "&&"
 
@@ -92,11 +96,13 @@ def handles_failure(line: str) -> bool:
 
 
 def unchecked_line(line: str) -> bool:
-    """True for a line whose check set -e never stops on: a bare negation, or a check followed by
-    `&&` and a second check, with no `||` list operator on the line (one in quotes or in `[[ ... ]]`
-    handles nothing)."""
+    """True for a line whose check set -e never stops on: a bare negation, a check followed by `&&` and a
+    second check, or `rm -rf X && mkdir ...` anywhere on it, with no `||` list operator on the line (one in
+    quotes or in `[[ ... ]]` handles nothing)."""
     if handles_failure(line) or _FUNCTION_LINE.match(line):
         return False
+    if _RM_THEN_MKDIR.search(line):
+        return True
     first = _first_word(line)
     if first == "!":
         return True
@@ -135,6 +141,10 @@ class SuiteScriptsGateTest(unittest.TestCase):
             '[[ $x == 1 || $y == 2 ]] && grep -qF z "$f"',
             '! grep -qF "$(a || b)" "$f"',
             'grep -qF a\\|\\|b "$f" && grep -qF c "$f"',
+            "rm -rf w && mkdir -p w",
+            'rm -rf "$w" && mkdir -p "$w/bin"',
+            'exec_bash(c, f"rm -rf {w} && mkdir -p {w}")',
+            '["bash", "-c", f"rm -rf {w} && mkdir -p {w} && cat >f"]',
         ):
             with self.subTest(source=source):
                 self.assertEqual([n for n, _ in unchecked_lines(f"set -e\n    {source}\necho ok\n")], [2])
@@ -153,7 +163,9 @@ class SuiteScriptsGateTest(unittest.TestCase):
             "unchanged() {{ cmp -s a b && cmp -s c d; }}",
             'absent() {{ ! grep -qF -- "$1" "$2"; }}',
             'absent x "$f"',
-            "rm -rf w && mkdir -p w",
+            "rm -rf w\n    mkdir -p w",
+            "rm -f x || true",
+            "rm -rf w && mkdir -p w || exit 1",
             "[[ $rc == 1 ]] || { cat out >&2; exit 1; }",
             'grep -qF a "$f" && grep -qF b "$f" || exit 1',
             '[[ $x == 1 || $y == 2 ]] && grep -qF z "$f" || exit 1',
