@@ -11,7 +11,7 @@ import re
 from typing import Final
 
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
-from cst_core.adapters.files import ensure_dir, read_text, write_atomic
+from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import (
@@ -162,9 +162,8 @@ class QosControlFile:
         return read_text(self.path)
 
     def write(self, line: str) -> None:
-        """line and a newline, in one write; the kernel's refusal raised."""
-        with open(self.path, "w", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        """line and a newline, in one write (write_text_direct); the kernel's refusal raised."""
+        LocalFileSystemAdapter().write_text_direct(self.path, line + "\n")
 
 
 @dataclass(frozen=True, slots=True)
