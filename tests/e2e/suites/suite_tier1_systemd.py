@@ -10001,28 +10001,46 @@ EOF
         daemon-reload: the real user manager flags the unit (NeedDaemonReload yes; the test fails as "cannot
         bite" otherwise). tester's cst doctor warns for it, naming the drop-in, with fix: systemctl --user
         daemon-reload; root's cst doctor at the same moment has no line naming it and no ERROR line (root reads
-        its own record). After systemctl --user daemon-reload, tester's doctor has no such line."""
+        its own record). After systemctl --user daemon-reload, tester's doctor has no such line. With root's own
+        user manager running (user@0.service, as a login of root starts it) and flagging a unit of root's real
+        record (copied aside and put back) in /etc/systemd/user (a drop-in written through the installer, no
+        reload; "cannot bite" otherwise), root's cst doctor with that manager's XDG_RUNTIME_DIR has no line
+        naming it: as root it asks no user manager. Before, it asked root's and warned."""
         c = self.SYSTEMD_CONTAINER
         ud = "/home/tester/.config/systemd/user"
         unit = f"{ud}/e2e195.service"
         dropin = f"{ud}/e2e195.service.d/10-cst.conf"
         rec = "/home/tester/.local/state/cst/installed.json"
+        gunit = "/etc/systemd/user/e2e195r.service"
+        rootrec = "/var/lib/cst/installed.json"
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        ru = "env XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus"
         ut = (
             "runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 "
             "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
         )
-        if exec_bash(c, f"for f in {unit} {ud}/e2e195.service.d; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+        planted = f"{unit} {ud}/e2e195.service.d {gunit} {gunit}.d"
+        if exec_bash(c, f"for f in {planted}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("a file of this test already exists (another test's)")
-        exec_bash(c, f"rm -f /var/tmp/e2e-195-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-195-rec; fi")
+        exec_bash(
+            c,
+            f"""rm -f /var/tmp/e2e-195-rec /var/tmp/e2e-195-rootrec /var/tmp/e2e-195-u0
+            if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-195-rec; fi
+            if [[ -e {rootrec} ]]; then cp -p {rootrec} /var/tmp/e2e-195-rootrec; fi
+            if systemctl -q is-active user@0.service; then touch /var/tmp/e2e-195-u0; fi""",
+        )
         self.addCleanup(
             exec_bash,
             c,
             f"""set +e
             {ut} systemctl --user stop e2e195.service
-            rm -rf {unit} {ud}/e2e195.service.d
+            {ru} systemctl --user stop e2e195r.service
+            rm -rf {planted}
             if [[ -e /var/tmp/e2e-195-rec ]]; then mv /var/tmp/e2e-195-rec {rec}; else rm -f {rec}; fi
-            {ut} systemctl --user daemon-reload""",
+            if [[ -e /var/tmp/e2e-195-rootrec ]]; then mv /var/tmp/e2e-195-rootrec {rootrec}; else rm -f {rootrec}; fi
+            {ut} systemctl --user daemon-reload
+            if [[ -e /var/tmp/e2e-195-u0 ]]; then {ru} systemctl --user daemon-reload; else systemctl stop user@0.service; fi
+            rm -f /var/tmp/e2e-195-u0""",
             check=False,
         )
         out = exec_bash(
@@ -10051,6 +10069,18 @@ EOF
             ut systemctl --user daemon-reload
             h="$(hits "$(doc ut env)")"
             if grep -qF e2e195 <<<"$h"; then echo "doctor still warns after the reload: $h" >&2; exit 1; fi
+            # Root's own user manager flags a unit of root's record: root's doctor asks no user manager.
+            ru() {{ {ru} "$@"; }}
+            systemctl start user@0.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >{gunit}
+            ru systemctl --user daemon-reload
+            ru systemctl --user start e2e195r.service
+            printf '[Service]\nEnvironment=E2E195=1\n' |
+                {installer} text {gunit}.d/10-cst.conf 0644 --component btrfs:alerts --keep-state >/dev/null
+            [[ "$(ru systemctl --user show -P NeedDaemonReload e2e195r.service)" == yes ]] ||
+                {{ echo "cannot bite: e2e195r.service not flagged by root's user manager" >&2; exit 1; }}
+            r="$(doc ru env HOME=/root)"
+            if grep -qF e2e195r <<<"$r"; then echo "root's doctor asked root's user manager: $r" >&2; exit 1; fi
             echo E2E-OK
             """,
         ).stdout

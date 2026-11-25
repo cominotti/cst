@@ -338,7 +338,9 @@ def check_units_loaded(host: DoctorHostPort, *, installed: InstalledFilesPort | 
         by_scope.get(UnitScope.SYSTEM, {}).pop(os.path.basename(SCRUB_UNIT), None)
     for scope in UnitScope:
         names = by_scope.get(scope, {})
-        if not names:
+        # As root, no user manager is asked (as the services area's user units): root's own, which a login
+        # of root starts, is not the one the user's units run in.
+        if not names or (scope == UnitScope.USER and host.uid == 0):
             continue
         for unit_id in _units_not_loaded(host, scope):
             dests = sorted({d for name, ds in names.items() if unit_applies(name, unit_id) for d in ds})

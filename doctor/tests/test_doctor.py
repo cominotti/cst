@@ -4494,6 +4494,19 @@ class UnitsLoadedTest(Scratch):
             self.results(), [self.warning("cst-pending-alerts.service", unit, fix="systemctl --user daemon-reload")]
         )
 
+    def test_as_root_no_user_manager_is_asked(self) -> None:
+        # Root's record names a unit of the user managers and one of the system's; root's own user manager
+        # (a login of root starts it) would answer, but root's doctor asks the system manager only.
+        unit, dropin = "/etc/systemd/user/cst-pending-alerts.service", "/etc/systemd/system/x.service.d/10-cst.conf"
+        self.record(unit, dropin)
+        self.answer(("cst-pending-alerts.service", "yes"), user=True)
+        self.answer(("x.service", "yes"))
+        self.host.uid = 0
+        self.assertEqual(self.results(), [self.warning("x.service", dropin)])
+        calls = self.calls()
+        self.assertIn(self.QUERY, calls)
+        self.assertNotIn(self.USER_QUERY, calls)
+
     def test_no_unit_file_recorded_asks_no_manager(self) -> None:
         # A record with no unit file and no drop-in (PR #29's lesson: no question where nothing is set up).
         self.record("/usr/local/sbin/e2e-units", "/etc/systemd/journald.conf.d/10-cst-write-budget.conf")
