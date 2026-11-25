@@ -959,8 +959,12 @@ docker volume rm <name>         # or one volume by name
   JSON: the migration is requested, and mark sets no +C on the volumes
   folder: fix the file, and the first boot after that runs it` (the folder
   keeps the `+C` an earlier install may have set). When the request
-  cannot be written, the line before it says why, and mark's own line is
-  `... mark sets no +C on the volumes folder`. Another dockerd whose config file cannot be read that way
+  cannot be written, the line before it says why, as for any install's
+  request: when the default folder has `+C` already and no earlier request
+  is there, it says that, if Docker uses that folder, no boot asks again, and
+  the `not-scheduled` record keeps it for `status` and `cst doctor`, naming the
+  unknown folder (neither claims the default folder is Docker's). mark's own
+  line is then `... mark sets no +C on the volumes folder`. Another dockerd whose config file cannot be read that way
   counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is

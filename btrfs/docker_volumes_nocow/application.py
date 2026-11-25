@@ -59,7 +59,7 @@ class DockerVolumesNocow:
                     # could sit beside an old count, which the next boot would take for this request's.
                     # The line after the request, as it went (request_migration's own line says why not).
                     problem = self.paths.config_problem
-                    if self.request_migration(renew=True):
+                    if self.request_migration(renew=True, install=True):
                         self.out.log(
                             3,
                             f"{problem}: the migration is requested, and mark sets no +C on the volumes folder: "
@@ -182,12 +182,9 @@ class DockerVolumesNocow:
             nocow = install and self.has_nocow(vols)
             earlier = install and self.state.flag_exists()
             if nocow and not earlier:
-                self.out.log(
-                    3,
-                    f"cannot schedule the migration ({e}); {vols} has +C already, so no boot asks again: "
-                    "fix that, then run cst btrfs install",
-                )
-                self.record_outcome(NocowOutcome.NOT_SCHEDULED, f"cannot schedule the migration: {e}")
+                line, reason = self.unscheduled_words(e)
+                self.out.log(3, line)
+                self.record_outcome(NocowOutcome.NOT_SCHEDULED, reason)
             elif earlier and (attempts := self.state.attempts()) >= GIVE_UP_AFTER:
                 # The earlier request's count was not reset: the next boot gives up at once (migrate).
                 self.out.log(
@@ -208,6 +205,24 @@ class DockerVolumesNocow:
             return False
         self.forget_outcome()  # a new request: the last one's outcome is over
         return True
+
+    def unscheduled_words(self, e: OSError) -> tuple[str, str]:
+        """The journal line and the outcome record's reason of an install's request that failed on a
+        volumes folder with +C already and no flag of an earlier request. With daemon.json unreadable
+        the folder is only the default one: neither claims that Docker uses it."""
+        vols, problem = self.paths.volumes, self.paths.config_problem
+        if not problem:
+            line = (
+                f"cannot schedule the migration ({e}); {vols} has +C already, so no boot asks again: "
+                "fix that, then run cst btrfs install"
+            )
+            return line, f"cannot schedule the migration: {e}"
+        unknown = f"{problem}: which volumes folder Docker uses is unknown"
+        line = (
+            f"cannot schedule the migration ({e}); {vols}, the default volumes folder ({unknown}), has +C "
+            "already: if Docker uses it, no boot asks again; fix both, then run cst btrfs install"
+        )
+        return line, f"cannot schedule the migration: {e}; {unknown}"
 
     def has_nocow(self, path: str) -> bool:
         """path has +C; False also when that cannot be read."""

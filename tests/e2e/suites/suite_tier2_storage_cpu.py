@@ -438,6 +438,27 @@ test ! -e "$flag"
 [[ "$(stat -c %a "$outcome")" == 644 ]]
 grep -qF '"outcome": "not-scheduled"' "$outcome"
 grep -q 'migration not scheduled by the install at' <<<"$("$helper" status)"
+# 7b. The same with an /etc/docker/daemon.json that is not JSON (which folder Docker uses is unknown):
+# mark's request is an install's too, so it records no boot asks, without claiming that the default
+# folder is Docker's. The old line said the next boot tries again, and nothing was recorded.
+rm -f "$outcome"
+saved_json=""
+if [ -e /etc/docker/daemon.json ]; then saved_json=/var/tmp/e2e-nocow-daemon.json; cp -p /etc/docker/daemon.json "$saved_json"; fi
+made_docker=""
+[ -d /etc/docker ] || { mkdir -p /etc/docker; made_docker=1; }
+printf '{' >/etc/docker/daemon.json
+rc=0; out="$("$helper" mark 2>&1)" || rc=$?
+printf '%s\n' "$out" | sed 's/^/E2E-NOCOW part 7b: /'
+[[ "$rc" == 2 ]]
+grep -qF "$vols, the default volumes folder (/etc/docker/daemon.json: not JSON: which volumes folder Docker uses is unknown), has +C already: if Docker uses it, no boot asks again" <<<"$out"
+grep -qF "/etc/docker/daemon.json: mark sets no +C on the volumes folder" <<<"$out"
+if grep -qF "the next boot tries again" <<<"$out"; then echo "mark says the next boot tries" >&2; exit 1; fi
+test ! -e "$flag"
+grep -qF '"outcome": "not-scheduled"' "$outcome"
+grep -qF 'which volumes folder Docker uses is unknown' "$outcome"
+if [ -n "$saved_json" ]; then mv -f "$saved_json" /etc/docker/daemon.json; else rm -f /etc/docker/daemon.json; fi
+[ -z "$made_docker" ] || rmdir /etc/docker
+echo "E2E-NOCOW part 7b: mark with daemon.json not JSON and a count it cannot reset records no boot asks"
 umount "$attempts"
 rc=0; "$helper" mark || rc=$?
 [[ "$rc" == 1 ]]

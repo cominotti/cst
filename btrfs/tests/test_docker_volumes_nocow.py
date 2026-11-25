@@ -1718,6 +1718,65 @@ class DaemonJsonProblemTest(PostponeBase):
         self.assertTrue(self.fs.nocow(self.vols))  # +C from an earlier install, as the line allows
         self.assertFalse(os.path.exists(self.flag))
 
+    def test_mark_whose_request_fails_on_a_default_folder_with_nocow_says_no_boot_asks(self) -> None:
+        # This branch's request is mark's own (an install's), so a failure is probed as install's mark
+        # probes it: +C on the default folder and no earlier flag means no boot asks again, and the
+        # outcome record keeps it. Before, the line said "the next boot tries again" and nothing was
+        # recorded. The words do not claim that the default folder is the one Docker uses.
+        os.remove(self.flag)
+        self.set_attempts("2")
+        eio = OSError(errno.EIO, "Input/output error")
+        with (
+            mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=eio),
+            mock.patch.object(time, "time", return_value=1_700_000_000.0),
+        ):
+            rc, out, err = self.main("mark")
+        self.assertEqual((rc, err), (2, ""))
+        unknown = f"{self.PROBLEM}: which volumes folder Docker uses is unknown"
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols}, the default "
+            f"volumes folder ({unknown}), has +C already: if Docker uses it, no boot asks again; fix both, then "
+            "run cst btrfs install\n"
+            f"<3>{TAG}: {self.PROBLEM}: mark sets no +C on the volumes folder\n",
+        )
+        self.assertFalse(os.path.exists(self.flag))
+        with open(self.outcome) as f:
+            self.assertEqual(
+                object_of(parse_json(f.read())),
+                {
+                    "v": 1,
+                    "outcome": "not-scheduled",
+                    "at": 1_700_000_000,
+                    "volumes": self.vols,
+                    "reason": f"cannot schedule the migration: [Errno 5] Input/output error; {unknown}",
+                },
+            )
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        self.assertIn(
+            f"  migration not scheduled by the install at {when} (cannot schedule the migration: [Errno 5] "
+            f"Input/output error; {unknown}); no boot asks for it: fix that, then run cst btrfs install\n",
+            self.call(self.cli.status)[1],
+        )
+
+    def test_mark_whose_request_fails_beside_an_earlier_flag_says_the_earlier_request_stays(self) -> None:
+        # The flag of an earlier request is there (the default folder has +C): the next boot after the
+        # fix runs that request, and nothing is recorded. Before, the line said the folder "keeps
+        # copy-on-write", which its +C does not show.
+        self.set_attempts("1")
+        eio = OSError(errno.EIO, "Input/output error")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=eio):
+            rc, out, err = self.main("mark")
+        self.assertEqual((rc, err), (2, ""))
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} has +C and "
+            "its volumes keep copy-on-write data, and the earlier request stays: the next boot tries again\n"
+            f"<3>{TAG}: {self.PROBLEM}: mark sets no +C on the volumes folder\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertFalse(os.path.exists(self.outcome))
+
 
 class DockerRunningTest(PostponeBase):
     """docker_busy(): the ActiveState of docker.service, failing closed."""
