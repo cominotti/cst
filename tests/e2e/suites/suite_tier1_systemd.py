@@ -11506,6 +11506,61 @@ EOF
         ).stdout
         self.assertIn("E2E-TOP-UNIT-BLANKS-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_255_btrfs_cache_reads_crypttab_as_systemd_cryptsetup_generator_does(self) -> None:
+        """The /etc/crypttab reader of cst doctor's cache drive check (btrfs/cache/domain/health.py) against the real
+        systemd-cryptsetup-generator, run with SYSTEMD_CRYPTTAB on a crypttab whose lines hold a no-break space in a
+        name, fields split by vertical tabs, two lines ended by a carriage return, a leading form feed and a U+2028
+        in an option: the names of the cryptsetup units the generator writes are the names CST warns about (each
+        line a cache-* mapping without nofail). Before the fix CST split the name at the no-break space and the
+        vertical tabs ended its lines."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-crypttab-generator"
+        self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            c,
+            f"""set -euo pipefail
+            gen=/usr/lib/systemd/system-generators/systemd-cryptsetup-generator
+            [[ -x $gen ]] || {{ echo "the test cannot bite: no $gen" >&2; exit 1; }}
+            rm -rf {w}
+            mkdir -p {w}/out
+            python3 -I - {w}/crypttab <<'EOF'
+import sys
+nbsp, vt, cr, ff, ls = chr(0xA0), chr(0x0B), chr(0x0D), chr(0x0C), chr(0x2028)
+lines = [
+    "cache-a UUID=1111 none luks",
+    f"cache-b{{nbsp}}x UUID=2222 none luks",
+    vt.join(["cache-c", "UUID=3333", "none", "luks"]),
+    f"cache-d UUID=4444 none luks{{cr}}cache-e UUID=5555 none luks",
+    f"{{ff}}cache-f UUID=6666 none luks",
+    f"cache-g UUID=7777 none lu{{ls}}ks",
+]
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    f.write(chr(10).join(lines) + chr(10))
+EOF
+            SYSTEMD_CRYPTTAB={w}/crypttab SYSTEMD_LOG_LEVEL=warning "$gen" {w}/out {w}/out {w}/out
+            : >{w}/gen
+            for f in {w}/out/systemd-cryptsetup@*.service; do
+                inst="${{f##*/systemd-cryptsetup@}}"
+                systemd-escape -u -- "${{inst%.service}}" >>{w}/gen
+            done
+            python3 -I -B - {w}/crypttab {w}/gen <<'EOF'
+import sys
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.cache.domain.health import parse_crypttab_cache_issues
+with open(sys.argv[1], encoding="utf-8") as f:
+    issues = parse_crypttab_cache_issues(f.read(), [])
+with open(sys.argv[2], encoding="utf-8") as f:
+    made = sorted(repr(n) for n in f.read().split(chr(10)) if n)
+warned = sorted(i.split(" is missing ")[0].removeprefix("/etc/crypttab entry ") for i in issues)
+if len(made) != 7 or made != warned:
+    sys.exit(f"the generator made units for {{made}}; CST warns about {{warned}}")
+print("E2E-CRYPTTAB-GENERATOR-OK")
+EOF
+            """,
+        ).stdout
+        self.assertIn("E2E-CRYPTTAB-GENERATOR-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_244_btrfs_compress_and_commit_undo_keeps_the_old_fstab_when_its_reload_fails(self) -> None:
         """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change fails with

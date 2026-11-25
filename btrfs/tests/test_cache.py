@@ -236,6 +236,31 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertEqual(parse_crypttab_cache_issues("", []), [])
         self.assertEqual(parse_crypttab_cache_issues(None, []), [])
 
+    def test_crypttab_is_read_as_systemd_cryptsetup_generator_reads_it(self) -> None:
+        # The generator ends a line at \n, \r or NUL (read_line), strips it of " \t\n\r" and splits its fields
+        # with sscanf's %s, at the six ASCII blanks: str.splitlines() and str.split() also took a vertical tab,
+        # U+2028 and a no-break space for line ends or separators.
+        nbsp = "\N{NO-BREAK SPACE}"
+
+        def warn(*names: str) -> list[str]:
+            return [
+                f"/etc/crypttab entry {n!r} is missing 'nofail' (boot could stall if NVMe is absent)" for n in names
+            ]
+
+        cases = (
+            (f"cache{nbsp}UUID=x none luks\n", []),
+            (f"{nbsp}cache UUID=x none luks\n", []),
+            ("cache\vUUID=x\vnone\vluks\n", warn("cache")),
+            ("cache-a UUID=x none luks\rcache-b UUID=y none luks", warn("cache-a", "cache-b")),
+            ("cache-a UUID=x none luks\0cache-b UUID=y none luks", warn("cache-a", "cache-b")),
+            ("cache-a UUID=x none lu\N{LINE SEPARATOR}ks,nofail\n", []),
+            ("\fcache UUID=x none luks\n", warn("cache")),
+            (" \t# cache UUID=x none luks\n", []),
+        )
+        for text, issues in cases:
+            with self.subTest(text=text):
+                self.assertEqual(parse_crypttab_cache_issues(text, []), issues)
+
     def test_doctor_warns_when_a_managed_target_has_another_mount(self) -> None:
         # Any mount at the target counted as an active bind: a tmpfs, another drive or another user's
         # folder there gave the ok line, while status says "mounted (other source!)".

@@ -1993,7 +1993,10 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   doctor` checks the base mounts, the absence of `flushoncommit`, `nofail`
   in `/etc/crypttab` (for the mapping behind the bases, found through
   `/dev/mapper/NAME` or the name of `/dev/dm-N`, and for the default names
-  `cache`, `cache-*`, `luks-cache*`), and the live bind mounts.
+  `cache`, `cache-*`, `luks-cache*`), and the live bind mounts. It reads
+  `/etc/crypttab` as systemd-cryptsetup-generator does: a line ends at a
+  newline, a carriage return or a NUL, and its fields are split at the six
+  ASCII blanks only (a no-break space stays in a field).
 - **Homes through a link:** the targets use the home's real path (passwd's
   `/home/u` is `/var/home/u` on Silverblue), the one the kernel and
   findmnt show, so an attached bind is found and never mounted twice.

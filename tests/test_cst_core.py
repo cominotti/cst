@@ -45,7 +45,7 @@ from cst_core.domain.dispatch import (
 )
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
 from cst_core.domain.plan import PlanItem
-from cst_core.domain.text import strip_ascii_blanks
+from cst_core.domain.text import split_ascii_blanks, strip_ascii_blanks
 from cst_core.domain.values import (
     ASCII_BLANKS,
     ByteSize,
@@ -133,6 +133,25 @@ class AsciiBlanksTest(unittest.TestCase):
             with self.subTest(kept=kept):
                 self.assertEqual(strip_ascii_blanks(kept), kept)
                 self.assertNotEqual(kept.strip(), kept)  # what str.strip() would have trimmed
+
+    def test_words_split_at_ascii_blanks_only(self) -> None:
+        # (text, blanks or None for the default, the words)
+        nbsp, ideo = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}"
+        cases: tuple[tuple[str, str | None, list[str]], ...] = (
+            ("", None, []),
+            (" \t\n\r\f\v", None, []),
+            ("  a \tb\n\nc  ", None, ["a", "b", "c"]),
+            ("a\fb\vc\rd", None, ["a", "b", "c", "d"]),
+            (f"a{nbsp}b c", None, [f"a{nbsp}b", "c"]),
+            (f"a{ideo}b", None, [f"a{ideo}b"]),
+            ("a\x1cb\x85c", None, ["a\x1cb\x85c"]),
+            ("a b\tc\fd", " \t", ["a", "b", "c\fd"]),
+            ("a]b^c", "]^", ["a", "b", "c"]),
+        )
+        for text, blanks, words in cases:
+            with self.subTest(text=text, blanks=blanks):
+                got = split_ascii_blanks(text) if blanks is None else split_ascii_blanks(text, blanks)
+                self.assertEqual(got, words)
         self.assertEqual(strip_ascii_blanks(" \N{NO-BREAK SPACE}off\t"), "\N{NO-BREAK SPACE}off")
 
 
