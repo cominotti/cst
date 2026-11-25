@@ -78,7 +78,8 @@ one place only.
 ## The gates that catch a copy
 
 - `tests/test_duplication.py`: clones, and the same name defined in several
-  files (Python top-level names and shell functions).
+  files (Python top-level functions, classes, type aliases and module-level
+  assignments, and shell functions).
 - `tests/test_architecture.py`: no I/O in `domain` or `application`; and
   `PRIMITIVE_OWNERS` / `PRIMITIVE_LITERALS`, which name the owner of each
   primitive (running a command, replacing or syncing a file, temporary files,

@@ -321,8 +321,26 @@ def shell_clones(repo: str, files: Iterable[str], window: int) -> CloneReport:
     return clones(norm, window)
 
 
+def top_level_names(node: ast.stmt) -> list[str]:
+    """The names one module-level statement defines: a function, a class, a type alias (`type X = ...`), or
+    an assignment (`X = ...`, `X: T = ...`) to a plain name; never a dunder (`__all__`, ...)."""
+    match node:
+        case ast.FunctionDef(name=name) | ast.ClassDef(name=name):
+            names = [name]
+        case ast.TypeAlias(name=ast.Name(id=name)):
+            names = [name]
+        case ast.Assign(targets=targets):
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+        case ast.AnnAssign(target=ast.Name(id=name)):
+            names = [name]
+        case _:
+            names = []
+    return [n for n in names if not (n.startswith("__") and n.endswith("__"))]
+
+
 def same_name_definitions(repo: str, files: Iterable[str], allowed: Iterable[str]) -> dict[str, list[str]]:
-    """{name: files} for top-level functions/classes defined in more than one file (allowed names aside)."""
+    """{name: files} for the module-level names (top_level_names: functions, classes, type aliases,
+    assignments) defined in more than one file (allowed names aside)."""
     skip = set(allowed)
     where: dict[str, set[str]] = defaultdict(set)
     for rel in files:
@@ -332,8 +350,9 @@ def same_name_definitions(repo: str, files: Iterable[str], allowed: Iterable[str
             except SyntaxError:
                 continue
         for node in tree.body:
-            if isinstance(node, ast.FunctionDef | ast.ClassDef) and node.name not in skip:
-                where[node.name].add(rel)
+            for name in top_level_names(node):
+                if name not in skip:
+                    where[name].add(rel)
     return {name: sorted(paths) for name, paths in sorted(where.items()) if len(paths) > 1}
 
 
