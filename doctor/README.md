@@ -354,8 +354,10 @@ is not counted as a failed attempt and sends no alert, so a migration could
 wait forever without a word. The helper records it instead, in
 `/var/lib/docker-volumes-nocow/postponed`: the reason of the last boot, its
 time, and how many boots were held back (once per boot). The first boot
-that is not held back removes the record, and so does a boot that finds no
-volumes folder (Docker removed, or its `data-root` moved). A file in place
+that is not held back removes the record, and so do a boot that finds no
+volumes folder (Docker removed, or its `data-root` moved) and a held-back
+boot with nothing to do (no migration scheduled, and the folder has `+C`
+already). A file in place
 of `/var/lib/docker-volumes-nocow` is no record (nothing is shown), as the
 helper reads it. A record of a newer format (a newer CST wrote it) is an
 `info` that names it; a time the record holds that no clock can show reads

@@ -904,13 +904,14 @@ docker volume rm <name>         # or one volume by name
   it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
-  The first boot that is not held back removes the record, and so does a
-  boot that finds no volumes folder (Docker removed, `data-root` moved),
-  whatever its format. The record is format 1 (its `"v"`); one without it,
+  The first boot that is not held back removes the record, and so do a
+  boot that finds no volumes folder (Docker removed, `data-root` moved) and
+  a held-back boot with nothing to do (no migration scheduled, and the folder
+  has `+C` already), whatever its format. The record is format 1 (its `"v"`); one without it,
   as an older CST wrote it, is format 0 and is read and counted on. A record
   of a newer format (a newer CST wrote it, and an older one runs now) is left
-  as it is: a held-back boot is not counted in it and says so in the
-  journal, and `status` and `cst doctor` name it. A time no clock can show
+  as it is by a held-back boot with work to do, which is not counted in it
+  and says so in the journal, and `status` and `cst doctor` name it. A time no clock can show
   (a damaged record) is printed as `?`, and the rest of the line stays. To run the
   migration by hand once nothing uses the volumes:
   `sudo systemctl stop docker.socket docker.service`, then
