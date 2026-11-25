@@ -40,8 +40,7 @@ def show_state(profile: GameProfile) -> int:
     on, manual = state_text is not None, os.path.exists(profile.paths.manual)
     state_recs = records(state_text or "")
     why = None if profile.problems else profile.target_refusal()  # as 'on' reads TARGET_USER
-    if on:
-        profile.user_from_state(state_recs, say=False)
+    owned = not on or profile.user_from_state(state_recs, say=False)
     p, s = profile.paths, profile.s
     profile.say_lines(state_head(on=on, manual=manual, problem_lines=profile.problem_lines(), why=why))
     _slice_line(profile, "machine.slice")
@@ -57,7 +56,7 @@ def show_state(profile: GameProfile) -> int:
     if kept is not None and kept:
         profile.say(leftovers_line(kept, p.epp))
     if on:
-        profile.say_lines(profile.drift_report(state_recs, intended_text, newer, manual=manual))
+        profile.say_lines(profile.drift_report(state_recs, intended_text, newer, manual=manual, user_manager=owned))
     return 0
 
 

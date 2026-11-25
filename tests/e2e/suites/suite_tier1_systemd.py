@@ -7625,8 +7625,8 @@ PY
                 || { echo "off: $got" >&2; exit 1; }
             grep -qF "off: could not undo $knob = OLD: kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
             grep -qF "except 2 setting(s) kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
-            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 1' ]] || { cat "$lo" >&2; exit 1; }
-            [[ "$(tail -n +2 "$lo")" == "$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 2' ]] || { cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: $knob, machine.slice CPUWeight" \
                 || { gp state >&2; exit 1; }
             # cst doctor (as tester) warns about both, by name, with the fix line of a profile that is off.
@@ -7647,11 +7647,11 @@ PY
             got=$(gp tick)
             [[ "$(cat "$knob")" == OLD ]] || { echo "the knob was not written: $got" >&2; exit 1; }
             grep -qF "undid $knob = OLD, kept in $lo by an earlier off" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
-            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             # An 'off' with no game.state retries it too, and keeps it while it fails.
             got=$(gp off)
             grep -qF "off: could not undo machine.slice CPUWeight=bogus" <<<"$got" || { echo "off: $got" >&2; exit 1; }
-            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
             rm -f "$lo"
             rm -rf /run/e2e182
@@ -7718,7 +7718,7 @@ PY
             printf 'cst-game-leftovers 1\n%s\n' "$nrec" >"$lo"
             for n in 1 2; do
                 gp tick >/dev/null
-                [[ "$(tail -n +2 "$lo")" == "$nrec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+                [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$nrec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
                 [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
                     || { echo "tick $n ran a daemon-reload" >&2; exit 1; }
             done
@@ -8086,6 +8086,480 @@ unit_log_has "FileExistsError"
 echo E2E-OK
 """
         )
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_205_cpu_game_profile_off_undoes_a_user_manager_record_only_in_the_recorded_uids_manager(self) -> None:
+        """'off' with the real system and user managers, after 'on' for another account than TARGET_USER names
+        now (G7). (a) 'on' for e2e205a, whose user manager is then stopped (a logout: user@UID.service and its
+        runtime folder go), TARGET_USER tester: 'off' says that manager is not running and drops its records,
+        leaves tester's user.slice CPUWeight and its user.control override as they were, and keeps nothing.
+        The old 'off' ran set-property and daemon-reload into the stopped manager. (b) 'on' for e2e205b, whose
+        account is then removed while its user manager still runs: 'off' keeps its records in game.leftovers
+        under its uid, never undone in tester's manager (the old 'off' dropped them as undone); a tick keeps
+        them, and once that manager is stopped the next tick drops them. (c) With that game.state still there, a
+        tick sets nothing in tester's manager (a Steam-named scope there gets no MemoryLow and no record) and
+        says why once; the old tick acted in tester's manager. cst doctor (as root) compares no drift of that
+        uid's user manager in tester's, and says why; the old doctor warned of a drift in tester's manager. 'state'
+        says those settings were not compared; the old 'state' said every setting held."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            systemctl --user -M tester@ stop app-flatpak-com.valvesoftware.Steam-e2e205.scope e2e205-steam-launch.service 2>/dev/null || true
+            for u in $(cat /tmp/e2e-205-uids 2>/dev/null); do
+                systemctl stop "user@$u.service" "user-runtime-dir@$u.service" 2>/dev/null || true
+            done
+            userdel -rf e2e205a 2>/dev/null || true
+            userdel -rf e2e205b 2>/dev/null || true
+            rm -rf /home/e2e205b /tmp/e2e-205-uids
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-205-conf.bak ]]; then mv /tmp/e2e-205-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-205-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            conf() { printf '%s\n' "TARGET_USER='$1'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf; }
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            tov=/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            # As tester: a folder root made there would keep tester's manager from writing its own overrides.
+            runuser -u tester -- mkdir -p "$(dirname "$tov")"
+            runuser -u tester -- sh -c 'printf "[Slice]\nCPUWeight=%s\n" "$1" >"$2"' sh "$tw" "$tov"
+            tsum=$(sha256sum "$tov")
+            steam=app-flatpak-com.valvesoftware.Steam-e2e205.scope
+            logout() {
+                systemctl stop "user@$1.service" "user-runtime-dir@$1.service"
+                test ! -e "/run/user/$1/systemd" || { echo "uid $1's runtime folder is still there" >&2; exit 1; }
+            }
+            tester_untouched() {
+                [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$tw" ]] \
+                    || { echo "tester's user.slice CPUWeight changed: $1" >&2; exit 1; }
+                [[ "$(sha256sum "$tov")" == "$tsum" ]] || { echo "tester's override changed: $1" >&2; exit 1; }
+            }
+            # (a) The recorded uid's user manager is not running.
+            useradd -m e2e205a
+            ua=$(id -u e2e205a)
+            echo "$ua" >>/tmp/e2e-205-uids
+            systemctl start "user@$ua.service"
+            conf e2e205a
+            touch /run/cpu-setup/manual
+            gp on >/dev/null
+            [[ "$(systemctl --user -M e2e205a@ show -P CPUWeight user.slice)" == idle ]]
+            grep -qF "prop sys user@$ua.service MemoryLow" "$st"
+            conf tester
+            logout "$ua"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "off: the user manager of uid $ua, the user 'on' acted for, is not running: " <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            if grep -qF "undoing for" <<<"$got"; then echo "off acted for the stopped manager: $got" >&2; exit 1; fi
+            test ! -e "$st"
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(a)"
+            # (b) No account has the recorded uid now, its user manager still runs: kept under its uid.
+            useradd -m e2e205b
+            ub=$(id -u e2e205b)
+            echo "$ub" >>/tmp/e2e-205-uids
+            systemctl start "user@$ub.service"
+            conf e2e205b
+            touch /run/cpu-setup/manual
+            gp on >/dev/null
+            conf tester
+            userdel -f e2e205b
+            if getent passwd "$ub" >/dev/null; then echo "uid $ub still has an account" >&2; exit 1; fi
+            test -d "/run/user/$ub/systemd"
+            # (c) The tick leaves tester's manager alone for game.state of that uid: a Steam-named scope there
+            # gets no MemoryLow and no record (the old tick set it in tester's manager), said once.
+            systemd-run --user -M tester@ --quiet --unit=e2e205-steam-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$tuid/bus \
+                systemd-run --user --scope --quiet --unit="$steam" sleep 300
+            for _ in $(seq 50); do
+                [[ "$(systemctl --user -M tester@ show -P ActiveState "$steam")" == active ]] && break
+                sleep 0.1
+            done
+            [[ "$(systemctl --user -M tester@ show -P ActiveState "$steam")" == active ]]
+            steam_low=$(systemctl --user -M tester@ show -P MemoryLow "$steam")
+            ssum=$(sha256sum "$st")
+            got=$(gp tick 2>&1)
+            grep -qF "profile on, its user manager's side not handled: no account has uid $ub, the user 'on' acted for" <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P MemoryLow "$steam")" == "$steam_low" ]] \
+                || { echo "the tick set the Steam scope in tester's manager" >&2; exit 1; }
+            if grep -qF "$steam" "$st"; then echo "game.state has a record of tester's Steam scope" >&2; exit 1; fi
+            got=$(gp tick 2>&1)
+            if grep -qF "not handled" <<<"$got"; then echo "said twice: $got" >&2; exit 1; fi
+            # 'state' says the user manager's settings were not compared, and why.
+            s=$(gp state)
+            grep -qF "drift: the user manager's settings not checked (no account has uid $ub, the user 'on' acted for)" <<<"$s" \
+                || { echo "state: $s" >&2; exit 1; }
+            if grep -qF "every setting the profile made still holds" <<<"$s"; then echo "state: $s" >&2; exit 1; fi
+            # cst doctor compares no drift of that uid's user manager in tester's either, and says why.
+            d=$(/opt/cst-rw/cst doctor 2>&1 || true)
+            grep -qF "drift not checked for user.slice (no account has uid $ub, the user 'on' acted for)" <<<"$d" \
+                || { echo "doctor: $d" >&2; exit 1; }
+            if grep -qF "(the profile set idle)" <<<"$d"; then echo "doctor compared tester's manager: $d" >&2; exit 1; fi
+            tester_untouched "(c)"
+            systemctl --user -M tester@ stop "$steam" e2e205-steam-launch.service 2>/dev/null || true
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "off: no account has uid $ub, the user 'on' acted for, now, and its user manager still runs" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "kept in $lo for the next off and tick" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            test ! -e "$st"
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 2' ]] || { cat "$lo" >&2; exit 1; }
+            grep -qx "user $ub" "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            grep -qx 'prop usr user.slice CPUWeight new -' "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(b) off"
+            sum=$(sha256sum "$lo")
+            gp tick >/dev/null
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "the tick changed game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(b) tick"
+            logout "$ub"
+            gp tick >/dev/null
+            test ! -e "$lo" || { echo "game.leftovers after the logout:" >&2; cat "$lo" >&2; exit 1; }
+            tester_untouched "(b) tick after the logout"
+            rm -f "$tov"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_206_cpu_game_profile_keeps_a_daemon_reload_that_failed_in_off_for_the_next_tick(self) -> None:
+        """The real game profile, on for tester (the memory chain's MemoryLow, its zz-cst-game.conf drop-ins and
+        tester's user.slice CPUWeight idle, each through a runtime override 'on' created), then 'off' with every
+        daemon-reload failing (a systemctl wrapper first on PATH for that one call fails it and runs the real
+        systemctl for every other call): game.state, the drop-ins and the overrides are gone, but systemd still
+        shows the game's values, and game.leftovers holds the two reloads due, each under its user line
+        (format 2: "user -" / "reload sys" / "user 1000" / "reload usr"), each said kept. The next tick with the
+        real systemctl runs both reloads: the values are tester's own again and game.leftovers is gone (G2, G4).
+        The old 'off' did not read the reloads' exit status: nothing was kept and no tick reloaded."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -rf /var/tmp/e2e-206-bin
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-206-conf.bak ]]; then mv /tmp/e2e-206-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            systemctl --user -M tester@ daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-206-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            slice=user-$tuid.slice
+            # The settings 'on' makes are new runtime overrides (an 'off' removes them and reloads).
+            rm -f "/run/systemd/system.control/$slice.d/50-MemoryLow.conf" \
+                "/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf"
+            systemctl daemon-reload
+            systemctl --user -M tester@ daemon-reload
+            low=$(systemctl show -P MemoryLow "$slice")
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            touch /run/cpu-setup/manual
+            got=$(gp on 2>&1)
+            systemctl daemon-reload
+            game_low=$(systemctl show -P MemoryLow "$slice")
+            [[ "$game_low" != "$low" ]] || { echo "the test cannot bite: $slice MemoryLow is $low already" >&2; exit 1; }
+            w=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            [[ "$w" == idle ]] || { echo "tester's user.slice CPUWeight after on: $w: $got" >&2; exit 1; }
+            install -d /var/tmp/e2e-206-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nfor a in "$@"; do if [[ "$a" == daemon-reload ]]; then echo "e2e: refused" >&2; exit 1; fi; done\nexec %s "$@"\n' \
+                "$real" >/var/tmp/e2e-206-bin/systemctl
+            chmod 0755 /var/tmp/e2e-206-bin/systemctl
+            got=$(PATH=/var/tmp/e2e-206-bin:$PATH gp off) || { echo "off failed: $got" >&2; exit 1; }
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            if compgen -G '/run/systemd/system.control/*.d/zz-cst-game.conf' >/dev/null; then echo "drop-ins left" >&2; exit 1; fi
+            [[ "$(systemctl show -P MemoryLow "$slice")" == "$game_low" ]] \
+                || { echo "the wrapper did not fail the reload: $(systemctl show -P MemoryLow "$slice")" >&2; exit 1; }
+            want=$(printf '%s\n' 'cst-game-leftovers 2' 'user -' 'reload sys' "user $tuid" 'reload usr')
+            [[ "$(cat "$lo")" == "$want" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            grep -qF "off: the daemon-reload of the system manager failed: kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "off: the daemon-reload of uid $tuid's user manager failed: kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: daemon-reload of the system manager, daemon-reload of uid $tuid's user manager" \
+                || { gp state >&2; exit 1; }
+            # The next tick, with the real systemctl, runs both reloads.
+            gp tick >/dev/null
+            [[ "$(systemctl show -P MemoryLow "$slice")" == "$low" ]] \
+                || { echo "$slice MemoryLow after the tick: $(systemctl show -P MemoryLow "$slice"), not $low" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$tw" ]] \
+                || { echo "tester's user.slice CPUWeight after the tick: not $tw" >&2; exit 1; }
+            test ! -e "$lo" || { echo "game.leftovers after the tick:" >&2; cat "$lo" >&2; exit 1; }
+            rm -rf /var/tmp/e2e-206-bin
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_207_cpu_game_profile_tick_sets_a_fixed_unit_whose_set_failed_in_on(self) -> None:
+        """The real game profile, on for tester, with machine.slice's set-property failing in 'on' (a systemctl
+        wrapper first on PATH for that one call fails it and runs the real systemctl for every other call):
+        machine.slice keeps its own CPUWeight, game.intended holds what 'on' meant to set (machine.slice
+        CPUWeight 10 10, G1), cst doctor (as tester) warns about the drift, the next tick with the real
+        systemctl sets it (CPUWeight 10) and says so, a second tick sets nothing, and 'off' gives machine.slice
+        its own CPUWeight back. The old 'on' recorded nothing for it, and no tick set it until 'off'."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -rf /var/tmp/e2e-207-bin
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-207-conf.bak ]]; then mv /tmp/e2e-207-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-207-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            own=$(systemctl show -P CPUWeight machine.slice)
+            [[ "$own" != 10 ]] || { echo "the test cannot bite: machine.slice CPUWeight is already 10" >&2; exit 1; }
+            install -d /var/tmp/e2e-207-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nif [[ "$1 $2 $3" == "set-property --runtime machine.slice" ]]; then echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
+                "$real" >/var/tmp/e2e-207-bin/systemctl
+            chmod 0755 /var/tmp/e2e-207-bin/systemctl
+            touch /run/cpu-setup/manual
+            got=$(PATH=/var/tmp/e2e-207-bin:$PATH gp on)
+            grep -qF 'machine.slice: could not set AllowedCPUs=0 CPUWeight=10 IOWeight=10' <<<"$got" \
+                || { echo "on: $got" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "the wrapper did not fail the set" >&2; exit 1; }
+            grep -qx 'prop sys machine.slice CPUWeight 10 10' /run/cpu-setup/game.intended \
+                || { echo "game.intended:" >&2; cat /run/cpu-setup/game.intended >&2; exit 1; }
+            d=$(runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+                /opt/cst-rw/cst doctor 2>&1 || true)
+            grep -qE 'machine\.slice CPUWeight is [^;]* \(the profile set 10\)' <<<"$d" || { echo "doctor: $d" >&2; exit 1; }
+            got=$(gp tick)
+            grep -qE "drift: machine\.slice CPUWeight was '[^']*' instead of '10'" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || { echo "the tick did not set it" >&2; exit 1; }
+            got=$(gp tick)
+            if grep -qF 'drift:' <<<"$got"; then echo "the second tick set it again: $got" >&2; exit 1; fi
+            gp off >/dev/null
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "machine.slice CPUWeight after off: $(systemctl show -P CPUWeight machine.slice)" >&2; exit 1; }
+            rm -rf /var/tmp/e2e-207-bin
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_208_cpu_game_profile_drops_an_entry_of_no_user_in_no_other_user_s_manager(self) -> None:
+        """The real game profile with the real user manager, profile off, TARGET_USER naming no account, and a
+        game.leftovers whose older entry is of no user ("user -": a new override of user.slice's CPUWeight) and
+        whose newer one is tester's (a new override of e2e208.slice). The tick undoes the newer first, in tester's
+        manager, then drops the entry of no user (no user manager to undo it in) and removes the file; tester's
+        own override of user.slice is left as it was. The old pass still acted for tester at the older entry, and
+        removed tester's override."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            rm -f /run/user/1000/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-208-conf.bak ]]; then mv /tmp/e2e-208-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl --user -M tester@ daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-208-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='e2e208-nobody'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            if getent passwd e2e208-nobody >/dev/null; then echo "e2e208-nobody has an account" >&2; exit 1; fi
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            tov=/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            # As tester: a folder root made there would keep tester's manager from writing its own overrides.
+            runuser -u tester -- mkdir -p "$(dirname "$tov")"
+            runuser -u tester -- sh -c 'printf "[Slice]\nCPUWeight=%s\n" "$1" >"$2"' sh "$tw" "$tov"
+            tsum=$(sha256sum "$tov")
+            printf '%s\n' 'cst-game-leftovers 2' 'user -' 'prop usr user.slice CPUWeight new -' \
+                "user $tuid" 'prop usr e2e208.slice MemoryLow new -' >"$lo"
+            got=$(gp tick 2>&1)
+            grep -qF "could not undo user.slice CPUWeight (its runtime override): TARGET_USER names no account, no user manager to undo it in: dropped" <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            test -e "$tov" || { echo "the tick removed tester's own override: $got" >&2; exit 1; }
+            [[ "$(sha256sum "$tov")" == "$tsum" ]] || { echo "tester's override changed" >&2; exit 1; }
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            rm -f "$tov"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_209_cpu_game_profile_off_keeps_another_uid_s_entry_of_the_same_record(self) -> None:
+        """The real game profile with the real system and user managers. An earlier 'off' kept a new override of
+        user.slice's CPUWeight for uid U of e2e209, whose account is then gone while its user manager still runs
+        (game.leftovers "user U" / "prop usr user.slice CPUWeight new -"). tester's own 'on' records the same
+        text, and tester's 'off' undoes tester's and keeps U's entry, said kept. The old 'off' took U's entry
+        for a record of tester's game.state and dropped it: no entry and no warning were left for U's manager."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            for u in $(cat /tmp/e2e-209-uids 2>/dev/null); do
+                systemctl stop "user@$u.service" "user-runtime-dir@$u.service" 2>/dev/null || true
+            done
+            userdel -rf e2e209 2>/dev/null || true
+            rm -rf /home/e2e209 /tmp/e2e-209-uids
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-209-conf.bak ]]; then mv /tmp/e2e-209-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-209-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            # tester's user.slice has no override of its own: 'on' records a new one.
+            rm -f "/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf"
+            systemctl --user -M tester@ daemon-reload
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            useradd -m e2e209
+            ub=$(id -u e2e209)
+            echo "$ub" >>/tmp/e2e-209-uids
+            systemctl start "user@$ub.service"
+            userdel -f e2e209
+            if getent passwd "$ub" >/dev/null; then echo "uid $ub still has an account" >&2; exit 1; fi
+            test -d "/run/user/$ub/systemd"
+            want=$(printf '%s\n' 'cst-game-leftovers 2' "user $ub" 'prop usr user.slice CPUWeight new -')
+            printf '%s\n' "$want" >"$lo"
+            touch /run/cpu-setup/manual
+            gp on >/dev/null
+            grep -qx 'prop usr user.slice CPUWeight new -' "$st" || { echo "game.state:" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]]
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            test ! -e "$st"
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$tw" ]] \
+                || { echo "tester's user.slice CPUWeight after off: not $tw: $got" >&2; exit 1; }
+            [[ "$(cat "$lo" 2>/dev/null)" == "$want" ]] || { echo "game.leftovers: $(cat "$lo" 2>&1): $got" >&2; exit 1; }
+            grep -qF "off: could not undo user.slice CPUWeight (its runtime override): kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_210_cpu_game_profile_keeps_the_predicted_form_when_the_read_back_fails(self) -> None:
+        """The real game profile, on for tester, with `systemctl show -P CPUWeight machine.slice` failing in 'on'
+        (a systemctl wrapper first on PATH for that one call fails it and runs the real systemctl for every other
+        call): the set-property works, and game.intended's last record of that setting is still the one 'on'
+        wrote before the set (machine.slice CPUWeight 10 10). When machine.slice's CPUWeight then drifts, the
+        next tick with the real systemctl sets it again, and 'off' gives machine.slice its own CPUWeight back.
+        The old 'on' added a record with an empty form after the set, which won: no tick saw that drift."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -rf /var/tmp/e2e-210-bin
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-210-conf.bak ]]; then mv /tmp/e2e-210-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-210-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            intended=/run/cpu-setup/game.intended
+            # machine.slice's CPUWeight has no runtime override: 'on' records a new one (no read of its old value).
+            rm -f /run/systemd/system.control/machine.slice.d/50-CPUWeight.conf
+            systemctl daemon-reload
+            own=$(systemctl show -P CPUWeight machine.slice)
+            [[ "$own" != 10 ]] || { echo "the test cannot bite: machine.slice CPUWeight is already 10" >&2; exit 1; }
+            install -d /var/tmp/e2e-210-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nif [[ "$*" == "show -P CPUWeight machine.slice" ]]; then echo "e2e: refused" >&2; exit 1; fi\nexec %s "$@"\n' \
+                "$real" >/var/tmp/e2e-210-bin/systemctl
+            chmod 0755 /var/tmp/e2e-210-bin/systemctl
+            touch /run/cpu-setup/manual
+            got=$(PATH=/var/tmp/e2e-210-bin:$PATH gp on 2>&1)
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || { echo "on did not set it: $got" >&2; exit 1; }
+            last=$(grep '^prop sys machine\.slice CPUWeight ' "$intended" | tail -n 1)
+            [[ "$last" == 'prop sys machine.slice CPUWeight 10 10' ]] \
+                || { echo "game.intended:" >&2; cat "$intended" >&2; exit 1; }
+            systemctl set-property --runtime machine.slice CPUWeight=77   # a drift, as a daemon-reload or uresourced makes
+            got=$(gp tick)
+            grep -qE "drift: machine\.slice CPUWeight was '[^']*' instead of '10'" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || { echo "the tick did not set it" >&2; exit 1; }
+            gp off >/dev/null
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "machine.slice CPUWeight after off: $(systemctl show -P CPUWeight machine.slice)" >&2; exit 1; }
+            rm -rf /var/tmp/e2e-210-bin
+            echo E2E-OK
+            """,
+        ).stdout
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS)

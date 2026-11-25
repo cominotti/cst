@@ -21,7 +21,6 @@ from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
 from cst_core.domain.text import SettingsProblem, describe_problems
-from cst_core.domain.units import LoadState
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters.host import (
     holds,
@@ -32,10 +31,19 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
-from cpu.game.adapters.leftovers import Reloads, drop_unowned, keep, read_kept, retry_kept, undo_entries, unit_gone
+from cpu.game.adapters.drift import repair_drift, settings_drift
+from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_pass, unit_gone, user_side
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
-from cpu.game.domain.leftovers import merged_entries, off_text
+from cpu.game.domain.boxes import shown_form
+from cpu.game.domain.leftovers import (
+    LEFTOVER_DROPINS_TEXT,
+    UserSide,
+    merged_entries,
+    of_user_manager,
+    off_text,
+    user_side_text,
+)
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -59,22 +67,16 @@ from cpu.game.domain import (
     ctl_file,
     cut_tail,
     drift_lines,
-    drifted,
     dropin_text,
     escaped_unit,
     has_prop_record,
     intended_header,
-    intended_props,
-    intended_records,
     newer_intended,
-    manager_of,
     on_text,
     PropUndo,
     record_line,
     records,
-    repaired_text,
     unreadable_lines,
-    show_values,
     state_uid,
     state_undo,
     shown,
@@ -85,7 +87,7 @@ from cpu.game.domain import (
 )
 
 
-# How the watchdog's words on the settings end: it says them once per boot (GameProfile._say_once).
+# How the watchdog's words on the settings end: it says them once per boot (GameProfile.say_once).
 _ONCE: Final = " (fix it; said once per boot)"
 
 
@@ -252,9 +254,15 @@ class GameProfile:
         """Append one whole record to `game.state`."""
         return self._append(self.paths.state, *fields)
 
+    def append_intended(self, *fields: str) -> bool:
+        """Append one whole record to game.intended (best effort: a failed write stops nothing)."""
+        return self._append(self.paths.intended, *fields)
+
     def setp(self, mgr: Manager, unit: str, *settings: str) -> None:
-        """Record, per property, whether a runtime override existed (and its value), then set
-        them all; for a fixed unit, also record in game.intended what systemd shows right after."""
+        """Record, per property, whether a runtime override existed (and its value), then set them all. For a
+        fixed unit, game.intended gets each value as systemd will show it (shown_form) before the set, so the
+        drift repair sets one whose set-property failed; after a set that worked, a second record when systemd
+        shows another form (the last record of a setting wins: intended_records), never for an empty read-back."""
         for kv in settings:
             p = kv.split("=", 1)[0]
             if os.path.exists(self.ctl_file(mgr, unit, p)):
@@ -264,14 +272,16 @@ class GameProfile:
             if not self._append(self.paths.state, *rec):
                 self.report_unrecorded(f"{unit}: {' '.join(settings)}")
                 return
+        fixed = [kv.partition("=")[::2] for kv in settings] if not transient_unit(unit) else []
+        for p, value in fixed:
+            self.append_intended(GameRecordKind.PROP, mgr, unit, p, value, shown_form(p, value))
         if self.ctl(mgr, "set-property", "--runtime", unit, *settings) != 0:
             self.log(4, f"{unit}: could not set {' '.join(settings)}")
             return
-        if transient_unit(unit):
-            return
-        for kv in settings:
-            p, _, value = kv.partition("=")
-            self._append(self.paths.intended, GameRecordKind.PROP, mgr, unit, p, value, self.prop(mgr, unit, p))
+        for p, value in fixed:
+            # An empty read-back (an error, [not set]) says nothing of the form: the predicted record stays last.
+            if (now := self.prop(mgr, unit, p)) not in {"", shown_form(p, value)}:
+                self.append_intended(GameRecordKind.PROP, mgr, unit, p, value, now)
 
     # ---- the boxes ----------------------------------------------------------------------------
     def steam_scopes(self) -> list[str]:
@@ -420,13 +430,15 @@ class GameProfile:
             except OSError:
                 self.log(4, f"{unit}: could not write {d}/{GAME_DROPIN}")
 
+    def game_dropins(self) -> list[str]:
+        """Every such drop-in there is, whatever unit and user it is for."""
+        found = glob.glob(os.path.join(glob.escape(self.paths.unit_runtime), "*.d", GAME_DROPIN))
+        return [f for f in sorted(found) if os.path.exists(f)]
+
     def remove_game_dropins(self) -> bool:
-        """Remove every such drop-in, whatever unit and user it is for; True when one was removed
-        (a daemon-reload is due)."""
+        """Remove every such drop-in; True when one was removed (a daemon-reload is due)."""
         removed = False
-        for f in sorted(glob.glob(os.path.join(glob.escape(self.paths.unit_runtime), "*.d", GAME_DROPIN))):
-            if not os.path.exists(f):
-                continue
+        for f in self.game_dropins():
             with contextlib.suppress(OSError):
                 os.unlink(f)
             with contextlib.suppress(OSError):
@@ -435,11 +447,12 @@ class GameProfile:
         return removed
 
     def remove_leftover_dropins(self) -> None:
-        """With the profile off: drop-ins left behind are removed, and the reload drops their MemoryLow."""
+        """With the profile off and a game.leftovers this CST does not read (retry_kept): drop-ins left behind
+        are removed, and the reload drops their MemoryLow."""
         if not self.remove_game_dropins():
             return
         self.ctl("sys", "daemon-reload")
-        self.log(4, f"profile off, but its MemoryLow drop-ins ({GAME_DROPIN}) were still there: removed them")
+        self.log(4, LEFTOVER_DROPINS_TEXT)
 
     # ---- on, off, tick ---------------------------------------------------------------------------
     def on(self) -> int:
@@ -515,6 +528,17 @@ class GameProfile:
             return f"TARGET_USER names no account: {name} (in {conf})"
         return None
 
+    def foreign_refusal(self, recs: Sequence[Record] | None = None) -> str | None:
+        """Why the tick leaves the user manager's side alone while the profile is on: no account has the uid
+        game.state records (the user 'on' acted for), so no name reaches that uid's manager, and TARGET_USER's
+        is another user's (G7). None when game.state records no uid, or an account has it. recs: game.state's
+        records, as a snapshot read them (None: read the file now)."""
+        uid = state_uid(records(self.state_text()) if recs is None else recs)
+        target = self.s.target_user
+        if uid is None or (target and self._lookup_uid(target, say=False) == uid) or self._name_of(uid):
+            return None
+        return f"no account has uid {uid}, the user 'on' acted for"
+
     def off(self) -> int:
         """Exact revert: the overrides 'on' created go (then daemon-reload), the ones that existed
         before get their old value back; the MemoryLow drop-ins go also without a game.state. What it
@@ -524,33 +548,28 @@ class GameProfile:
         if not os.path.exists(p.state):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(p.manual)
-            self.remove_leftover_dropins()
             retry_kept(self, say=True)
             return 0
-        reload = Reloads(system=self.remove_game_dropins())
         text = self.state_text()
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
         recs = records(text)
-        if not self.user_from_state(recs):
-            recs = drop_unowned(self, recs)
+        uid = state_uid(recs)
+        side = user_side(self, uid, say=True)  # a user manager's record only in the manager of its uid
+        owner = None if side == UserSide.OWN else uid
+        said = None if owner is None else user_side_text(side, owner, sum(map(of_user_manager, recs)))
+        if said is not None:
+            self.log(*said)
         kept = read_kept(self, say=True)
-        failed, _dropped = undo_entries(self, merged_entries(kept or [], recs), reload, say=True)
-        self.reload_managers(reload)
+        acting = (self.uid(say=True) or None) if bool(kept) else None  # the uid an entry of no user is for
+        entries = merged_entries(kept or [], recs, owner=owner, acting=acting)
+        failed, _dropped, _skipped = undo_pass(self, entries, kept, say=True)
         held = keep(self, failed, kept)
         for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(f)
         self.log(5, off_text(len(failed), p.leftovers, kept=held))
         return 0
-
-    def reload_managers(self, reload: Reloads) -> None:
-        """daemon-reload each manager an undo removed an override in: the system manager, and the user
-        manager of each user it was removed for (an 'off' and a retry act for several users' kept records)."""
-        if reload.system:
-            self.ctl("sys", "daemon-reload")
-        for user in reload.users:
-            self.ctl("usr", "daemon-reload", user=user)
 
     def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> bool:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
@@ -600,68 +619,33 @@ class GameProfile:
                         return False  # the override is still there: no daemon-reload for it
                     with contextlib.suppress(OSError):
                         os.rmdir(os.path.dirname(f))
-                    reload.add(mgr, self.s.target_user)
+                    reload.add(mgr, self.uid(say=say) if mgr == "usr" else "", self.s.target_user)
                     return True
                 rc = self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
                 return rc == 0 or unit_gone(self, mgr, unit)
             case None:
                 return True
 
-    def drift(self, text: str) -> list[Drift]:
-        """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
-        recs = intended_records(text)  # as cst doctor reads it
-        now: dict[tuple[str, str], dict[str, str]] = {}
-        for (mgr, unit), props in intended_props(recs).items():
-            args = ["show", "-p", "LoadState"] + [a for prop in props for a in ("-p", prop)] + [unit]
-            res = self.ask(mgr, *args)
-            if res.returncode != 0:
-                continue
-            vals = show_values(res.stdout)
-            if vals.get("LoadState") == LoadState.LOADED:
-                now[mgr, unit] = vals
-        return drifted(recs, now, lambda f: (read_stripped(f) or "") if os.path.exists(f) else None)
+    def drift(self, text: str, *, user_manager: bool = True) -> list[Drift]:
+        """The settings in game.intended (its text) that no longer hold (settings_drift)."""
+        return settings_drift(self, text, user_manager=user_manager)
 
-    def repair_drift(self) -> None:
-        """Set again what drift() lists, straight with set-property: not with setp, which would add
-        a second record to game.state and make 'off' restore the profile's own value. A game.intended
-        of a newer CST is not read (its records may mean something else), and a setting game.state holds
-        no record of is not set again ('off' could not undo it): each said in the journal once per boot
-        (again when the text changes, and when it comes back after a tick that had nothing to say: _say_unheld)."""
-        text, newer = self.intended()
-        if newer is not None:
-            said = f"drift not repaired: {newer}"
-            self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
-            return
-        drifts = self.drift(text)
-        skipped = unheld(drifts, records(self.state_text()))
-        self._say_unheld(skipped)
-        for d in drifts:
-            if d in skipped:
-                continue
-            r = d.record
-            if d.is_cgroup_file:
-                ok = write_sysfs_line(r[1], r[2])
-            else:
-                ok = (
-                    self.ctl(manager_of(r[1]) or "usr", "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True)
-                    == 0
-                )
-            self.log(*repaired_text(d, ok=ok))
-
-    def _say_unheld(self, skipped: Sequence[Drift]) -> None:
-        """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
-        notice; with none, forget the mark, so a later one is said again."""
-        if not skipped:
+    def say_unheld(self, skipped: Sequence[Drift], failed: Sequence[tuple[int, str]] = ()) -> None:
+        """Say the drifts the tick does not set again ('off' could not undo them), at notice, and the ones whose
+        repair failed (failed: their lines), once per boot; with none, forget the mark, so a later one is said
+        again."""
+        lines = [(5, unheld_text(d)) for d in skipped] + list(failed)
+        if not lines:
             with contextlib.suppress(OSError):
                 os.unlink(self.paths.drift_warned)
             return
-        said = "\n".join(unheld_text(d) for d in skipped)
+        said = "\n".join(text for _prio, text in lines)
 
         def emit() -> None:
-            for line in said.split("\n"):
-                self.log(5, line)
+            for prio, text in lines:
+                self.log(prio, text)
 
-        self._say_once(self.paths.drift_warned, said, emit)
+        self.say_once(self.paths.drift_warned, said, emit)
 
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
@@ -678,24 +662,24 @@ class GameProfile:
         if self.problems:
             self.warn_once("tick changes nothing")
             return 0
-        self.user_from_state(records(self.state_text()), say=False)  # the user 'off' undoes for
+        owned = self.user_from_state(records(self.state_text()), say=False)  # the user 'off' undoes for
         self.pin_docker()  # containers started meanwhile
-        why = self.target_refusal()  # no account for the user acted for: no user manager to change
+        # No account for the user acted for, or for the uid 'on' acted for: no user manager to change.
+        why = self.target_refusal() or (None if owned else self.foreign_refusal())
         if why is None:
             self.protect_steam()  # the game's own scope, started after 'on'
             self.demote_escapes()  # boxes next to the game that appeared after 'on'
         else:
             self._say_refusal("profile on, its user manager's side not handled", why)
         apply_game_gpu(self)
-        self.repair_drift()  # settings a daemon-reload or uresourced undid
+        repair_drift(self, user_manager=owned)  # settings a daemon-reload or uresourced undid
         return 0
 
     def _tick_while_off(self) -> None:
         """The tick with the profile off: leftover drop-ins go, and a GameMode client switches the profile on,
         unless it was switched off by hand while that client runs (suppress) or 'on' would refuse."""
         p = self.paths
-        self.remove_leftover_dropins()
-        retry_kept(self, say=False)  # what an 'off' could not undo, now that the profile is off
+        retry_kept(self, say=False)  # leftover drop-ins, and what an 'off' could not undo, now that it is off
         if not self.gamemode_client():
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(p.suppress)
@@ -714,7 +698,7 @@ class GameProfile:
         """The watchdog's word on a TARGET_USER 'on' refuses (target_refusal's why), once per boot, in the
         mark of the settings file's problem lines (_forget_fixed_settings)."""
         said = f"{what}: {why}{_ONCE}"
-        self._say_once(self.paths.settings_warned, said, lambda: self.log(4, said))
+        self.say_once(self.paths.settings_warned, said, lambda: self.log(4, said))
 
     def _forget_fixed_settings(self) -> None:
         """With no problem line: forget what the watchdog said about the settings (a line or a name that
@@ -723,9 +707,9 @@ class GameProfile:
         mark = self.paths.settings_warned
         said = read_text(mark)
         if said is not None:
-            why = self.target_refusal()
-            if why is not None and said.endswith(f": {why}{_ONCE}"):
-                return
+            for why in (self.target_refusal(), self.foreign_refusal()):
+                if why is not None and said.endswith(f": {why}{_ONCE}"):
+                    return
         with contextlib.suppress(OSError):
             os.unlink(mark)
 
@@ -748,10 +732,10 @@ class GameProfile:
         them (and again when they or the word change, or after a tick found the file fixed), then quiet
         until the next boot (the mark is in /run); the watchdog's unit does not fail on them."""
         said = "\n".join([what, *self.problem_lines()])  # another word on the same lines is said too
-        self._say_once(self.paths.settings_warned, said, lambda: self._log_problems(4, what, "; said once per boot"))
+        self.say_once(self.paths.settings_warned, said, lambda: self._log_problems(4, what, "; said once per boot"))
 
     @staticmethod
-    def _say_once(mark: str, said: str, emit: Callable[[], None]) -> None:
+    def say_once(mark: str, said: str, emit: Callable[[], None]) -> None:
         """emit() unless the mark holds said (it was said already this boot: the mark is in /run); then
         the mark holds said, so another text is said again."""
         if read_text(mark) == said:
@@ -766,15 +750,23 @@ class GameProfile:
         return show_state(self)
 
     def drift_report(
-        self, state_recs: Sequence[Record], intended_text: str | None, newer: str | None, *, manual: bool
+        self,
+        state_recs: Sequence[Record],
+        intended_text: str | None,
+        newer: str | None,
+        *,
+        manual: bool,
+        user_manager: bool = True,
     ) -> list[str]:
         """The drift part of 'state' from its snapshot (game.state's records, game.intended's text or None, why
-        it cannot be compared, the by-hand mark): each setting that no longer holds, or that none drifted."""
+        it cannot be compared, the by-hand mark; user_manager: see drift, and when False a line says why the user
+        manager's settings were not compared): each setting that no longer holds, or that none drifted."""
         if intended_text is None:
             return drift_lines(None, manual=manual)
-        drifts = self.drift(intended_text) if newer is None else None
+        drifts = self.drift(intended_text, user_manager=user_manager) if newer is None else None
         not_held = [] if drifts is None else unheld(drifts, state_recs)
-        return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held)
+        unchecked = None if user_manager else self.foreign_refusal(state_recs)
+        return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held, unchecked=unchecked)
 
     def intended(self) -> tuple[str, str | None]:
         """game.intended's text, and why it cannot be compared (None: it can)."""
