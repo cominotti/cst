@@ -842,10 +842,10 @@ class SpaceGuardTest(Base):
                 self.assertEqual(self.core_calls(), [self.prune_call()])
 
     def test_an_invalid_guard_setting_stops_the_hourly_run(self) -> None:
-        # A space guard setting bash arithmetic cannot compute stops the run before it looks at the free
-        # space, naming the setting and its value: no snapshot, no prune, no purge and no paused mark. Before,
-        # 250GiB was bash's error line and a false test, so the run went on with no limit; abc stopped it
-        # only where the comparison read it.
+        # A space guard setting bash arithmetic cannot compute stops the run, naming the setting and its
+        # value: no snapshot, no purge and no paused mark; the normal retention still prunes (the guard holds
+        # back the snapshot, not the expiry). Before, 250GiB was bash's error line and a false test, so the
+        # run went on with no limit; abc stopped it only where the comparison read it.
         conf = self.path("etc/btrfs-setup/snapshots.conf")
         for key in ("SKIP_AT_OR_BELOW_GIB", "RESUME_ABOVE_GIB", "EMERGENCY_AT_OR_BELOW_GIB"):
             for value in ("250GiB", "abc", "1 x", "x y]", "~5", "1<<3", "\N{NO-BREAK SPACE}250"):
@@ -867,14 +867,14 @@ class SpaceGuardTest(Base):
                             ),
                             self.lines(r.stdout),
                         )
-                        self.assertEqual(self.core_calls(), [])
+                        self.assertEqual(self.core_calls(), [self.prune_call()])
                         self.assertEqual(os.path.exists(self.state_file("paused")), paused)
                         self.assertFalse(os.path.exists(self.state_file("emergency")))
                         self.assertEqual(self.notified(), [])
 
     def test_a_guard_setting_past_64_bits_stops_the_hourly_run(self) -> None:
         # bash wrapped it around: 9223372036854775808 to -2**63 (no limit), 18446744073709551866 to 250. The
-        # run stops, as for any setting it cannot hold at.
+        # run stops after the normal retention's prune, as for any setting it cannot hold at.
         conf = self.path("etc/btrfs-setup/snapshots.conf")
         for key in ("SKIP_AT_OR_BELOW_GIB", "RESUME_ABOVE_GIB", "EMERGENCY_AT_OR_BELOW_GIB"):
             for value in ("9223372036854775808", "18446744073709551866", "2**63"):
@@ -893,12 +893,48 @@ class SpaceGuardTest(Base):
                         ),
                         self.lines(r.stdout),
                     )
-                    self.assertEqual(self.core_calls(), [])
+                    self.assertEqual(self.core_calls(), [self.prune_call()])
+
+    def test_above_a_valid_emergency_limit_an_invalid_guard_setting_ends_the_emergency(self) -> None:
+        # The purge at 100 GiB free set the emergency mark and its alert's stamp. Once it has freed the disk,
+        # the next run is above the valid EMERGENCY_AT_OR_BELOW_GIB: the mark and the stamp go, as on a run
+        # with valid settings, so status no longer says EMERGENCY, and the normal retention prunes before the
+        # run stops for RESUME_ABOVE_GIB (exit 1, its line). Before, the run stopped first: the mark stayed
+        # and nothing expired until the setting was fixed.
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        line = log(
+            3,
+            f"RESUME_ABOVE_GIB='abc' in {conf}: not a number of GiB the space guard can hold at: no snapshot until "
+            "it is fixed",
+        )
+        self.conf(RESUME_ABOVE_GIB="abc", EMERGENCY_AT_OR_BELOW_GIB="150")
+        self.machine(free=[100 * GIB, 200 * GIB])
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(self.state_file("emergency")))
+        self.assertTrue(os.path.exists(self.state_file("alerted-emergency")))
+        self.machine(free=200 * GIB)
+        self.forget_calls()
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(line, self.lines(r.stdout))
+        self.assertFalse(os.path.exists(self.state_file("emergency")))
+        self.assertFalse(os.path.exists(self.state_file("alerted-emergency")))
+        self.assertEqual(self.core_calls(), [self.prune_call()])
+        # An invalid emergency limit gives no number to be above: its mark stays; the retention still prunes.
+        self.conf(EMERGENCY_AT_OR_BELOW_GIB="150GiB")
+        self.write(self.state_file("emergency"), "")
+        self.forget_calls()
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.core_calls(), [self.prune_call()])
+        self.assertTrue(os.path.exists(self.state_file("emergency")))
 
     def test_a_valid_emergency_limit_still_purges_when_another_guard_setting_is_invalid(self) -> None:
         # At or below a valid EMERGENCY_AT_OR_BELOW_GIB the purge runs, as it did before the guard's
         # settings were checked first; the run then stops for the invalid setting (exit 1, its line). An
-        # invalid emergency limit itself stops the run with no purge: no number to purge at.
+        # invalid emergency limit itself stops the run with no purge (no number to purge at); the normal
+        # retention still prunes.
         conf = self.path("etc/btrfs-setup/snapshots.conf")
         for key, value, purged in (
             ("SKIP_AT_OR_BELOW_GIB", "250GiB", True),
@@ -921,7 +957,7 @@ class SpaceGuardTest(Base):
                     ),
                     self.lines(r.stdout),
                 )
-                want = [self.prune_call("--allow-mass-delete", policy="24h 3d")] if purged else []
+                want = [self.prune_call("--allow-mass-delete", policy="24h 3d")] if purged else [self.prune_call()]
                 self.assertEqual(self.core_calls(), want)
                 self.assertEqual(os.path.exists(self.state_file("emergency")), purged)
                 if purged:

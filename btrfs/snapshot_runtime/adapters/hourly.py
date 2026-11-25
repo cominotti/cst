@@ -147,7 +147,8 @@ def guard_limits(m: SnapshotRun) -> dict[str, int]:
     compute (250GiB, abc, 1 x, a no-break space, or an operator _Arith does not read although bash would
     compute it: 1<<8, ~5) gets a line naming it and its value, and is left out:
     after_conversions then stops the run (exit 1), whether this run's comparison would read it or not,
-    once a valid emergency limit has had its purge: the run never goes on with no limit."""
+    once a valid emergency limit has had its purge, or else once the normal retention has pruned: the run
+    never takes a snapshot with no limit."""
     limits: dict[str, int] = {}
     for key in GUARD_KEYS:
         value = m.settings[key]
@@ -256,6 +257,13 @@ def after_conversions(m: SnapshotRun) -> int:
         rc = emergency(m, free)
         return 1 if stopped else rc
     if stopped:
+        # The guard holds back the snapshot, not the expiry: above a valid emergency limit the
+        # emergency is over (its mark and alert go, as below), and the normal retention prunes. An
+        # invalid emergency limit gives no number to be above: its mark stays.
+        if emergency_at is not None:
+            m.rm_f(f"{m.state}/emergency")
+            clear_alert(m, AlertKind.EMERGENCY)
+        prune_only(m)
         raise RunStopped
     m.rm_f(f"{m.state}/emergency")
     skip, resume = limits["SKIP_AT_OR_BELOW_GIB"], limits["RESUME_ABOVE_GIB"]

@@ -2731,12 +2731,15 @@ would be 250, `9223372036854775808` a negative number, so no limit),
 and its value (`SKIP_AT_OR_BELOW_GIB='250GiB' in /etc/btrfs-setup/snapshots.conf:
 not a number of GiB the space guard can hold at: no snapshot until it is
 fixed`), whether this hour's check would read that setting or not: no
-snapshot and no prune until it is fixed, never a run with no limit. One thing
-still runs: when `EMERGENCY_AT_OR_BELOW_GIB` itself is a valid number and the
-free space is at or below it, the emergency purge runs first (it is what
-frees a nearly full disk), and the run then stops for the other setting, with
-the same line and exit 1. An invalid `EMERGENCY_AT_OR_BELOW_GIB` gives no
-number to purge at: no purge. The health check's `no successful hourly run for over 3 hours` alert follows.
+snapshot until it is fixed, never a run with no limit. The guard holds back
+the snapshot, not the expiry: older snapshots still expire by the normal
+retention (a prune) before the run stops. A valid
+`EMERGENCY_AT_OR_BELOW_GIB` still acts: at or below it the emergency purge
+runs instead (it is what frees a nearly full disk); above it the emergency is
+over, and its mark goes (`cst btrfs snapshots status` no longer says
+EMERGENCY). An invalid `EMERGENCY_AT_OR_BELOW_GIB` gives no number to purge
+at: no purge, and an emergency mark stays until it is fixed. Each such run
+ends with the same line and exit 1. The health check's `no successful hourly run for over 3 hours` alert follows.
 
 `cst btrfs bulk steam apply --copy` respects them: a real copy of a game
 needs its size plus the emergency limit plus 20 GiB free, and `plan` warns

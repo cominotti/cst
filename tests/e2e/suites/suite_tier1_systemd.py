@@ -9724,9 +9724,11 @@ echo test_110-ok
         a shell: the same stop. With valid values the same run makes its snapshot (cannot bite otherwise).
         Last, 100 GiB free (at or below the valid EMERGENCY_AT_OR_BELOW_GIB=150) with RESUME_ABOVE_GIB=abc:
         the emergency purge still runs (the core is asked for a prune with --allow-mass-delete, the
-        emergency mark is set), then the run stops for RESUME_ABOVE_GIB (exit 1, its line); with
-        EMERGENCY_AT_OR_BELOW_GIB='150GiB' itself, no purge. The alert, with no btrfs-notify, is kept in
-        the pending folder, which is set aside and put back.
+        emergency mark is set), then the run stops for RESUME_ABOVE_GIB (exit 1, its line). Then 200 GiB
+        free, above that limit, the setting still invalid: the emergency mark goes and the normal retention
+        prunes (a prune without --allow-mass-delete), before the same stop. With
+        EMERGENCY_AT_OR_BELOW_GIB='150GiB' itself, no purge, only that prune. The alert, with no
+        btrfs-notify, is kept in the pending folder, which is set aside and put back.
         A fake cannot show that the installed front hands hourly to the runtime under a real unit and that
         the unit fails, which is what the health check and cst doctor see."""
         d = "/var/tmp/e2e-snapshot-guard"
@@ -9813,14 +9815,27 @@ grep -qF "<3>btrfs-snapshot: RESUME_ABOVE_GIB='abc' in $conf: not a number of Gi
 grep -q '^prune .*--allow-mass-delete' "$d/core-args"
 if grep -q '^snapshot' "$d/core-args"; then exit 1; fi
 [ -e /var/lib/btrfs-snapshot/emergency ]
-# An invalid EMERGENCY_AT_OR_BELOW_GIB gives no number to purge at: no purge.
+
+# 5. The purge freed the disk: 200 GiB free, above the valid emergency limit, RESUME_ABOVE_GIB still
+# abc. The emergency mark goes and the normal retention prunes, then the same stop (exit 1, its line).
+: >"$d/core-args"
+echo 214748364800 >"$d/free"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out" "$d/core-args"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: RESUME_ABOVE_GIB='abc' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+grep -q '^prune ' "$d/core-args"
+if grep -q -e '--allow-mass-delete' -e '^snapshot' "$d/core-args"; then exit 1; fi
+[ ! -e /var/lib/btrfs-snapshot/emergency ]
+# An invalid EMERGENCY_AT_OR_BELOW_GIB gives no number to purge at: no purge, the normal prune only.
 rm -rf /var/lib/btrfs-snapshot; : >"$d/core-args"
 base "EMERGENCY_AT_OR_BELOW_GIB=150GiB"
 rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
-cat "$d/out"
+cat "$d/out" "$d/core-args"
 [ "$rc" = 1 ]
 grep -qF "<3>btrfs-snapshot: EMERGENCY_AT_OR_BELOW_GIB='150GiB' in $conf: not a number of GiB the space guard can hold at" "$d/out"
-[ ! -s "$d/core-args" ]
+grep -q '^prune ' "$d/core-args"
+if grep -q -e '--allow-mass-delete' -e '^snapshot' "$d/core-args"; then exit 1; fi
 [ ! -e /var/lib/btrfs-snapshot/emergency ]
 echo test_217-ok
 """,
