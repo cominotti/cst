@@ -174,7 +174,8 @@ class GamePowerPort(GameSysValuesPort, Protocol):
     """sysfs as the profile's power steps read and write it: EPP, cpuidle and the GPU's power files."""
 
     def list_dir(self, path: str) -> list[str]:
-        """The names in the folder; none when it cannot be listed (gone meanwhile: a CPU taken offline)."""
+        """The names in the folder; none when it cannot be listed, whatever the error (gone meanwhile: a CPU taken
+        offline)."""
         ...
 
     def drm_cards(self, sys_drm: str) -> tuple[dict[str, str], list[str]]:

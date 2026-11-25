@@ -19,14 +19,16 @@ class GameSysfsFiles(GameSysValues):
     """sysfs and the processes' DRM file descriptors, as files."""
 
     def list_dir(self, path: str) -> list[str]:
-        """The names in the folder; none when it cannot be listed (gone since it was seen: a CPU taken offline)."""
+        """The names in the folder; none when it cannot be listed, whatever the error (gone since it was seen: a
+        CPU taken offline; EACCES, EIO), with no journal line, as the sysfs reads beside it (read_stripped)."""
         try:
             return os.listdir(path)
         except OSError:
             return []
 
     def drm_cards(self, sys_drm: str) -> tuple[dict[str, str], list[str]]:
-        """Each DRM card's device (its real path) to its cardN name, and every cardN, by number."""
+        """Each DRM card's device (its real path) to its cardN name, and every cardN, by number; none when the
+        folder cannot be listed (list_dir: gone meanwhile, or any other error)."""
         dev_to_card: dict[str, str] = {}
         cards: list[str] = []
         if not os.path.isdir(sys_drm):
