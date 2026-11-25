@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import os
 from typing import Final
 
-from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
+from btrfs.cache.adapters import loaded_mount_units, reload_failure
 from btrfs.compress.domain import (
     KARGS_SETTLE_POLL_S,
     KARGS_SETTLE_TIMEOUT_S,
@@ -204,16 +204,14 @@ class LinuxCompressHostAdapter:
             raise
 
     def mount_units(self) -> list[dict[str, str]] | None:
-        """The loaded mount units, on the host from a toolbox (as cache's CacheSystemd); none with a test root
+        """The loaded mount units, on the host from a toolbox (cache's loaded_mount_units); none with a test root
         (CST_BTRFS_*_ROOT): no systemd loaded that root's /etc/fstab, so none of its units is behind."""
         if self._host_root:
             return []
-        on_host = SystemctlHost.SHOW_ONLY if self._ctx.is_container() else SystemctlHost.LOCAL
-        return SystemctlAdapter(self._runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
+        return loaded_mount_units(self._runner, from_toolbox=self._ctx.is_container())
 
     def daemon_reload(self) -> str | None:
-        res = self._systemctl.daemon_reload_result()
-        return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
+        return reload_failure(self._runner)
 
     def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
         """Update `rootflags=` in a single `rpm-ostree kargs` invocation."""

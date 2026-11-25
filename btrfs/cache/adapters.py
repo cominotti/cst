@@ -220,21 +220,35 @@ class CacheMountTable:
         return _run_mount(rt, ["umount", _map_path(binding.target, rt, read_only=False)], f"umount {binding.target}")
 
 
+def loaded_mount_units(runner: CommandRunnerPort, *, from_toolbox: bool) -> list[dict[str, str]] | None:
+    """The mount units systemd has loaded, MOUNT_UNIT_PROPS of each, from one `systemctl show --state=loaded
+    -p ... '*.mount'` (without --state=loaded a glob hides the inactive units, and a stale /etc/fstab whose
+    units are all inactive would look current), asked of the host's systemd when from_toolbox; None when
+    systemctl gives no answer. cache's CacheSystemd and compress-force's and commit-interval's adapter
+    (LinuxCompressHostAdapter) ask with it."""
+    on_host = SystemctlHost.SHOW_ONLY if from_toolbox else SystemctlHost.LOCAL
+    return SystemctlAdapter(runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
+
+
+def reload_failure(runner: CommandRunnerPort) -> str | None:
+    """`systemctl daemon-reload` here, never on the host: None when it worked, else why it failed
+    ("systemctl daemon-reload failed: ..."). CacheSystemd and LinuxCompressHostAdapter reload with it."""
+    res = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+    return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
+
+
 class CacheSystemd:
-    """CacheSystemdPort over systemctl (SystemctlAdapter): the reload local, the mount units on the host from
-    a toolbox as findmnt is, one `systemctl show --state=loaded -p ... '*.mount'`: without --state=loaded a
-    glob hides the inactive units, and a stale /etc/fstab whose units are all inactive would look current."""
+    """CacheSystemdPort over systemctl: the reload local (reload_failure), the mount units on the host from a
+    toolbox as findmnt is (loaded_mount_units)."""
 
     def __init__(self, rt: CacheMountRuntime) -> None:
         self._rt = rt
 
     def daemon_reload(self) -> str | None:
-        res = SystemctlAdapter(self._rt.runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
-        return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
+        return reload_failure(self._rt.runner)
 
     def mount_units(self) -> list[dict[str, str]] | None:
-        on_host = SystemctlHost.SHOW_ONLY if _from_toolbox(self._rt) else SystemctlHost.LOCAL
-        return SystemctlAdapter(self._rt.runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
+        return loaded_mount_units(self._rt.runner, from_toolbox=_from_toolbox(self._rt))
 
 
 class CacheFolders:
