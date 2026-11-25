@@ -1877,6 +1877,15 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   `/var/mnt/scratchpad`, is not mounted) or when another mount sits on top
   of CST's bind (unmounting the target would take that one away instead):
   mount the base, or unmount the other mount, and run `detach` again.
+  A write of `/etc/fstab` whose new text was already in place when it
+  failed (its folder could not be synced after the rename) is undone the
+  same way: the run reads `/etc/fstab` back and puts the old text back
+  when the new one is there, before it says `restored.`. systemd was not
+  reloaded then and still has the old text loaded; the next run's catch-up
+  reload clears the `NeedDaemonReload` flag the rewrite sets. A put-back
+  whose own folder sync fails is in place too, and `ROLLBACK INCOMPLETE
+  (/etc/fstab put back, its folder not synced: ...)` says so; a detach then
+  still reloads systemd after it.
   `status` shows these two as `mounted (source not checked: base not
   mounted)` and `mounted (other source on top of CST's bind!)`.
 - **A run stopped before its reload:** a run killed (or the machine reset)

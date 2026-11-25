@@ -96,7 +96,7 @@ from cst_core.domain.record import ComponentState
 from cst_core.domain.units import parse_show_units
 from cst_core.domain.values import ExitAndLines
 from cst_core.installer import NAME as INSTALLER_NAME
-from cst_core.ports import CommandFault, CommandResult, WriteFailed
+from cst_core.ports import CommandFault, CommandResult, ReplacedNotSynced, WriteFailed
 from tests.fault_injection import FaultPlan
 from tests.test_install import MemoryTarget
 from tests.test_install_record import MemoryRecord
@@ -1595,7 +1595,9 @@ class CacheWorld(FaultPoints):
 
     Every mutating call is one point (FaultPoints), named as main's fault matrix named its call:
     "folder PATH" (each ensure_private), "tag SOURCE" (a CACHEDIR.TAG written: none when one is there),
-    "mount --bind SOURCE TARGET", "umount TARGET", "fstab write" (the write and the put-back),
+    "mount --bind SOURCE TARGET", "umount TARGET", two for each /etc/fstab write (the write and the put-back):
+    "fstab replace" (the new text in place) and "fstab sync" (its folder synced: no effect; a failure there
+    raises ReplacedNotSynced, with the new text in place, as write_atomic does),
     "fstab remove" (the put-back when there was no file) and "systemctl daemon-reload". A failed command
     answers "WHAT failed: REASON" (the error's text); a failed folder, tag or /etc/fstab call raises it.
     Every error the fakes model (a link at a private folder: ENOTDIR, as O_NOFOLLOW with O_DIRECTORY gives;
@@ -1786,7 +1788,11 @@ class FakeFstab:
             w.fstab_writes += 1
             w.fstab, w.fstab_id = copy, w.fstab_writes
 
-        w.step("fstab write", write)
+        def not_synced(err: OSError) -> None:
+            raise ReplacedNotSynced(err.errno, err.strerror, err.filename, "/etc/fstab") from err
+
+        w.step("fstab replace", write)
+        w.step("fstab sync", lambda: None, not_synced)
 
     def remove(self) -> None:
         w = self.world

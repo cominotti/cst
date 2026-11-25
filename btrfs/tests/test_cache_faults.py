@@ -80,11 +80,11 @@ class Start:
 
 ATTACHED_FSTAB = plan_attach_fstab(BASE_FSTAB, BINDINGS)
 BOTH = tuple(b.target for b in BINDINGS)
-ATTACH_FRESH = Start(ATTACH, BASE_FSTAB, (), points=9, fail_then_later=6)
-ATTACH_NO_FSTAB = Start(ATTACH, None, (), points=9, fail_then_later=6)
+ATTACH_FRESH = Start(ATTACH, BASE_FSTAB, (), points=10, fail_then_later=11)
+ATTACH_NO_FSTAB = Start(ATTACH, None, (), points=10, fail_then_later=9)
 # An attach killed after its first mount: the cache bind mounted, no line yet.
-ATTACH_HALF_DONE = Start(ATTACH, BASE_FSTAB, (BOTH[0],), points=7, fail_then_later=3)
-DETACH_FULL = Start(DETACH, ATTACHED_FSTAB, BOTH, points=4, fail_then_later=6)
+ATTACH_HALF_DONE = Start(ATTACH, BASE_FSTAB, (BOTH[0],), points=8, fail_then_later=7)
+DETACH_FULL = Start(DETACH, ATTACHED_FSTAB, BOTH, points=5, fail_then_later=11)
 # A detach killed after its first umount: the lines gone and the reload done, the scratchpad still mounted.
 DETACH_HALF_DONE = Start(DETACH, BASE_FSTAB, (BOTH[1],), points=1, fail_then_later=0)
 
@@ -369,7 +369,7 @@ class ProtocolFaultTest(unittest.TestCase):
         self.assertEqual(self._run(["attach"])[0], 0)
         self.world.fail("umount /var/home/tester/Scratchpad", UMOUNT_BUSY)  # after .cache's umount
         self.world.fail("mount --bind /var/mnt/cache/tester /var/home/tester/.cache", MOUNT_DENIED)  # mounting it again
-        self.world.fail_at("fstab write", 2, no_space())  # the put-back, detach's second write there
+        self.world.fail_at("fstab replace", 2, no_space())  # the put-back, detach's second write there
         rc, lines = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
@@ -382,7 +382,7 @@ class ProtocolFaultTest(unittest.TestCase):
     def test_a_fstab_that_cannot_be_put_back_after_a_busy_umount_is_rollback_incomplete(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
         self.world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY)
-        self.world.fail_at("fstab write", 2, no_space())  # the put-back, detach's second write there
+        self.world.fail_at("fstab replace", 2, no_space())  # the put-back, detach's second write there
         rc, lines = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
@@ -392,6 +392,60 @@ class ProtocolFaultTest(unittest.TestCase):
         )
         self.assertFalse(any("restored." in line for line in lines))
         self.assertEqual(sorted(self._mounted()), ["/var/home/tester/.cache", "/var/home/tester/Scratchpad"])
+
+    def test_an_fstab_write_whose_folder_sync_failed_is_read_back_and_put_back(self) -> None:
+        # write_atomic's ReplacedNotSynced: the new text is in place, so the run puts the old one back before
+        # it says restored; a put-back whose own sync fails is in place too, and named. busy: detach's first
+        # umount fails, so its put-back after the umount is the second write (and its reload runs).
+        eio = OSError(errno.EIO, os.strerror(errno.EIO))
+        not_synced = "/etc/fstab put back, its folder not synced: Input/output error"
+        cases = (
+            (
+                "attach",
+                ATTACH,
+                False,
+                1,
+                "ERROR: cannot write /etc/fstab: Input/output error; mounts and /etc/fstab restored.",
+            ),
+            (
+                "detach",
+                DETACH,
+                False,
+                1,
+                "ERROR: cannot write /etc/fstab: Input/output error; mounts and /etc/fstab restored.",
+            ),
+            (
+                "attach, the put-back's sync failing too",
+                ATTACH,
+                False,
+                None,
+                f"ERROR: cannot write /etc/fstab: Input/output error; ROLLBACK INCOMPLETE ({not_synced})",
+            ),
+            (
+                "detach, a busy umount, the put-back's sync failing",
+                DETACH,
+                True,
+                2,
+                f"ERROR: umount /var/home/tester/.cache failed: umount: target is busy; ROLLBACK INCOMPLETE ({not_synced})",
+            ),
+        )
+        for name, action, busy, nth, want in cases:
+            with self.subTest(name):
+                self.world = cache_world(BASE_FSTAB)
+                if action == DETACH:
+                    self.assertEqual(self._run(["attach"])[0], 0)
+                start, mounted = self.world.fstab, sorted(self._mounted())
+                if busy:
+                    self.world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY)
+                if nth is None:
+                    self.world.fail("fstab sync", eio)
+                else:
+                    self.world.fail_at("fstab sync", nth, eio)
+                rc, lines = self._run([action])
+                self.assertEqual((rc, lines[-1]), (1, want))
+                self.assertEqual(self.world.fstab, start)
+                self.assertEqual(sorted(self._mounted()), mounted)
+                self.assertEqual(self.world.view_current(), busy)  # only _restore_fstab reloads after a put-back
 
     def test_a_failed_reload_after_putting_the_lines_back_is_rollback_incomplete(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)

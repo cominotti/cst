@@ -20,6 +20,7 @@ import stat
 import tempfile
 from typing import Protocol, override
 import unittest
+from unittest import mock
 
 from btrfs.cache.adapters import (
     CacheAccounts,
@@ -64,7 +65,8 @@ from btrfs.tests.fakes import (
     FakeFstab,
     FakeMountRunner,
 )
-from cst_core.ports import CommandResult, OutputMode
+from cst_core.adapters import files as core_files
+from cst_core.ports import CommandResult, OutputMode, ReplacedNotSynced
 from tests.fault_injection import no_file_may_grow, no_space
 
 USER = CacheMountUser("alice", 1000, 1000, "/var/home/alice")
@@ -72,6 +74,10 @@ CACHE, SCRATCHPAD = build_user_bindings(USER)
 NAS_LINE = "nas:/share /var/mnt/nas nfs defaults,nofail 0 0\n"
 NOT_UTF8 = b"# caf\xe9 written by an old tool\n".decode("utf-8", "surrogateescape")
 MOUNT_UNITS_SHOW = ["systemctl", "show", "--state=loaded", *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)), "*.mount"]
+
+
+def _eio() -> OSError:
+    return OSError(errno.EIO, os.strerror(errno.EIO))
 
 
 class Side(Protocol):
@@ -86,6 +92,7 @@ class Side(Protocol):
     def put_fstab(self, text: str | None) -> None: ...
     def fstab_is_a_folder(self) -> None: ...
     def disk_full(self) -> contextlib.AbstractContextManager[None]: ...
+    def fstab_sync_fails(self) -> contextlib.AbstractContextManager[None]: ...
     def put_crypttab(self, text: str) -> None: ...
     def mkdir(self, path: str) -> None: ...
     def put_file(self, path: str) -> None: ...
@@ -139,7 +146,15 @@ class FakeSide:
 
     @contextlib.contextmanager
     def disk_full(self) -> Generator[None]:
-        self.world.fail("fstab write", no_space())
+        self.world.fail("fstab replace", no_space())
+        try:
+            yield
+        finally:
+            self.world.failing.clear()
+
+    @contextlib.contextmanager
+    def fstab_sync_fails(self) -> Generator[None]:
+        self.world.fail("fstab sync", _eio())
         try:
             yield
         finally:
@@ -266,6 +281,19 @@ class RealSide:
     def disk_full(self) -> contextlib.AbstractContextManager[None]:
         return no_file_may_grow()
 
+    @contextlib.contextmanager
+    def fstab_sync_fails(self) -> Generator[None]:
+        """write_atomic's fsync of a folder fails with EIO (its file's fsync works)."""
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise _eio()
+            real_fsync(fd)
+
+        with mock.patch.object(core_files.os, "fsync", fsync):
+            yield
+
     def put_crypttab(self, text: str) -> None:
         with open(self.at("/etc/crypttab"), "w", encoding="utf-8") as fh:
             fh.write(text)
@@ -386,6 +414,13 @@ class _PortsContract(unittest.TestCase):
         with self.side.disk_full(), self.assertRaises(OSError):
             self.side.fstab().write(NAS_LINE + NAS_LINE)
         self.assertEqual(self.side.fstab().read(), NAS_LINE)
+
+    def test_a_write_whose_folder_sync_fails_is_in_place_and_says_so(self) -> None:
+        self.side.put_fstab(NAS_LINE)
+        with self.side.fstab_sync_fails(), self.assertRaises(ReplacedNotSynced) as caught:
+            self.side.fstab().write(NAS_LINE + NOT_UTF8)
+        self.assertEqual(caught.exception.errno, errno.EIO)
+        self.assertEqual(self.side.fstab().read(), NAS_LINE + NOT_UTF8)
 
     # the mount table
     def test_a_bind_shows_its_source_device_and_folder(self) -> None:

@@ -58,6 +58,7 @@ from btrfs.cache.ports import (
 )
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from cst_core.domain.values import ExitAndLines
+from cst_core.ports import ReplacedNotSynced
 
 _NOT_MOUNTED: Final = LiveMount(source="", target="", fstype="", options="", uuid="", fsroot="")
 
@@ -224,16 +225,33 @@ class _FstabFailure:
 def _commit_fstab(previous: str | None, new_text: str, m: CacheMounts) -> _FstabFailure | None:
     """Write /etc/fstab and reload systemd; None, or why it failed, after /etc/fstab was put back as
     it was (the previous text, or no file when there was none) or, in undo_errors, why it could not be.
-    A failed first write leaves the file as it was (write_atomic)."""
+    A first write that failed before its rename leaves the file as it was (write_atomic); one whose
+    folder sync failed after it (ReplacedNotSynced) may have left the new text in place: it is read
+    back and put back when it is there. systemd is not reloaded then: it still has the old text loaded."""
     try:
         m.fstab.write(new_text)
+    except ReplacedNotSynced as exc:
+        return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}", _undo_replaced(previous, new_text, m))
     except OSError as exc:
         return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}")
     why = m.systemd.daemon_reload()
     if why is None:
         return None
     put_back = _put_fstab_back(previous, m)
-    return _FstabFailure(why, () if put_back is None else (put_back,))
+    return _FstabFailure(why, () if put_back.error is None else (put_back.error,))
+
+
+def _undo_replaced(previous: str | None, new_text: str, m: CacheMounts) -> tuple[str, ...]:
+    """After a write of new_text that raised once its rename was done: /etc/fstab read back, and put back
+    as it was when it holds new_text (nothing when it holds something else); what of it failed."""
+    try:
+        now = m.fstab.read()
+    except OSError as exc:
+        return (f"cannot read {FSTAB_PATH} back: {exc.strerror or exc}",)
+    if now != new_text:
+        return ()
+    put_back = _put_fstab_back(previous, m)
+    return () if put_back.error is None else (put_back.error,)
 
 
 def _fstab_behind(snap: CacheMountSnapshot, m: CacheMounts, mounting: Collection[str] = ()) -> bool | None:
@@ -288,22 +306,36 @@ def _attach_fstab(snap: CacheMountSnapshot) -> tuple[str, str]:
     return cur, plan_attach_fstab(cur, [p.binding for p in snap.bindings])
 
 
-def _put_fstab_back(previous: str | None, m: CacheMounts) -> str | None:
-    """/etc/fstab as it was (the previous text, or no file when there was none); None, or why not."""
+@dataclass(frozen=True, slots=True)
+class _PutBack:
+    """What putting /etc/fstab back did: whether the old text (or no file) is in place, and what failed."""
+
+    in_place: bool
+    error: str | None = None
+
+
+def _put_fstab_back(previous: str | None, m: CacheMounts) -> _PutBack:
+    """/etc/fstab as it was (the previous text, or no file when there was none). A write whose folder sync
+    failed after its rename (ReplacedNotSynced) put the old text in place, not synced: an error that says
+    so."""
     try:
         if previous is None:
             m.fstab.remove()  # already gone: as it was
         else:
             m.fstab.write(previous)
+    except ReplacedNotSynced as exc:
+        return _PutBack(in_place=True, error=f"{FSTAB_PATH} put back, its folder not synced: {exc.strerror or exc}")
     except OSError as exc:
-        return f"cannot put {FSTAB_PATH} back: {exc.strerror or exc}"
-    return None
+        return _PutBack(in_place=False, error=f"cannot put {FSTAB_PATH} back: {exc.strerror or exc}")
+    return _PutBack(in_place=True)
 
 
 def _restore_fstab(previous: str | None, m: CacheMounts) -> list[str]:
-    """Put /etc/fstab back as it was and reload systemd; what of it failed."""
-    failed = _put_fstab_back(previous, m) or m.systemd.daemon_reload()
-    return [] if failed is None else [failed]
+    """Put /etc/fstab back as it was and reload systemd when the old text is in place; what of it failed."""
+    put_back = _put_fstab_back(previous, m)
+    errors = [] if put_back.error is None else [put_back.error]
+    why = m.systemd.daemon_reload() if put_back.in_place else None
+    return errors if why is None else [*errors, why]
 
 
 def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
