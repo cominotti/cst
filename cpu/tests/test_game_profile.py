@@ -2592,6 +2592,57 @@ class LeftoversTest(GameProfileCase):
         os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)  # USER is logged in
         return self.accounts_profile(target)
 
+    def two_users_profile(self) -> tuple[GameProfile, io.StringIO]:
+        """A profile for USER (uid UID), on accounts where "other" (uid 1001) has one too."""
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            self.settings,
+            self.systemd,
+            uid_of=lambda u: {USER: UID, "other": "1001"}.get(u, ""),
+            name_of=lambda uid: {UID: USER, "1001": "other"}.get(uid, ""),
+            out=out,
+        )
+        return p, out
+
+    @staticmethod
+    def reloads(actions: Sequence[str]) -> list[str]:
+        return [a for a in actions if a.endswith(" daemon-reload")]
+
+    def test_each_user_manager_an_override_was_removed_in_gets_its_daemon_reload(self) -> None:
+        # 'off' undoes game.state's new overrides of USER's manager, and a kept record of another user's
+        # (uid 1001), left by an earlier failed 'off' for that user: USER's manager gets its daemon-reload,
+        # not the manager of the user acted for last.
+        self.run_profile("on")
+        self.assertIn("prop usr user.slice CPUWeight new -\n", self.read(self.state))
+        self.write(
+            self.paths.leftovers, "cst-game-leftovers 1\nuser 1001\nprop usr background.slice CPUWeight existed 100\n"
+        )
+        p, _ = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertIn(
+            "systemctl --user -M other@ set-property --runtime background.slice CPUWeight=100", self.systemd.actions
+        )
+        self.assertEqual(self.reloads(self.systemd.actions), [f"{SYS} daemon-reload", f"{USR} daemon-reload"])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        # A retry of two kept new overrides, one of each user's manager: each manager is reloaded.
+        self.write(
+            self.paths.leftovers,
+            f"cst-game-leftovers 1\nuser {UID}\nprop usr app.slice CPUWeight new -\n"
+            "user 1001\nprop usr app.slice MemoryLow new -\n",
+        )
+        self.no_game()
+        p, out = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(out.getvalue().count("undid"), 2, out.getvalue())
+        self.assertEqual(
+            self.reloads(self.systemd.actions),
+            ["systemctl --user -M other@ daemon-reload", f"{USR} daemon-reload"],
+        )
+        self.assertEqual(p.s.target_user, USER)
+
     def test_the_tick_while_off_judges_target_user_not_the_user_of_a_kept_record(self) -> None:
         # A GameMode client runs (game_scratch's) and TARGET_USER is unset or names no account: 'on' would
         # refuse, so the tick must not start cpu-game.service, whatever user a kept record is for.
@@ -2669,8 +2720,10 @@ class LeftoversTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
     def test_an_undo_reports_its_failure(self) -> None:
+        from cpu.game.adapters.leftovers import Reloads
+
         p, _ = self.profile()
-        reload = {"sys": False, "usr": False}
+        reload = Reloads()
         self.systemd.fail_set.add(("sys", "machine.slice"))
         self.assertFalse(p.undo_record(("prop", "sys", "machine.slice", "CPUWeight", "existed", "70"), reload))
         folder = os.path.join(self.tmp, "epp-folder")

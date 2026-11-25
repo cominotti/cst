@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import contextlib
+import dataclasses
 import os
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,22 @@ from cpu.game.domain.leftovers import (
 
 if TYPE_CHECKING:
     from cpu.game.adapters.profile import GameProfile
+
+
+@dataclasses.dataclass
+class Reloads:
+    """The managers an undo removed a runtime override in, each due a daemon-reload: the system manager
+    (system), and each user's manager by the user's name (users, in the order they were first acted in)."""
+
+    system: bool = False
+    users: list[str] = dataclasses.field(default_factory=list)
+
+    def add(self, mgr: Manager, user: str) -> None:
+        """An override of that manager was removed (user: the user acted for, for the user manager)."""
+        if mgr == "sys":
+            self.system = True
+        elif user not in self.users:
+            self.users.append(user)
 
 
 def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
@@ -51,7 +68,7 @@ def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
     return None
 
 
-def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: dict[str, bool], *, say: bool) -> list[Entry]:
+def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: Reloads, *, say: bool) -> list[Entry]:
     """Undo the entries, the last first (a property touched twice ends at its oldest value), each record of
     the user manager for the user its entry names; the ones whose undo failed, in their order, each with the
     uid it was for (say: each named in a warning line). An entry whose uid no account has now is never
@@ -117,16 +134,17 @@ def unit_gone(profile: GameProfile, mgr: Manager, unit: str) -> bool:
 
 def retry_kept(profile: GameProfile, *, say: bool) -> None:
     """Undo game.leftovers' entries again ('off' with no game.state, say: each one that fails again is said;
-    the tick with the profile off, quietly): one notice line per entry undone now, then the file holds the
-    rest (removed when none is left). The profile acts for TARGET_USER again afterwards: each kept record of
-    the user manager is undone for the user it names, and what the tick decides next (switching on) is
-    TARGET_USER's."""
+    the tick with the profile off, quietly), each kept record of the user manager in the manager of the user
+    it names: one notice line per entry undone now, then a daemon-reload of each manager an undo removed an
+    override in (the system manager, and each of those users' managers), then the file holds the rest
+    (removed when none is left). The profile acts for TARGET_USER again afterwards, so what the tick decides
+    next (switching on) is TARGET_USER's."""
     kept = read_kept(profile, say=say)
     if kept is None or not kept:
         return
     settings = profile.s
     try:
-        reload = {"sys": False, "usr": False}
+        reload = Reloads()
         failed = undo_entries(profile, kept, reload, say=say)
         still = {rec for _uid, rec in failed}
         for _uid, rec in kept:

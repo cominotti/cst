@@ -32,7 +32,7 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
-from cpu.game.adapters.leftovers import keep, read_kept, retry_kept, undo_entries, unit_gone
+from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_entries, unit_gone
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
 from cpu.game.domain.leftovers import merged_entries, off_text
@@ -167,15 +167,15 @@ class GameProfile:
             self._uids[user] = found
         return self._uids[user]
 
-    def _argv(self, mgr: Manager, args: Sequence[str]) -> list[str]:
+    def _argv(self, mgr: Manager, args: Sequence[str], user: str | None = None) -> list[str]:
         if mgr == "usr":
-            return ["systemctl", "--user", "-M", f"{self.s.target_user}@", *args]
+            return ["systemctl", "--user", "-M", f"{self.s.target_user if user is None else user}@", *args]
         return ["systemctl", *args]
 
-    def ctl(self, mgr: Manager, *args: str, quiet: bool = False) -> int:
-        """systemctl ARGS for the system manager (sys) or the user's (usr), its output on ours
-        (quiet: its stderr dropped); the exit status."""
-        argv = self._argv(mgr, args)
+    def ctl(self, mgr: Manager, *args: str, quiet: bool = False, user: str | None = None) -> int:
+        """systemctl ARGS for the system manager (sys) or the user's (usr: the user acted for, or user),
+        its output on ours (quiet: its stderr dropped); the exit status."""
+        argv = self._argv(mgr, args, user)
         if not quiet:
             self._stream().flush()
             return self._runner.run(argv, output=OutputMode.INHERIT).returncode
@@ -527,7 +527,7 @@ class GameProfile:
             self.remove_leftover_dropins()
             retry_kept(self, say=True)
             return 0
-        reload = {"sys": self.remove_game_dropins(), "usr": False}
+        reload = Reloads(system=self.remove_game_dropins())
         text = self.state_text()
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
@@ -543,12 +543,13 @@ class GameProfile:
         self.log(5, off_text(len(failed), p.leftovers, kept=held))
         return 0
 
-    def reload_managers(self, reload: dict[str, bool]) -> None:
-        """daemon-reload each manager an undo removed an override of (reload: by manager)."""
-        if reload["sys"]:
+    def reload_managers(self, reload: Reloads) -> None:
+        """daemon-reload each manager an undo removed an override in: the system manager, and the user
+        manager of each user it was removed for (an 'off' and a retry act for several users' kept records)."""
+        if reload.system:
             self.ctl("sys", "daemon-reload")
-        if reload["usr"]:
-            self.ctl("usr", "daemon-reload")
+        for user in reload.users:
+            self.ctl("usr", "daemon-reload", user=user)
 
     def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
@@ -577,7 +578,7 @@ class GameProfile:
         self.s = dataclasses.replace(self.s, target_user=name)
         return True
 
-    def undo_record(self, rec: Sequence[str], reload: dict[str, bool], *, say: bool = True) -> bool:
+    def undo_record(self, rec: Sequence[str], reload: Reloads, *, say: bool = True) -> bool:
         """Undo one record of game.state (as state_undo reads it); False when the undo failed: a file write
         or set-property that failed, an override file there that cannot be removed. A unit that is gone is
         no failure (unit_gone), nor is a file whose folder is gone (write_back), nor a record it cannot read
@@ -598,7 +599,7 @@ class GameProfile:
                         return False  # the override is still there: no daemon-reload for it
                     with contextlib.suppress(OSError):
                         os.rmdir(os.path.dirname(f))
-                    reload[mgr] = True
+                    reload.add(mgr, self.s.target_user)
                     return True
                 rc = self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
                 return rc == 0 or unit_gone(self, mgr, unit)
