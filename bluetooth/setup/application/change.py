@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst bluetooth apply`, `revert` and `le-audio`: the changes, in bluetooth-setup.sh's order.
 
-The restarts that a run does not make (--no-restart, the question answered
-no, a restart that failed) stay owed in a record that the next run reads
-(Survey.restart_state): apply resumes them.
+The restarts a run owes are recorded before the write that needs them
+(Change.owe), so a run stopped after a write leaves the restart owed; the
+restarts that a run does not make (--no-restart, the question answered no,
+a restart that failed, a stop) stay owed in that record, which the next run
+reads (Survey.restart_state): apply and revert resume them.
 """
 
 from collections.abc import Callable
@@ -28,11 +30,15 @@ from bluetooth.setup.application.checks import Checks
 from bluetooth.setup.application.survey import StepFailed, is_cst_rule
 from bluetooth.setup.domain import (
     A2DP_SINK_UUID,
+    BACKUP_NAME_TRIES,
     BapState,
     BearerState,
     BluetoothCommand,
     LeState,
     WpState,
+    backup_name,
+    backup_name_taken,
+    backup_order,
     bearer_matches,
     changes_machine,
     matches_a_line,
@@ -116,23 +122,53 @@ class Change(Checks):
 
     # ---- main.conf -------------------------------------------------------------------------
     def install_main_conf(self, src: str) -> None:
-        """A timestamped backup, then the new main.conf atomically (root, through sudo)."""
+        """A backup of a name of its own, then the new main.conf atomically (root, through sudo)."""
         mc = self.p.main_conf
-        bak = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
+        ctx: list[str] = []
         z: list[str] = []
         if (
             self.m.files.which("selinuxenabled")
             and self.run(["selinuxenabled"], output=OutputMode.INHERIT).returncode == 0
         ):
-            self.must(["sudo", "cp", "-p", "--preserve=context", mc, bak])
-            z = ["-Z"]
-        else:
-            self.must(["sudo", "cp", "-p", mc, bak])
+            ctx, z = ["--preserve=context"], ["-Z"]
+        bak = self.take_backup(ctx)
         self.backup = bak
         self.out(f"backup:    {bak}\n")
         self.must(["sudo", "install", "-m", "0644", "-o", "root", "-g", "root", *z, src, f"{mc}.new"])
+        # bluetoothd reads main.conf; its restart takes WirePlumber's endpoints.
+        self.owe(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
         self.must(["sudo", "mv", "-f", f"{mc}.new", mc])
         self.out(f"written:   {mc}\n")
+
+    def take_backup(self, ctx: list[str]) -> str:
+        """main.conf copied (cp -p) to main.conf.bak-YYYYmmdd-HHMMSS, or to the first of -1, -2, ...
+        after it that no backup has: a backup is never replaced. cp --update=none-fail creates the
+        name it is given only if it does not exist (O_CREAT|O_EXCL; GNU cp 9.5 or later), so a name
+        another run takes between the look and the copy is not replaced either: cp fails, the name is
+        there (cp says "File exists" or "not replacing"), and the next one is tried. Any other failure
+        stops the run, also one that left a part of the copy behind (a full disk)."""
+        mc = self.p.main_conf
+        base = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
+        taken = self.backup_names()
+        for n in range(BACKUP_NAME_TRIES):
+            bak = backup_name(base, n)
+            if bak in taken:
+                continue
+            # cp's words are read: in the C locale (sudo keeps LC_ALL by default on Fedora; a cp that
+            # speaks another language fails the run, as any other failure does).
+            r = self.m.runner.run(["sudo", "cp", "-p", *ctx, "--update=none-fail", mc, bak], locale_c=True)
+            if r.returncode == 0:
+                return bak
+            taken = self.backup_names()
+            if bak not in taken or not backup_name_taken(r.stderr):
+                self.out(r.stdout)
+                self.err(r.stderr)
+                raise StepFailed(shell_exit_status(r.returncode))
+        raise self.die(f"no free name for a backup of {mc} ({base} and {BACKUP_NAME_TRIES - 1} more are taken)")
+
+    def backup_names(self) -> set[str]:
+        """The names main.conf's backups have now."""
+        return {name for _, name in self.m.files.backups(self.p.main_conf)}
 
     def write_wp(self) -> None:
         """The rule, as the user, atomically; one with other settings is kept as .bak first."""
@@ -238,15 +274,35 @@ class Change(Checks):
         self.out(f"Restart cancelled. To finish later: {self.restart_hint()}\n")
         return False
 
+    def save_owed(self, *units: str) -> bool:
+        """The record saved, owing the units' restarts; False when it cannot be written (warned once a
+        run). The invocation IDs are read again first: a service that restarted by itself since they
+        were read may have read the old files."""
+        self.forget_unit(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
+        if self.restart_state("save", *units) is not None:
+            return True
+        if not self.owed_warned:
+            self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
+            self.owed_warned = True
+        return False
+
+    def owe(self, *units: str) -> None:
+        """The restarts a write needs, recorded right before it: a run stopped after the write (and
+        before its restarts) leaves them owed, and the next run makes them. Each save records every
+        restart this run's writes needed so far, under the invocation IDs read right before it: a unit
+        whose earlier save failed is in the next one, and a service that restarted by itself since an
+        earlier write is owed again under its new ID. A save that fails is warned of, and the run goes
+        on; only then can a stop after the write lose the restart. A service that restarts by itself
+        between the save and the write reads the old files, and the record no longer owes it: the
+        window is that of one write."""
+        self.owing.update(units)
+        self.save_owed(*sorted(self.owing))
+
     def do_restarts(self, *, bt: bool, wp: bool) -> int:
         """0: done (or nothing to do); 1: cancelled at the question; 2: a restart failed."""
         if not (bt or wp):
             return 0
-        owed = [WIREPLUMBER_UNIT, *([BLUETOOTH_UNIT] if bt else [])]
-        # Read again since plan: a service that restarted by itself meanwhile may have read the old files.
-        self.forget_unit(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
-        if self.restart_state("save", *owed) is None:
-            self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
+        self.save_owed(WIREPLUMBER_UNIT, *([BLUETOOTH_UNIT] if bt else []))
         if self.o.no_restart:
             hint = self.restart_hint() if bt else "systemctl --user restart wireplumber"
             self.out(f"Not restarted (--no-restart). To finish: {hint}\n")
@@ -341,6 +397,7 @@ class Change(Checks):
             self.out(f"unchanged: {p.main_conf} (Experimental and KernelExperimental already set in [General])\n")
         self.out(f"== WirePlumber: {self.wp_title()}\n")
         if self.legacy:
+            self.owe(WIREPLUMBER_UNIT)
             self.m.files.remove_file(p.legacy_wp_conf)
             self.out(f"removed:   {p.legacy_wp_conf} (older name of the same rule)\n")
         match self.wp_state:
@@ -352,6 +409,7 @@ class Change(Checks):
                 self.write_wp()
                 self.out(f"adopted:   {self.wp_conf} (comments renewed, settings unchanged: no restart)\n")
             case _:
+                self.owe(WIREPLUMBER_UNIT)
                 self.write_wp()
                 self.out(f"written:   {self.wp_conf} (LDAC {c.quality})\n")
         self.apply_le()
@@ -406,6 +464,8 @@ class Change(Checks):
                 self.out("unchanged: LE Audio off\n")
                 return
             f.make_dirs(self.p.wp_dir)
+            if self.le_change:  # not a renewal of comments (adopt): WirePlumber reads no comment
+                self.owe(WIREPLUMBER_UNIT)
             f.write_user_file(le, render_le_off(), 0o644)
             if self.le_state == LeState.ADOPT:
                 self.out(f"adopted:   {le} (comments renewed, no restart)\n")
@@ -414,6 +474,7 @@ class Change(Checks):
             return
         match self.le_state:
             case LeState.REMOVE:
+                self.owe(WIREPLUMBER_UNIT)
                 f.remove_file(le)
                 self.out(f"removed:   {le} (LE Audio on)\n")
             case LeState.ABSENT:
@@ -496,9 +557,10 @@ class Change(Checks):
 
     # ---- revert ----------------------------------------------------------------------------
     def oldest_backup(self) -> str | None:
-        """The oldest main.conf backup by time (ours or the old script's): the state before any of this."""
-        found = sorted((int(mtime), name) for mtime, name in self.m.files.backups(self.p.main_conf))
-        return found[0][1] if found else None
+        """The oldest main.conf backup by time, then name and -N number (ours or the old script's):
+        the state before any of this."""
+        found = sorted(backup_order(mtime, name) for mtime, name in self.m.files.backups(self.p.main_conf))
+        return found[0][3] if found else None
 
     def revert(self) -> int:
         p, f, check = self.p, self.m.files, self.o.check
@@ -507,6 +569,7 @@ class Change(Checks):
         mc = p.main_conf
         if not (f.is_file(mc) and not f.is_symlink(mc)):
             raise self.die(f"{mc} is missing or a symlink")
+        self.read_owed()  # before any change: what an earlier run (apply or revert) left owed
         changed_mc = self.revert_main_conf()
         self.save_headset()  # the rule goes next: it may be the only place that names the headset
         wp, le = self.revert_files()
@@ -514,19 +577,29 @@ class Change(Checks):
         self.lw_plan()
         lw = self.lw_ours_present()
         self.lw_remove()
+        bt = changed_mc or self.bt_owed
+        restart = bt or wp or le or self.wp_owed  # a bluetoothd restart takes WirePlumber's endpoints
         if check:
-            if changed_mc:
+            if bt:
                 self.out("would restart bluetooth.service (after asking) and wireplumber\n")
-            if not changed_mc and (wp or le):
+            elif restart:
                 self.out("would restart wireplumber\n")
-            return 10 if changed_mc or wp or lw or le else 0
+            self.owed_report()
+            return 10 if restart or lw else 0
         self.out("== restarts\n")
-        if not (changed_mc or wp or le):
+        if not restart:
             self.out("none needed\n")
             return 0
-        if self.do_restarts(bt=changed_mc, wp=True) == 2:
+        self.owed_report()
+        if self.do_restarts(bt=bt, wp=True) == 2:
             raise self.die(f"a restart failed (see above). Backup of main.conf: {self.backup or 'none taken'}")
         return 0
+
+    def owed_report(self) -> None:
+        """revert's line for each restart the record owes (plan's words)."""
+        for unit, owed in ((BLUETOOTH_UNIT, self.bt_owed), (WIREPLUMBER_UNIT, self.wp_owed)):
+            if owed:
+                self.out(f"owed:      {unit} (still owed: an earlier run did not restart it)\n")
 
     def revert_main_conf(self) -> bool:
         """The two keys back to the oldest backup's; whether main.conf changes."""
@@ -570,6 +643,7 @@ class Change(Checks):
             if check:
                 self.out(f"would remove {self.wp_conf}\n")
             else:
+                self.owe(WIREPLUMBER_UNIT)
                 f.remove_file(self.wp_conf)
                 self.out(f"removed:   {self.wp_conf}\n")
         self.out(f"== LE Audio: {p.le_conf}\n")
@@ -582,6 +656,7 @@ class Change(Checks):
             if check:
                 self.out(f"would remove {p.le_conf} (LE Audio on again)\n")
             else:
+                self.owe(WIREPLUMBER_UNIT)
                 f.remove_file(p.le_conf)
                 self.out(
                     f"removed:   {p.le_conf} (LE Audio on again; LE_AUDIO=off in the settings writes it again at the next apply)\n"

@@ -100,6 +100,27 @@ case "$me" in
             [[ "$how" == PARENT-HUP ]] && { kill -HUP "$PPID"; exec "${args[@]}"; }  # SIGHUP, the step done
             exit "$how"
         fi
+        if [[ "$1" == cp && " ${args[*]} " == *" --update=none-fail "* ]]; then
+            # GNU cp 9.5's --update=none-fail, whatever cp this machine has: a destination that is
+            # there (a link too) is left alone, exit 1. race-backup: another run creates the
+            # destination just before (once), as cp's O_EXCL open then finds it.
+            kept=()
+            for a in "${args[@]}"; do [[ "$a" == --update=none-fail ]] || kept+=("$a"); done
+            args=("${kept[@]}")
+            dst="${args[-1]}"
+            if [[ -e "$S/race-backup" ]]; then
+                rm -f "$S/race-backup"
+                echo "another run's backup" >"$dst"
+                echo "cp: cannot create regular file '$dst': File exists" >&2
+                exit 1
+            fi
+            if [[ -e "$S/partial-backup" ]]; then  # a full disk: the start of the copy is left behind
+                head -c 8 "${args[-2]}" >"$dst"
+                echo "cp: error writing '$dst': No space left on device" >&2
+                exit 1
+            fi
+            if [[ -e "$dst" || -L "$dst" ]]; then echo "cp: not replacing '$dst'" >&2; exit 1; fi
+        fi
         exec "${args[@]}"
         ;;
     systemctl)
@@ -124,6 +145,8 @@ case "$me" in
                 ;;
             show)
                 [[ -e "$S/hang-show" ]] && exec /usr/bin/sleep 30  # systemd does not answer
+                # term-show-when names a path: a look while it exists sends SIGTERM to the program.
+                if [[ -e "$S/term-show-when" && -e "$(cat "$S/term-show-when")" ]]; then kill -TERM "$PPID"; exit 1; fi
                 u="$(unit "$scope" "${!#}")"
                 case "$*" in
                     *ActiveState*)   # systemd prints ActiveState= before InvocationID=
@@ -560,6 +583,8 @@ class SetupModel:
             if not how.strip().isdigit():
                 raise AssertionError(f"SetupModel: fail-sudo-{args[0]} {how.strip()} is FAKE's alone")
             return int(how), "", ""
+        if args[0] == "cp" and "--update=none-fail" in args:
+            return self.cp_none_fail([a for a in args[1:] if a != "--update=none-fail"])
         kept: list[str] = []
         skip = False
         for a in args[1:]:
@@ -584,6 +609,27 @@ class SetupModel:
                 return self.systemctl(["restart", "bluetooth"])
             case _:
                 raise AssertionError(f"SetupModel: no such sudo command: {args}")
+        return 0, "", ""
+
+    def cp_none_fail(self, args: list[str]) -> Answer:
+        """sudo cp -p [--preserve=context] --update=none-fail SRC DST, as FAKE answers it."""
+        dst = args[-1]
+        if self.has("race-backup"):
+            os.unlink(self.state("race-backup"))
+            with open(dst, "w", encoding="utf-8") as f:
+                f.write("another run's backup\n")
+            return 1, "", f"cp: cannot create regular file '{dst}': File exists\n"
+        if self.has("partial-backup"):
+            with open(args[-2], encoding="utf-8") as src, open(dst, "w", encoding="utf-8") as f:
+                f.write(src.read(8))
+            return 1, "", f"cp: error writing '{dst}': No space left on device\n"
+        if os.path.lexists(dst):
+            return 1, "", f"cp: not replacing '{dst}'\n"
+        match [a for a in args if a != "--preserve=context"]:
+            case ["-p", src, _]:
+                shutil.copy2(src, dst)
+            case _:
+                raise AssertionError(f"SetupModel: no such sudo cp: {args}")
         return 0, "", ""
 
     def systemctl(self, args: list[str]) -> Answer:
@@ -616,6 +662,8 @@ class SetupModel:
         return (0, "active\n", "") if active else (3, "inactive\n", "")
 
     def show(self, scope: str, args: list[str]) -> Answer:
+        if self.has("term-show-when"):
+            raise AssertionError("SetupModel: term-show-when is FAKE's alone")
         u = self.prefix(scope, args[-1])
         joined = " ".join(args)
         if "ActiveState" in joined:

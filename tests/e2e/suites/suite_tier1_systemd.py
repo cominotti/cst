@@ -9086,6 +9086,345 @@ EOF
         ).stdout
         self.assertIn("E2E-CACHE-177-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed(self) -> None:
+        """`cst bluetooth apply` as tester with the real user manager and WirePlumber, stopped by
+        SIGTERM after its writes and before its restarts (a `systemctl` shim on PATH, for that run
+        only, sends SIGTERM to the program at its first look at wireplumber.service once the LE Audio
+        drop-in exists: the look right before the restarts). main.conf is as apply leaves it, so no run
+        restarts bluetoothd. The record of restarts owed names
+        wireplumber.service under the InvocationID systemd gives it (bluetoothd does not run here: it
+        owes nothing), written before the writes; `plan` exits 10 with WirePlumber's restart still
+        owed; the next `apply` makes that restart (a new InvocationID), writes nothing and forgets the
+        record; `plan` then has nothing to do and a third `apply` restarts nothing. Before, the record
+        was written only at the restarts: none after the stop, and `plan` said no restart was needed.
+        Then WirePlumber restarts by itself between the rule's write and the drop-in's (the shim
+        restarts it at the first look at it once the rule exists and the drop-in does not) and the run
+        is stopped as before: the record owes WirePlumber under its new InvocationID (the save before
+        the drop-in's write read it again), `plan` exits 10, and the next `apply` restarts it once.
+        Before, that save was skipped (the record owed WirePlumber under the old ID already), and
+        nothing owed the restart after the stop."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -rf /var/tmp/e2e-178 /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.local/state/cst/bluetooth-restart-pending.json",
+            check=False,
+        )
+        # main.conf as apply leaves it: no run of this test restarts bluetoothd (a real restart in
+        # the shared container), even one the stop did not stop.
+        exec_bash(
+            c,
+            "mkdir -p /etc/bluetooth && printf '[General]\\nExperimental = true\\n"
+            "KernelExperimental = 6fbaf188-05e0-496a-9885-d6ddfdb4e03e\\n' >/etc/bluetooth/main.conf",
+        )
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_178
+            trap 'echo "test_178 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            w=/var/tmp/e2e-178
+            wp="$H/.config/wireplumber/wireplumber.conf.d"
+            rule="$wp/50-bluez-00_11_22_33_44_55.conf"
+            le="$wp/90-cst-le-audio-off.conf"
+            owed_file="$H/.local/state/cst/bluetooth-restart-pending.json"
+            wp_id() { systemctl --user show -p InvocationID --value wireplumber.service; }
+            rm -rf "$w" "$owed_file" "$rule" "$le"
+            mkdir -p "$w/bin" "$H/.config/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n' >"$H/.config/cst/bluetooth.conf"
+            # The shim: SIGTERM to its caller at a look at wireplumber.service once the drop-in exists.
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ -e '$le' && \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                '    kill -TERM "$PPID"' '    exit 1' 'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            chmod 0755 "$w/bin/systemctl"
+            cat "$w/bin/systemctl" >&2
+            id0="$(wp_id)"
+            [[ -n "$id0" ]]
+
+            # 1. apply, stopped after its writes, before its restarts.
+            rc=0; out="$(PATH="$w/bin:$PATH" bt apply --yes 2>&1)" || rc=$?
+            show "stopped apply" "$out"
+            [[ $rc == 143 ]] || { echo "test_178: the stopped apply exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            if grep -q '^restart: ' <<<"$out"; then echo "test_178: the stopped apply restarted" >&2; exit 1; fi
+            [[ -f "$rule" && -f "$le" ]]
+            [[ "$(wp_id)" == "$id0" ]]
+            [[ -f "$owed_file" ]] || { echo "test_178: no record of the restart owed" >&2; exit 1; }
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id0"
+
+            # 2. plan shows it owed.
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the stop" "$out"
+            [[ $rc == 10 ]]
+            grep -qE '^  ok +bluetooth.service +no restart needed$' <<<"$out"
+            grep -qE '^  restart +wireplumber \(your session\) ' <<<"$out"
+            grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
+
+            # 3. the next apply makes the restart, writes nothing and forgets the record.
+            step "apply after the stop" apply --yes
+            wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            if grep -q '^restart:   bluetooth' <<<"$out"; then echo "test_178: bluetoothd restarted" >&2; exit 1; fi
+            no_writes "apply after the stop" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+            id1="$(wp_id)"
+            [[ -n "$id1" && "$id1" != "$id0" ]]
+            [[ ! -e "$owed_file" ]]
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the restart" "$out"
+            [[ $rc == 0 ]]
+
+            # 4. a third apply restarts nothing.
+            step "third apply" apply --yes
+            no_writes "third apply" "$out"
+            grep -qxF "none needed" <<<"$out"
+            [[ "$(wp_id)" == "$id1" ]]
+
+            # 5. WirePlumber restarts by itself after the rule's write, before the drop-in's: the save
+            # before the drop-in's write owes it again, under its new InvocationID. The shim restarts it
+            # at the first look at it once the rule exists and the drop-in does not, then stops the run
+            # as above. Before, that look did not happen (the record owed WirePlumber already, under the
+            # old ID), and nothing owed its restart after the stop.
+            rm -f "$rule" "$le" "$owed_file" "$w/restarted"
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                "    if [[ -e '$rule' && ! -e '$le' && ! -e '$w/restarted' ]]; then" \
+                "        touch '$w/restarted'; /usr/bin/systemctl --user restart wireplumber.service" \
+                '    fi' \
+                "    if [[ -e '$le' ]]; then kill -TERM \"\$PPID\"; exit 1; fi" \
+                'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            cat "$w/bin/systemctl" >&2
+            id2="$(wp_id)"
+            rc=0; out="$(PATH="$w/bin:$PATH" bt apply --yes 2>&1)" || rc=$?
+            show "apply stopped after WirePlumber restarted by itself" "$out"
+            [[ $rc == 143 ]] || { echo "test_178: the second stopped apply exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            [[ -e "$w/restarted" ]] || { echo "test_178: no look at WirePlumber between the rule's write and the drop-in's" >&2; exit 1; }
+            [[ -f "$rule" && -f "$le" ]]
+            id3="$(wp_id)"
+            [[ -n "$id3" && "$id3" != "$id2" ]]
+            [[ -f "$owed_file" ]] || { echo "test_178: no record after the second stop" >&2; exit 1; }
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id3"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the second stop" "$out"
+            [[ $rc == 10 ]]
+            grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
+            step "apply after the second stop" apply --yes
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            no_writes "apply after the second stop" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+            [[ "$(wp_id)" != "$id3" && ! -e "$owed_file" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_179_bluetooth_revert_again_makes_the_restart_a_stopped_revert_owes(self) -> None:
+        """`cst bluetooth revert` as tester with the real user manager and WirePlumber, after the
+        applied state is built as test_80 builds it (`apply --yes --no-restart`, then `apply --yes`:
+        bluetoothd does not run here, so only WirePlumber is restarted). `revert --yes` is stopped by
+        SIGTERM after its changes and before its restarts (a `systemctl` shim on PATH, for that run
+        only, sends SIGTERM to the program at its first look at wireplumber.service once the LE Audio
+        drop-in is gone; a `sudo` shim refuses `systemctl restart bluetooth`, so no run restarts
+        bluetoothd in the shared container): exit 143, the rule and the drop-in gone, the vendor keys
+        back in main.conf, and the record owes WirePlumber's restart under its InvocationID.
+        `revert --check` exits 10 and says it would restart WirePlumber, still owed; `revert --yes`
+        makes that restart (a new InvocationID) and forgets the record; a third `revert --yes` says
+        "none needed" and restarts nothing. Before, the second revert found nothing to revert and said
+        "none needed"."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -rf /var/tmp/e2e-179 /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.local/state/cst/bluetooth-restart-pending.json",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_179
+            trap 'echo "test_179 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            w=/var/tmp/e2e-179
+            wp="$H/.config/wireplumber/wireplumber.conf.d"
+            rule="$wp/50-bluez-00_11_22_33_44_55.conf"
+            le="$wp/90-cst-le-audio-off.conf"
+            owed_file="$H/.local/state/cst/bluetooth-restart-pending.json"
+            wp_id() { systemctl --user show -p InvocationID --value wireplumber.service; }
+            wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
+            rm -rf "$w" "$owed_file" "$rule" "$le"
+            mkdir -p "$w/bin" "$H/.config/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n' >"$H/.config/cst/bluetooth.conf"
+            # The shims: SIGTERM to the caller at a look at wireplumber.service once the drop-in is gone;
+            # bluetoothd's restart refused.
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ ! -e '$le' && \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                '    kill -TERM "$PPID"' '    exit 1' 'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            printf '%s\n' '#!/bin/bash' \
+                'if [[ "$*" == "systemctl restart bluetooth" ]]; then echo "test_179: refused: sudo $*" >&2; exit 1; fi' \
+                'exec /usr/bin/sudo "$@"' >"$w/bin/sudo"
+            chmod 0755 "$w/bin/systemctl" "$w/bin/sudo"
+
+            # 0. the applied state, as test_80 builds it.
+            step "apply --no-restart" apply --yes --no-restart
+            step apply apply --yes
+            grep -qxF "$wp_restart_line" <<<"$out"
+            [[ -f "$rule" && -f "$le" && ! -e "$owed_file" ]]
+            grep -qxF "Experimental = true" /etc/bluetooth/main.conf
+            id0="$(wp_id)"
+
+            # 1. revert, stopped after its changes, before its restarts.
+            rc=0; out="$(PATH="$w/bin:$PATH" bt revert --yes 2>&1)" || rc=$?
+            show "stopped revert" "$out"
+            [[ $rc == 143 ]] || { echo "test_179: the stopped revert exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            if grep -q '^restart: ' <<<"$out"; then echo "test_179: the stopped revert restarted" >&2; exit 1; fi
+            [[ ! -e "$rule" && ! -e "$le" ]]
+            if grep -qxF "Experimental = true" /etc/bluetooth/main.conf; then echo "test_179: main.conf not reverted" >&2; exit 1; fi
+            [[ "$(wp_id)" == "$id0" ]]
+            [[ -f "$owed_file" ]]
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id0"
+
+            # 2. revert --check says it would make the restart.
+            rc=0; out="$(bt revert --check 2>&1)" || rc=$?
+            show "revert --check" "$out"
+            [[ $rc == 10 ]] || { echo "test_179: revert --check exited $rc" >&2; exit 1; }
+            grep -qxF "would restart wireplumber" <<<"$out"
+            grep -qxF "owed:      wireplumber.service (still owed: an earlier run did not restart it)" <<<"$out"
+
+            # 3. revert again makes it and forgets the record.
+            rc=0; out="$(bt revert --yes 2>&1)" || rc=$?
+            show "revert again" "$out"
+            [[ $rc == 0 ]]
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            if grep -q '^restart:   bluetooth' <<<"$out"; then echo "test_179: bluetoothd restarted" >&2; exit 1; fi
+            id1="$(wp_id)"
+            [[ -n "$id1" && "$id1" != "$id0" ]]
+            [[ ! -e "$owed_file" ]]
+
+            # 4. a third revert has nothing to do.
+            out="$(bt revert --yes 2>&1)"
+            show "third revert" "$out"
+            grep -qxF "none needed" <<<"$out"
+            [[ "$(wp_id)" == "$id1" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_180_bluetooth_main_conf_backups_never_replace_one_another(self) -> None:
+        """main.conf's backups with the real GNU cp: a backup is never replaced. A backup of each
+        second of the next two minutes is there already (each its own text, its mtime a day ahead, so
+        none is the oldest). `apply --yes --no-restart` (as tester) backs main.conf up as
+        `main.conf.bak-<its second>-1`, holding the vendor text, and leaves every planted file as it
+        was (content and mtime); the `revert --yes --no-restart` right after takes a name of its own
+        (another -1, or -2 in the same second), leaves the planted files and apply's backup, and puts
+        the vendor keys back; a second revert finds them as in the oldest backup and changes nothing.
+        The exact command apply runs, `sudo cp -p --preserve=context --update=none-fail`, onto a name
+        that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the planted file
+        of its second."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            """
+            set +e
+            runuser -u tester -- env HOME=/home/tester XDG_RUNTIME_DIR=/run/user/1000 \\
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \\
+                /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1
+            if [[ -f /tmp/bt180/before ]]; then
+                comm -13 /tmp/bt180/before <(ls -1 /etc/bluetooth/main.conf.bak-* 2>/dev/null | sort) | xargs -r -d '\\n' rm -f
+            fi
+            rm -rf /tmp/bt180 /home/tester/.config/cst/bluetooth.conf
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_180 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            w=/tmp/bt180
+            mc=/etc/bluetooth/main.conf
+            vendor=$'[General]\n# Name = BlueZ'
+            rm -rf "$w"; mkdir -p "$w" /etc/bluetooth
+            printf '%s\n' "$vendor" >"$mc"
+            { ls -1 "$mc".bak-* 2>/dev/null || true; } | sort >"$w/before"
+            runuser -u tester -- bash -c 'mkdir -p ~/.config/cst && printf "DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n" >~/.config/cst/bluetooth.conf'
+            bt() {
+                runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /opt/cst-rw/cst bluetooth "$@"
+            }
+            show() { sed "s/^/test_180 $1: /" <<<"$2" >&2; }   # the CI log
+            # A backup of each second from now + 2 to now + 122 s, each its own text, a day ahead in time
+            # (an earlier test's backups are of a second before now); then wait for the first of them.
+            now="$(date +%s)"
+            for t in $(seq $((now + 2)) $((now + 122))); do
+                f="$mc.bak-$(date -d "@$t" +%Y%m%d-%H%M%S)"
+                [[ ! -e "$f" ]]
+                echo "planted for $t" >"$f"
+                touch -d "@$((now + 86400))" "$f"
+                echo "$f" >>"$w/planted"
+            done
+            planted() { while read -r f; do echo "$(stat -c %Y "$f") $(sha256sum <"$f") $f"; done <"$w/planted"; }
+            p0="$(planted)"
+            while (( $(date +%s) < now + 2 )); do sleep 0.1; done
+            backup_of() { sed -n 's/^backup:    //p' <<<"$1"; }
+
+            # 1. apply: its second's name is taken, so its backup is that name with -1.
+            rc=0; out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+            show apply "$out"
+            [[ $rc == 1 ]]   # the live checks fail here (no adapter), and only they
+            grep -qF "ERROR: verification found problems (see above)." <<<"$out"
+            if grep -qF "stopped:" <<<"$out"; then exit 1; fi
+            a="$(backup_of "$out")"
+            [[ "$a" == "$mc".bak-[0-9]*-[0-9]*-1 ]] || { echo "apply's backup: $a" >&2; exit 1; }
+            grep -qxF "${a%-1}" "$w/planted"
+            [[ "$(cat "$a")" == "$vendor" ]]
+            [[ "$(planted)" == "$p0" ]] || { echo "apply changed a planted backup" >&2; exit 1; }
+            grep -qxF "Experimental = true" "$mc"
+
+            # 2. revert right after: a name of its own; the vendor keys back.
+            rc=0; out="$(bt revert --yes --no-restart 2>&1)" || rc=$?
+            show revert "$out"
+            [[ $rc == 0 ]]
+            r="$(backup_of "$out")"
+            [[ -n "$r" && "$r" != "$a" ]]
+            if grep -qxF "$r" "$w/planted"; then echo "revert's backup took a planted name: $r" >&2; exit 1; fi
+            [[ "$(planted)" == "$p0" ]] || { echo "revert changed a planted backup" >&2; exit 1; }
+            [[ "$(cat "$a")" == "$vendor" ]]
+            if grep -qxF "Experimental = true" "$mc"; then echo "revert left Experimental = true" >&2; exit 1; fi
+
+            # 3. a second revert: the keys are as in the oldest backup already; nothing written.
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show "second revert" "$out"
+            grep -qF "unchanged: Experimental and KernelExperimental are already as in " <<<"$out"
+            if grep -q '^backup:' <<<"$out"; then echo "the second revert took a backup" >&2; exit 1; fi
+
+            # 4. apply's exact cp onto a name that is there: exit 1, the file left alone.
+            f="$(head -n 1 "$w/planted")"
+            s="$(stat -c %Y "$f") $(sha256sum <"$f")"
+            rc=0; runuser -u tester -- sudo cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
+            [[ $rc == 1 ]] || { echo "cp onto a backup that is there: exit $rc" >&2; cat "$w/cp.err" >&2; exit 1; }
+            [[ "$(stat -c %Y "$f") $(sha256sum <"$f")" == "$s" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:
         """`cst btrfs scrub-limit set` and `off` after an earlier run that wrote both files and died before
