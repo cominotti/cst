@@ -63,6 +63,7 @@ from doctor.application import (
     alerts as doc_alerts,
     btrfs as doc_btrfs,
     cpu as doc_cpu,
+    docker_nocow as doc_nocow,
     install as doc_install,
     registry as doc_registry,
     services as doc_services,
@@ -70,6 +71,7 @@ from doctor.application import (
     swap as doc_swap,
     vm as doc_vm,
 )
+from btrfs.docker_volumes_nocow import adapters as nocow_adapters, domain as nocow_domain
 from btrfs.health_check import domain as hc_domain
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
@@ -2589,6 +2591,92 @@ class DockerNocowOutcomeTest(Scratch):
         )
         self.assertIn("fix: cst btrfs install", r.stdout)
         self.assert_read_only()
+
+    def _root_rows(self, *, uid: int = 0, container: bool = False, answer: tuple[str, str] | None) -> tuple[list[Result], int]:
+        host = doc_adapters.Host(dict(self.env))
+        host.uid = uid
+        host.container = container
+        with mock.patch.object(doc_adapters.Host, "nocow_unscheduled", return_value=answer) as asked:
+            rows = list(doc_nocow.check_docker_nocow_outcome(host))
+        return rows, asked.call_count
+
+    def test_as_root_on_the_host_a_folder_with_c_and_no_flag_or_record_warns(self) -> None:
+        # As cst btrfs status's "no boot asks for it". Before, nothing: doctor never looked at the folder.
+        rows, asked = self._root_rows(answer=("/var/lib/docker/volumes", "db"))
+        self.assertEqual(asked, 1)
+        self.assertEqual(
+            rows,
+            [
+                Result(
+                    "WARN",
+                    "Docker volumes NOCOW: /var/lib/docker/volumes has +C and its volumes keep copy-on-write data (db "
+                    "first), but no migration is scheduled and no outcome is recorded (an older install stopped "
+                    "between its +C and its flag): no boot asks for it",
+                    "cst btrfs install",
+                )
+            ],
+        )
+
+    def test_the_host_reads_the_folder_with_the_helper_s_tree_adapter(self) -> None:
+        volumes = os.path.join(self.tmp, "docker", "volumes")
+        for name in ("a", "b"):
+            os.makedirs(os.path.join(volumes, name, "_data"))
+        cow = {os.path.join(volumes, "a", "_data"): 0, os.path.join(volumes, "b", "_data"): 2}
+
+        def scan(_tree: object, top: str, *, fix: bool = False) -> nocow_domain.TreeScan:
+            del fix
+            return nocow_domain.TreeScan(cow[top], cow[top] * 4096, 1, 4096)
+
+        cases: tuple[tuple[str, str, bool | OSError, tuple[str, str] | None], ...] = (
+            ("+C and a volume with copy-on-write data: the first one", volumes, True, (volumes, "b")),
+            ("no +C", volumes, False, None),
+            ("absent", os.path.join(self.tmp, "none"), True, None),
+            ("+C cannot be read", volumes, OSError(errno.EIO, "I/O error"), None),
+        )
+        for label, folder, nocow, want in cases:
+            with (
+                self.subTest(label),
+                mock.patch.object(doc_adapters, "nocow_docker_root", return_value=(folder, "")),
+                mock.patch.object(nocow_adapters.LocalVolumeTree, "is_nocow", side_effect=[nocow]),
+                mock.patch.object(nocow_adapters.LocalVolumeTree, "scan", scan),
+            ):
+                self.assertEqual(doc_adapters.Host(dict(self.env)).nocow_unscheduled(), want)
+
+    def test_the_folder_is_looked_at_only_when_nothing_else_answers(self) -> None:
+        cases: tuple[tuple[str, int, bool, str, bool], ...] = (
+            # (label, uid, container, what is on disk, whether the folder is asked)
+            ("as a user", 1000, False, "", False),
+            ("as root in a toolbox", 0, True, "", False),
+            ("a flag", 0, False, "flag", False),
+            ("a give-up's record", 0, False, "gave-up", False),
+            ("a count left", 0, False, "count", False),
+            ("no helper installed", 0, False, "no helper", False),
+            ("nothing else: the folder is asked, and answers none", 0, False, "", True),
+        )
+        for label, uid, container, on_disk, want_asked in cases:
+            with self.subTest(label):
+                match on_disk:
+                    case "flag":
+                        open(self.flag, "w").close()
+                    case "gave-up":
+                        self.record("gave-up")
+                    case "count":
+                        self.count("1")
+                    case "no helper":
+                        os.remove(self.helper)
+                    case _:
+                        pass
+                try:
+                    rows, asked = self._root_rows(uid=uid, container=container, answer=None)
+                finally:
+                    for p in (self.flag, os.path.join(self.state_dir, "outcome"), os.path.join(self.state_dir, "attempts")):
+                        if os.path.exists(p):
+                            os.remove(p)
+                    if not os.path.exists(self.helper):
+                        with open(self.helper, "w") as f:
+                            f.write("#!/bin/sh\n")
+                self.assertEqual(asked, int(want_asked))
+                self.assertFalse(any("has +C" in r.message for r in rows), rows)
 
     def test_nothing_beside_the_flag(self) -> None:
         self.record("not-scheduled")

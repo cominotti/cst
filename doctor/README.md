@@ -257,8 +257,10 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `outcome` and `attempts` (world-readable, written by `docker-volumes-nocow`
   at boot and by `install`), and look whether the flag
   `/etc/btrfs-setup/docker-nocow-pending` and the installed helper
-  `/usr/local/sbin/docker-volumes-nocow` exist. They never open Docker's
-  folders (root-only) and run no command.
+  `/usr/local/sbin/docker-volumes-nocow` exist. As a user they never open
+  Docker's folders (root-only) and run no command; as root on the host, with
+  no flag, no outcome record and no count, they read the volumes folder's
+  `+C` and scan its volumes with the helper's own adapters (section 6.3).
 - Each text file the checks read (`/etc/fstab`, `machine.slice`'s drop-ins,
   `/etc/tmpfiles.d/zswap.conf`, `/proc/mounts`, the files under `/sys`) is
   opened only when it is a regular file: a FIFO, a device or a folder there is
@@ -397,20 +399,26 @@ boot could not reset it. A request resets such a count before it writes its
 flag, and fails while it cannot, so no migration is asked for until the
 count can be reset
 ([btrfs/README.md, section 4.10](../btrfs/README.md#410-docker-volumes-without-copy-on-write-nocow)).
-The doctor cannot look at `+C` itself (Docker's folders are root's only),
-so it reads what the helper leaves on disk, with the helper installed and no
+As a user the doctor cannot look at `+C` itself (Docker's folders are root's
+only), so it reads what the helper leaves on disk, with the helper installed and no
 flag (a flag is a scheduled migration):
 
 - a `not-scheduled` record is a `WARN` with the install's time and reason;
 - else a count above 0 is a `WARN` naming it;
+- else, with no record (or one it cannot read) and only when the doctor runs as
+  root on the host (a bare `sudo cst doctor` or root's login; `cst status`
+  runs it as the user who called `sudo`), it reads the volumes folder with
+  docker-volumes-nocow's own adapters: `+C` on it and a volume that keeps
+  copy-on-write data is a `WARN` ("no boot asks for it", as `cst btrfs
+  status` says), naming the first such volume (the scan stops there);
 - both have the fix `cst btrfs install`, once the cause is fixed;
 - a record or a flag that cannot be read is `info`.
 
 It says nothing beside a flag, for a give-up's record (the give-up's alert,
 kept for the next login, and `status` show it), when the helper is not
-installed, and when neither file is there. An older install that was
-stopped half-way and left no record is shown by `cst btrfs status` only
-(`no boot asks for it`).
+installed, and when neither file is there. As a user, an older install that
+was stopped half-way and left no record is shown by `cst btrfs status` only
+(`no boot asks for it`); `sudo cst doctor` shows it too.
 
 ```
 == btrfs
