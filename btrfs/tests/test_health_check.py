@@ -1341,6 +1341,27 @@ done < "$1"
                     self.assertEqual(got, want)
 
 
+class AwakeSinceTest(unittest.TestCase):
+    """awake_since against the old bash lines (b819032f^:btrfs/btrfs-health-check): awk's int($1) of the
+    journal's line, read by bash's 64-bit arithmetic against the boot."""
+
+    OLD = (
+        "awake_since=\"$(printf '%s\\n' \"$1\" | awk '{print int($1)}')\"; boot_since=$2\n"
+        '(( ${awake_since:-0} > boot_since )) || awake_since="${boot_since}"\n'
+        'echo "$(( awake_since ))"\n'
+    )
+    BOOT: Final = 1_763_990_000
+
+    def test_awake_since_wraps_the_resume_time_at_64_bits_as_bash_did(self) -> None:
+        from btrfs.health_check.domain import awake_since
+
+        for resume in ("9223372036854775808", "18446744073709551616", "99999999999999999999", "1764000000"):
+            with self.subTest(resume=resume):
+                line = f"{resume}.500000 host systemd[1]: Finished systemd-suspend.service"
+                (bash,) = run_bash(self.OLD, line, str(self.BOOT))
+                self.assertEqual(str(awake_since(line + "\n", self.BOOT)), bash)
+
+
 class MemberDisksTest(unittest.TestCase):
     """The member disks' part, which a test folder cannot reach through the program (their block devices):
     the rules it applies to them, as the bash version did (its smart_check and swap_disks)."""
