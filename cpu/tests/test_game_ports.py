@@ -3,7 +3,7 @@
 (cpu/tests/fakes.py): each failure a Faulty adapter stages has the shape the real one gives (run on the real
 adapter in a temporary folder, a full disk staged with RLIMIT_FSIZE 0), and the pins of what the real adapters
 pass on: systemctl's argv and options, the files' encoding and modes, the run lock, the order of the boxes and
-the output's lines."""
+the output's lines; and the start of the composition root (cpu.game.wiring) for each action."""
 
 from collections.abc import Callable, Sequence
 import contextlib
@@ -17,6 +17,7 @@ import unittest
 import unittest.mock
 from typing import override
 
+from cpu.game import wiring
 from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFiles, GameUnitFiles
 from cpu.game.adapters.kernel import GameKernelFiles
 from cpu.game.adapters.output import GameStreamOutput
@@ -32,6 +33,7 @@ from cpu.tests.fakes import (
     FaultyUnitFiles,
 )
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import CommandResult, OutputMode
 from tests.fault_injection import FaultMode, FaultPlan, Killed, no_file_may_grow
 
@@ -450,3 +452,37 @@ class DrmDiscoveryPinTest(Case):
         os.symlink("/dev/dri/renderD128", os.path.join(proc, "44", "fd", "zz"))
         self.assertEqual(files.pid_cards(proc, drm, "44", dev_to_card), {"card1"})
         self.assertEqual(files.pid_cards(proc, drm, "45", dev_to_card), set())  # gone: its fds cannot be listed
+
+
+class WiringTest(unittest.TestCase):
+    """How cpu-game-profile starts each action (cpu.game.wiring.run_action): Ctrl-C as bash's, the locale's
+    collation, SIGPIPE back at its default for 'state' only (a closed pipe ends it quietly; on, off and tick
+    keep Python's handling, so their undo and cleanup run), then the profile over the real paths and runner."""
+
+    def test_the_start_of_each_action(self) -> None:
+        for action, method, rc in (
+            ("on", "locked", 4),
+            ("off", "locked", 4),
+            ("tick", "locked", 4),
+            ("state", "state", 3),
+        ):
+            with self.subTest(action):
+                steps = unittest.mock.Mock()
+                steps.load_profile.return_value = steps.profile
+                steps.profile.locked.return_value = 4
+                steps.profile.state.return_value = 3
+                with contextlib.ExitStack() as stack:
+                    for name in ("default_ctrl_c", "collate_as_bash", "restore_default_signals", "load_profile"):
+                        stack.enter_context(unittest.mock.patch.object(wiring, name, getattr(steps, name)))
+                    self.assertEqual(wiring.run_action(action), rc)
+                ran = [unittest.mock.call.default_ctrl_c(), unittest.mock.call.collate_as_bash()]
+                if action == "state":
+                    ran.append(unittest.mock.call.restore_default_signals())
+                ran.append(unittest.mock.call.load_profile(GamePaths(), unittest.mock.ANY))
+                ran.append(
+                    unittest.mock.call.profile.state()
+                    if method == "state"
+                    else unittest.mock.call.profile.locked(action)
+                )
+                self.assertEqual(steps.mock_calls, ran)
+                self.assertIsInstance(steps.load_profile.call_args.args[1], SubprocessCommandRunner)
