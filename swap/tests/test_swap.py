@@ -2878,6 +2878,30 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertEqual(stat.S_IMODE(os.stat(mine).st_mode), 0)
         self.assertFalse(os.path.lexists(f"{dest}.pre-swap-config.bak"))
 
+    def test_a_link_at_uresourced_conf_to_a_folder_is_replaced_once_its_copy_aside_is_there(self) -> None:
+        # An earlier apply left uresourced.conf.pre-swap-config.bak: step 7 copies nothing aside, so the link
+        # is no reason to refuse; the installer replaces it with CST's file.
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        dest = self.env.etc_path(URESOURCED_ENTRY)
+        bak = f"{dest}.pre-swap-config.bak"
+        with open(bak, "w", encoding="utf-8") as f:
+            f.write("# the copy an earlier apply made\n")
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        os.symlink(elsewhere, dest)
+        plan = self._plan_text(dataclasses.replace(self.env, as_root=True))
+        line = next(x for x in plan.splitlines() if " uresourced.conf " in x)
+        self.assertFalse(line.startswith("  ?  "), line)
+        rc, out, err, _systemd, _system = self._apply_on(self._fs())
+        self.assertEqual(rc, 0, out + err)
+        self.assertFalse(os.path.islink(dest))
+        with open(dest, encoding="utf-8") as f, open(self.env.src_path(URESOURCED_ENTRY), encoding="utf-8") as g:
+            self.assertEqual(f.read(), g.read())
+        with open(bak, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# the copy an earlier apply made\n")
+        self.assertTrue(os.path.isdir(elsewhere))
+
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the
         # earlier files first, and stopped only at that step.
