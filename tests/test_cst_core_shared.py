@@ -103,7 +103,7 @@ from cst_core.domain.text import (
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
-from tests.probes import assert_replaced_durably, recorded_fsyncs
+from tests.probes import assert_replaced_durably, open_fds, recorded_fsyncs, time_bound
 from toolchains.domain import auto as tcd_auto
 from toolchains.domain import common as tcd_common
 from vm import domain as vm_domain
@@ -352,6 +352,39 @@ class AdaptersTest(unittest.TestCase):
             fs.read_existing_text(folder)
         self.assertIsNone(fs.read_text(folder))
         self.assertEqual(fs.read_text(self.path("missing"), "d"), "d")
+
+    def test_regular_only_refuses_what_is_not_a_regular_file_and_never_waits(self) -> None:
+        # regular_only: a path there that is not a regular file (a FIFO, a device, a folder; through a
+        # link, what it leads to) cannot be read, and its open returns at once (bounded: without the
+        # option a FIFO's open waits for a writer); no descriptor is left open; a regular file, a
+        # missing path and a path through a file read as without the option.
+        time_bound(self, 5)
+        fs = core_files.LocalFileSystemAdapter()
+        fifo = self.path("fifo")
+        os.mkfifo(fifo)
+        link = self.path("link")
+        os.symlink(fifo, link)
+        folder = self.path("folder")
+        os.mkdir(folder)
+        for path in (fifo, link, os.devnull, folder):
+            with self.subTest(path=path):
+                before = open_fds()
+                self.assertEqual(fs.read_text(path, "d", regular_only=True), "d")
+                self.assertIsNone(fs.read_text(path, regular_only=True))
+                with self.assertRaises(OSError) as cm:
+                    fs.read_existing_text(path, regular_only=True)
+                self.assertEqual(cm.exception.errno, errno.EINVAL)
+                self.assertEqual(open_fds(), before, "a descriptor left open")
+        p = self.path("f", b"a\xffb\r\n")
+        before = open_fds()
+        self.assertEqual(fs.read_text(p, regular_only=True), "a" + chr(0xDCFF) + "b\r\n")
+        self.assertEqual(fs.read_existing_text(p, regular_only=True), fs.read_existing_text(p))
+        self.assertEqual(open_fds(), before, "a descriptor left open")
+        os.symlink(p, self.path("to-file"))
+        self.assertEqual(fs.read_text(self.path("to-file"), regular_only=True), "a" + chr(0xDCFF) + "b\r\n")
+        self.assertIsNone(fs.read_existing_text(self.path("missing"), regular_only=True))
+        self.assertIsNone(fs.read_existing_text(os.path.join(p, "below"), regular_only=True))
+        self.assertEqual(fs.read_text(self.path("missing"), "d", regular_only=True), "d")
 
     def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
         existing = self.path("existing")

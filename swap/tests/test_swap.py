@@ -766,8 +766,8 @@ class _ClosedFolder(SwapTempFileSystem):
         return path != self._closed and not self._inside(path) and super().is_searchable(path)
 
     @override
-    def read_text(self, path: str, default: str | None = None) -> str | None:
-        return default if self._inside(path) else super().read_text(path, default)
+    def read_text(self, path: str, default: str | None = None, *, regular_only: bool = False) -> str | None:
+        return default if self._inside(path) else super().read_text(path, default, regular_only=regular_only)
 
 
 class _BufferedToPipe(io.StringIO):
@@ -810,9 +810,9 @@ class _ReadsRecorded(SwapTempFileSystem):
         self.reads: list[str] = []
 
     @override
-    def read_text(self, path: str, default: str | None = None) -> str | None:
+    def read_text(self, path: str, default: str | None = None, *, regular_only: bool = False) -> str | None:
         self.reads.append(path)
-        return default if path in self._unopened else super().read_text(path, default)
+        return default if path in self._unopened else super().read_text(path, default, regular_only=regular_only)
 
 
 class _TextUnreadable(SwapTempFileSystem):
@@ -825,8 +825,8 @@ class _TextUnreadable(SwapTempFileSystem):
         self._unread = set(unread)
 
     @override
-    def read_text(self, path: str, default: str | None = None) -> str | None:
-        return default if path in self._unread else super().read_text(path, default)
+    def read_text(self, path: str, default: str | None = None, *, regular_only: bool = False) -> str | None:
+        return default if path in self._unread else super().read_text(path, default, regular_only=regular_only)
 
 
 class SwapFakeSystemd(NoUnitQueries):
