@@ -148,11 +148,13 @@ class DockerVolumesNocow:
         self.tree.remove_tree(old)
 
     # ---- the commands ----------------------------------------------------
-    def request_migration(self, *, renew: bool = False) -> bool:
+    def request_migration(self, *, renew: bool = False, install: bool = False) -> bool:
         """Write the flag (and its folder), durable before +C is set: the data root may be on
         another filesystem than /etc, and after a power loss +C must not stay while the flag
         is lost. renew (install's request): the request gets its two boots again even when a
-        flag is there already. False, with a log line, when that fails."""
+        flag is there already. False, with a log line, when that fails. install (mark's own
+        request): when that fails on a volumes folder with +C already, no boot asks again; the
+        line says so and the outcome record keeps it for status and cst doctor."""
         try:
             if (renew or not self.state.flag_exists()) and self.state.attempts():
                 # A count of boots without its flag is not this request's (an older helper removed the
@@ -162,13 +164,29 @@ class DockerVolumesNocow:
                 self.state.save_attempts(0)
             self.state.request_migration()
         except OSError as e:
-            self.out.log(
-                3,
-                f"cannot schedule the migration ({e}); {self.paths.volumes} keeps copy-on-write, the next boot tries again",
-            )
+            vols = self.paths.volumes
+            # Probed after the failure (a probe before it could stop a mark that goes on today).
+            if install and self.has_nocow(vols):
+                self.out.log(
+                    3,
+                    f"cannot schedule the migration ({e}); {vols} has +C already, so no boot asks again: "
+                    "fix that, then run cst btrfs install",
+                )
+                self.record_outcome(NocowOutcome.NOT_SCHEDULED, f"cannot schedule the migration: {e}")
+            else:
+                self.out.log(
+                    3, f"cannot schedule the migration ({e}); {vols} keeps copy-on-write, the next boot tries again"
+                )
             return False
         self.forget_outcome()  # a new request: the last one's outcome is over
         return True
+
+    def has_nocow(self, path: str) -> bool:
+        """path has +C; False also when that cannot be read."""
+        try:
+            return self.tree.is_nocow(path)
+        except OSError:
+            return False
 
     # ---- the outcome record: shown by status, read by no decision here ------------------------
     def record_outcome(self, outcome: NocowOutcome, reason: str) -> None:
@@ -297,7 +315,8 @@ class DockerVolumesNocow:
         """+C on the volumes folder (new volumes inherit it). Its exit status: 0 nothing left to
         migrate; 1 existing volumes still need migrating, and the flag that asks the next boot is
         written; 2 the request could not be written (a journal line says why; no +C then, so the
-        next boot asks again)."""
+        next boot asks again, unless the folder had +C already: then no boot asks, and the outcome
+        record says so)."""
         vols = self.paths.volumes
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent (Docker not set up yet): nothing to mark")
@@ -309,7 +328,7 @@ class DockerVolumesNocow:
         if not requested:
             self.state.forget_attempts()
             self.forget_outcome()  # nothing left to ask for
-        elif not self.request_migration(renew=True):  # a new request gets its two boots again
+        elif not self.request_migration(renew=True, install=True):  # a new request gets its two boots again
             return 2
         self.tree.set_nocow(vols, on=True)
         todo = self.pending(fix=True)  # folders and empty files: in place, now
@@ -317,7 +336,7 @@ class DockerVolumesNocow:
             return 0
         # A container wrote between the two scans (install does not stop Docker): asked now,
         # after +C but flushed, which a kill right before can still lose.
-        if not requested and not self.request_migration(renew=True):
+        if not requested and not self.request_migration(renew=True, install=True):
             return 2
         self.out.say(
             f"{len(todo)} existing volume(s) hold copy-on-write data "

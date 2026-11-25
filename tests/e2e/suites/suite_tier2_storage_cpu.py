@@ -98,6 +98,7 @@ vols=/var/lib/docker/volumes
 flag=/etc/btrfs-setup/docker-nocow-pending
 attempts=/var/lib/docker-volumes-nocow/attempts
 postponed=/var/lib/docker-volumes-nocow/postponed
+outcome=/var/lib/docker-volumes-nocow/outcome
 stub=/run/systemd/system/docker.service
 dropin=/run/systemd/system/docker-volumes-nocow.service.d
 target=/run/systemd/system/e2e-nocow-boot.target
@@ -118,7 +119,8 @@ cleanup() {
     systemctl stop e2e-nocow-boot.target docker.service e2e-dind.service 2>/dev/null || true
     rm -rf "$stub" "$dropin" "$target" "$wrap" "$fake" "$seen"
     rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4" "$vols/e2e-cow5" "$vols/e2e-cow6"
-    rm -f "$flag" "$attempts" "$postponed"
+    while mountpoint -q "$attempts"; do umount "$attempts" || break; done   # part 7's read-only count
+    rm -f "$flag" "$attempts" "$postponed" "$outcome"
     [[ -d /etc/btrfs-setup || ! -e /etc/btrfs-setup ]] || rm -f /etc/btrfs-setup   # part 6's obstacle
     if [[ -d "$saved" ]]; then
         rm -rf /etc/btrfs-setup
@@ -415,6 +417,34 @@ rc=0; "$helper" mark || rc=$?
 [[ "$(lsattr -d "$vols" | awk '{print $1}')" != *C* ]]
 rm -f /etc/btrfs-setup
 echo "E2E-NOCOW part 6: mark writes the flag before +C, and sets no +C when it cannot"
+
+# 7. The old state for real (+C on the volumes folder, a volume with copy-on-write data, no flag) and a
+# count of 2 mark cannot reset (its file a read-only bind mount: a rename over a mount point fails).
+# No boot asks for a folder with +C, so mark says so and records it (not-scheduled, 0644) for status
+# and cst doctor; the old line said the next boot tries again. With the mount gone, mark writes the
+# request and removes the record.
+chattr +C "$vols"
+install -d -m 0755 /var/lib/docker-volumes-nocow
+rm -f "$outcome"
+printf '2\n' >"$attempts"
+mount --bind "$attempts" "$attempts"
+mount -o remount,bind,ro "$attempts"
+rc=0; out="$("$helper" mark 2>&1)" || rc=$?
+printf '%s\n' "$out" | sed 's/^/E2E-NOCOW part 7: /'
+[[ "$rc" == 2 ]]
+grep -qF "has +C already, so no boot asks again: fix that, then run cst btrfs install" <<<"$out"
+test ! -e "$flag"
+[[ "$(cat "$attempts")" == 2 ]]
+[[ "$(stat -c %a "$outcome")" == 644 ]]
+grep -qF '"outcome": "not-scheduled"' "$outcome"
+grep -q 'migration not scheduled by the install at' <<<"$("$helper" status)"
+umount "$attempts"
+rc=0; "$helper" mark || rc=$?
+[[ "$rc" == 1 ]]
+test -f "$flag"
+test ! -e "$outcome"
+[[ "$(cat "$attempts")" == 0 ]]
+echo "E2E-NOCOW part 7: mark on +C with copy-on-write data and a count it cannot reset records no boot asks"
 """
 
 

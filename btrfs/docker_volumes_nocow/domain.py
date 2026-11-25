@@ -270,6 +270,9 @@ class NocowOutcome(StrEnum):
     """Why no migration is scheduled, as the helper recorded it (the outcome record's "outcome")."""
 
     GAVE_UP = "gave-up"  # the migration did not finish after GIVE_UP_AFTER boots
+    # An install's mark found +C and copy-on-write data (or made +C) and could not write the request:
+    # no boot asks again (a boot asks only for a folder without +C).
+    NOT_SCHEDULED = "not-scheduled"
 
 
 class OutcomeRecord(TypedDict):
@@ -341,6 +344,11 @@ def outcome_line(read: OutcomeRead) -> str:
     match read.outcome:
         case NocowOutcome.GAVE_UP:
             return f"  migration gave up {when}: {read.record['reason']}; run cst btrfs install to try again"
+        case NocowOutcome.NOT_SCHEDULED:
+            return (
+                f"  migration not scheduled by the install at {when} ({read.record['reason']}); no boot asks for it: "
+                "fix that, then run cst btrfs install"
+            )
 
 
 def postponed_line(rec: StoredPostponed | None) -> str:

@@ -827,7 +827,14 @@ docker volume rm <name>         # or one volume by name
   the counter of attempts to 0 (see below), flushed too, so a power loss
   cannot bring an old count back beside the new flag. When it cannot write
   either, the folder keeps no `+C`, the journal says why, and the next boot
-  asks again. One gap is left: a container that writes into a volume during
+  asks again. That holds only for a folder without `+C`: a boot asks only
+  for such a folder. When the folder has `+C` already (an older install
+  stopped between its `+C` and its flag, below) and the request fails, no
+  boot asks again: `mark` exits 2 with `... has +C already, so no boot asks
+  again: fix that, then run cst btrfs install`, and records it in
+  `/var/lib/docker-volumes-nocow/outcome` (`not-scheduled`), which `status`
+  shows as `migration not scheduled by the install at <time> (<why>)`. The
+  next `install` that can write the request removes it. One gap is left: a container that writes into a volume during
   the few milliseconds between mark's two looks at the volumes is asked for
   after `+C` (still flushed), so a kill exactly there can lose that request.
   When no volume holds copy-on-write data, `mark` removes an old counter

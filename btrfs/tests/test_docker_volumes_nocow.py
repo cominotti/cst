@@ -581,6 +581,7 @@ class MarkUnmarkTest(Base):
         self.assertFalse(self.fs.nocow(self.vols))
         self.assertEqual(tree(top), before)
         self.assertIsNone(read_attempts(self))
+        self.assertFalse(os.path.exists(self.outcome))  # the next boot asks: nothing to record
 
     def test_mark_that_cannot_reset_the_count_makes_no_request(self) -> None:
         # The reset of an old count is part of the request: when it fails, no flag and no +C.
@@ -596,6 +597,100 @@ class MarkUnmarkTest(Base):
         self.assertFalse(os.path.exists(self.flag))
         self.assertEqual(self.fs.sets, [])
         self.assertEqual(read_attempts(self), "1")
+
+    def test_mark_on_a_folder_with_nocow_already_that_cannot_reset_the_count_says_no_boot_asks(self) -> None:
+        # The old state (an older install stopped between +C and its flag: +C, copy-on-write data, no
+        # flag) and a count of 2 mark cannot reset: no boot asks again (a boot asks only for a folder
+        # without +C). The line said "the next boot tries again"; it tells the truth now, and the
+        # outcome record keeps it for status and cst doctor.
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.set_attempts("2")
+        with (
+            mock.patch.object(
+                nocow_adapters.NocowStateFiles, "save_attempts", side_effect=OSError(errno.EIO, "Input/output error")
+            ),
+            mock.patch.object(time, "time", return_value=1_700_000_000.0),
+        ):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} has +C already, "
+            "so no boot asks again: fix that, then run cst btrfs install\n",
+        )
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), "2")
+        with open(self.outcome) as f:
+            self.assertEqual(
+                object_of(parse_json(f.read())),
+                {
+                    "v": 1,
+                    "outcome": "not-scheduled",
+                    "at": 1_700_000_000,
+                    "volumes": self.vols,
+                    "reason": "cannot schedule the migration: [Errno 5] Input/output error",
+                },
+            )
+        self.assertEqual(stat.S_IMODE(os.stat(self.outcome).st_mode), 0o644)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        _rc, status = self.call(self.cli.status)
+        self.assertTrue(
+            status.startswith(
+                f"  migration not scheduled by the install at {when} (cannot schedule the migration: [Errno 5] "
+                "Input/output error); no boot asks for it: fix that, then run cst btrfs install\n"
+            ),
+            status,
+        )
+        self.assertNotIn("  no boot asks for it: run cst btrfs install\n", status)
+        # Fixed: the next install writes the request and removes the record.
+        rc, _out, _err = self.main("mark")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_mark_on_a_folder_with_nocow_already_that_cannot_write_the_flag_says_no_boot_asks(self) -> None:
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); "
+            rf"{self.vols} has \+C already, so no boot asks again: fix that, then run cst btrfs install\n$",
+        )
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "not-scheduled")
+
+    def test_mark_whose_request_after_its_own_nocow_fails_says_no_boot_asks(self) -> None:
+        # The second scan finds data the first did not (a container wrote between them): the request
+        # comes after mark's own +C, so when it fails no boot asks either.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        service = self.cli.service
+        real_scan = service.tree.scan
+        first: list[bool] = []
+
+        def scan(top: str, *, fix: bool = False) -> TreeScan:
+            if not fix and not first:
+                first.append(True)
+                return TreeScan()
+            return real_scan(top, fix=fix)
+
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with (
+            mock.patch.object(service.tree, "scan", scan),
+            mock.patch.object(nocow_adapters.NocowStateFiles, "request_migration", side_effect=denied),
+        ):
+            rc, out = self.call(lambda: service.execute(NocowCommand.MARK))
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{self.vols} has +C already, so no boot asks again", out)
+        self.assertTrue(self.fs.nocow(self.vols))
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "not-scheduled")
 
     def test_mark_with_a_flag_already_there_gives_two_boots_again(self) -> None:
         self.volume("cow")
@@ -1320,11 +1415,16 @@ class MigrateTest(Base):
         with mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=denied):
             rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
-        self.assertIn("cannot schedule the migration ([Errno 13] Permission denied)", out)
+        self.assertIn(
+            f"cannot schedule the migration ([Errno 13] Permission denied); {self.vols} keeps copy-on-write, "
+            "the next boot tries again\n",
+            out,
+        )
         self.assertFalse(os.path.exists(self.flag))
         self.assertFalse(self.fs.nocow(self.vols))
         self.assertEqual(read_attempts(self), "2")
         self.assertEqual(self.fs.commands("cp"), [])
+        self.assertFalse(os.path.exists(self.outcome))  # migrate's request: the next boot asks again
 
     def test_a_request_already_scheduled_keeps_its_count(self) -> None:
         # The flag is there (the request is under way) but the volumes folder has no +C: the count stays.
