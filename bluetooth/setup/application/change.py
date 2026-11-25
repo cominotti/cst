@@ -566,19 +566,26 @@ class Change(Checks):
                 self.lw_remove_older(path)
 
     def lw_remove_older(self, path: str) -> None:
-        """An older CST's copy at path removed through the installer, and the enable link a manager that
-        read its folder made beside it (with --check: only said)."""
+        """The enable link a manager that read the folder of an older CST's copy at path made beside it,
+        then that copy, through the installer (with --check: only said). The link goes first: the record
+        lists only the copy, so a run stopped between the two leaves the copy and its record line, and
+        the next run finds both again. A link that cannot be removed (other than one gone already) stops
+        the run with the copy kept."""
         link = watcher_unit.enable_link(self.m.files, path)
         if self.o.check:
-            self.out(f"would remove {path} (an older CST's copy)\n")
             if link is not None:
                 self.out(f"would remove {link} (its enable link)\n")
+            self.out(f"would remove {path} (an older CST's copy)\n")
             return
+        if link is not None:
+            try:
+                removed = self.m.files.remove_file(link)
+            except OSError as e:
+                raise self.die(f"cannot remove {link}, the enable link of {path}: {e.strerror or e} (both kept)") from e
+            if removed:
+                self.out(f"removed:   {link} (its enable link)\n")
         said = self.checked(["remove-text", "--home", self.p.home, path])
         self.out(f"{said.rstrip(chr(10))} (an older CST's copy)\n" if said else f"forgotten: {path}\n")
-        if link is not None:
-            self.m.files.remove_file(link)
-            self.out(f"removed:   {link} (its enable link)\n")
 
     def lw_remove(self) -> None:
         """The watcher stopped, disabled and removed, if CST installed it (with --check: only said)."""

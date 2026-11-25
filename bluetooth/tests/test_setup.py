@@ -1755,10 +1755,10 @@ class WatcherTest(SetupCase):
         self.assertIn(row("remove", "~/xdg/systemd/user/default.target.wants/" + LW, LW_STALE_LINK), r.stdout)
         self.assertIn(row("write", f"systemd/user/{LW}", "the LDAC rate watcher (LDAC_RATE=48000)"), r.stdout)
         r = m.run("revert", "--check")
-        self.assertIn(f"would remove {old} (an older CST's copy)\nwould remove {link} (its enable link)\n", r.stdout)
+        self.assertIn(f"would remove {link} (its enable link)\nwould remove {old} (an older CST's copy)\n", r.stdout)
         self.assertTrue(os.path.islink(link))
         r = m.run("apply", "--no-restart")
-        self.assertIn(f"removed:   {old} (an older CST's copy)\nremoved:   {link} (its enable link)\n", r.stdout)
+        self.assertIn(f"removed:   {link} (its enable link)\nremoved:   {old} (an older CST's copy)\n", r.stdout)
         self.assertFalse(os.path.lexists(link))
         self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
         self.assertFalse(os.path.exists(old))
@@ -1770,6 +1770,37 @@ class WatcherTest(SetupCase):
         r = m.run("revert", "--yes", "--no-restart")
         self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
+
+    def test_an_enable_link_it_cannot_remove_stops_the_run_with_the_copy_kept(self) -> None:
+        # The older copy's wants folder cannot be written (EACCES): apply stops with one ERROR line
+        # (no traceback) before it touches the copy, so the copy and its record line stay and the next
+        # run finds both again; once the folder can be written, apply removes the link, then the copy.
+        # Before, the copy and its record line went first and the link stayed behind, found by no later
+        # run.
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        link = os.path.join(os.path.dirname(old), "default.target.wants", LW)
+        os.makedirs(os.path.dirname(link))
+        os.symlink(old, link)
+        os.chmod(os.path.dirname(link), 0o555)
+        self.addCleanup(os.chmod, os.path.dirname(link), 0o755)
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertEqual(r.returncode, 1, r.text)
+        self.assertIn(
+            f": ERROR: cannot remove {link}, the enable link of {old}: Permission denied (both kept)\n", r.stderr
+        )
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotIn("removed:", r.stdout)
+        self.assertNotIn(f"written:   {m.lw_unit}", r.stdout)  # the run stopped there
+        self.assertTrue(os.path.isfile(old) and os.path.islink(link))
+        self.assertIn(old, json.loads(self.text(m.record))["files"])
+        os.chmod(os.path.dirname(link), 0o755)
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertIn(f"removed:   {link} (its enable link)\nremoved:   {old} (an older CST's copy)\n", r.stdout)
+        self.assertFalse(os.path.lexists(link) or os.path.exists(old))
 
     def test_an_enable_link_to_a_unit_of_the_users_own_is_left_alone(self) -> None:
         # The older copy's wants folder holds a link of the unit's name to a unit of the user's own

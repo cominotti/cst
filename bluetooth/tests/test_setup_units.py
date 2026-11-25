@@ -341,6 +341,41 @@ class WatcherInstallTest(unittest.TestCase):
         )
 
 
+class GoneLinkFiles(LocalSetupFiles):
+    """The user's files, where a file is gone by the time the run removes it (another run took it)."""
+
+    @override
+    def remove_file(self, path: str) -> bool:
+        super().remove_file(path)
+        return False
+
+
+class OlderCopyLinkTest(unittest.TestCase):
+    """An older CST's copy of the watcher's unit and its enable link (Change.lw_remove_older)."""
+
+    def test_a_link_gone_by_then_is_not_said_removed(self) -> None:
+        # The link was there when the run looked, and gone when it removed it: no "removed:" line for
+        # it, and the copy is still removed. Before, the run said it removed the link.
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        m.user_settings(f"DEVICE={MAC}\nLDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", "cst-bt-ldac48.service")
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        link = os.path.join(os.path.dirname(old), "default.target.wants", "cst-bt-ldac48.service")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(old, link)
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        run, console, _ = change(
+            m, "apply", "--yes", settings={"LDAC_RATE": "48000"}, doubles=SetupDoubles(files=GoneLinkFiles())
+        )
+        run.lw_remove_older(old)
+        self.assertEqual(console.stdout, f"removed:   {old} (an older CST's copy)\n")
+        self.assertFalse(os.path.lexists(link) or os.path.exists(old))
+
+
 class WaitTest(unittest.TestCase):
     """The restarts wait for the adapter (15 s) and the BAP endpoint (15 s), asking every half second."""
 
