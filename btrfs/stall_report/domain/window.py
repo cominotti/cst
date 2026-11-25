@@ -297,23 +297,35 @@ def _add_vm(t: _PairTotals, a: SampleRecord, b: SampleRecord, vm_idx: dict[str, 
         if k in ZSWAP_KEYS and not full_vm:
             held.pop(k, None)
             continue
-        va, v7_span = _vm_value(a, vm_idx, k), full_vm
-        if va is None and k in held:
-            va, held_v7 = held[k]
-            v7_span = held_v7 and full_vm
+        va, v7_span = _vm_start(held, a, vm_idx, k, full_vm=full_vm)
         vb = _vm_value(b, vm_idx, k)
         if vb is None:
             if va is not None:
                 held[k] = (va, v7_span)
             continue
         held.pop(k, None)
-        if va is None:  # no sample before b read it
-            continue
-        d = vb - va
-        if d > 0:
-            vmd[k] += d
-            if k == "pswpout" and v7_span:
-                t["pswpout_v7"] += d
+        if va is not None:  # else no sample before b read it
+            _count_growth(t, k, vb - va, v7_span=v7_span)
+
+
+def _vm_start(
+    held: dict[str, tuple[int, bool]], a: SampleRecord, vm_idx: dict[str, int], k: str, *, full_vm: bool
+) -> tuple[int | None, bool]:
+    """Where the growth of counter k up to the next sample starts, and whether every pair it spans is a
+    v7+ pair: a's value; when a could not read it (null), the one held from the last sample that did."""
+    va = _vm_value(a, vm_idx, k)
+    if va is None and k in held:
+        va, held_v7 = held[k]
+        return va, held_v7 and full_vm
+    return va, full_vm
+
+
+def _count_growth(t: _PairTotals, k: str, d: int, *, v7_span: bool) -> None:
+    """A growth d of counter k (none when d is not positive); pswpout's in pswpout_v7 too over a v7+ span."""
+    if d > 0:
+        t["vmd"][k] += d
+        if k == "pswpout" and v7_span:
+            t["pswpout_v7"] += d
 
 
 def _add_fs(fs: dict[str, FsTotals], a: SampleRecord, b: SampleRecord) -> None:
