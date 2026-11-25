@@ -15,7 +15,7 @@ from typing import Final
 
 from cst_core.domain.contracts import StateFormat, StateFormatKey, state_format, version_of
 from cst_core.domain.errors import ExitStatus
-from cst_core.domain.text import blank_edge_problem, describe_problems, parse_shell_assignments, strip_ascii_blanks
+from cst_core.domain.text import blank_edge_problem, describe_problem_lines, parse_shell_assignments, strip_ascii_blanks
 from cst_core.domain.values import DAY, MINUTE, format_bytes_decimal
 
 # The recorder's state and the last run's summary (the files of GcPaths).
@@ -235,7 +235,15 @@ class IncompleteRecordError(InspectError):
 
 
 class UnknownProtection(RuntimeError):
-    """docker-gc cannot tell which registries are protected: it removes nothing, and says why."""
+    """docker-gc cannot tell which registries are protected: it removes nothing, and says why.
+
+    lines: the journal lines, one per problem (the text is them joined with newlines). Never split
+    the text again: a settings problem line can hold a form feed, U+001C or U+2028, which
+    str.splitlines() also splits at."""
+
+    def __init__(self, *lines: str) -> None:
+        super().__init__("\n".join(lines))
+        self.lines: tuple[str, ...] = lines
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +282,7 @@ def parse_settings_file(path: str, text: str) -> tuple[str, ...]:
     an assignment, an unknown key or a value that is not a list of registries raises UnknownProtection
     with every such line; nothing is guessed. No DOCKER_GC_PROTECT line: none protected."""
     parsed = parse_shell_assignments(text, bash_sourced=False)
-    problems = describe_problems(path, parsed.problems).splitlines()
+    problems = describe_problem_lines(path, parsed.problems)
     for a in parsed.entries:
         if a.key not in SETTINGS_KEYS:
             problems.append(f"{path} line {a.line}: {a.key}: unknown setting (known: {', '.join(SETTINGS_KEYS)})")
@@ -283,7 +291,7 @@ def parse_settings_file(path: str, text: str) -> tuple[str, ...]:
         elif bad := [r for r in registries_of(a.value) if not REGISTRY_RE.fullmatch(r)]:
             problems.append(f"{path} line {a.line}: {a.key}: not a registry: {', '.join(bad)}")
     if problems:
-        raise UnknownProtection("\n".join(problems) + f"\nnothing is removed until {path} is fixed")
+        raise UnknownProtection(*problems, f"nothing is removed until {path} is fixed")
     return registries_of(parsed.values.get("DOCKER_GC_PROTECT", ""))
 
 
@@ -392,8 +400,7 @@ def resolve_protection(
         return base
     if blanks := item_blank_problems(env):
         raise UnknownProtection(
-            "\n".join(f"DOCKER_GC_PROTECT in the environment: {why}" for why in blanks)
-            + "\nnothing is removed until it is fixed"
+            *(f"DOCKER_GC_PROTECT in the environment: {why}" for why in blanks), "nothing is removed until it is fixed"
         )
     return Protection(registries_of(env), "DOCKER_GC_PROTECT in the environment", to_write=base.to_write)
 

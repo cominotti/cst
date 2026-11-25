@@ -896,6 +896,25 @@ class SettingsUseCaseTest(unittest.TestCase):
         f.gc.execute(GcCommand.RECORD)
         self.assertEqual(f.config.reads, 0, "the recorder read the settings")
 
+    def test_a_problem_line_whose_text_holds_a_line_separator_is_one_journal_line(self) -> None:
+        # str.splitlines() of the refusal's text split such a line in two, the second piece with no file or
+        # line number; only a newline ends a settings line. The exit status and the refusal are unchanged.
+        conf = PATHS.settings_file
+        for sep in ("\f", "\x1c", "\N{LINE SEPARATOR}"):
+            with self.subTest(sep=repr(sep)):
+                f = Fixture(config=FakeConfig(f"DOCKER_GC_PROTECT='{REGISTRY}{sep}'\nDOCKER_GC_PROTCT=x\n"))
+                f.state.state = GcState(since=NOW - 30 * DAY)
+                f.docker.listed_images = [Image("sha256:r", tags=(f"{REGISTRY}/x:1",), size=1)]
+                self.assertEqual(f.gc.execute(GcCommand.RUN), gc_domain.BAD_SETTINGS_EXIT)
+                name = "a line separator" if sep == "\N{LINE SEPARATOR}" else "a control character"
+                first = (
+                    f"<3>{conf} line 1: DOCKER_GC_PROTECT='{REGISTRY}{sep}': {name} (U+{ord(sep):04X}) at the end of "
+                    "the value: CST does not trim it (delete it)"
+                )
+                second = f"<3>{conf} line 2: DOCKER_GC_PROTCT: unknown setting (known: DOCKER_GC_PROTECT)"
+                self.assertEqual(f.console.lines, [first, second, f"<3>nothing is removed until {conf} is fixed"])
+                self.assertEqual(f.docker.calls, [], "it reached docker")
+
 
 class SettingsFileTest(unittest.TestCase):
     @override
