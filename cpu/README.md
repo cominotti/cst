@@ -985,9 +985,11 @@ of ... in /run/cpu-setup/game.leftovers: not done`). (Versions before
 2026-11 never read a reload's exit status and kept nothing for it: the
 game's values stayed until a reboot or someone else's `daemon-reload`.)
 A kept new override of the user manager with no `user` line (kept while
-`TARGET_USER` named no account) is dropped while `TARGET_USER` still names
-none: no user's runtime folder holds it and no user manager can be reloaded,
-so nothing is said undone (`<4>... could not undo ...: TARGET_USER names no
+`TARGET_USER` named no account) is undone in the manager of the user the
+pass acts for when it starts: in `off`, the user game.state records when it
+records one, else `TARGET_USER`'s; in the tick, `TARGET_USER`'s. It is
+dropped only while that user has no account: no user's runtime folder holds
+it and no user manager can be reloaded, so nothing is said undone (`<4>... could not undo ...: TARGET_USER names no
 account, no user manager to undo it in: dropped`). An entry of no user is
 judged so whatever entry of another user's the same pass undid before it:
 it is never undone in that user's manager (versions before 2026-11 went on
