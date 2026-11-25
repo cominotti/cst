@@ -4,7 +4,7 @@ the fingerprint of a source, the two ways a backup stops (Stop, Uncertain) and t
 backup run (NasRun); the NAS backup's snapshot arguments, index, torn records and last lines, and the
 lines status and backup-timer status print about them. Pure."""
 
-from collections.abc import Mapping, Sequence, Set as AbstractSet
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 import datetime
 import json
@@ -15,6 +15,7 @@ from cst_core.domain.errors import ExitStatus, Refused, ResticExit
 from cst_core.domain.shapes import KeyTypes, has_shape, items_of, json_object
 from cst_core.domain.values import MINUTE, Json
 from vm.domain import (
+    ADOPTED_TAG,
     KEEP_TAG,
     ON_CALENDAR,
     TAG,
@@ -62,6 +63,7 @@ class IndexEntry(TypedDict, total=False):
     path: str
     mode: str
     snapshot: str
+    original: str
     repository: str
     host: str
     consistency: str
@@ -77,6 +79,7 @@ _ENTRY_KEYS: KeyTypes = {
     "path": (str,),
     "mode": (str,),
     "snapshot": (str,),
+    "original": (str,),
     "repository": (str,),
     "host": (str,),
     "consistency": (str,),
@@ -241,15 +244,102 @@ class ResticMessage(StrEnum):
 
 class ResticSnapshot(TypedDict):
     """One snapshot of `restic snapshots --json` (the fields the NAS prune and the torn retry read;
-    tags as restic gives them, checked where they are read)."""
+    tags and original as restic gives them, checked where they are read). original: the id the
+    snapshot had first, which restic sets when restic tag saves it again under a new id."""
 
     id: str
+    time: NotRequired[object]
     tags: NotRequired[object]
+    original: NotRequired[object]
 
 
 def is_restic_snapshot(value: object) -> TypeIs[ResticSnapshot]:
     """A snapshot of restic snapshots --json with a non-empty string id."""
     return json_object(value) and isinstance(snap_id := value.get("id"), str) and snap_id != ""
+
+
+def snapshot_names(snap: ResticSnapshot) -> list[str]:
+    """The ids a listed snapshot answers to: its own, and the one it had first when its tags were
+    changed (restic tag saves it again under a new id, with that first id as its original)."""
+    original = snap.get("original")
+    return [snap["id"], *([original] if isinstance(original, str) and original else [])]
+
+
+def restic_instant(value: object) -> datetime.datetime | None:
+    """A snapshot's time as restic snapshots --json gives it (RFC 3339: nanoseconds, the local offset
+    or Z), as an instant; None for anything else, a time without an offset included (it cannot be
+    compared with one that has it)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def _names_any(snap: ResticSnapshot, ids: Sequence[str]) -> bool:
+    """snap (by its id or its original) is one of ids, a prefix either way, as restic matches a short id."""
+    return any(n.startswith(i) or i.startswith(n) for n in snapshot_names(snap) for i in ids if i)
+
+
+def stray_snapshots(
+    listed: Sequence[ResticSnapshot], indexed: Sequence[str], torn: Sequence[str], made: str
+) -> list[ResticSnapshot]:
+    """The listed snapshots of a VM that no record names, each of which may be torn: neither the
+    index (indexed: the ids of its NAS entries), the record of torn snapshots (torn), the run's own
+    snapshot (made, "" none) nor the tag ADOPTED_TAG accounts for it. Only one not older than the
+    oldest listed snapshot the index names (the baseline) is a stray: those before it are an older
+    CST's or from before the index was started again, and stay. No listed snapshot the index names: no
+    baseline, no stray. A time that cannot be read is no baseline, and its snapshot can be a stray
+    (the retention keeps more, never less)."""
+    times = [t for s in listed if _names_any(s, indexed) and (t := restic_instant(s.get("time"))) is not None]
+    if not times:
+        return []
+    baseline = min(times)
+    known = [*indexed, *torn, made]
+
+    def stray(s: ResticSnapshot) -> bool:
+        tags, t = s.get("tags"), restic_instant(s.get("time"))
+        adopted = isinstance(tags, list) and ADOPTED_TAG in tags
+        return not adopted and not _names_any(s, known) and (t is None or t >= baseline)
+
+    return [s for s in listed if stray(s)]
+
+
+# The alert of a NAS run whose repository has a snapshot of the VM that no record names.
+STRAYS_TITLE: Final = "VM backup: a NAS snapshot no record names"
+
+
+def _stray_names(strays: Sequence[ResticSnapshot]) -> str:
+    def when(s: ResticSnapshot) -> str:
+        t = restic_instant(s.get("time"))
+        return "time unknown" if t is None else t.isoformat(timespec="seconds")
+
+    return ", ".join(f"{s['id'][:8]} ({when(s)})" for s in strays)
+
+
+def strays_text(vm: str, strays: Sequence[ResticSnapshot]) -> str:
+    """Why the retention waits for the strays of vm (stray_snapshots), with the commands that forget or
+    keep each: one stray's full id in them, several as ID with their full ids after."""
+    n = len(strays)
+    ident = strays[0]["id"] if n == 1 else "ID"
+    each = "" if n == 1 else f" (ID: each of {' '.join(s['id'] for s in strays)})"
+    return (
+        f"restic lists {n} snapshot{'s' if n > 1 else ''} of {vm} that neither the index nor the record of "
+        f"torn snapshots names (each may be torn): {_stray_names(strays)}; look at each (restic ls {ident}), "
+        f"then forget it (restic forget {ident}) or keep it as a backup (restic tag --add {ADOPTED_TAG} "
+        f'{ident}){each}, with the repository\'s variables of vm/README.md, section "Restore from the NAS"'
+    )
+
+
+def strays_alert(vm: str, strays: Sequence[ResticSnapshot]) -> str:
+    """The alert's body for the strays of vm: short, the commands are in the backup's output."""
+    return (
+        f"{vm}: the NAS repository has {len(strays)} snapshot(s) of {vm} that no record names "
+        f"({', '.join(s['id'][:8] for s in strays)}); its retention waits until each is forgotten "
+        f"(restic forget ID) or kept (restic tag --add {ADOPTED_TAG} ID): see the backup's output"
+    )
 
 
 class ResticSummary(TypedDict, total=False):
@@ -278,6 +368,17 @@ class StopAfterSnapshot(Stop):
         super().__init__(message)
         self.rc = rc
         self.summary = summary
+
+
+class StopAfterBackup(Stop):
+    """A stop that waited through, or ended restic after, a read whose check passed: the snapshot is a
+    backup (snap, with its consistency), which the run indexes after the merge back before the stop
+    ends it."""
+
+    def __init__(self, message: str, snap: str, consistency: str) -> None:
+        super().__init__(message)
+        self.snap = snap
+        self.consistency = consistency
 
 
 def copied_kind(src: str, tpm_dir: str, *, big: bool) -> str:
@@ -367,27 +468,63 @@ def restic_failure_why(rc: int) -> str:
     }.get(rc, f"restic exit {rc}")
 
 
-def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: AbstractSet[str] | None) -> list[IndexEntry]:
-    """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: the ids
-    of the VM's snapshots restic lists (None: not readable), without which the VM's NAS entries of
-    entry's repository leave it."""
+def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[str, str] | None) -> list[IndexEntry]:
+    """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: each id
+    the VM's snapshots restic lists answer to (snapshot_names), with the id restic lists that snapshot
+    under (None: not readable). The VM's NAS entries of entry's repository that answer to none leave
+    the index; one that answers only to the original a restic tag kept takes the listed id, the one
+    restic restores, lists and forgets the snapshot by, and keeps its first id as its original
+    (entry_names): restic keeps that first id as the original of every later tag change."""
     snap = entry["snapshot"]
     out = [e for e in entries if not (e.get("mode") == BackupMode.NAS and e.get("snapshot") == snap)]
     out.append(entry)
     if alive is not None:
-        alive = alive | {snap}
-        out = [
-            e
-            for e in out
-            if not (
+        alive = {**alive, snap: snap}
+        kept: list[IndexEntry] = []
+        for e in out:
+            if (
                 e["vm"] == entry["vm"]
                 and e.get("mode") == BackupMode.NAS
                 and e.get("repository") == entry["repository"]
-                and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
-            )
-        ]
+            ):
+                now = _listed_as(entry_names(e), alive)
+                if now is None:
+                    continue
+                if now != e["snapshot"]:
+                    moved = e.copy()  # the entry under the id restic lists it by, its first id kept
+                    first = e.get("original") or e["snapshot"]
+                    moved["snapshot"] = now
+                    if first != now:
+                        moved["original"] = first
+                    else:
+                        moved.pop("original", None)
+                    kept.append(moved)
+                    continue
+            kept.append(e)
+        out = kept
     out.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
     return out
+
+
+def entry_names(e: IndexEntry) -> list[str]:
+    """The ids an index entry's snapshot answers to: its snapshot, and the id it had first (original)
+    once nas_index moved it to the id a restic tag gave it."""
+    snap, original = e.get("snapshot"), e.get("original")
+    return [n for n in (snap, original) if n is not None and n]
+
+
+def _listed_as(snaps: Sequence[str], alive: Mapping[str, str]) -> str | None:
+    """The id restic lists the snapshot of the entry whose names are snaps (entry_names) under (alive:
+    nas_index's), a prefix either way as restic matches a short id: the first of snaps restic lists by
+    itself, else the id of the snapshot whose original one of snaps is; None when restic lists none."""
+
+    def names(name: str, snap: str) -> bool:
+        return name.startswith(snap) or snap.startswith(name)
+
+    for snap in snaps:
+        if any(names(name, snap) for name, now in alive.items() if name == now):
+            return snap
+    return next((now for snap in snaps for name, now in alive.items() if name != now and names(name, snap)), None)
 
 
 def nas_done_lines(notes: Sequence[str], snap: str, vm: str, consistency: str, keep: str | None) -> list[str]:

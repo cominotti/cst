@@ -149,7 +149,10 @@ rewrote it, or it was damaged), the backup is finished and kept (the folder,
 or the restic snapshot), but it is not added to the index: the backup ends with
 exit 1 and a message that names it and says how to restore it by hand, after
 its notes (a TPM state not found, ...) and its restore lines, as a backup that
-is indexed prints them. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+is indexed prints them. For a NAS backup the message also says that the next
+NAS backups may name the snapshot as one no record names (section 10.6), and
+wait with their retention until it is kept as a backup (`restic tag --add
+cst-adopted ID`) or forgotten. An entry this `cst vm` does not understand (no `vm`, a NAS entry
 without its snapshot, a local one without its folder, a known key of another
 type) is not listed or pruned, and is written back as it is after the others.
 
@@ -604,7 +607,8 @@ QEMU still runs, so the merge runs as usual.
 **If the VM is shut down during the backup**, the merge cannot run (it needs
 QEMU running). The backup stops with an error, an alert and the commands to
 merge offline (`qemu-img commit`, then `virsh edit`; section 10.8). The data
-restic read is still a good backup, but it is not recorded.
+restic read is still a good backup, but it is not recorded: the next backup
+names it as a snapshot no record names (section 10.6), to keep or forget.
 
 A VM that is **shut off** (and not saved: see the managed-save note in
 section 3) is read directly, without a snapshot. CST checks the state again
@@ -630,9 +634,30 @@ stop stays short for the merge back. Once restic has answered with a
 snapshot, a stop waits (the stops are held: the staged files' removal, the
 check of a shut-off VM after the read) until a torn snapshot is recorded,
 or, for a backup, until that check is done; so does a stop that comes when
-restic has just ended on its own.
+restic has just ended on its own. When the snapshot is a backup (the check
+of a shut-off VM passed, or the read of a running VM's snapshot), it is
+indexed after the merge back, and then the stop ends the run with "restic
+snapshot ID of VM is a backup: indexed (the retention runs at the next
+backup)", after the run's notes (a TPM copy that may be torn, ...): no
+retention and no listing then, nothing forgotten. A stop that
+comes after the merge back of a good read (while the retention, a listing or
+the index's write runs) ends the run the same way: the snapshot is indexed
+first, with the same words, and nothing more is forgotten or listed. If the
+index cannot be written then (a full disk, say), the stop says so instead,
+names the snapshot as a backup and gives the commands that keep or forget
+it. If the merge
+back fails, the snapshot is not indexed, as without a stop (above); the
+refusal then names it as a backup whose read was checked, with the commands
+that keep it (`restic tag --add cst-adopted ID`) or forget it. After a
+stop that ended restic, a snapshot whose check could not be done at all (an
+error of libvirt or of a file read, not a change it found) is recorded as
+torn (what tore it: "check failed"), and the next NAS backup forgets it;
+never at once. Without such a stop, the error ends the run and the next
+backup names the snapshot (section 10.6, "Snapshots no record names").
 The one instant not covered: restic ended between saving its snapshot and
-printing its ID. When the forget fails, the message
+printing its ID (or the program was killed before the record): the next
+backup names such a snapshot (section 10.6, "Snapshots no record names").
+When the forget fails, the message
 adds "recorded in /var/lib/cst/vm-nas-torn.json: the next NAS backup of VM
 forgets it before its retention". If the record cannot be written either,
 the message says so (a stop's message too): then forget it by hand before
@@ -641,7 +666,9 @@ those restic still lists with the tags `cst-vm` and `vm:<name>`, under
 the host recorded with them (restic lists a snapshot only under the host it
 was made on, so a changed `NAS_RESTIC_HOST` or hostname hides none; one
 listed snapshot per recorded ID, forgotten by its listed ID): never by the
-recorded ID alone. A recorded ID that restic no longer lists was forgotten
+recorded ID alone. A snapshot whose tags were changed (`restic tag`: restic
+lists it under a new ID, the recorded one as its `original`) is still the
+recorded one, forgotten by its new ID. A recorded ID that restic no longer lists was forgotten
 already (by hand, or by the run that recorded it when it could not update
 the record): it is dropped from the record. One that restic lists without
 both tags is never forgotten: it stays recorded, and the retention waits.
@@ -717,6 +744,7 @@ One restic snapshot per backup, with the host name of the `/home` backup
 | `cst-vm` | a VM backup made by CST |
 | `vm:<name>` | which VM, e.g. `vm:win11-devbox` |
 | `cst-keep` and `NAME` | only with `--keep-tag NAME`: never forgotten by the retention |
+| `cst-adopted` | only added by you (`restic tag --add cst-adopted ID`): a snapshot no record names that you keep as a backup (section 10.6); the retention counts it, `cst vm list` does not show it |
 
 The paths inside the snapshot are the real ones:
 
@@ -860,6 +888,46 @@ it names no other entry: an absent record is an empty one, so removing
 one that names another VM's torn snapshot would let that VM's retention
 count it as a backup.
 
+**Snapshots no record names.** Before the retention, the backup also lists
+the VM's snapshots in the repository (`restic snapshots` of the tags
+`cst-vm` and `vm:<name>`, made on this host) and compares them with the
+index and the record of torn snapshots. A snapshot that neither names (by
+its ID, or by the ID it had before `restic tag` changed it), that is not
+this run's own and that has no `cst-adopted` tag may be torn: a kill
+(SIGKILL, power loss) after restic saved it and before its record, restic
+ending between saving it and printing its ID, a good read whose merge back
+failed (section 10.2), or a snapshot made by hand with both tags. The
+retention would count it as a backup and could forget a good one in its
+place, so the run names each in its output and in one critical alert, and
+**skips the retention**:
+"retention skipped: restic lists 1 snapshot of VM that neither the index nor
+the record of torn snapshots names (each may be torn): ID (TIME); look at
+each (restic ls ID), then forget it (restic forget ID) or keep it as a backup
+(restic tag --add cst-adopted ID), ...". Nothing is forgotten on its own,
+and the backup itself is good: the run still ends with exit status 0. Look
+at the snapshot with the repository's variables (section 10.9), then either
+forget it or tag it `cst-adopted`; the next backup is quiet again and runs
+the retention, which counts an adopted snapshot as a backup (it is not added
+to the index, so `cst vm list` does not show it). The check only starts
+from the oldest snapshot the index names: a snapshot older than it (made by
+an older CST, or before the index was moved aside) is left alone, and with
+no NAS backup of the VM in the index (its first backup, or the index moved
+aside) nothing is compared and restic is not asked. So a snapshot no record
+names that is older than every indexed backup is not seen.
+
+**After updating from a CST without this check**, the first NAS backup of a
+VM can name good backups the older `cst vm` left out of the index, when they
+are newer than its oldest indexed backup: one whose tags you changed with
+`restic tag` (for example `restic tag --remove cst-keep ID`; the older
+version then dropped its entry), and one whose run a stop ended after
+restic's read. It names each once in the output and one alert, and skips the
+retention until you act; nothing is forgotten. Look at each (`restic ls
+ID`); keep the ones you want as backups with `restic tag --add cst-adopted
+ID` (the retention then counts them; they stay out of `cst vm list`) and
+forget the others. The next backup is quiet again. When the index or
+the record cannot be read, or `restic snapshots` fails, the retention waits
+too, with the reason.
+
 The weekly timer runs the installed copy `/usr/local/sbin/cst-vm`
 (section 10.5). A copy installed before this record existed does not read
 it and runs the retention anyway, so after updating CST run
@@ -869,6 +937,18 @@ the `install` row of `cst doctor` show an older copy).
 The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 (`mode` `nas`, the restic snapshot ID, the consistency, the keep tag, the
 versions and the deployment); entries whose snapshot was forgotten leave it.
+An entry stays when its snapshot's tags were changed by hand (`restic tag`,
+for example `restic tag --remove cst-keep ID` above): restic then lists the
+snapshot under a new ID, with the ID it had first as its `original` (restic
+keeps that first ID through every later change of the tags), and finds it by
+the new ID only (`restic restore` of the old one says "no matching ID
+found"). The next NAS backup of the VM gives the entry the new ID, which
+`cst vm list` then shows, and keeps the first ID in the entry's `original`
+key, so the entry follows its snapshot through later tag changes too. An
+older CST reads such an entry by its new ID and keeps it until the tags
+change again. An entry whose ID restic still lists keeps it, also when
+another listed snapshot has that ID as its `original` (a `restic rewrite`
+without `--forget` keeps both).
 When `restic snapshots` cannot be read as a list of snapshots with their ids
 (another shape, an id that is not text), no entry leaves: the index keeps them
 all until a later backup reads the list.
@@ -1077,7 +1157,9 @@ runs (also when restic fails) and is checked in both definitions before the
 overlay is removed, a failed merge (loud, alert, nothing removed), a VM shut
 down during the backup, the shut-off path and its re-check, the refused
 states, a left-over overlay, an unusable repository (no snapshot taken),
-the keep tag, `forget`'s arguments, the index entries, the timer's units
+the keep tag, `forget`'s arguments, the index entries (an entry whose snapshot
+restic lists under a new ID after `restic tag` stays, under that new ID, and
+after a second `restic tag` too: `SnapshotNamesTest`), the timer's units
 (the stop budget covers the merge's limit), and that the NAS constants match
 `btrfs/btrfs-snapshot`. They also check what a manual run can meet: a closed
 terminal during restic (on a pseudo-terminal) and a pipe without a reader
@@ -1105,17 +1187,47 @@ it printed its snapshot leaves that snapshot recorded and forgets nothing
 (or names it when the record fails), and a stop while the check of a
 shut-off VM started during the read waits for virsh is raised once its
 snapshot is recorded (`NasStopHeldFromAnswerTest` adds the staged files'
-removal and the check of a VM still shut off, in-process; `ResticBackupAnsweredTest`
+removal and the check of a VM still shut off, in-process; a stop after a
+read whose check passed, live or shut off, carried or held, indexes the
+snapshot after the merge back and names it in the stop, with no listing,
+forget or retention, and indexes nothing when the merge back fails; the
+index refusing it, or failing to be written, puts its words in the stop; a check that could not be
+done records the snapshot as torn only after a stop that ended restic, the
+check's error kept in the stop's context; `NasStopAfterTheMergeBackTest`: a
+stop after a good read's merge back, in the retention, the index's listing
+or its write, indexes the snapshot before it ends the run, with nothing
+listed or forgotten after it; `ResticBackupAnsweredTest`
 the call that starts the hold, once restic exited with its snapshot); the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
 when that forget fails, a listing fails, an ID is ambiguous or its listed
-snapshot lacks a tag, drops one restic no longer lists without forgetting
+snapshot lacks a tag, forgets one restic lists under a new ID after
+`restic tag` (its original recorded) by that ID, drops one restic no longer lists without forgetting
 it, keeps the entries of other VMs, repositories and
 newer formats, refuses a newer or unreadable record before anything, and
-the record's lock gives up after its timeout. Tier 1's `test_200` stops a
+the record's lock gives up after its timeout. The check of the snapshots no
+record names (`NasStraySnapshotTest`, `ResticInstantTest`): a newer one is
+named (its short ID and time, the commands with its full ID) with one alert,
+and the retention waits; one older than every indexed backup, the run's own,
+an adopted one, a recorded torn one and one listed under a new ID after
+`restic tag` (its original indexed) are not; no NAS entry of the VM in the
+index means no listing at all; an unreadable time names the stray but is no
+baseline; times are compared as instants across a change of the offset; a
+listing that fails or an index or record that cannot be read makes the
+retention wait unnamed. Tier 1's `test_203` runs it against the real restic
+(its `time`, the `original` a real `restic tag` sets, the `--host`
+filter): the index's step moves a retagged entry to its new ID (restic finds
+the snapshot by it only), and after a second `restic tag` the entry is no
+stray and moves again, the stray named and not counted, then quiet after it is adopted or
+forgotten, and no listing with the index moved aside. Tier 1's `test_200` stops a
 real restic read once restic printed its snapshot (the snapshot is recorded
-and named, and the next retry forgets it), and `test_151` runs the
-torn-snapshot retry, the retention after it and `forget_torn` against the
+and named, and the next retry forgets it), `test_204` stops it once restic
+ended on its own (exit 0: the snapshot is indexed, the record stays empty,
+and the next retry names nothing and runs the retention), `test_221` stops
+the retention's restic forget after a good read (the snapshot is indexed
+first, nothing is forgotten, and the next retry names nothing and runs the
+retention), and `test_151` runs the
+torn-snapshot retry (also of a snapshot a real `restic tag` saved under a
+new ID), the retention after it and `forget_torn` against the
 real restic over SFTP to its NAS container (restic's own `snapshots --json`,
 a short recorded ID, the record and its lock as root). No E2E test runs a
 whole NAS backup: neither tier has libvirt with a running guest.
@@ -1136,7 +1248,14 @@ snapshot and loses an entry only on a listing it read (`indexClean`,
 `indexInRepo`); the retention never lets a torn snapshot take a good
 one's place and keeps the kept ones (`goodKeptFull`, `keepKept`); only a
 consistent read is indexed (`consistentRead`), also without `--atomic`
-(five instances, `nas_partial` among them). Its traces are replayed against the real code
+(`nas_partial`); a retention never runs while a snapshot no record names
+is newer than the oldest indexed one (`strayNotCounted`), and never lets a
+torn snapshot take a good one's place but one the check cannot see (older
+than every indexed backup) or the user adopted (`goodKeptAll`); a run a
+stop ended after a checked read, or after a good read's merge back, all
+merged back, has its snapshot in the index (`checkedIndexed`); six
+instances, `nas_strays` the one with four runs where the user adopts or
+forgets a named snapshot. Its traces are replayed against the real code
 (`vm/tests/test_vm_nas_replay.py`, in the unit suite), so a change of order
 in `nas.py` fails the unit tests until the spec follows it. What it models,
 its gaps and its numbers:
