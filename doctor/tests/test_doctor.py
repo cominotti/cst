@@ -3174,6 +3174,39 @@ class UserManagerBoxesTest(Scratch):
         self.assertIn(f"The {alone}; for builds", info)
         self.assertNotIn("idle", info)
 
+    def test_the_lines_of_one_check_agree_when_off_removes_game_state_midway(self) -> None:
+        # game.state records a uid no account has, and an 'off' removes it while the check runs: right after
+        # the check's first read of it past the one that picks the user manager. The check reads the uid once
+        # for all its lines, so the jobs line says what the slice's line says; before, it read game.state again
+        # for each line and the jobs line, finding none, got the idle words.
+        self.as_root_with_game_state_uid("999999")
+        self.cg("x.slice", usage_usec=1_000_000)
+        self.cg("app.slice/run-u1.service", usage_usec=1_000_000)
+        host = doc_adapters.Host(self.env, repo=REPO)
+        host.uid = 0
+        state = os.path.join(self.root, "run", "cpu-setup", "game.state")
+        opened = host.open_text
+        reads: list[str] = []
+
+        def open_text(path: str) -> TextIO:
+            f = opened(doc_domain.ViewPath(path))
+            if path == state:
+                reads.append(path)
+                if len(reads) == 2:
+                    os.remove(state)  # 'off' ends the profile after this read
+            return f
+
+        with mock.patch.object(host, "open_text", open_text), mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(doc_cpu.check_user_manager_boxes(host))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(len(reads), 2)  # one read to pick the manager, one for every line
+        self.assertEqual([r.status for r in res], [doc_domain.WARN, doc_domain.INFO], res)
+        alone = "game profile, on for uid 999999, which no account has now, leaves this user manager alone until 'off'"
+        warn, info = res[0].message, res[1].message
+        self.assertIn(f"without the toolboxes' limits; the {alone}. Name it user-x.slice", warn)
+        self.assertIn(f"The {alone}; for builds", info)
+        self.assertNotIn("idle", info)
+
     def test_a_uid_an_account_has_keeps_the_idle_words(self) -> None:
         self.as_root_with_game_state_uid(str(os.getuid()))
         self.cg("x.slice", usage_usec=1_000_000)

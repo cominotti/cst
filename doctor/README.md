@@ -600,7 +600,8 @@ profile is on (as the drift check asks, and as the tick demotes that user's
 boxes), else the `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`. While no account
 has the uid the profile is on for, the profile calls no user manager until
 `off`, and the check says it leaves that manager alone instead of making
-its boxes idle while a game runs.
+its boxes idle while a game runs. The check reads that uid once for all its
+lines, so they say the same when an `off` removes `game.state` while it runs.
 
 ### 8.4 Settings 'off' could not undo
 
