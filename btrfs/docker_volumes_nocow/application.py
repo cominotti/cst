@@ -357,10 +357,9 @@ class DockerVolumesNocow:
             self.out.say(f"{self.paths.config_problem}: the boot's migration waits until it is fixed")
         flagged = self.state.flag_exists()
         # With the flag there a migration is scheduled: a record beside it (a removal that failed) is old.
-        recorded = self.state.read_outcome() if not flagged else None
-        line = outcome_line(recorded) if recorded is not None else ""
-        if line:
-            self.out.say(line)
+        recorded = "" if flagged else outcome_line(self.state.read_outcome())
+        if recorded:
+            self.out.say(recorded)
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent")
             return
@@ -376,7 +375,7 @@ class DockerVolumesNocow:
             self.out.say(
                 f"  {len(todo)} with copy-on-write data ({sum(t.size for t in todo) >> 20} MiB), migration {when}"
             )
-            if on and not flagged and not line:
+            if on and not flagged and not recorded:
                 # +C, no flag, no record: no boot looks again (a boot asks only for a folder without +C).
                 self.out.say("  no boot asks for it: run cst btrfs install")
         line = postponed_line(self.state.read_postponed())
