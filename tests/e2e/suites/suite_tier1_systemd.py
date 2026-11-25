@@ -5997,7 +5997,7 @@ EOF
             grep -qxF "  migration postponed at 1 boot(s) in a row, last ?: r" <<<"$out"
             d="$(doctor)"
             echo "test_215 doctor, a time past the clock: $(grep -F "Docker volumes NOCOW" <<<"$d" || true)" >&2
-            if grep -qF "the check itself failed" <<<"$d"; then echo "doctor's check failed" >&2; exit 1; fi
+            if grep -qF "check_docker_nocow_postponed: the check itself failed" <<<"$d"; then echo "doctor's check failed" >&2; exit 1; fi
             grep -qF "info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last at an unknown time: r;" <<<"$d"
             # 4. A file in place of the state folder: no record.
             rm -rf {state}
