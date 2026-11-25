@@ -85,6 +85,7 @@ from cst_core.domain.text import (
     NO_WORDS,
     YES_WORDS,
     cgroup_v2_path,
+    count_text,
     describe_problems,
     enum_member,
     first_line,
@@ -180,6 +181,11 @@ class DomainTest(unittest.TestCase):
         for text in ("", "\n", "1:name=systemd:/a.scope\n", " 0::/a.scope", "10::/a.scope", "0:/a.scope"):
             with self.subTest(text=text):
                 self.assertIsNone(cgroup_v2_path(text))
+
+    def test_count_text(self) -> None:
+        for text, count in (("2", 2), (" 3\n", 3), ("0", 0), ("", 0), ("two", 0), ("-1", -1)):
+            with self.subTest(text=text):
+                self.assertEqual(count_text(text), count)
 
     def test_first_line(self) -> None:
         self.assertEqual(first_line("\n  \n  error: x \nmore"), "error: x")
@@ -660,6 +666,17 @@ class CounterFileTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path))
         self.counter.save(1)
         self.counter.forget()
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_forget_raises_an_error_other_than_a_missing_file(self) -> None:
+        # forget swallowed every OSError: a count it could not remove was left behind in silence,
+        # and the next boot took it for the new request's.
+        os.mkdir(self.path)
+        with self.assertRaises(IsADirectoryError):
+            self.counter.forget()
+        self.assertTrue(os.path.isdir(self.path))
+        os.rmdir(self.path)
+        self.counter.forget()  # none: nothing to forget, no error
         self.assertFalse(os.path.exists(self.path))
 
 

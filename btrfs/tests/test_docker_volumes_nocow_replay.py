@@ -11,7 +11,7 @@ by run:
 - the trace's start becomes the volumes on disk, the folder's +C, the flag and the counter;
 - a run (a boot, an install, Docker recreating a volume) gets the faults the trace picked, each at
   the position of its call in the run (Docker running, no room, chcon, cp failing, killed or
-  copying wrong; a rename, the flag, the counter or its reset failing) and dies where the trace
+  copying wrong; a rename, the flag, the counter, its reset or its removal by install failing) and dies where the trace
   crashes; a power loss also spoils the copies the spec says it loses;
 - every call the code makes that changes the volumes or the helper's files is recorded with the
   spec's label: the calls of a run must be the spec's, in the spec's order;
@@ -56,7 +56,9 @@ LABEL: Final = b"system_u:object_r:container_file_t:s0"
 SILENT: Final = "~"
 FAIL: Final = "fail"
 # The recorded calls whose "fail" outcome this test injects (an OSError, at that call's position).
-INJECTED: Final = frozenset({"request_migration", "save_attempts", "remove_flag", "rename_new_data", "rename_old_data"})
+INJECTED: Final = frozenset(
+    {"request_migration", "save_attempts", "forget_attempts", "remove_flag", "rename_new_data", "rename_old_data"}
+)
 # Every (label, outcome) of a recorded call in the spec: the checked-in traces replay each at least once.
 SPEC_CALLS: Final = frozenset(
     {
@@ -69,6 +71,7 @@ SPEC_CALLS: Final = frozenset(
         ("request_migration", "ok"),
         ("request_migration", FAIL),
         ("forget_attempts", ""),
+        ("forget_attempts", FAIL),
         ("set_nocow_vols", ""),
         ("remove_attempts", ""),
         ("remove_flag", "ok"),

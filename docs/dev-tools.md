@@ -1055,7 +1055,8 @@ network is used. `tests/test_quint_task.py` checks the task's flags.
 helper's files (the methods of `VolumeTreePort` and `NocowStatePort`), in
 the code's order: `install`'s `mark` (with copy-on-write data, the request
 first: an old count reset, then the flag, then +C on the volumes folder;
-without, the count forgotten, then +C), after which `btrfs-setup.sh` writes
+without, the count forgotten, then +C; a forget that fails ends mark there,
+with the count kept and no +C), after which `btrfs-setup.sh` writes
 nothing whatever mark's exit status; each boot's
 `migrate` (the recovery of an interrupted migration, volume by volume; the
 folder's +C and its request; the give-up check; the counter; the rewrite of
@@ -1063,14 +1064,16 @@ each volume: twin, label, copy, sync, the two renames, the old copy's
 removal; `give_up`); and Docker recreating a volume. A crash can come after
 any step: a kill, or a power loss that also loses a copy not yet synced. A
 step can fail where the code checks the outcome (a rename, the flag's
-removal, the counter, the copy). The label each action leaves in `step` is
+removal, the counter, install's forget of it, the copy). The label each action leaves in `step` is
 the call the replay records from the real code, so the spec's traces can be
 replayed against it. A start without the flag may hold a count of boots an
 older helper left (any count up to `GIVE_UP_AFTER`): with an install that
 touched the flag beside it after a failed reset, `attemptsMatch` fails. A
 volume's folders hold contents, not files ("cow",
 "copy", "partial", "empty", "absent"). The spec's header lists what it does
-not model: `scan(fix)`, the postponed record, journal lines and alerts,
+not model: `scan(fix)`, the postponed record, the outcome record (written
+and removed best effort, read by no decision of `migrate` or `mark`),
+journal lines and alerts,
 `daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
 a failing `remove_tree`, containers writing during an install, the
 durability of metadata, and the start an older install could leave (+C on
@@ -1127,6 +1130,19 @@ planted copy of the spec that removes the flag before the counter violates
 `attemptsMatch`, and one that saves the counter after the rewrite violates
 `boundedTries`.
 
+The owner accepted (2026-11-24) two things the spec shows here, and both stay
+as they are. The bound is per round, not per request: a stop between the
+counter's removal and the flag's starts the count over, while removing the
+flag first would leave a counter that a later request inherits, so that
+request would give up too early. And `mark()` may run while a rewrite is
+between its two renames: the volume then has no `_data`, so `mark()` does
+not see its data and may remove the counter while the flag stays. Nothing is
+lost: the next boot's recovery puts the original back as `_data`, and the
+request (the flag) is still there, so that boot migrates it, with its count
+started over. Closing either gap would need a lock or a journal shared by
+install and the boot, for a case that costs at most `GIVE_UP_AFTER` more
+rewrites.
+
 **Where `sync()` may go.** The copy is synced before `rename(_data,
 old)`. Moving the sync to just after that rename (still before
 `rename(new, _data)`) is safe, and the checker says so: a power loss before
@@ -1171,8 +1187,8 @@ error) the checked-in trace is left as it is and the run stops with exit 1. Abou
 all; the replay takes a fraction of a second.
 
 What the replay does not compare: `scan(fix)` setting +C in place on
-folders and empty files, the postponed record, journal lines and the alert,
-`daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
+folders and empty files, the postponed record, the outcome record, journal
+lines and the alert, `daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
 a failing `remove_tree`, containers writing during an install, and the
 durability of metadata (the unit tests and the fault tests cover those).
 

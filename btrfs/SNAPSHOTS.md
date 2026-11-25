@@ -751,7 +751,10 @@ again. After two boots with items still busy, it gives up, removes the flag
 and sends an alert (shown at your next login). Each boot's attempt is written
 to disk (fsync) before the moves start, so a boot that hangs or is reset
 during the moves still counts. The items stay where they are,
-and snapshots start.
+and snapshots start. Each `bulk apply` starts the count again (it removes
+`/var/lib/btrfs-bulk/boot-attempts`); when it cannot remove that file, it
+says `cannot reset the count of boot attempts`, moves nothing and exits 1,
+since an old count would make the next boot give up too early.
 
 **`NEEDS A LOOK` items are not moved automatically.** `snapshots setup`
 warns about them **before** it starts the snapshots, and then asks whether to

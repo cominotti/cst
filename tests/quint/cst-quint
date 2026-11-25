@@ -161,8 +161,8 @@ CHECKS: Final[tuple[Check, ...]] = (
 # to each witness a random walk rarely reaches (the seed and the bounds fix which one): a "never..."
 # value of the spec, or the negation of a step's label for a call with no witness of its own.
 NOCOW_WITNESSES: Final = (
-    ("recovered", "nocow_a", "neverRecovered", 45),
-    ("recover_failed", "nocow_a", "neverRecoverFailed", 40),
+    ("recovered", "nocow_a", "neverRecovered", 50),
+    ("recover_failed", "nocow_a", "neverRecoverFailed", 80),
     ("old_removed", "nocow_a", "neverOldRemoved", 40),
     ("twin_removed", "nocow_a", "neverTwinRemoved", 20),
     ("rolled_back", "nocow_a", "neverRolledBack", 30),
@@ -170,8 +170,10 @@ NOCOW_WITNESSES: Final = (
     ("gave_up_flag_kept", "nocow_a", "neverGaveUpFlagKept", 30),
     ("converged", "nocow_a", "neverConverged", 30),
     ("install_forgot", "nocow_a", 'not(step.name == "forget_attempts")', 20),
+    ("forget_failed", "nocow_a", 'not(step.name == "forget_attempts" and step.outcome == "fail")', 20),
     ("reset_failed", "nocow_a", 'not(step.name == "save_attempts" and step.outcome == "fail")', 20),
     ("label_failed", "nocow_a", 'not(step.name == "reference_label" and step.outcome == "fail")', 20),
+    ("copy_failed", "nocow_a", 'not(step.name == "copy" and step.outcome == "fail")', 20),
     ("copy_mismatch", "nocow_a", 'not(step.name == "copy" and step.outcome == "mismatch")', 20),
     ("copy_killed", "nocow_a", 'not(step.name == "copy" and step.outcome == "killed")', 25),
     ("power_loss_partial", "nocow_a", "neverPowerLossPartial", 20),
