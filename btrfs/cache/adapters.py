@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Host and toolbox adapters for `cst btrfs cache` (`btrfs/btrfs-cache`): the ports of ports.py over the
 host's files and commands, as the host sees them (the test root of CST_BTRFS_CACHE_ROOT; /run/host for the
-reads from a toolbox), and the front that runs the use cases of application.py over them."""
+reads from a toolbox), and cache_mounts, the use cases of application.py over them (wiring.py builds it)."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from btrfs.cache.domain import (
     FINDMNT_COLUMNS,
     MIN_HUMAN_UID,
     CacheMountBinding,
-    CacheMountParsedArgs,
     CacheMountUser,
     LiveMount,
     parse_findmnt_mounts,
@@ -32,7 +31,7 @@ from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
-from cst_core.adapters.runtime import ManagedCliEnv, host_view_path
+from cst_core.adapters.runtime import host_view_path
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode
 
@@ -312,13 +311,3 @@ def cache_mounts(rt: CacheMountRuntime) -> CacheMounts:
         accounts=CacheAccounts(rt),
         seam_root=rt.seam_root,
     )
-
-
-def dispatch_cache_mount_cli_action(
-    parsed: CacheMountParsedArgs, env: ManagedCliEnv, *, read_only: bool
-) -> tuple[int, list[str]]:
-    """Resolve runtime dependencies and execute the requested `cache` subcommand."""
-    del read_only
-    env_map = os.environ if env.env is None else env.env
-    prog = env_map.get("CST_PROG") or "cst btrfs cache"
-    return cache_mounts(cache_runtime(env_map, env.ctx, env.runner)).run(parsed, prog)
