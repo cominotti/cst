@@ -11,7 +11,7 @@ from typing import Final
 
 from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.units import SYSTEMD_WHITESPACE, systemd_lines
-from cst_core.domain.values import MINUTE, parse_integer, parse_whole_number
+from cst_core.domain.values import MINUTE, parse_integer
 from cst_core.domain.text import (
     file_lines,
     is_mount_comment,
@@ -25,6 +25,7 @@ DEFAULT_LEVEL: Final[int] = 1
 BTRFS_ZSTD_DEFAULT_LEVEL: Final[int] = 3
 MIN_ZSTD_LEVEL: Final[int] = 1
 MAX_ZSTD_LEVEL: Final[int] = 15
+_KSTRTOINT_BOUNDS: Final = (-(2**31), 2**31 - 1)  # kernel int: kstrtoint refuses outside it (-ERANGE)
 
 FSTAB_PATH: Final[str] = "/etc/fstab"
 PROC_MOUNTS_PATH: Final[str] = "/proc/mounts"
@@ -206,17 +207,14 @@ def parse_compress_spec(token: str) -> CompressSpec | None:
     """Parse one mount option token if it is `compress*` or `compress-force*`."""
     if not _is_compress_token(token):
         return None
-    if "=" not in token:
-        mode = CompressMode.COMPRESS_FORCE if token == CompressMode.COMPRESS_FORCE else CompressMode.COMPRESS
-        return CompressSpec(mode=mode, algo="zlib", level=None, raw=token)
-    key, value = token.split("=", 1)
+    key, sep, value = token.partition("=")
     mode = CompressMode.COMPRESS_FORCE if key == CompressMode.COMPRESS_FORCE else CompressMode.COMPRESS
-    if ":" in value:
-        algo, lvl_str = value.split(":", 1)
-        # As the kernel's kstrtoint (btrfs_compress_str2level): one optional "+" or "-", then ASCII digits.
-        lvl = parse_whole_number(lvl_str[1:]) if lvl_str.startswith("+") else parse_integer(lvl_str)
-        return CompressSpec(mode=mode, algo=algo, level=lvl, raw=token)
-    return CompressSpec(mode=mode, algo=value, level=None, raw=token)
+    if not sep:
+        return CompressSpec(mode=mode, algo="zlib", level=None, raw=token)
+    algo, has_lvl, lvl_str = value.partition(":")
+    # As kernel kstrtoint (btrfs_compress_str2level): optional +/-, ASCII digits, within int32.
+    lvl = parse_integer(lvl_str, plus=True, bounds=_KSTRTOINT_BOUNDS) if has_lvl else None
+    return CompressSpec(mode=mode, algo=algo, level=lvl, raw=token)
 
 
 def extract_compress_specs(options_str: str) -> tuple[CompressSpec, ...]:

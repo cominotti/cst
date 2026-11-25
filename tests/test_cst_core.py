@@ -323,6 +323,31 @@ class ValueObjectsTest(unittest.TestCase):
                 with self.subTest(bad=bad[:12]):
                     self.assertIsNone(parse_integer(bad))
 
+    def test_an_integer_with_plus_and_bounds_is_read_as_the_kernel_reads_it(self) -> None:
+        # (text, plus, bounds, the integer or None)
+        cases = (
+            ("+5", True, None, 5),
+            ("+0", True, None, 0),
+            ("-5", True, None, -5),
+            ("+-5", True, None, None),
+            ("++5", True, None, None),
+            ("-+5", True, None, None),
+            ("+", True, None, None),
+            ("+ 5", True, None, None),
+            ("+5", False, None, None),
+            ("7", False, (0, 7), 7),
+            ("8", False, (0, 7), None),
+            ("-1", False, (0, 7), None),
+            ("-8", True, (-8, 7), -8),
+            ("-9", True, (-8, 7), None),
+            ("+7", True, (-8, 7), 7),
+            ("+8", True, (-8, 7), None),
+            ("x", True, (-8, 7), None),
+        )
+        for text, plus, bounds, want in cases:
+            with self.subTest(text=text, plus=plus, bounds=bounds):
+                self.assertEqual(parse_integer(text, plus=plus, bounds=bounds), want)
+
     def test_duration_parse(self) -> None:
         self.assertEqual(Duration.parse("30s"), Duration(30))
         self.assertEqual(Duration.parse("15m"), Duration(900))

@@ -279,6 +279,12 @@ class DomainTests(unittest.TestCase):
             ("zstd:\N{ARABIC-INDIC DIGIT ONE}", None),
             ("zstd:1_0", None),
             ("zstd:", None),
+            # kstrtoint refuses a number its int cannot hold (-ERANGE).
+            ("zstd:2147483647", 2**31 - 1),
+            ("zstd:-2147483648", -(2**31)),
+            ("zstd:2147483648", None),
+            ("zstd:-2147483649", None),
+            ("zstd:+99999999999", None),
         )
         for value, level in cases:
             with self.subTest(value=value):

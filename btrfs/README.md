@@ -1556,8 +1556,9 @@ cst btrfs compress-force revert        # root on host; back to compress=zstd:N
 N is a zstd level 1..15 in ASCII digits; anything else is a usage error
 (exit 2). A level read from `/etc/fstab`, the kernel arguments or a mount
 is read as the kernel reads it (`kstrtoint`): one optional `+` or `-`,
-then ASCII digits; anything else, a no-break space or a digit of another
-script for example, gives no level.
+then ASCII digits, within the kernel's `int` (-2147483648 to 2147483647);
+anything else, a no-break space, a digit of another script or a number too
+large for an `int` for example, gives no level.
 
 **Why:** with plain `compress=zstd:1`, btrfs runs a fast pre-compression estimator
 before invoking zstd and skips compression altogether when the sample looks only

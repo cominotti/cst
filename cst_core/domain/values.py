@@ -131,16 +131,25 @@ def parse_whole_number(text: str) -> int | None:
     return _whole_number(text)
 
 
-def parse_integer(text: str) -> int | None:
+def parse_integer(text: str, *, plus: bool = False, bounds: tuple[int, int] | None = None) -> int | None:
     """TEXT as an integer: one optional leading "-", then what parse_whole_number takes ("-0" is 0).
 
     None for anything else: "+5", "--5", "-" alone, blanks, a digit that is not ASCII, or more digits
-    than int() reads. Never a ValueError.
+    than int() reads. Never a ValueError. plus: one leading "+" is taken too, as the kernel's kstrto*
+    take it ("+-5" and "++5" stay None). bounds (LOW, HIGH): None for a number outside them, as the
+    kernel's kstrto* refuse a value their type cannot hold (-ERANGE).
     """
     if text.startswith("-"):
         number = parse_whole_number(text[1:])
-        return None if number is None else -number
-    return parse_whole_number(text)
+        value = None if number is None else -number
+    elif plus and text.startswith("+"):
+        value = parse_whole_number(text[1:])
+    else:
+        value = parse_whole_number(text)
+    if value is None or bounds is None:
+        return value
+    low, high = bounds
+    return value if low <= value <= high else None
 
 
 @dataclass(frozen=True, slots=True)
