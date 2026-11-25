@@ -3951,6 +3951,31 @@ class NasStopHeldFromAnswerTest(unittest.TestCase):
         self.assertEqual(_written(store), [[(SNAP_ID, "crash-consistent")]])
         self.assertEqual(commits, [1], "the index is written after the merge back")
 
+    def test_a_held_stop_after_a_good_read_prints_the_runs_notes_first(self) -> None:
+        # They were dropped: a TPM copy that may be torn went unsaid for a backup the stop calls indexed.
+        note = "tpm changed while restic read it (/var/lib/swtpm): that copy may be torn"
+        lines: list[str] = []
+        preflight = vm_app_nas._nas_preflight
+
+        def noted(
+            cfg: vm_domain.VmSettings, p: vm_app_nas.NasBackup, vm: str, *, live: bool, quiesce: bool
+        ) -> vm_domain_backup.NasRun:
+            run = preflight(cfg, p, vm, live=live, quiesce=quiesce)
+            run.notes.append(note)
+            return run
+
+        def say(_out: FakeNasOut, text: str, *, flush: bool = False) -> None:
+            del flush
+            lines.append(text)
+
+        with (
+            mock.patch.object(vm_app_nas, "_nas_preflight", side_effect=noted),
+            mock.patch.object(FakeNasOut, "say", autospec=True, side_effect=say),
+        ):
+            stop, _store, _commits = self._live_held(commit_fails=False)
+        self.assertEqual(str(stop), STOPPED_INDEXED)
+        self.assertIn(f"  note: {note}", lines)
+
     def test_a_stop_after_a_good_read_whose_merge_back_fails_indexes_nothing(self) -> None:
         refused, store, _commits = self._live_held(commit_fails=True)
         self.assertIsInstance(refused, Refused)
@@ -4061,6 +4086,24 @@ class NasStopAfterTheMergeBackTest(unittest.TestCase):
                 retention = [c for c in calls if "--keep-weekly" in c]
                 self.assertEqual(len(retention), 1, "the retention ran once, before the stop")
                 self.assertEqual([c for c in calls if c[0] == "forget" and c not in retention], [], "nothing forgotten")
+
+    def test_the_runs_notes_are_printed_before_the_stop(self) -> None:
+        # They were dropped: a TPM copy that may be torn went unsaid for a backup the stop calls indexed.
+        note = "tpm changed while restic read it (/var/lib/swtpm): that copy may be torn"
+        preflight = vm_app_nas._nas_preflight
+
+        def noted(
+            cfg: vm_domain.VmSettings, p: vm_app_nas.NasBackup, vm: str, *, live: bool, quiesce: bool
+        ) -> vm_domain_backup.NasRun:
+            run = preflight(cfg, p, vm, live=live, quiesce=quiesce)
+            run.notes.append(note)
+            return run
+
+        for where in ("retention", "listing", "write"):
+            with self.subTest(where=where), mock.patch.object(vm_app_nas, "_nas_preflight", side_effect=noted):
+                stop, _store, _calls, out = self._run(where)
+                self.assertEqual(str(stop), STOPPED_INDEXED)
+                self.assertIn(f"  note: {note}", out.lines)
 
     def test_a_stop_in_the_retention_lists_nothing_more(self) -> None:
         _stop, _store, calls, out = self._run("retention")

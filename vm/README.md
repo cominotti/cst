@@ -638,7 +638,8 @@ restic has just ended on its own. When the snapshot is a backup (the check
 of a shut-off VM passed, or the read of a running VM's snapshot), it is
 indexed after the merge back, and then the stop ends the run with "restic
 snapshot ID of VM is a backup: indexed (the retention runs at the next
-backup)": no retention and no listing then, nothing forgotten. A stop that
+backup)", after the run's notes (a TPM copy that may be torn, ...): no
+retention and no listing then, nothing forgotten. A stop that
 comes after the merge back of a good read (while the retention, a listing or
 the index's write runs) ends the run the same way: the snapshot is indexed
 first, with the same words, and nothing more is forgotten or listed. If the

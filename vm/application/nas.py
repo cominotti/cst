@@ -266,6 +266,7 @@ def nas_run(
         # A stop after a read whose check passed, all merged back: the snapshot is a backup, indexed
         # before the stop ends the run (no listing, no retention: those wait for the next backup).
         if refused is None and isinstance(failure, StopAfterBackup):
+            _say_notes(p, run.notes)
             failure = _index_stopped_backup(
                 p, vm, failure, nas_index_entry(run, nas, failure.snap, failure.consistency, keep)
             )
@@ -291,6 +292,7 @@ def _nas_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, en
         refused = _index_nas_backup(p, vm, nas, entry)
     except Stop as e:
         with p.signals.ignored():
+            _say_notes(p, run.notes)
             raise _index_stopped_backup(p, vm, e, entry) from None
     for line in nas_done_lines(run.notes, snap, vm, entry["consistency"], entry["keep"]):
         p.out.say(line)
@@ -592,6 +594,13 @@ def _nas_not_merged_back(
 def _add_overlay_files(p: NasBackup, run: NasRun) -> None:
     """run.overlaid gets each overlay of run.specs whose file is there."""
     run.overlaid.update({t: spec for t, spec in run.specs.items() if p.store.lexists(spec[1])})
+
+
+def _say_notes(p: NasBackup, notes: Sequence[str]) -> None:
+    """The run's notes (a TPM copy that may be torn, ...), as nas_done_lines prints them: for a stop that
+    ends a run whose snapshot is a backup, before its words."""
+    for n in notes:
+        p.out.say(f"  note: {n}")
 
 
 def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) -> Stop:
