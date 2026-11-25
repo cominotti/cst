@@ -123,7 +123,9 @@ other work at the same time (another test run, a build, an agent).
   spread of 5% to 11%). With fewer workers the long units are a smaller part
   of each worker's share, so their place in the queue matters less.
 
-Conditions of these numbers: Python 3.15; 3 runs per cell, the median shown;
+Conditions of the numbers above, except the longest-first bullet's, which
+gives its own (so: the affinity numbers, the worker table, and the TMPDIR and
+`nice -n 10` bullets): Python 3.15; 3 runs per cell, the median shown;
 a shared machine, with another project's load at times (the spread was 1% to
 3% at 8 workers or more, up to 39% at 2 to 4). The tree measured was not
 `main`: it was `main` plus the verification proof-of-concept tests (3,354
