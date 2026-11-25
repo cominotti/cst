@@ -32,6 +32,7 @@ from btrfs.health_check.domain import (
     scrub_age_days,
     snapshots_overdue,
 )
+from btrfs.snapshot_runtime.domain import days_between, latest_epoch, next_check_failures
 from tests.mbt import profiles
 
 profiles.load()
@@ -124,6 +125,33 @@ class HealthCheckArithmeticTest(profiles.MbtTestCase):
             " 2>/dev/null || echo error"
         )
         self.assertEqual(bash(script, now, nas_last), [str(int(nas_overdue(now, nas_last)))])
+
+
+class NasArithmeticTest(profiles.MbtTestCase):
+    # btrfs-snapshot line 1092 (and 1369): age_d=$(( ($(date +%s) - last) / 86400 )).
+    @given(now=WORD, last=WORD)
+    def test_days_between(self, now: int, last: int) -> None:
+        got = bash('last=$2; ( echo "$(( ($1 - last) / 86400 ))" ) 2>/dev/null || echo error', now, last)
+        self.assertEqual(got, [str(days_between(now, last))])
+
+    # btrfs-snapshot line 1348: fails=$(( $(cat nas-check-failures || echo 0) + 1 )), the count as text.
+    @given(before=WORD)
+    def test_next_check_failures(self, before: int) -> None:
+        got = bash('( echo "$(( $1 + 1 ))" ) 2>/dev/null || echo error', before)
+        self.assertEqual(got, [str(next_check_failures(before))])
+
+    # btrfs-snapshot lines 1078-1081: nas_since's loop over nas-last-ok and nas-enabled-at (None: no file,
+    # an empty $(cat)); best printed as bash arithmetic reads it ("010" is 8).
+    @given(last_ok=st.one_of(st.none(), DIGITS, WORD.map(str)), enabled_at=st.one_of(st.none(), DIGITS, WORD.map(str)))
+    def test_latest_epoch(self, last_ok: str | None, enabled_at: str | None) -> None:
+        script = """best=0
+for v in "$1" "$2"; do
+    [[ "${v}" =~ ^[0-9]+$ ]] && (( v > best )) && best="${v}"
+done 2>/dev/null
+echo "$(( best ))"
+"""
+        got = bash(script, last_ok or "", enabled_at or "")
+        self.assertEqual(got, [str(latest_epoch([last_ok, enabled_at]))])
 
 
 class BashReadsTest(profiles.MbtTestCase):

@@ -1333,6 +1333,12 @@ Rules the script follows about the password:
 
 1. Checks the NAS is reachable. If not, it skips the run. You get an alert
    only when the last good backup is `NAS_STALE_DAYS` (7) days old or more.
+   The last good backup is the later of `nas-last-ok` and `nas-enabled-at`
+   in `/var/lib/btrfs-snapshot`, each read as the old bash's arithmetic
+   read it (and as `btrfs-health-check` reads them): a leading `0` is
+   octal (`08` is no number and is skipped), a value past 2**63 - 1 wraps
+   around (a negative one is skipped), and the age in days and the count of
+   failed checks (`nas-check-failures`) are 64-bit and wrap the same way.
 2. Opens the repository with the password. What
    `/var/lib/btrfs-snapshot` records about it (which snapshots it has, the
    last prune and check) belongs to that repository's id

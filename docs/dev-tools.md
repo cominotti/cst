@@ -788,6 +788,7 @@ not derive from it.
 - `mbt_bash_arith.py`: the health check's and the NAS run's numbers
   against the real bash: each property calls one domain function
   (`scrub_age_days`, `boot_since`, `snapshots_overdue`, `nas_overdue`;
+  the NAS run's `days_between`, `next_check_failures` and `latest_epoch`;
   the reads `bash_int`, `bash_decimal` and `critical_warning_value`)
   with values around 0, +-2**63 and +-2**64 (digit strings of up to 5000
   digits, with leading zeros, and hex for the reads) and has bash evaluate

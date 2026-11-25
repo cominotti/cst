@@ -155,8 +155,10 @@ class GateTest(Base):
         self.nas()
         self.assertEqual(self.notified(), [self.stale("The NAS backup is not configured completely.", 9)])
 
-    def test_a_last_success_past_int_s_digit_limit_is_skipped(self) -> None:
+    def test_a_last_success_past_int_s_digit_limit_wraps_as_bash(self) -> None:
         # isascii() and isdigit() took 5000 digits, and int() raised ValueError out of the staleness check.
+        # bash's (( v > best )) reads them wrapped at 64 bits: 8198552921648689607, a date long after
+        # now, so the backup is never stale (before this, the value was skipped and the enabling counted).
         self.conf(NAS_ENABLED="1", NAS_PATH="")
         self.days_ago("nas-enabled-at", 3)
         self.write(self.state_file("nas-last-ok"), "1" * 5000 + "\n")
@@ -166,7 +168,32 @@ class GateTest(Base):
         self.assertEqual(self.notified(), [])
         self.days_ago("nas-enabled-at", 9)
         self.nas()
-        self.assertEqual(self.notified(), [self.stale("The NAS backup is not configured completely.", 9)])
+        self.assertEqual(self.notified(), [])
+
+    def test_the_staleness_files_are_read_as_bash_arithmetic(self) -> None:
+        # The old nas_since compared them in (( v > best )): a leading 0 is octal, 08 an error (skipped),
+        # a value past 2**63 - 1 wraps around to a negative one (skipped). Main read them as decimal.
+        body = "The NAS backup is not configured completely."
+        self.conf(NAS_ENABLED="1", NAS_PATH="")
+        with self.subTest("octal"):
+            # 9 days ago, written in octal: bash's 9 days (main: the octal digits as a decimal, a date
+            # after now, no alert).
+            self.write(self.state_file("nas-last-ok"), "0" + format(int(time.time() - 9 * DAY), "o") + "\n")
+            rc, _lines, err = self.nas()
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(self.notified(), [self.stale(body, 9)])
+        for text in ("08", "9223372036854775808"):
+            with self.subTest(text):
+                # Skipped: the staleness clock starts now (main: 8, a stale alert from 1970; 2**63, no
+                # alert and no start).
+                self.forget_calls()
+                self.write(self.state_file("nas-last-ok"), text + "\n")
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(self.state_file("nas-enabled-at"))
+                rc, _lines, err = self.nas()
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(self.notified(), [])
+                self.assertLess(abs(int(self.read_state("nas-enabled-at")) - time.time()), 120)
 
     def test_another_nas_run_holds_its_lock(self) -> None:
         with self.hold_lock("run/btrfs-snapshot-nas.lock"):
@@ -952,6 +979,16 @@ class MaintenanceTest(Base):
         self.restic()
         self.nas()
         self.assertFalse(os.path.exists(self.state_file("nas-check-failures")))
+
+    def test_the_failure_count_wraps_at_64_bits_as_bash(self) -> None:
+        # bash's $(( 9223372036854775807 + 1 )) is -2**63: below 3, no alert (main: 2**63 and the alert).
+        self.known_repository()
+        self.write(self.state_file("nas-check-failures"), "9223372036854775807\n")
+        self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})
+        rc, _lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.read_state("nas-check-failures"), "-9223372036854775808\n")
+        self.assertNotIn("NAS backup: repository check keeps failing", [a[4] for a in self.notified()])
 
     def test_a_check_overdue_by_another_interval_alerts(self) -> None:
         self.known_repository()

@@ -42,6 +42,7 @@ from btrfs.snapshot_runtime.domain import (
     duration_s,
     features_type,
     guard_number,
+    latest_epoch,
     next_check_failures,
     repo_id,
     restic_line,
@@ -142,14 +143,9 @@ class Nas:
 
     # ---- staleness -------------------------------------------------------------------------
     def since(self) -> int:
-        """The last good backup, or when the backup was enabled if that is later; started now if
-        neither is recorded."""
-        best = 0
-        for name in ("nas-last-ok", "nas-enabled-at"):
-            v = self.m.read(f"{self.m.state}/{name}")
-            n = None if v is None else parse_whole_number(v)  # ASCII digits within int()'s limit, else skipped
-            if n is not None and n > best:
-                best = n
+        """The last good backup, or when the backup was enabled if that is later (each read as bash
+        arithmetic, latest_epoch); started now if neither is recorded."""
+        best = latest_epoch([self.m.read(f"{self.m.state}/{name}") for name in ("nas-last-ok", "nas-enabled-at")])
         if best == 0:
             best = self.m.now()
             self.m.write(f"{self.m.state}/nas-enabled-at", f"{best}\n")
