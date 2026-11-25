@@ -5,10 +5,12 @@
 - docker-volumes-nocow (test_docker_volumes_nocow and its fault tests): FakeSystem, the inode-flag
   ioctls, getxattr, the commands, os.sync and the fake cp; Crash, which its copy_into raises; the
   flag bits NOCOW and OTHER; entries, carries_flags and tree, to walk and compare a folder;
-- scrub-limit (test_scrub_limit, its fault tests and tests/mbt/mbt_scrub_rollback): ScrubFakeRunner,
-  the installer and systemctl; RecordingInstallerRunner, the installer's text, remove-text and mark
-  through the real InstallService and one install record; SystemdModel, the same and what systemd
-  has loaded of the drop-in; core_text, a generated text of btrfs:core;
+- scrub-limit (test_scrub_limit, test_scrub_limit_ports): ScrubFakeRunner, the installer and
+  systemctl; RecordingInstallerRunner, the installer's text, remove-text and mark through the real
+  InstallService and one install record; SystemdModel, the same and what systemd has loaded of the
+  drop-in; core_text, a generated text of btrfs:core; (its fault tests, tests/mbt/mbt_scrub_rollback
+  and test_scrub_limit_ports) ScrubWorld and FakeScrubSettings, FakeScrubDropin, FakeScrubSystemd and
+  FakeScrubSysfs over it, the in-memory fakes of btrfs/scrub_limit/ports.py;
 - cache (test_cache): FakeMountRunner, findmnt, mount and umount over a list of mounts;
   CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry.
 
@@ -18,6 +20,8 @@ Not collected as a test module (unittest finds test*.py).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
+import contextlib
+import errno
 import json
 import os
 from pathlib import Path
@@ -30,11 +34,17 @@ import sys
 from typing import override
 
 from btrfs.cache.domain import FINDMNT_COLUMNS
+from btrfs.scrub_limit.application import ScrubLimit
+from btrfs.scrub_limit.domain import SCRUB_CONF_PATH, SCRUB_DROPIN_PATH
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
+from cst_core.domain.record import ComponentState
 from cst_core.ports import CommandFault, CommandResult
+from tests.fault_injection import FaultPlan
+from tests.test_install import MemoryTarget
+from tests.test_install_record import MemoryRecord
 
 # ---- files ---------------------------------------------------------------
 
@@ -437,6 +447,267 @@ class SystemdModel(RecordingInstallerRunner):
         if cmd == ["systemctl", "daemon-reload"] and r.returncode == 0:
             self.loaded, self.dirty = read(self.dropin), False
         return r
+
+
+class ScrubWorld:
+    """What scrub-limit's ports see, in memory, for the use cases of btrfs/scrub_limit/application.py:
+    snapshots.conf and its folder, the drop-in (in an in-memory install target, written and removed
+    through the real InstallService with an in-memory install record, as installer.py text --keep-state and
+    remove-text do) and its folder, and what systemd has loaded of it.
+
+    loaded is the drop-in's text at the last daemon-reload that worked; dirty, a write or a removal of the
+    drop-in since (NeedDaemonReload follows writes and the list of drop-ins, not their text, as
+    SystemdModel models it). Every mutating call of a port is one named point (`calls`), through plan
+    (tests/fault_injection.py) and through fail(): snapshots.conf's write is three, "settings folder" (its
+    folder made, on every write), "settings replace" (the text in place) and "settings sync" (the folder's
+    sync after the rename: a failure there leaves the new text in place); "settings remove", "settings
+    rmdir", "drop-in text", "drop-in remove-text", "drop-in rmdir" and "systemctl daemon-reload". A failed
+    rmdir is no error (the port's contract; as os.rmdir, one of a folder that is not there or not empty
+    raises inside the call, before a kill armed there fires), a failed installer call or daemon-reload is an
+    exit 1 with the error on stderr, a failed settings call raises it."""
+
+    def __init__(
+        self,
+        *,
+        conf_path: str = SCRUB_CONF_PATH,
+        dropin_path: str = SCRUB_DROPIN_PATH,
+        record: str = "/var/lib/cst/installed.json",
+    ) -> None:
+        self.conf_path = conf_path
+        self.dropin_path = dropin_path
+        self.record = record
+        self.conf: str | None = None
+        self.conf_folder = False
+        self.conf_unreadable = False
+        self.dropin_folder = False
+        self.dropin_unreadable = False
+        self.loaded: str | None = None
+        self.dirty = False
+        self.show_fails = False  # systemctl cannot say whether systemd loaded the files
+        self.live: tuple[str, ...] = ()  # sysfs's lines (ScrubSysfsPort)
+        self.reload_timeouts: list[float | None] = []  # the time limit of each daemon-reload asked for
+        self.calls: list[str] = []  # every mutating call, by its point name
+        self.built_for: list[bool] = []  # the read_only of each use case build() gave
+        self.plan = FaultPlan()
+        self.failing: dict[str, tuple[OSError, int | None]] = {}
+        self.target = MemoryTarget()
+        self.records = MemoryRecord()
+        self.svc = InstallService(self.target, lambda _e: b"", record=self.records)
+
+    @property
+    def dropin(self) -> str | None:
+        """The drop-in's text (None: not there)."""
+        held = self.target.files.get(self.dropin_path)
+        return None if held is None else held[0].decode()
+
+    def put_conf(self, text: str | None) -> None:
+        """snapshots.conf as a test's start state (None: not there, its folder neither)."""
+        self.conf, self.conf_folder = text, text is not None
+
+    def put_dropin(self, text: str | None) -> None:
+        """The drop-in on disk as a test's start state, not recorded and not loaded (None: not there)."""
+        if text is None:
+            self.target.files.pop(self.dropin_path, None)
+        else:
+            self.target.files[self.dropin_path] = (text.encode(), 0o644)
+        self.dropin_folder = text is not None
+
+    def core_state(self) -> ComponentState | None:
+        """btrfs:core's state in the install record (None: no record, or none for it)."""
+        rec = self.records.read(self.record)
+        return None if rec is None else rec.components.get(Component.BTRFS_CORE.value)
+
+    def core_has_a_file(self) -> bool:
+        rec = self.records.read(self.record)
+        return rec is not None and any(f.component == Component.BTRFS_CORE.value for f in rec.files.values())
+
+    def install_core(self, *, done: bool) -> None:
+        """btrfs:core as an install leaves it: a seed text and the drop-in (when there) recorded, then done
+        (or still pending)."""
+        seed = posixpath.join(posixpath.dirname(self.record), "core-seed")
+        self.svc.put(core_text(seed, self.record), b"seed\n", as_root=False)
+        if self.dropin is not None:
+            self.svc.put(core_text(self.dropin_path, self.record), self.dropin.encode(), as_root=False)
+        if done:
+            self.svc.mark(self.record, Component.BTRFS_CORE.value)
+
+    def fail(self, point: str, err: OSError, *, times: int | None = None) -> None:
+        """The next times calls of point fail with err (None: every one)."""
+        self.failing[point] = (err, times)
+
+    def step[T](self, point: str, effect: Callable[[], T], failed: Callable[[OSError], T] | None = None) -> T:
+        """One mutating call: recorded, then failed by fail(), else run through plan."""
+        self.calls.append(point)
+        err, left = self.failing.get(point, (None, 0))
+        if err is not None and (left is None or left > 0):
+            self.failing[point] = (err, None if left is None else left - 1)
+            if failed is None:
+                raise err
+            return failed(err)
+        return self.plan.step(point, effect, failed)
+
+    def build(self) -> Callable[[bool], ScrubLimit]:
+        """What run_scrub_limit_cli's build takes: this world's use cases, whatever read_only it is asked
+        for, which built_for records."""
+        return lambda read_only: self._built(read_only=read_only)
+
+    def _built(self, *, read_only: bool) -> ScrubLimit:
+        self.built_for.append(read_only)
+        return self.service()
+
+    def service(self) -> ScrubLimit:
+        """The use cases over this world's ports."""
+        return ScrubLimit(
+            settings=FakeScrubSettings(self),
+            dropin=FakeScrubDropin(self),
+            systemd=FakeScrubSystemd(self),
+            sysfs=FakeScrubSysfs(self),
+        )
+
+
+def _rmdir(*, exists: bool, empty: bool) -> None:
+    """What os.rmdir raises for a folder that is not there or not empty."""
+    if not exists:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+    if not empty:
+        raise OSError(errno.ENOTEMPTY, os.strerror(errno.ENOTEMPTY))
+
+
+def _installer_failed(err: OSError) -> tuple[int, list[str], str]:
+    return 1, [], err.strerror or str(err)
+
+
+class FakeScrubSettings:
+    """ScrubSettingsPort over a ScrubWorld."""
+
+    def __init__(self, world: ScrubWorld) -> None:
+        self.world = world
+
+    @property
+    def path(self) -> str:
+        return self.world.conf_path
+
+    def read(self) -> tuple[str | None, bool]:
+        w = self.world
+        return (None, True) if w.conf_unreadable else (w.conf, False)
+
+    def folder_exists(self) -> bool:
+        return self.world.conf_folder
+
+    def write(self, text: str) -> None:
+        w = self.world
+
+        def made() -> None:
+            w.conf_folder = True
+
+        def replaced() -> None:
+            w.conf = text
+
+        w.step("settings folder", made)
+        w.step("settings replace", replaced)
+        w.step("settings sync", lambda: None)
+
+    def remove(self) -> None:
+        w = self.world
+
+        def removed() -> None:
+            w.conf = None
+
+        w.step("settings remove", removed)
+
+    def remove_folder_if_empty(self) -> None:
+        w = self.world
+
+        def rmdir() -> None:
+            _rmdir(exists=w.conf_folder, empty=w.conf is None)
+            w.conf_folder = False
+
+        with contextlib.suppress(OSError):  # as the adapter's: a folder not there, or not empty, stays
+            w.step("settings rmdir", rmdir)
+
+
+class FakeScrubDropin:
+    """ScrubDropinPort over a ScrubWorld: the installer's text --keep-state and remove-text through its
+    InstallService, with the installer's report lines."""
+
+    def __init__(self, world: ScrubWorld) -> None:
+        self.world = world
+
+    @property
+    def path(self) -> str:
+        return self.world.dropin_path
+
+    def read(self) -> tuple[str | None, bool]:
+        w = self.world
+        return (None, True) if w.dropin_unreadable else (w.dropin, False)
+
+    def write(self, text: str) -> tuple[int, list[str], str]:
+        w = self.world
+
+        def write_text() -> tuple[int, list[str], str]:
+            place = core_text(w.dropin_path, w.record)
+            written = w.svc.put(place, text.encode(), as_root=False, keep_state=True)
+            w.dropin_folder = True
+            w.dirty = w.dirty or written
+            word = InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED
+            return 0, [word.line(w.dropin_path)], ""
+
+        return w.step("drop-in text", write_text, _installer_failed)
+
+    def remove(self) -> tuple[int, list[str], str]:
+        w = self.world
+
+        def remove_text() -> tuple[int, list[str], str]:
+            lines = list(w.svc.remove([core_text(w.dropin_path, w.record)]))
+            w.dirty = w.dirty or bool(lines)
+            return 0, lines, ""
+
+        return w.step("drop-in remove-text", remove_text, _installer_failed)
+
+    def remove_folder_if_empty(self) -> None:
+        w = self.world
+
+        def rmdir() -> None:
+            _rmdir(exists=w.dropin_folder, empty=w.dropin is None)
+            w.dropin_folder = False
+
+        with contextlib.suppress(OSError):  # as the adapter's: a folder not there, or not empty, stays
+            w.step("drop-in rmdir", rmdir)
+
+
+class FakeScrubSystemd:
+    """ScrubSystemdPort over a ScrubWorld."""
+
+    def __init__(self, world: ScrubWorld) -> None:
+        self.world = world
+
+    def need_daemon_reload(self) -> bool | None:
+        w = self.world
+        return None if w.show_fails else w.dirty
+
+    def daemon_reload(self, *, timeout: float | None) -> CommandResult:
+        w = self.world
+        argv = ("systemctl", "daemon-reload")
+        w.reload_timeouts.append(timeout)
+
+        def reload() -> CommandResult:
+            w.loaded, w.dirty = w.dropin, False
+            return CommandResult(0, "", "", argv=argv)
+
+        def failed(err: OSError) -> CommandResult:
+            return CommandResult(1, "", f"{err.strerror}\n", argv=argv)
+
+        return w.step("systemctl daemon-reload", reload, failed)
+
+
+class FakeScrubSysfs:
+    """ScrubSysfsPort over a ScrubWorld."""
+
+    def __init__(self, world: ScrubWorld) -> None:
+        self.world = world
+
+    def live_limits(self) -> tuple[str, ...]:
+        return self.world.live
 
 
 # ---- cache ---------------------------------------------------------------
