@@ -11,7 +11,6 @@ from cpu.game.domain.leftovers import leftover_entries, newer_leftovers, undo_te
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
-    GAME_DROPIN,
     GAME_DROPIN_DIR,
     GAME_INTENDED,
     GAME_LEFTOVERS,
@@ -28,9 +27,9 @@ from doctor.domain import (
     cpu_time,
     name_list,
     parse_cpu_stat_seconds,
+    game_dropin_of,
     view_join,
     ViewPath,
-    host_join,
 )
 from doctor.ports import CheckFn, DoctorHostPort
 
@@ -48,17 +47,14 @@ def names_no_account(host: DoctorHostPort, name: str) -> bool:
     return rc == GETENT_NO_KEY
 
 
-def game_dropins_left(host: DoctorHostPort) -> list[str]:
+def game_dropins_left(host: DoctorHostPort) -> list[HostPath]:
     """Host paths of the game profile's MemoryLow drop-ins that exist now."""
     try:
         names = sorted(host.listdir(host.path(GAME_DROPIN_DIR)))
     except OSError:
         return []
-    return [
-        f"{GAME_DROPIN_DIR}/{n}/{GAME_DROPIN}"
-        for n in names
-        if n.endswith(".d") and host.isfile(host.path(host_join(GAME_DROPIN_DIR, n, GAME_DROPIN)))
-    ]
+    dropins = [game_dropin_of(n.removesuffix(".d")) for n in names if n.endswith(".d")]
+    return [p for p in dropins if host.isfile(host.path(p))]
 
 
 def game_again(host: DoctorHostPort) -> str:

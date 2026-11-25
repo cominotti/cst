@@ -2739,9 +2739,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         """Each component of the manifest, installed for real on the container's / (root's as root,
         the user's as tester): plan changes nothing; install over a plain-script copy of each of its
         Python programs (what CST installed before the zipapps) writes the zipapps and lists every
-        file in the install record; once marked done, cst doctor's install area has no WARN about it;
-        a second install changes nothing, the record included; remove --component removes the
-        files and their record lines. A component with a file already in place (another test's) is
+        file in the install record; a second install changes nothing, the record included; once marked
+        done and its manager reloaded (as its setup command does after the installer), cst doctor's
+        install area has no WARN about it; remove --component removes the files and their record lines
+        (and the manager is reloaded again). A component with a file already in place (another test's) is
         skipped, so nothing of another test is removed. /usr/sbin/btrfs, which a btrfs unit runs and
         the image lacks, is an empty program for the time of the test (as in test_16)."""
         c = self.SYSTEMD_CONTAINER
@@ -2768,6 +2769,12 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         owner = exec_bash(c, f"{installer} dests --component {comp} | head -n 1").stdout.strip()
         user = owner.startswith("~")
         run = "runuser -u tester -- " if user else ""
+        reload = (
+            "runuser -u tester -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
+            "systemctl --user daemon-reload"
+            if user
+            else "systemctl daemon-reload"
+        )
         home = "--home /home/tester" if user else ""
         record = "/home/tester/.local/state/cst/installed.json" if user else "/var/lib/cst/installed.json"
         dests = exec_bash(c, f"{installer} dests {home} --component {comp}").stdout.split()
@@ -2819,6 +2826,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             again="$({run}{installer} install {home} {sets} --component {comp})"
             if grep -v '^unchanged: ' <<<"$again"; then echo "a second install changed files" >&2; exit 1; fi
             [[ "$(sha256sum {record})" == "$before" ]] || {{ echo "a second install changed the record" >&2; exit 1; }}
+            # The installer alone reloads no manager; the setup command that runs it does, after it. Without
+            # the reload, doctor rightly warns that systemd has not loaded the component's units as installed.
+            {reload}
             doc="$({run}env HOME={"/home/tester" if user else "/root"} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
             # Only its install area: the other areas report on the container itself.
             inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
@@ -2827,6 +2837,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
                 echo "doctor warns about {comp}" >&2; exit 1
             fi
             {run}{installer} remove {home} --component {comp} >/dev/null
+            {reload}
             for d in {" ".join(shlex.quote(d) for d in dests)}; do
                 [[ ! -e "$d" ]] || {{ echo "remove left $d" >&2; exit 1; }}
             done
@@ -10200,6 +10211,277 @@ EOF
             [[ ! -e {dest} ]]
             [[ "$({core})" == "$start" ]]
             done_and_no_warning
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_193_doctor_names_a_cst_unit_systemd_has_not_loaded(self) -> None:
+        """Root's real install record (copied aside and put back) with drop-ins written through the installer
+        (installer.py text --component btrfs:core --keep-state) and no daemon-reload: of a timer's inactive
+        service (loaded through the timer) and of a template whose instance runs. The real systemd flags both
+        and a unit no record names (a drop-in written by hand): NeedDaemonReload yes (the test fails as
+        "cannot bite" otherwise). cst doctor warns for the two recorded units, each naming its drop-in, with
+        fix: sudo systemctl daemon-reload; it says nothing of the unit no record names, nor of a recorded new
+        unit file nothing has loaded, and its one systemctl show --state=loaded '*' loads that unit not. After
+        daemon-reload, no such line. With the real game profile on (its runtime drop-in of user@UID.service,
+        written without a reload) and a recorded drop-in of user@.service loaded: systemd flags
+        user@UID.service, and doctor says nothing of it."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        sd = "/etc/systemd/system"
+        seed = "/etc/e2e-193-core-seed"
+        own = [f"{sd}/e2e193.timer", f"{sd}/e2e193.service", f"{sd}/e2e193i@.service", f"{sd}/e2e193-other.service"]
+        dirs = [f"{sd}/e2e193.service.d", f"{sd}/e2e193i@.service.d", f"{sd}/e2e193-other.service.d"]
+        new = f"{sd}/e2e193-new.service"
+        game = f"{sd}/user@.service.d/50-e2e193.conf"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        planted = " ".join([seed, *own, *dirs, new, game])
+        if exec_bash(c, f"for f in {planted}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a file of this test already exists (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-193-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-193-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"""set +e
+            systemctl stop e2e193.timer e2e193.service 'e2e193i@x.service' e2e193-other.service
+            if [[ -e /run/cpu-setup/game.state ]]; then
+                printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+                python3 -I -B /opt/cst-rw/cpu/game-profile off
+            fi
+            if [[ -e /var/tmp/e2e-193-conf ]]; then
+                rm -f /etc/cpu-setup/cpu-setup.conf
+                if [[ -s /var/tmp/e2e-193-conf ]]; then mv /var/tmp/e2e-193-conf /etc/cpu-setup/cpu-setup.conf; fi
+                rm -f /var/tmp/e2e-193-conf /run/cpu-setup/manual
+                rmdir /etc/cpu-setup 2>/dev/null
+            fi
+            rm -rf {planted}
+            rmdir {sd}/user@.service.d 2>/dev/null
+            if [[ -e /var/tmp/e2e-193-rec ]]; then mv /var/tmp/e2e-193-rec {rec}; else rm -f {rec}; fi
+            systemctl daemon-reload""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            doc() {{ env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true; }}
+            # The lines of the check: each WARN line that says so, with the fix line after it.
+            hits() {{ grep -A1 -F ': systemd has not loaded its files as they are on disk' <<<"$1" || true; }}
+            keep() {{ {installer} text "$1" 0644 --component btrfs:core --keep-state >/dev/null; }}
+            warned() {{  # warned DOCTOR-OUTPUT UNIT DROP-IN: a WARN of UNIT naming DROP-IN, then the fix
+                local w
+                w="$(grep -A1 -F "$2: systemd has not loaded its files as they are on disk (CST installed $3)" <<<"$1" || true)"
+                grep -qE '^ *WARN' <<<"$w" && grep -qF 'fix: sudo systemctl daemon-reload' <<<"$w" ||
+                    {{ echo "doctor did not warn for $2: $1" >&2; return 1; }}
+            }}
+            printf '[Timer]\nOnCalendar=weekly\n' >{sd}/e2e193.timer
+            printf '[Service]\nType=oneshot\nExecStart=/bin/true\n' >{sd}/e2e193.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >'{sd}/e2e193i@.service'
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >{sd}/e2e193-other.service
+            systemctl daemon-reload
+            systemctl start e2e193.timer 'e2e193i@x.service' e2e193-other.service
+            [[ "$(systemctl show -P ActiveState e2e193.service)" == inactive ]]
+            printf 'seed\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            {installer} mark --component btrfs:core done
+            printf '[Service]\nEnvironment=E2E193=1\n' | keep {sd}/e2e193.service.d/10-cst.conf
+            printf '[Service]\nEnvironment=E2E193=1\n' | keep '{sd}/e2e193i@.service.d/10-cst.conf'
+            printf '[Service]\nType=oneshot\nExecStart=/bin/true\n' | keep {new}
+            mkdir -p {sd}/e2e193-other.service.d
+            printf '[Service]\nEnvironment=E2E193=1\n' >{sd}/e2e193-other.service.d/10-hand.conf
+            # Cannot bite otherwise: the real systemd flags the three units.
+            for u in e2e193.service 'e2e193i@x.service' e2e193-other.service; do
+                [[ "$(systemctl show -P NeedDaemonReload "$u")" == yes ]] || {{ echo "cannot bite: $u not flagged" >&2; exit 1; }}
+            done
+            [[ -z "$(systemctl list-units --all --no-legend e2e193-new.service)" ]]
+            d="$(doc)"
+            warned "$d" e2e193.service {sd}/e2e193.service.d/10-cst.conf
+            warned "$d" 'e2e193i@x.service' '{sd}/e2e193i@.service.d/10-cst.conf'
+            h="$(hits "$d")"
+            if grep -qF -e e2e193-other -e e2e193-new <<<"$h"; then echo "doctor named a unit it must not: $h" >&2; exit 1; fi
+            [[ -z "$(systemctl list-units --all --no-legend e2e193-new.service)" ]] ||
+                {{ echo "the doctor's query loaded e2e193-new.service" >&2; exit 1; }}
+            systemctl daemon-reload
+            h="$(hits "$(doc)")"
+            if grep -qF e2e193 <<<"$h"; then echo "doctor still warns after the reload: $h" >&2; exit 1; fi
+            # The game profile's runtime drop-in flags user@UID.service by itself: no line of this check.
+            if [[ -e /etc/cpu-setup/cpu-setup.conf ]]; then cp -a /etc/cpu-setup/cpu-setup.conf /var/tmp/e2e-193-conf; else : >/var/tmp/e2e-193-conf; fi
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            uid=$(id -u tester)
+            printf '[Service]\nEnvironment=E2E193=1\n' | keep {game}
+            systemctl daemon-reload
+            touch /run/cpu-setup/manual
+            python3 -I -B /opt/cst-rw/cpu/game-profile on >/dev/null
+            test -e "/run/systemd/system/user@$uid.service.d/zz-cst-game.conf"
+            [[ "$(systemctl show -P NeedDaemonReload "user@$uid.service")" == yes ]] ||
+                {{ echo "cannot bite: user@$uid.service not flagged during the game" >&2; exit 1; }}
+            h="$(hits "$(doc)")"
+            if grep -qF "user@$uid.service" <<<"$h"; then echo "doctor warned during the game: $h" >&2; exit 1; fi
+            python3 -I -B /opt/cst-rw/cpu/game-profile off >/dev/null
+            [[ "$({installer} remove-text {game})" == "removed:   {game}" ]]
+            systemctl daemon-reload
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_194_doctor_warns_on_an_install_record_that_cannot_be_read(self) -> None:
+        """Root's and tester's real install records (copied aside and put back), each made a folder in turn:
+        cst doctor as their owner has a WARN line naming the path and "Is a directory". With root's record a
+        file again and /var/lib/cst of mode 0700 (the real EACCES a fake only imitates), tester's doctor says
+        info "not readable as your user" for it and no WARN. With both folders removed (no record), no line
+        names either path as a record that cannot be read. Before, every one of these was info "not readable
+        as your user"."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        urec = "/home/tester/.local/state/cst/installed.json"
+        exec_bash(
+            c,
+            f"""rm -rf /var/tmp/e2e-194; mkdir /var/tmp/e2e-194
+            if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-194/rec; fi
+            if [[ -e {urec} ]]; then cp -p {urec} /var/tmp/e2e-194/urec; fi
+            if [[ -d /var/lib/cst ]]; then stat -c %a /var/lib/cst >/var/tmp/e2e-194/mode; fi""",
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            if [[ -e /var/tmp/e2e-194/mode ]]; then chmod "$(cat /var/tmp/e2e-194/mode)" /var/lib/cst; else chmod 0755 /var/lib/cst; fi
+            rm -rf {rec} {urec}
+            if [[ -e /var/tmp/e2e-194/rec ]]; then mv /var/tmp/e2e-194/rec {rec}; fi
+            if [[ -e /var/tmp/e2e-194/urec ]]; then mv /var/tmp/e2e-194/urec {urec}; fi
+            rm -rf /var/tmp/e2e-194""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            doc() {{ "$@" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true; }}
+            unreadable() {{  # unreadable DOCTOR-OUTPUT PATH: a WARN line saying PATH cannot be read
+                grep -E '^ *WARN' <<<"$1" | grep -qF "$2: the install record cannot be read (Is a directory)" ||
+                    {{ echo "doctor did not warn for $2: $1" >&2; return 1; }}
+            }}
+            rm -f {urec}
+            ut mkdir -p {urec}
+            unreadable "$(doc ut env)" {urec}
+            rmdir {urec}
+            rm -f {rec}
+            mkdir -p {rec}
+            unreadable "$(doc env HOME=/root)" {rec}
+            rmdir {rec}
+            # A record tester may not read is no fault: info, never this WARN.
+            if [[ -e /var/tmp/e2e-194/rec ]]; then cp -p /var/tmp/e2e-194/rec {rec}; else printf '{{"format": 1, "files": {{}}, "components": {{}}}}\n' >{rec}; fi
+            chmod 0700 /var/lib/cst
+            d="$(doc ut env)"
+            grep -E '^ *info' <<<"$d" | grep -qF "{rec}: not readable as your user (Permission denied)" ||
+                {{ echo "tester's doctor did not say info for root's record: $d" >&2; exit 1; }}
+            if grep -E '^ *WARN' <<<"$d" | grep -qF "{rec}"; then echo "tester's doctor warned for root's record: $d" >&2; exit 1; fi
+            chmod 0755 /var/lib/cst
+            rm -f {rec}
+            for d in "$(doc ut env)" "$(doc env HOME=/root)"; do
+                if grep -qF 'the install record cannot be read' <<<"$d"; then echo "doctor without a record: $d" >&2; exit 1; fi
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_195_doctor_names_a_cst_user_unit_the_user_manager_has_not_loaded(self) -> None:
+        """tester's real install record (copied aside and put back) with a drop-in of a running user unit
+        written through the installer as tester (installer.py text --home /home/tester) and no
+        daemon-reload: the real user manager flags the unit (NeedDaemonReload yes; the test fails as "cannot
+        bite" otherwise). tester's cst doctor warns for it, naming the drop-in, with fix: systemctl --user
+        daemon-reload; root's cst doctor at the same moment has no line naming it and no ERROR line (root reads
+        its own record). After systemctl --user daemon-reload, tester's doctor has no such line. With root's own
+        user manager running (user@0.service, as a login of root starts it) and flagging a unit of root's real
+        record (copied aside and put back) in /etc/systemd/user (a drop-in written through the installer, no
+        reload; "cannot bite" otherwise), root's cst doctor with that manager's XDG_RUNTIME_DIR has no line
+        naming it: as root it asks no user manager. Before, it asked root's and warned."""
+        c = self.SYSTEMD_CONTAINER
+        ud = "/home/tester/.config/systemd/user"
+        unit = f"{ud}/e2e195.service"
+        dropin = f"{ud}/e2e195.service.d/10-cst.conf"
+        rec = "/home/tester/.local/state/cst/installed.json"
+        gunit = "/etc/systemd/user/e2e195r.service"
+        rootrec = "/var/lib/cst/installed.json"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        ru = "env XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus"
+        ut = (
+            "runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 "
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+        )
+        planted = f"{unit} {ud}/e2e195.service.d {gunit} {gunit}.d"
+        if exec_bash(c, f"for f in {planted}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a file of this test already exists (another test's)")
+        exec_bash(
+            c,
+            f"""rm -f /var/tmp/e2e-195-rec /var/tmp/e2e-195-rootrec /var/tmp/e2e-195-u0
+            if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-195-rec; fi
+            if [[ -e {rootrec} ]]; then cp -p {rootrec} /var/tmp/e2e-195-rootrec; fi
+            if systemctl -q is-active user@0.service; then touch /var/tmp/e2e-195-u0; fi""",
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            {ut} systemctl --user stop e2e195.service
+            {ru} systemctl --user stop e2e195r.service
+            rm -rf {planted}
+            if [[ -e /var/tmp/e2e-195-rec ]]; then mv /var/tmp/e2e-195-rec {rec}; else rm -f {rec}; fi
+            if [[ -e /var/tmp/e2e-195-rootrec ]]; then mv /var/tmp/e2e-195-rootrec {rootrec}; else rm -f {rootrec}; fi
+            {ut} systemctl --user daemon-reload
+            if [[ -e /var/tmp/e2e-195-u0 ]]; then {ru} systemctl --user daemon-reload; else systemctl stop user@0.service; fi
+            rm -f /var/tmp/e2e-195-u0""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            ut() {{ {ut} "$@"; }}
+            doc() {{ "$@" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true; }}
+            hits() {{ grep -A1 -F ': systemd has not loaded its files as they are on disk' <<<"$1" || true; }}
+            ut mkdir -p {ud}
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' | ut tee {unit} >/dev/null
+            ut systemctl --user daemon-reload
+            ut systemctl --user start e2e195.service
+            printf '[Service]\nEnvironment=E2E195=1\n' |
+                ut {installer} text {dropin} 0644 --home /home/tester --component toolchains:auto --keep-state >/dev/null
+            [[ "$(ut systemctl --user show -P NeedDaemonReload e2e195.service)" == yes ]] ||
+                {{ echo "cannot bite: e2e195.service not flagged" >&2; exit 1; }}
+            d="$(doc ut env)"
+            w="$(grep -A1 -F "e2e195.service: systemd has not loaded its files as they are on disk (CST installed {dropin})" <<<"$d" || true)"
+            grep -qE '^ *WARN' <<<"$w" && grep -qF 'fix: systemctl --user daemon-reload' <<<"$w" ||
+                {{ echo "tester's doctor did not warn: $d" >&2; exit 1; }}
+            r="$(doc env HOME=/root)"
+            if grep -qF e2e195 <<<"$r"; then echo "root's doctor named it: $r" >&2; exit 1; fi
+            if grep -qE '^ *ERROR' <<<"$r"; then echo "root's doctor has an ERROR line: $r" >&2; exit 1; fi
+            ut systemctl --user daemon-reload
+            h="$(hits "$(doc ut env)")"
+            if grep -qF e2e195 <<<"$h"; then echo "doctor still warns after the reload: $h" >&2; exit 1; fi
+            # Root's own user manager flags a unit of root's record: root's doctor asks no user manager.
+            ru() {{ {ru} "$@"; }}
+            systemctl start user@0.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >{gunit}
+            ru systemctl --user daemon-reload
+            ru systemctl --user start e2e195r.service
+            printf '[Service]\nEnvironment=E2E195=1\n' |
+                {installer} text {gunit}.d/10-cst.conf 0644 --component btrfs:alerts --keep-state >/dev/null
+            [[ "$(ru systemctl --user show -P NeedDaemonReload e2e195r.service)" == yes ]] ||
+                {{ echo "cannot bite: e2e195r.service not flagged by root's user manager" >&2; exit 1; }}
+            r="$(doc ru env HOME=/root)"
+            if grep -qF e2e195r <<<"$r"; then echo "root's doctor asked root's user manager: $r" >&2; exit 1; fi
             echo E2E-OK
             """,
         ).stdout

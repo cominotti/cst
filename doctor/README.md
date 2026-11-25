@@ -68,8 +68,9 @@ cst doctor help
 | `vm` | The weekly NAS backup timer of each VM (`cst-vm-backup@VM.timer`) | `info`: on or off. Never `WARN` |
 | `vm` | A VM's weekly NAS backup timer is on, but `/usr/local/sbin/btrfs-notify` (which a failed backup alerts through) is missing, as `cst btrfs uninstall` leaves it when snapshots are not set up: a failed backup then reaches no desktop, only the journal and the pending alerts (the `alerts` rows) | `WARN`, fix: `cst btrfs install` (it installs `btrfs-notify` with the alerts kept for the next login); nothing when no timer is on |
 | `responsiveness` | Live responsiveness probes shared with [perf/README.md](../perf/README.md) for each axis (`memory` / `cpu` / `io` / `gpu`) whose CST module (`swap`, `cpu`, or `btrfs`) is installed or configured on the host: memory headroom/reclaim stalls/THP/MGLRU/zswap/`session.slice` floors, cpuidle latency/`ntsync`/`irqbalance`/IRQ overlap on `BUILD_CPUS`, `blk-iocost`/NVMe APST/dirty writeback/btrfs commit latency/`SCRUB_LIMIT`, and connected GPU runtime PM / AMD game power profile | `WARN` on `BOTTLENECK` or findings with a `fix:` command (`cst swap apply`, `cst btrfs install`, `cst btrfs scrub-limit set 500M`, `cst btrfs iocost apply`, `cst cpu install`, `cst cpu irq apply`, `cst cpu game off && cst cpu game on`, `sudo systemctl restart cpu-game.service`); `INFO` for advisory items; nothing for axes without CST files installed (`cst perf` always checks all four axes unconditionally) |
-| `install` | What CST installed, from its install records (`/var/lib/cst/installed.json` for root's files, `~/.local/state/cst/installed.json` for yours; see [section 9](#9-the-install-check)): per recorded file, missing; differs on disk from its record (its sha256 differs from the record's: changed by hand, or written by an install that could not update the record); a component installed only in part (a file of it was recorded and its setup command has not finished since: the record says `pending`; for `btrfs:iocost`, whose `cst btrfs iocost revert` marks it pending before it changes anything, the warning also names that revert, which finishes a removal that stopped); a unit whose CST program (a word under `/usr/local/` or `%h/` in its command lines: `ExecStart=`, `ExecStartPre=`, `ExecStop=` and the like, not `ExecSearchPath=` or `ExecPaths=`) is missing or not executable; a record written by a newer CST or that is no record | `WARN`, fix: the command that installs the component again (`cst btrfs install`, `cst btrfs docker-gc enable`, ...) |
-| `install` | A recorded file older than this checkout (what CST installed differs from what this checkout installs now, a template rendered with the values it was installed with); a mode other than the one CST installed; a file not readable as your user (the record is then compared with this checkout only); a record you may not read | `info`, one line per component for the older files, naming the command that refreshes them. A file a module renders itself (the sccache wrapper) and generated files (units of `cst vm` and `cst toolchains`, the LDAC watcher's unit, the files of `cst btrfs degraded-boot`, the scrub drop-in, the stall-report launcher, cpu's hwp tmpfiles file and toolbox drop-ins) are only checked against the record |
+| `install` | What CST installed, from its install records (`/var/lib/cst/installed.json` for root's files, `~/.local/state/cst/installed.json` for yours; see [section 9](#9-the-install-check)): per recorded file, missing; differs on disk from its record (its sha256 differs from the record's: changed by hand, or written by an install that could not update the record); a component installed only in part (a file of it was recorded and its setup command has not finished since: the record says `pending`; for `btrfs:iocost`, whose `cst btrfs iocost revert` marks it pending before it changes anything, the warning also names that revert, which finishes a removal that stopped); a unit whose CST program (a word under `/usr/local/` or `%h/` in its command lines: `ExecStart=`, `ExecStartPre=`, `ExecStop=` and the like, not `ExecSearchPath=` or `ExecPaths=`) is missing or not executable; a record written by a newer CST, that is no record, or that is there and cannot be read (a folder in its place, a read error: every install and removal of CST stops at it after changing its files; no fix line: move it aside) | `WARN`, fix: the command that installs the component again (`cst btrfs install`, `cst btrfs docker-gc enable`, ...) |
+| `install` | A unit file or drop-in CST installed (from its install records: `/etc/systemd/system/` for the system manager, `/etc/systemd/user/` and `~/.config/systemd/user/` for yours, and `$XDG_CONFIG_HOME/systemd/user/` when that is set, where `cst bluetooth apply` writes the LDAC watcher's unit; a template's drop-in applies to its instances) whose unit systemd has loaded and has not loaded as its files are on disk (`NeedDaemonReload` yes, asked with one `systemctl show --state=loaded '*'` per manager, which loads no unit): a command that wrote it stopped before its `daemon-reload`, or reloaded only another user's manager (`cst btrfs install` reloads only the calling user's manager after it rewrites `/etc/systemd/user/cst-pending-alerts.service`), or a hand edit of one of the unit's files | `WARN` per unit, naming CST's files of it, fix: `sudo systemctl daemon-reload` (`systemctl --user daemon-reload` for yours); nothing for a unit systemd has not loaded (it reads the files as they are when it loads it), for `btrfs-scrub-weekly.service` while its unit file `/etc/systemd/system/btrfs-scrub-weekly.service` is there (the `btrfs` scrub row says it; once that file is gone, the scrub row says nothing and this check names the unit for CST's drop-in of it), for a unit with a drop-in of the game profile (`/run/systemd/system/NAME.d/zz-cst-game.conf`, written without a reload on purpose: the `cpu` rows cover it), for a file CST removed (the record no longer names it), when CST installed no unit file or drop-in (then no systemctl call), when systemctl cannot be asked, or, as root, for a unit of a user manager (root asks none) |
+| `install` | A recorded file older than this checkout (what CST installed differs from what this checkout installs now, a template rendered with the values it was installed with); a mode other than the one CST installed; a file not readable as your user (the record is then compared with this checkout only); a record you may not read (its folder's mode) | `info`, one line per component for the older files, naming the command that refreshes them. A file a module renders itself (the sccache wrapper) and generated files (units of `cst vm` and `cst toolchains`, the LDAC watcher's unit, the files of `cst btrfs degraded-boot`, the scrub drop-in, the stall-report launcher, cpu's hwp tmpfiles file and toolbox drop-ins) are only checked against the record |
 | `install` | Without a record (an install from before it): each component's installed files compared with this checkout | `info` per component with files that differ, naming the command that installs and records them; nothing for a component that is not installed, or when this checkout cannot build a file to compare with |
 | `install` | Every recorded file as CST installed it | `ok`, with the number of files per record |
 | `vm` | A VM whose disks or network card differ from what `cst vm tune` recommends (SATA/IDE disks instead of virtio-scsi, disk driver without `cache='none' io='native' discard='unmap' detect_zeroes='unmap'`, e1000/e1000e/rtl8139 card; see [section 7](#7-the-vm-checks)) | `info`, naming the first differences and `cst vm tune plan VM`; `ok` when it matches. Never `WARN` |
@@ -253,6 +254,11 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `~/.local/state/cst-alerts/delivered` (written by `cst-pending-alerts` at
   login; the older `~/.local/state/f44-alerts` is read when the new one does
   not exist). `cst doctor` only reads it.
+- The `install` check asks `systemctl show --state=loaded -p Id -p
+  LoadState -p NeedDaemonReload '*'` of each manager its install records
+  name a unit file or drop-in of (on the host through `flatpak-spawn
+  --host` in a toolbox; `systemctl --user show` for your user manager,
+  never as root). It loads no unit.
 - Started as root (`cst status` asks `sudo` once for the modules that need
   it), `cst` runs the doctor as the user who called `sudo`, so it checks
   your user's units. Run as root without `sudo`, the user units are skipped.
@@ -597,6 +603,38 @@ and what this CST folder would install now.
   stopped after its installer). `WARN`, same fix.
 - A unit whose program is missing (a unit of one component running a program
   of another that was removed, for example). `WARN`.
+- A unit file or drop-in CST installed that systemd has not loaded as it
+  is on disk: systemd has loaded the unit and one of its files changed
+  since (`NeedDaemonReload` yes), because a command that wrote it stopped
+  before its `daemon-reload` or reloaded only another user's manager
+  (`cst btrfs install` reloads only the calling user's manager after it
+  rewrites `/etc/systemd/user/cst-pending-alerts.service`; another user's
+  manager that has the unit loaded keeps the old copy), or because of a hand
+  edit. `WARN` per unit,
+  naming CST's files of it (systemd does not say which file changed, so a
+  hand edit of another drop-in of the unit counts too; the same reload
+  fixes it), with `sudo systemctl daemon-reload` (`systemctl --user
+  daemon-reload` for a unit of your user manager). The question is one
+  `systemctl show --state=loaded -p Id -p LoadState -p NeedDaemonReload '*'`
+  per manager, asked only when the record names a unit file or drop-in of
+  it: `--state=loaded` lists every loaded unit, active or inactive (without
+  it a glob lists only active units, and would miss a timer's service
+  between its runs), and loads none (a unit's own name would load it). Left
+  out: a unit systemd has not loaded (it reads the files as they are when
+  it loads it: nothing is stale); a file CST removed (an uninstall that
+  stopped before its reload: the record no longer names it); a machine
+  without a record; prefix and type-wide drop-ins (`a-.slice.d`,
+  `service.d`: CST installs none) and unit aliases (the Id is matched);
+  `btrfs-scrub-weekly.service` while its unit file is there, which the
+  `btrfs` scrub row reports with what it costs (without the unit file
+  this check names it, for CST's drop-in of it); a unit with a drop-in of the game profile in
+  `/run/systemd/system/NAME.d/zz-cst-game.conf` (`user@UID.service`
+  during a game: the profile writes it without a reload on purpose, and the
+  `cpu` rows cover it; a CST file changed in that time is reported after
+  the next reload); and, as root (`sudo cst doctor`, or root's own
+  login), the units of the user managers: root asks none of them, not even
+  its own, which a login of root starts (as the `services` area's user
+  units).
 - The record's bytes differ from what this folder installs now: the
   installed copy is **older** (or newer) than this checkout, the normal
   state after a `git pull` until the next install. `info`, once per component,
@@ -605,6 +643,13 @@ and what this CST folder would install now.
 - No record at all (CST installed the files before it kept one): each
   component's files are compared with this checkout directly, as `info`.
   The next install of that component records them.
+
+A record that is there and cannot be read (a folder in its place, a file
+where its folder belongs, a read error) is a `WARN` naming its path: every
+CST install and removal reads it, stops at it and fails at its update after
+it has changed its files. Move it aside; there is no fix line, since no one
+command fixes it safely. A record you may not read (its folder's mode) is
+`info` "not readable as your user", as below.
 
 A file root may read only (the polkit rule's folder is
 `drwxr-x--- root:polkitd`) is checked against the record only: `info`
