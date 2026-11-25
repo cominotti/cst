@@ -102,11 +102,6 @@ def revert_iocost(
     return build_iocost(paths, runner, uninstall=svc).revert(live_only=False)
 
 
-def component_changes(paths: IocostPaths, runner: CommandRunnerPort) -> tuple[str, ...] | None:
-    """The btrfs:iocost files `apply` would write or record again (IocostInstaller.changes)."""
-    return IocostInstaller(runner, paths.installer_script, paths.install_root).changes()
-
-
 def plan_iocost(
     paths: IocostPaths, runner: CommandRunnerPort, *, live_only: bool, target_device: str | None
 ) -> tuple[int, list[str]]:
