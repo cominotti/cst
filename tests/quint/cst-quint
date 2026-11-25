@@ -144,13 +144,15 @@ NAS_PROPERTIES: Final = (
     "unreachableNoOverlay",
     "noStacking",
     "tornHandled",
+    "tornHandledFull",
     "indexClean",
     "goodKept",
+    "goodKeptFull",
     "keepKept",
     "consistentRead",
     "indexInRepo",
 )
-NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed")
+NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial")
 CHECKS: Final[tuple[Check, ...]] = (
     *(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES),
     *(Check(NAS_SPEC, main, NAS_PROPERTIES) for main in NAS_INSTANCES),

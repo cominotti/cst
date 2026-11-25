@@ -1125,12 +1125,14 @@ properties: each disk is merged back or the alert names its overlay
 holding writes (`noOverlayLost`); a stale definition is never named for
 `qemu-img commit` (`staleNamed`); an unreachable NAS leaves no overlay
 (`unreachableNoOverlay`); a leftover overlay is refused, never stacked
-(`noStacking`); a torn snapshot is recorded or named (`tornHandled`, with
-its known gaps); the index holds no torn snapshot and loses an entry only
-on a listing it read (`indexClean`, `indexInRepo`); the retention never
-lets a torn snapshot take a good one's place and keeps the kept ones
-(`goodKept`, `keepKept`); only a consistent read is indexed
-(`consistentRead`). Its traces are replayed against the real code
+(`noStacking`); a torn snapshot is recorded or named (`tornHandledFull`:
+the gaps left are a kill before its record, and restic ended between
+saving its snapshot and printing its summary); the index holds no torn
+snapshot and loses an entry only on a listing it read (`indexClean`,
+`indexInRepo`); the retention never lets a torn snapshot take a good
+one's place and keeps the kept ones (`goodKeptFull`, `keepKept`); only a
+consistent read is indexed (`consistentRead`), also without `--atomic`
+(five instances, `nas_partial` among them). Its traces are replayed against the real code
 (`vm/tests/test_vm_nas_replay.py`, in the unit suite), so a change of order
 in `nas.py` fails the unit tests until the spec follows it. What it models,
 its gaps and its numbers:

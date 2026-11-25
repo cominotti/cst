@@ -1206,12 +1206,18 @@ and TPM files read live, the clock, libvirt crashing, other index entries,
 an index or a record of a newer cst vm, and restic's monthly buckets (the
 retention keeps the `KEEP` newest, one run a week, and every kept one).
 
-Four instances are checked: a running VM with one disk and three runs, the
+Five instances are checked: a running VM with one disk and three runs, the
 quiesced attempt first (`nas_live1`), two disks and two runs
 (`nas_live2`), a shut-off VM with three runs and `--keep-tag` or not
-(`nas_shutoff`), and the VM's state changed by the user between two runs
-(`nas_mixed`); `KEEP = 2`. Together about 8 million distinct states in
-about 1.5 minutes and under 2 GB (`nas_live1`: 6.2 million, 44 s).
+(`nas_shutoff`), the VM's state changed by the user between two runs
+(`nas_mixed`), and `nas_live2` without `--atomic` (`nas_partial`: a
+settled answer can switch some disks only); `KEEP = 2`. Together about
+8.5 million distinct states in about 2.5 minutes, each run of TLC at most
+about 2 GB: `nas_live1` 5.74 million states, depth 45, 48 to 65 s, 1.7 to
+2.1 GiB; `nas_live2` 958 thousand, depth 34, 17 to 23 s; `nas_shutoff`
+508 thousand, depth 32, 16 to 21 s; `nas_mixed` 313 thousand, depth 32,
+14 s; `nas_partial` 1.02 million, depth 34, 17 s, 1.3 GiB (measured on a
+workstation; each instance far under `TLC_TIMEOUT`).
 
 **The properties:**
 
@@ -1228,18 +1234,21 @@ about 1.5 minutes and under 2 GB (`nas_live1`: 6.2 million, 44 s).
   overlay and changed no definition.
 - `noStacking`: no snapshot is taken while a disk is on an earlier run's
   overlay (a killed run's included: the next run refuses).
-- `tornHandled`: every torn snapshot in the repository (incomplete, or of
-  a shut-off VM started during the read) is recorded for the next run, or a
-  message named it, or one of the known gaps below left it.
+- `tornHandledFull`: every torn snapshot in the repository (incomplete,
+  stopped after restic saved it, or of a shut-off VM started during the
+  read) is recorded for the next run, or a message named it, or a kill
+  left it (the known gap below). `tornHandled` also excuses a stop's gap,
+  which nothing leaves any more: it is implied now, and kept checked.
 - `indexClean`: the index never names a torn snapshot, and an entry
   leaves it only when restic's listing was read.
-- `goodKept`: the retention never forgets a good snapshot while fewer
+- `goodKeptFull`: the retention never forgets a good snapshot while fewer
   than `KEEP` good ones newer than it stay, unless a torn snapshot a
-  message named, or a gap left, is in the repository.
+  message named, or a kill left, is in the repository. `goodKept` (a
+  stop's gap excused too) is implied now, and kept checked.
 - `keepKept`: a snapshot made with `--keep-tag` is never forgotten by the
   retention.
 - `consistentRead`: a snapshot is indexed only when its read was
-  consistent.
+  consistent (also without `--atomic`: `nas_partial`).
 - `indexInRepo`: after an index write with the listing read, every entry
   names a snapshot in the repository.
 
@@ -1252,13 +1261,10 @@ ended between saving its snapshot and printing its summary. From restic's
 answer with a snapshot on, the stops are held (`_ResticAnswer`: the
 staging folder's removal, the shut-off VM's check) until a torn snapshot's
 record is written or the check is done: the spec has no stop between two
-steps there, only the held stop of `after` and `record`. `tornHandled` and
-`goodKept` state the gaps (a stop's gap, `lostStop`, is no longer set); `tornHandledFull` and `goodKeptFull` in the spec (not
-checked by `cst-quint`) allow the kill only, and TLC shows their
-counterexamples (`--invariant tornHandledFull` on `nas_shutoff`, through
-quint by hand, as `cst-quint` runs it). The instance `nas_partial` (not
-checked either) drops the `--atomic` assumption: a settled answer that
-switched only some disks is refused (`_refuse_partial`: the others' files
+steps there, only the held stop of `after` and `record`. `tornHandledFull`
+and `goodKeptFull` allow the kill only (a stop's gap, `lostStop`, is no
+longer set). The instance `nas_partial` drops the `--atomic` assumption:
+a settled answer that switched only some disks is refused (`_refuse_partial`: the others' files
 dropped, the switched ones merged back), so `consistentRead` holds there;
 the stray files of a settled answer are dropped in the snapshot's held
 block, so a stop held through the call is raised only after them.
@@ -1267,7 +1273,17 @@ block, so a stop held through the call is raised only after them.
 outcome stayed unclear (fixed with the spec, in the same pull request): a
 stop that came during the held snapshot call was raised before the check
 that alerts, and a failed merge back of another disk dropped the unclear
-one from the alert. Planted copies of the spec show that the properties
+one from the alert. Four more, fixed in a later pull request, each with its
+property: a stop that ended restic after it saved its snapshot lost the
+snapshot's id (`tornHandledFull`, `goodKeptFull`), a stop between
+restic's answer and the torn record left the snapshot unrecorded (the
+same), a settled answer that switched only some disks was read as a
+backup (`consistentRead` on `nas_partial`), and a stop held through
+such an answer, or through a failed one, left its stray files
+(`mergedOrAlerted`). With this pull request's `cst-quint`, the spec of
+the commit before it fails on `nas_shutoff` and `nas_live1` (a torn
+snapshot left by a stop: `tornHandledFull`) and on `nas_partial` (a
+stray file after a stopped run: `mergedOrAlerted`). Planted copies of the spec show that the properties
 catch the orders that matter: an overlay removed when only the live
 listing shows the image (`noOverlayLost`), the retention before
 `retry_torn` (`goodKept`), the forget before the record

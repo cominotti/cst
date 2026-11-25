@@ -23,10 +23,10 @@
 // of run r), in the live and in the persistent definition (a shut-off VM's live listing is its
 // persistent one); an overlay file is (target, run). Snapshot ids are run numbers. Assumed, not
 // modelled: a virsh snapshot-create-as that answered (not a timeout) switched every disk or none
-// (--atomic), and never switches later; the instance nas_partial (not in cst-quint's checks) drops
-// that assumption: a settled answer that switched some disks only is refused (_refuse_partial: the
-// files of the others dropped, the switched ones merged back, no second attempt). Not modelled: two VMs at once and the record's lock (TORN_LOCK: unit tests), several
-// hosts or a changed NAS_RESTIC_HOST, the /home job's prune holding the repository's lock (a call that
+// (--atomic), and never switches later; the instance nas_partial drops that assumption: a settled
+// answer that switched some disks only is refused (_refuse_partial: the files of the others dropped,
+// the switched ones merged back, no second attempt). Not modelled: two VMs at once and the record's
+// lock (TORN_LOCK: unit tests), several hosts or a changed NAS_RESTIC_HOST, the /home job's prune holding the repository's lock (a call that
 // fails), the notes and the words of the messages, the manifest and the staged files, the UEFI and
 // TPM files read live (notes only), the clock (each timeout is an outcome), libvirt crashing, other
 // VMs' and local backups' index entries, an index or a record of a newer cst vm, a find_overlays that
@@ -44,10 +44,10 @@
 // removal, the shut-off VM's check) until the torn snapshot's record is written or the check is done:
 // a stop there comes as the held stopIn of "after" and "record", never between two steps.
 //
-// Known gaps, stated in the properties: a torn snapshot restic committed is in the repository,
+// Known gap, stated in the properties: a torn snapshot restic committed is in the repository,
 // neither recorded nor named, after a kill before its record (SIGKILL, power loss: nothing more
-// runs). tornHandled and goodKept allow it and a stop's gap (lostStop, which nothing sets any more);
-// tornHandledFull and goodKeptFull (not in cst-quint's checks) allow the kill only.
+// runs). tornHandledFull and goodKeptFull allow the kill only; tornHandled and goodKept also allow a
+// stop's gap (lostStop, which nothing sets any more: the Full ones imply them now).
 module nas {
   const TARGETS: List[str]
   const RUNS: int
@@ -121,7 +121,7 @@ module nas {
     lostOverlay: bool,         // an overlay file removed while in use or unmerged
     stacked: bool,             // a snapshot taken while a disk was on an earlier overlay
     goodBad: bool,             // a retention forgot a good snapshot a torn one replaced
-    goodBadFull: bool,
+    goodBadFull: bool,         // the same, a stop's gap not excused (goodKeptFull)
     keepBad: bool,             // a retention forgot a kept snapshot
     indexBad: bool,            // an index entry dropped without a readable listing, or a torn one indexed
     mixedIndexed: bool,        // a snapshot indexed whose read was not consistent
@@ -805,8 +805,8 @@ module nas_mixed {
   import nas(TARGETS = ["vda"], RUNS = 2, START = "running", KEEPS = Set(false), QUIESCE = Set(false),
              MAX_STOPS = 1, MAX_GUEST = 1, MAX_KILLS = 1, MAX_USER = 2, ATOMIC = true, KEEP = 2, SHUTOFF_ONLY = false).*
 }
-// Not in cst-quint's checks: nas_live2 without --atomic, where a settled answer can switch some disks
-// only (refused: never read as a backup).
+// nas_live2 without --atomic, where a settled answer can switch some disks only (refused: never read
+// as a backup).
 module nas_partial {
   import nas(TARGETS = ["vda", "vdb"], RUNS = 2, START = "running", KEEPS = Set(false), QUIESCE = Set(false),
              MAX_STOPS = 1, MAX_GUEST = 1, MAX_KILLS = 1, MAX_USER = 0, ATOMIC = false, KEEP = 2, SHUTOFF_ONLY = false).*
