@@ -53,7 +53,7 @@ from btrfs.tests.snapshot_fakes import RuntimeTest
 from cst_core.ports import ClockPort
 from vm import domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, restic as vm_adapters_restic
-from vm.application import nas as vm_app_nas
+from vm.application import nas as vm_app_nas, nas_torn as vm_app_nas_torn
 from vm.domain import backup as vm_domain_backup
 from vm.ports import ProgressPort
 from vm import wiring as vm_wiring
@@ -830,6 +830,23 @@ class LiveBackupTest(Nas):
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
+
+    def test_an_entry_whose_snapshot_was_retagged_stays_in_the_index(self) -> None:
+        # restic tag saves the snapshot again under a new id, with the first id as its original: the
+        # entry left the index, although restic still lists the backup.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        repo = "sftp:btrfs-setup-nas:/volume1/restic"
+        old = [
+            {"vm": "win", "mode": "nas", "snapshot": "first1", "repository": repo, "epoch": 1, "timestamp": "a"},
+            {"vm": "win", "mode": "nas", "snapshot": "gone22", "repository": repo, "epoch": 2, "timestamp": "b"},
+        ]
+        with open(self.index, "w") as f:
+            json.dump({"backups": old}, f)
+        listed = [{"id": "second", "original": "first1"}, {"id": "other3", "original": ""}, {"id": SNAP_ID}]
+        self.restic_cfg(snapshots_json=json.dumps(listed))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([e.get("snapshot") for e in self.index_entries()], ["first1", SNAP_ID])
 
     def test_a_nas_entry_without_its_snapshot_is_kept_and_does_not_stop_the_prune(self) -> None:
         # It passed the reader (it has a path) and the prune read its snapshot: a KeyError after the backup.
@@ -1895,6 +1912,30 @@ class TornRecordTest(Nas):
         with vm_adapters_backup.VmLock("torn", os.path.join(self.tmp, "run")):
             vm_adapters_backup.drop_torn(cfg, [self.torn_entry()], lock_timeout=0.2)
         self.assertEqual(self.torn_list(), [])
+
+
+class SnapshotNamesTest(unittest.TestCase):
+    """The ids a listed restic snapshot answers to (snapshot_names, nas_snapshot_ids): its own, and its
+    original when restic tag saved it again under a new id."""
+
+    def test_a_retagged_snapshot_answers_to_its_original_too(self) -> None:
+        self.assertEqual(vm_domain_backup.snapshot_names({"id": "new", "original": "old"}), ["new", "old"])
+
+    def test_an_original_that_is_no_id_is_left_out(self) -> None:
+        for original in ("", 5, None, ["old"]):
+            with self.subTest(original=original):
+                self.assertEqual(vm_domain_backup.snapshot_names({"id": "new", "original": original}), ["new"])
+        self.assertEqual(vm_domain_backup.snapshot_names({"id": "new"}), ["new"])
+
+    def test_the_index_prune_gets_the_listed_ids_and_their_originals(self) -> None:
+        class Listing(FakeNasRestic):
+            @override
+            def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+                del env, args, timeout
+                return 0, json.dumps([{"id": "new", "original": "old"}, {"id": SNAP_ID}]), ""
+
+        got = vm_app_nas_torn.nas_snapshot_ids(Listing(), "win", _NAS_REPO)
+        self.assertEqual(got, {"new", "old", SNAP_ID})
 
 
 class ConstantsTest(unittest.TestCase):

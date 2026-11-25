@@ -241,15 +241,24 @@ class ResticMessage(StrEnum):
 
 class ResticSnapshot(TypedDict):
     """One snapshot of `restic snapshots --json` (the fields the NAS prune and the torn retry read;
-    tags as restic gives them, checked where they are read)."""
+    tags and original as restic gives them, checked where they are read). original: the id the
+    snapshot had first, which restic sets when restic tag saves it again under a new id."""
 
     id: str
     tags: NotRequired[object]
+    original: NotRequired[object]
 
 
 def is_restic_snapshot(value: object) -> TypeIs[ResticSnapshot]:
     """A snapshot of restic snapshots --json with a non-empty string id."""
     return json_object(value) and isinstance(snap_id := value.get("id"), str) and snap_id != ""
+
+
+def snapshot_names(snap: ResticSnapshot) -> list[str]:
+    """The ids a listed snapshot answers to: its own, and the one it had first when its tags were
+    changed (restic tag saves it again under a new id, with that first id as its original)."""
+    original = snap.get("original")
+    return [snap["id"], *([original] if isinstance(original, str) and original else [])]
 
 
 class ResticSummary(TypedDict, total=False):

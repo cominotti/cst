@@ -21,7 +21,7 @@ from vm.domain import (
     VmSettings,
     forget_args,
 )
-from vm.domain.backup import ResticSnapshot, Stop, TornEntry, is_restic_snapshot
+from vm.domain.backup import ResticSnapshot, Stop, TornEntry, is_restic_snapshot, snapshot_names
 from vm.ports import ResticPort
 
 if TYPE_CHECKING:
@@ -29,9 +29,10 @@ if TYPE_CHECKING:
 
 
 def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | None:
-    """The ids of the VM's restic snapshots, or None when not readable."""
+    """The ids of the VM's restic snapshots, each with the id it had first when its tags were changed
+    (snapshot_names), or None when not readable."""
     snaps = nas_snapshots(restic, vm, nas)
-    return None if snaps is None else {s["id"] for s in snaps}
+    return None if snaps is None else {n for s in snaps for n in snapshot_names(s)}
 
 
 def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = None) -> list[ResticSnapshot] | None:

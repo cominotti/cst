@@ -869,6 +869,10 @@ the `install` row of `cst doctor` show an older copy).
 The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 (`mode` `nas`, the restic snapshot ID, the consistency, the keep tag, the
 versions and the deployment); entries whose snapshot was forgotten leave it.
+An entry stays when its snapshot's tags were changed by hand (`restic tag`,
+for example `restic tag --remove cst-keep ID` above): restic then lists the
+snapshot under a new ID, with the entry's ID as its `original`; the entry
+keeps the ID it had (`restic restore` takes either).
 When `restic snapshots` cannot be read as a list of snapshots with their ids
 (another shape, an id that is not text), no entry leaves: the index keeps them
 all until a later backup reads the list.
@@ -1077,7 +1081,8 @@ runs (also when restic fails) and is checked in both definitions before the
 overlay is removed, a failed merge (loud, alert, nothing removed), a VM shut
 down during the backup, the shut-off path and its re-check, the refused
 states, a left-over overlay, an unusable repository (no snapshot taken),
-the keep tag, `forget`'s arguments, the index entries, the timer's units
+the keep tag, `forget`'s arguments, the index entries (an entry whose snapshot
+restic lists under a new ID after `restic tag` stays: `SnapshotNamesTest`), the timer's units
 (the stop budget covers the merge's limit), and that the NAS constants match
 `btrfs/btrfs-snapshot`. They also check what a manual run can meet: a closed
 terminal during restic (on a pseudo-terminal) and a pipe without a reader
