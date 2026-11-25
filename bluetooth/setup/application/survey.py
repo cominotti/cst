@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
 import re
-from typing import Literal
+from typing import Final, Literal
 
 from cst_core.domain.shapes import parse_json
 from bluetooth.domain import (
@@ -43,6 +43,7 @@ from bluetooth.setup.domain import (
     Config,
     LDAC_WATCHER_LABEL,
     LE_AUDIO_LABEL,
+    LW_KEPT_NOTE,
     LeState,
     Options,
     Paths,
@@ -76,6 +77,10 @@ from cst_core.ports import (
     SystemdPort,
     UnitName,
 )
+
+
+# The states of the watcher's program that are CST's (revert and apply with the watcher off remove it).
+_LW_PROG_OURS: Final = (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE)
 
 
 class StepFailed(Exception):
@@ -146,6 +151,7 @@ class Survey:
         self.bearer_state = BearerState.NONE
         self.lw_want = False
         self.lw_stale: tuple[str, ...] = ()  # an older CST's copies of the watcher's unit, elsewhere
+        self.lw_kept: tuple[str, ...] = ()  # recorded copies kept: the manager names no folder
         self.lw_unit_st: OwnedState | Literal[""] = ""
         self.lw_prog_st: OwnedState | Literal[""] = ""
         self.lw_enabled = ""
@@ -468,6 +474,7 @@ class Survey:
             self.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
         self.lw_stale = watcher_unit.older_copies(self.m.records, self.p.home, self.lw_unit_file, self.lw_unit_path)
+        self.lw_kept = watcher_unit.kept_copies(f, self.m.records, self.p.home, self.lw_unit_file, self.lw_unit_path)
         self.lw_prog_st = self._lw_prog_state() if f.exists(self.p.lw_prog) else OwnedState.MISSING
         u = self.m.user_systemd_host
         self.lw_enabled = u.is_enabled(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
@@ -476,7 +483,7 @@ class Survey:
             want = (OwnedState.OK, OwnedState.OK, "enabled", ActiveState.ACTIVE)
             ours_change = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) != want
         else:
-            ours_change = self.lw_ours_present()
+            ours_change = self.lw_removes()
         self.lw_change = ours_change or bool(self.lw_stale)
 
     @cached_property
@@ -503,8 +510,18 @@ class Survey:
         return f"no headset is set (LDAC_RATE={rate} needs one)" if rate else "LDAC_RATE is empty"
 
     def lw_ours_present(self) -> bool:
-        prog_ours = (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE)
-        return self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE) or self.lw_prog_st in prog_ours
+        return self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE) or self.lw_prog_st in _LW_PROG_OURS
+
+    def lw_keeps_prog(self) -> bool:
+        """revert (or apply with the watcher off) keeps CST's program of the watcher: recorded copies of
+        its unit are kept (lw_kept), and one of them may be the unit the manager runs."""
+        return bool(self.lw_kept) and self.lw_prog_st in _LW_PROG_OURS
+
+    def lw_removes(self) -> bool:
+        """revert (or apply with the watcher off) removes something of the watcher's: its unit, or its
+        program unless that is kept (lw_keeps_prog)."""
+        unit_ours = self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE)
+        return unit_ours or (self.lw_prog_st in _LW_PROG_OURS and not self.lw_keeps_prog())
 
     def lw_unit_label(self) -> str:
         return f"systemd/user/{LDAC_UNIT}"
@@ -653,8 +670,9 @@ class Survey:
     def _lw_off_report(self, rate: str) -> None:
         """The watcher's rows when apply keeps it off."""
         why = self.lw_off_why()
-        if self.lw_ours_present():
-            self.item("remove", LDAC_WATCHER_LABEL, f"{why}: apply stops and removes {LDAC_UNIT} and its program")
+        if self.lw_removes():
+            what = LDAC_UNIT if self.lw_keeps_prog() else f"{LDAC_UNIT} and its program"
+            self.item("remove", LDAC_WATCHER_LABEL, f"{why}: apply stops and removes {what}")
         elif rate:
             self.item("skip", LDAC_WATCHER_LABEL, f"off: {why}")
         else:
@@ -663,6 +681,8 @@ class Survey:
             self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
         if self.lw_prog_st == OwnedState.CONFLICT:
             self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
+        if self.lw_keeps_prog():
+            self.item("note", self.lw_prog_label(), LW_KEPT_NOTE)
         self._lw_stale_report()
 
     def _lw_stale_report(self) -> None:

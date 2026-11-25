@@ -36,6 +36,7 @@ from bluetooth.setup.domain import (
     BapState,
     BearerState,
     BluetoothCommand,
+    LW_KEPT_WHY,
     LeState,
     OlderCopy,
     WpState,
@@ -588,29 +589,47 @@ class Change(Checks):
         self.out(f"{said.rstrip(chr(10))} (an older CST's copy)\n" if said else f"forgotten: {path}\n")
 
     def lw_remove(self) -> None:
-        """The watcher stopped, disabled and removed, if CST installed it (with --check: only said)."""
+        """The watcher stopped, disabled and removed, if CST installed it (with --check: only said). Its
+        program stays while the recorded copies of its unit do (lw_keeps_prog: one of them may be the
+        unit the manager runs, which would then start a missing program), and one line says so."""
         p, unit = self.p, LDAC_UNIT
         self.lw_remove_stale()
-        if not self.lw_ours_present():
-            self.out("unchanged: not installed\n")
+        keep_prog = self.lw_keeps_prog()
+        if not self.lw_removes():
+            if keep_prog:
+                self.lw_kept_report()
+            else:
+                self.out("unchanged: not installed\n")
             if self.lw_unit_st == OwnedState.CONFLICT:
                 self.err(f"WARNING: {self.lw_unit_file} was not written by CST: left alone\n")
             if self.lw_prog_st == OwnedState.CONFLICT:
                 self.err(f"WARNING: {p.lw_prog} was not written by CST: left alone\n")
             return
         if self.o.check:
-            self.out(f"would stop, disable and remove {unit} and {p.lw_prog}\n")
+            self.out(f"would stop, disable and remove {unit}{'' if keep_prog else f' and {p.lw_prog}'}\n")
+            if keep_prog:
+                self.lw_kept_report()
             return
         if self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE):
             self.out(self.m.user_systemd.disable(UnitName(unit), now=True, output=OutputMode.STDOUT).stdout)
             self.checked(["remove-text", "--home", p.home, self.lw_unit_file])
             self.out(f"removed:   {self.lw_unit_file} (stopped and disabled)\n")
             self._must_result(self.m.user_systemd.daemon_reload_result(output=OutputMode.INHERIT))
-        if self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
+        if keep_prog:
+            self.lw_kept_report()
+        elif self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
             self.checked(["remove", "--home", p.home, "bluetooth/bt-ldac-watch"])
             self.m.files.remove_empty_dir(os.path.dirname(p.lw_prog))
             self.out(f"removed:   {p.lw_prog}\n")
         self.lw_active = ""
+
+    def lw_kept_report(self) -> None:
+        """The one line of the watcher's program and the recorded copies of its unit kept (lw_kept)."""
+        what = f"{self.p.lw_prog} and {', '.join(self.lw_kept)}"
+        if self.o.check:
+            self.out(f"would keep {what}: {LW_KEPT_WHY}\n")
+        else:
+            self.err(f"WARNING: kept {what}: {LW_KEPT_WHY}\n")
 
     # ---- revert ----------------------------------------------------------------------------
     def oldest_backup(self) -> str | None:
@@ -632,7 +651,7 @@ class Change(Checks):
         wp, le = self.revert_files()
         self.out(f"== LDAC rate watcher: {LDAC_UNIT}\n")
         self.lw_plan()
-        lw = self.lw_ours_present() or bool(self.lw_stale)
+        lw = self.lw_removes() or bool(self.lw_stale)
         self.lw_remove()
         bt = changed_mc or self.bt_owed
         restart = bt or wp or le or self.wp_owed  # a bluetoothd restart takes WirePlumber's endpoints

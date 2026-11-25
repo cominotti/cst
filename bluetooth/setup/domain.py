@@ -41,6 +41,15 @@ LW_STALE_NOTE: Final = "an older CST's copy, where your user manager does not re
 LW_STALE_FOREIGN_NOTE: Final = "recorded as CST's, not written by CST: left alone; apply drops its record line"
 LW_STALE_SAME_NOTE: Final = "the same file as the unit's, by another path: apply only drops this record line"
 LW_STALE_LINK_NOTE: Final = "the enable link of that older copy: apply removes it"
+# Why revert (or apply with the watcher off) keeps the watcher's program while it keeps the recorded copies
+# of its unit (watcher_unit.kept_copies): one of them may be the unit the manager runs.
+LW_KEPT_WHY: Final = (
+    "the user manager does not say where it reads units (UnitPath), so a recorded copy of the unit may be"
+    " the one it runs; a later run removes them once it answers"
+)
+LW_KEPT_NOTE: Final = (
+    "kept with the recorded copies of the watcher's unit: the user manager does not say where it reads units"
+)
 # Where `systemctl --user enable` links the watcher's unit, beside it (its WantedBy=default.target).
 LW_WANTS_DIR: Final = "default.target.wants"
 

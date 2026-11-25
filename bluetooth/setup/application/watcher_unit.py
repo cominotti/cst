@@ -43,9 +43,27 @@ def older_copies(records: InstallRecordPort, home: str, current: str, answer: st
     its path, the installer's for this home (record_file), is not plain (a HOME with a "." in it). None
     either when the user manager's UnitPath (answer) names no folder of the user's own units
     (named_user_unit_dir): current is then only systemd's default, and a recorded copy elsewhere may be
-    the one the manager loads, so every recorded copy is kept."""
+    the one the manager loads, so every recorded copy is kept (kept_copies)."""
     if named_user_unit_dir(answer) is None:
         return ()
+    return _recorded_elsewhere(records, home, current)
+
+
+def kept_copies(
+    files: SetupFilesPort, records: InstallRecordPort, home: str, current: str, answer: str | None
+) -> tuple[str, ...]:
+    """The recorded copies older_copies keeps because the user manager's UnitPath (answer) names no
+    folder: those on disk that are not current by another path. One of them may be the unit the manager
+    runs, so revert keeps the watcher's program with them. None when the manager names its folder."""
+    if named_user_unit_dir(answer) is not None:
+        return ()
+    cur = files.realpath(current)
+    return tuple(p for p in _recorded_elsewhere(records, home, current) if files.exists(p) and files.realpath(p) != cur)
+
+
+def _recorded_elsewhere(records: InstallRecordPort, home: str, current: str) -> tuple[str, ...]:
+    """The watcher's unit files the user's install record lists elsewhere than current; none when the
+    record cannot be read."""
     try:
         rec = records.read(record_file(Owner.USER, home))
     except OSError, RecordFormatError, ValueError:

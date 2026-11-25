@@ -200,6 +200,11 @@ LW_STALE = "an older CST's copy, where your user manager does not read units: ap
 LW_STALE_FOREIGN = "recorded as CST's, not written by CST: left alone; apply drops its record line"
 LW_STALE_SAME = "the same file as the unit's, by another path: apply only drops this record line"
 LW_STALE_LINK = "the enable link of that older copy: apply removes it"
+LW_KEPT_WHY = (
+    "the user manager does not say where it reads units (UnitPath), so a recorded copy of the unit may be"
+    " the one it runs; a later run removes them once it answers"
+)
+LW_KEPT_NOTE = "kept with the recorded copies of the watcher's unit: the user manager does not say where it reads units"
 
 
 def row(word: str, label: str, note: str = "") -> str:
@@ -1859,6 +1864,70 @@ class WatcherTest(SetupCase):
                 self.assertNotIn("older CST", r.stdout)
                 self.assertTrue(os.path.isfile(old))
                 self.assertIn(old, json.loads(self.text(m.record))["files"])
+
+    def test_the_program_is_kept_while_the_recorded_copies_are(self) -> None:
+        # The live unit was recorded under a folder the manager named then (~/xdg), and now the manager's
+        # UnitPath cannot be read: revert keeps that copy (it may be the unit the manager runs) and the
+        # watcher's program with it, so that unit does not start a missing program, and says both in one
+        # line; a second revert changes nothing. apply with the watcher off does the same, and plan says
+        # so. Once the manager answers, revert removes both. Before, revert and apply removed the program,
+        # left the copy enabled and said nothing of it.
+        for cmd in ("revert", "apply"):
+            with self.subTest(cmd=cmd):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+                m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+                m.run("apply", "--no-restart")
+                os.unlink(m.state + "/unit-path")
+                m.flag("no-unit-path")
+                kept = f"{m.lw_prog} and {old}: {LW_KEPT_WHY}\n"
+                if cmd == "apply":
+                    m.user_settings(f"DEVICE={MAC}\n")  # the watcher off
+                    r = m.run("plan")
+                    self.assertIn(row("note", "~/.local/lib/cst/bt-ldac-watch", LW_KEPT_NOTE), r.stdout)
+                    self.assertNotIn(f"stops and removes {LW}", r.stdout)
+                    self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), r.stdout)
+                else:
+                    r = m.run("revert", "--check")
+                    self.assertIn(f"would keep {kept}", r.stdout)
+                    self.assertNotIn("would stop, disable and remove", r.stdout)
+                for _ in range(2):
+                    r = m.run(cmd, "--yes", "--no-restart")
+                    self.assertEqual(r.stderr.count(f"WARNING: kept {kept}"), 1, r.text)
+                    self.assertNotIn(f"removed:   {m.lw_prog}", r.stdout)
+                    self.assertTrue(os.access(m.lw_prog, os.X_OK) and os.path.isfile(old))
+                    self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, old]))
+                m.flag("no-unit-path", on=False)
+                r = m.run("revert", "--yes", "--no-restart")
+                self.assertIn(f"removed:   {old} (an older CST's copy)\n", r.stdout)
+                self.assertIn(f"removed:   {m.lw_prog}\n", r.stdout)
+                self.assertNotIn("kept", r.stderr)
+                self.assertEqual(json.loads(self.text(m.record))["files"], {})
+
+    def test_a_copy_gone_or_the_unit_itself_keeps_no_program(self) -> None:
+        # The manager's UnitPath cannot be read, and the copy the record lists elsewhere cannot be a unit
+        # the manager runs: it is gone from disk, or it is the unit file in ~/.config by another path (a
+        # link ~/cfg -> ~/.config). revert removes the program as before, with no "kept" line.
+        for case in ("gone", "the unit itself"):
+            with self.subTest(case=case):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                if case == "gone":
+                    copy = os.path.join(m.home, "xdg", "systemd", "user", LW)
+                else:
+                    os.makedirs(os.path.join(m.home, ".config"), exist_ok=True)
+                    os.symlink(".config", os.path.join(m.home, "cfg"))
+                    copy = os.path.join(m.home, "cfg", "systemd", "user", LW)
+                m.put("unit-path", f"{os.path.dirname(copy)} /etc/systemd/user\n")
+                m.run("apply", "--no-restart")
+                self.assertIn(copy, json.loads(self.text(m.record))["files"])
+                os.unlink(m.state + "/unit-path")
+                m.flag("no-unit-path")
+                if case == "gone":
+                    os.unlink(copy)
+                r = m.run("revert", "--yes", "--no-restart")
+                self.assertIn(f"removed:   {m.lw_prog}\n", r.stdout)
+                self.assertNotIn("kept", r.stderr)
+                self.assertFalse(os.path.exists(m.lw_prog))
 
     def test_a_home_not_written_plainly_still_plans(self) -> None:
         # HOME as a shell or pam_env can leave it. A trailing slash: the record is read where the
