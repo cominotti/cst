@@ -1147,11 +1147,14 @@ def cache_reload_scaffold(w: str) -> str:
     real /etc/fstab and loaded (daemon-reload; nothing started). PATH="w/sync:$PATH" runs a command whose
     daemon-reload first copies w/etc/fstab to /etc/fstab and counts it (`reloads` prints the count);
     PATH="w/kill:$PATH" one whose daemon-reload copies it, then kills the pid in w/pid. $cst is the
-    checkout's cst. Clean up with cache_reload_cleanup(w)."""
+    checkout's cst. A work folder it cannot empty stops it (rm and mkdir on their own lines: set -e does not
+    stop on the first command of an && list), and it records /etc/fstab before any other step. Clean up with
+    cache_reload_cleanup(w)."""
     return f"""
             set -euo pipefail
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
-            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
+            rm -rf {w}
+            mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
             if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
             [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
             [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
@@ -8924,7 +8927,7 @@ echo E2E-OK
             f"""
             if [[ -f {w}/fstab.bak ]]; then
                 cp -a {w}/fstab.bak /etc/fstab
-            else
+            elif [[ -f {w}/no-fstab ]]; then
                 rm -f /etc/fstab
             fi
             if [[ -f {w}/installed.json.bak ]]; then
@@ -8945,10 +8948,11 @@ echo E2E-OK
             c,
             f"""
             set -euo pipefail
-            rm -rf {w} && mkdir -p {w}/bin {w}/proc
+            rm -rf {w}
+            mkdir -p {w}/bin {w}/proc
+            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
             [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
             touch /run/ostree-booted
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
             printf '# test fstab\\nUUID={uuid} / btrfs subvol=root,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
             printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
@@ -9142,7 +9146,7 @@ EOF
             exec_bash,
             c,
             f"""
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
             if [[ -f {w}/installed.json.bak ]]; then cp -a {w}/installed.json.bak /var/lib/cst/installed.json; else rm -f /var/lib/cst/installed.json; fi
             if [[ ! -f {w}/had-ostree-booted ]]; then rm -f /run/ostree-booted; fi
             rm -f {shlex.quote(f"/etc/systemd/system/{top_unit}")} {shlex.quote(f"/etc/systemd/system/{auto_unit}")}
@@ -9157,10 +9161,11 @@ EOF
             f"""
             set -euo pipefail
             absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
-            rm -rf {w} && mkdir -p {w}/bin {w}/proc
+            rm -rf {w}
+            mkdir -p {w}/bin {w}/proc
+            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
             [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
             touch /run/ostree-booted
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
             printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
             printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
@@ -9397,7 +9402,7 @@ EOF
             exec_bash,
             c,
             f"""
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
             if [[ -f {w}/crypttab.bak ]]; then cp -a {w}/crypttab.bak /etc/crypttab; else rm -f /etc/crypttab; fi
             systemctl daemon-reload || true
             rm -rf {w}
@@ -9408,10 +9413,11 @@ EOF
             c,
             f"""
             set -euo pipefail
-            rm -rf {w} && mkdir -p {w}/bin {w}/fail {w}/fail2 {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
+            rm -rf {w}
+            mkdir -p {w}/bin {w}/fail {w}/fail2 {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
+            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
             for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do mkdir -p {w}/var/home/$u; done
             mkdir -p "{w}/var/home/u four"
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /etc/crypttab ]] || cp -a /etc/crypttab {w}/crypttab.bak
             {{
                 echo "root:x:0:0:root:/root:/bin/bash"

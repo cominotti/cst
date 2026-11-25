@@ -251,6 +251,21 @@ unless the line has an `||` list operator (one in quotes, in `[[ ... ]]` or in
 parentheses handles nothing) or is a one-line function. It does not see a check
 chained to a function (`[[ ... ]] && unchanged`): write those on two lines too.
 
+### Cleanups of /etc/fstab
+
+A tier 1 test that writes the container's `/etc/fstab` registers its cleanup
+before its script runs, so the cleanup also runs after a script that stopped
+early. The script records the file right after it makes its work folder `w`,
+before any other step: `w/fstab.bak` when there is one, `w/no-fstab` when
+there is none. The cleanup puts the copy back, removes `/etc/fstab` only with
+`no-fstab`, and with neither leaves it alone: the script stopped before it
+wrote the file. `rm -rf w` and `mkdir -p w/...` go on two lines, so a work
+folder that cannot be emptied (a mount still under it) stops the script
+instead of leaving the old content in place. `cache_reload_scaffold` and
+`cache_reload_cleanup` (test_177, test_201, test_202), test_157, test_159 and
+test_160 follow it. The rule covers `/etc/fstab` only: those cleanups still
+remove other files they found no backup of.
+
 ## Mixed-version tests
 
 The history of this repository was rewritten on 2026-11-18. The commit SHAs in fixture names (`tests/fixtures/legacy/<file>@<sha>`) and the `(#NN)` pull request numbers in older commit subjects refer to the history before that date; the fixtures' contents are what the names describe.
