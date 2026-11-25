@@ -851,7 +851,16 @@ docker volume rm <name>         # or one volume by name
   as below, and a later `install` starts afresh). One gap is left: a
   container that writes into a volume during the few milliseconds between
   mark's two looks at the volumes is asked for after `+C` (still flushed),
-  so a kill exactly there can lose that request.
+  so a kill exactly there can lose that request. When that second look
+  fails (an error reading a volume), `mark` writes the request all the
+  same and exits 2, with a journal line `... the migration is requested:
+  the next boot looks at the volumes again`: what a container wrote in
+  between is unknown, and no boot asks for a folder that has `+C`. A
+  migration with nothing to copy just removes its flag at the next boot.
+  When that request cannot be written either, it is recorded as
+  `not-scheduled` as above. If the same error comes back at the boots, the
+  request ends as any other that does not finish: two boots, then the
+  give-up alert and its record.
   When no volume holds copy-on-write data, `mark` removes an old counter
   instead; if that fails (a folder in its place, a read-only `/var`), it
   sets no `+C`, exits 2 and the journal names the file (the next boot sets

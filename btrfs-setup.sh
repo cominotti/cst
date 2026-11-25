@@ -1030,7 +1030,8 @@ DOCKER_NOCOW_BIN=/usr/local/sbin/docker-volumes-nocow
 # mark writes the request itself before it sets +C: the attempt counter reset, then the flag,
 # each flushed (exit 1: volumes left to copy). Also when daemon.json cannot be read (exit 2,
 # nothing marked: the first boot after the fix migrates). Every exit 2 leaves a journal line;
-# when the request could not be written, the folder keeps no +C and the next boot asks again.
+# when the request could not be written, the folder keeps no +C and the next boot asks again;
+# when mark's second look at the volumes fails after +C, the request is written all the same.
 # Nothing is written here: a flag touched beside an old count would make the next boot give up
 # at once.
 mark_docker_volumes() {

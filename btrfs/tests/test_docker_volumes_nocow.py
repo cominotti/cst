@@ -774,6 +774,85 @@ class MarkUnmarkTest(Base):
         self.assertTrue(os.path.exists(self.flag))
         self.assertTrue(self.fs.nocow(self.vols))
 
+    def second_scan_fails(self, *, write: bool = True) -> contextlib.AbstractContextManager[object]:
+        """The first scan with fix (mark's second look, after +C) first writes a file with data into
+        volume v (a container writing between the two looks; write) and then fails (EIO); every other
+        scan is the real one."""
+        service = self.cli.service
+        real_scan = service.tree.scan
+        failed: list[bool] = []
+
+        def scan(top: str, *, fix: bool = False) -> TreeScan:
+            if fix and not failed:
+                failed.append(True)
+                if write:
+                    with open(os.path.join(self.vols, "v", "_data", "late"), "wb") as f:
+                        f.write(b"\x02" * (1 << 20))
+                raise OSError(errno.EIO, "Input/output error")
+            return real_scan(top, fix=fix)
+
+        return mock.patch.object(service.tree, "scan", scan)
+
+    def test_mark_whose_second_scan_fails_after_nocow_still_requests(self) -> None:
+        # Nothing to copy at the first look, so no request yet; +C; the second look fails. Before, mark
+        # stopped there with no request: +C stayed with what a container wrote, and no boot asked again.
+        self.fs.set(self.vols, nocow=False)
+        top = self.volume("v", data={"empty": b""})
+        with self.second_scan_fails():
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertTrue(self.fs.nocow(self.vols))
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: {self.vols}: [Errno 5] Input/output error; the migration is requested: the next boot "
+            "looks at the volumes again\n",
+        )
+        self.assertIsNone(read_attempts(self))
+        self.assertFalse(os.path.exists(self.outcome))
+        # The next boot rewrites what was written between the two looks.
+        _rc, out = self.call(self.cli.migrate)
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assert_all_nocow(top)
+        self.assert_no_leftovers("v")
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+
+    def test_mark_whose_second_scan_fails_and_whose_request_cannot_be_written_records_it(self) -> None:
+        # The request cannot be written either: +C is set and no flag is there, so no boot asks; the
+        # not-scheduled record says so, and the scan's error ends mark as before.
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=False)
+        self.volume("v", data={"empty": b""})
+        with self.second_scan_fails():
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); "
+            rf"{self.vols} has \+C already, so no boot asks again: fix that, then run cst btrfs install\n"
+            rf"<3>{TAG}: {self.vols}: \[Errno 5\] Input/output error\n$",
+        )
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "not-scheduled")
+
+    def test_mark_whose_second_scan_fails_after_its_request_says_it_is_requested(self) -> None:
+        # Copy-on-write data at the first look: the request was written before +C, as always; the line
+        # says so now (before: the error alone).
+        self.fs.set(self.vols, nocow=False)
+        self.volume("v")
+        with self.second_scan_fails(write=False):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: {self.vols}: [Errno 5] Input/output error; the migration is requested: the next boot "
+            "looks at the volumes again\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+
     def test_mark_after_an_old_install_left_nocow_without_its_flag(self) -> None:
         # An older install set +C first and the flag after mark: killed in between, it left +C,
         # copy-on-write data and no flag. No boot asks again; the next install does.

@@ -342,7 +342,8 @@ class DockerVolumesNocow:
         migrate; 1 existing volumes still need migrating, and the flag that asks the next boot is
         written; 2 the request could not be written (a journal line says why; no +C then, so the
         next boot asks again, unless the folder had +C already and no flag was there: then no boot
-        asks, and the outcome record says so)."""
+        asks, and the outcome record says so). Also 2 when the second look at the volumes (after +C)
+        fails: the request is written all the same, and the next boot looks again."""
         vols = self.paths.volumes
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent (Docker not set up yet): nothing to mark")
@@ -357,7 +358,15 @@ class DockerVolumesNocow:
         elif not self.request_migration(renew=True, install=True):  # a new request gets its two boots again
             return 2
         self.tree.set_nocow(vols, on=True)
-        todo = self.pending(fix=True)  # folders and empty files: in place, now
+        try:
+            todo = self.pending(fix=True)  # folders and empty files: in place, now
+        except OSError as e:
+            # What a container wrote since the first scan is unknown, and no boot asks for a folder with
+            # +C: asked anyway (a migration with nothing to copy only removes its flag at the next boot).
+            if not requested and not self.request_migration(renew=True, install=True):
+                raise
+            self.out.log(3, f"{vols}: {e}; the migration is requested: the next boot looks at the volumes again")
+            return 2
         if not todo:
             return 0
         # A container wrote between the two scans (install does not stop Docker): asked now,
