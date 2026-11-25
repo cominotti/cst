@@ -179,11 +179,13 @@ def _torn_of(p: NasBackup, vm: str, nas: NasRepo) -> list[TornEntry]:
 
 
 def forget_listed(p: NasBackup, vm: str, nas: NasRepo, e: TornEntry, listed: Sequence[ResticSnapshot]) -> str | None:
-    """Forget the listed snapshot the torn entry e names (retry_torn); None when the entry is done with
-    (forgotten now, or restic no longer lists it: forgotten already), else why it stays. A listed one
-    without both tags is never forgotten: it stays, and the retention waits."""
-    short = e["snapshot"][:8]
-    found = [s for s in listed if s["id"].startswith(e["snapshot"]) or e["snapshot"].startswith(s["id"])]
+    """Forget the listed snapshot the torn entry e names (by its id, or by the original restic tag kept),
+    by its listed id (retry_torn); None when the entry is done with (forgotten now, or restic no longer
+    lists it: forgotten already), else why it stays. A listed one without both tags is never forgotten:
+    it stays, and the retention waits."""
+    short, torn = e["snapshot"][:8], e["snapshot"]
+    # By its id or, once restic tag saved it again under a new id, its original (snapshot_names).
+    found = [s for s in listed if any(n.startswith(torn) or torn.startswith(n) for n in snapshot_names(s))]
     if len(found) > 1:
         return f"the torn snapshot {short} names {len(found)} listed snapshots"
     if not found:

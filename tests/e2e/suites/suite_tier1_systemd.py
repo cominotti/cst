@@ -5375,7 +5375,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
         their listed IDs, and the retention then keeps the good backup; the other VM's entry and
         snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
-        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
+        run whose forget works) forgets it and leaves the record as it was; and a recorded torn snapshot
+        whose tags a real restic tag changed is forgotten by its new ID. A whole NAS backup needs
         libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
         w = "/var/tmp/e2e-vm-torn"
         nas_dir = "/srv/backup/e2e-vm-torn"
@@ -5404,6 +5405,19 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qx "forget_torn: None" "$w/forget.out"
             [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
             [[ "$(d entries "$CST_VM_TORN")" == "1 e2eother=$other" ]]
+            # A recorded torn snapshot whose tags were changed (a real restic tag: a new ID, the recorded one
+            # its original) is forgotten by its new ID, not dropped as "forgotten already".
+            retagged="$(snap cst-vm,vm:e2evm)"
+            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$retagged"
+            restic tag -q --add cst-keep "$retagged"
+            retagged2="$(restic snapshots --json --no-lock | d retagged "$retagged")"
+            [[ ${#retagged2} == 64 && "$retagged2" != "$retagged" ]]
+            d retry e2evm >"$w/retagged.out"
+            cat "$w/retagged.out" >&2
+            grep -qF "torn restic snapshot ${retagged2:0:8} of an earlier run forgotten" "$w/retagged.out"
+            if grep -qF "forgotten already" "$w/retagged.out"; then exit 1; fi
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
+            [[ "$(d entries "$CST_VM_TORN")" == 1 ]]
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},

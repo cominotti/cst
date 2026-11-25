@@ -1827,6 +1827,24 @@ class TornRecordTest(Nas):
         )
         self.assertEqual(self.torn_list(), [])
 
+    def test_a_recorded_snapshot_whose_tags_were_changed_is_forgotten_by_its_new_id(self) -> None:
+        # restic tag saved it again under a new id, with the recorded one as its original: the retry took it
+        # for "forgotten already" and dropped it from the record, and the next check named it as a stray.
+        retagged = "f00dcafe" + "2" * 56
+        self.write_torn([self.torn_entry()])
+        listing = [
+            {"id": SNAP_ID, "tags": BOTH_TAGS},
+            {"id": retagged, "original": TORN_ID, "tags": [*BOTH_TAGS, "cst-keep"]},
+        ]
+        self.restic_cfg(snapshots_json=json.dumps(listing))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.forgets()[0], ["forget", "--retry-lock", "30m", retagged], "by its listed id")
+        self.assertIn("--keep-weekly", self.forgets()[1], "then the retention")
+        self.assertIn(f"torn restic snapshot {retagged[:8]} of an earlier run forgotten", r.stdout)
+        self.assertNotIn("forgotten already", r.stdout)
+        self.assertEqual(self.torn_list(), [])
+
     def test_a_recorded_snapshot_listed_without_both_tags_is_kept_and_the_retention_waits(self) -> None:
         # restic lists by both tags, so a listed snapshot without them is an answer of another shape:
         # never forgotten, never dropped, and the retention (which could count it) waits.

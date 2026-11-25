@@ -666,7 +666,9 @@ those restic still lists with the tags `cst-vm` and `vm:<name>`, under
 the host recorded with them (restic lists a snapshot only under the host it
 was made on, so a changed `NAS_RESTIC_HOST` or hostname hides none; one
 listed snapshot per recorded ID, forgotten by its listed ID): never by the
-recorded ID alone. A recorded ID that restic no longer lists was forgotten
+recorded ID alone. A snapshot whose tags were changed (`restic tag`: restic
+lists it under a new ID, the recorded one as its `original`) is still the
+recorded one, forgotten by its new ID. A recorded ID that restic no longer lists was forgotten
 already (by hand, or by the run that recorded it when it could not update
 the record): it is dropped from the record. One that restic lists without
 both tags is never forgotten: it stays recorded, and the retention waits.
@@ -1178,7 +1180,8 @@ listed or forgotten after it; `ResticBackupAnsweredTest`
 the call that starts the hold, once restic exited with its snapshot); the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
 when that forget fails, a listing fails, an ID is ambiguous or its listed
-snapshot lacks a tag, drops one restic no longer lists without forgetting
+snapshot lacks a tag, forgets one restic lists under a new ID after
+`restic tag` (its original recorded) by that ID, drops one restic no longer lists without forgetting
 it, keeps the entries of other VMs, repositories and
 newer formats, refuses a newer or unreadable record before anything, and
 the record's lock gives up after its timeout. The check of the snapshots no
@@ -1201,7 +1204,8 @@ and the next retry names nothing and runs the retention), `test_221` stops
 the retention's restic forget after a good read (the snapshot is indexed
 first, nothing is forgotten, and the next retry names nothing and runs the
 retention), and `test_151` runs the
-torn-snapshot retry, the retention after it and `forget_torn` against the
+torn-snapshot retry (also of a snapshot a real `restic tag` saved under a
+new ID), the retention after it and `forget_torn` against the
 real restic over SFTP to its NAS container (restic's own `snapshots --json`,
 a short recorded ID, the record and its lock as root). No E2E test runs a
 whole NAS backup: neither tier has libvirt with a running guest.
