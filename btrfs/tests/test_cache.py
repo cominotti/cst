@@ -1202,13 +1202,20 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
                 self.assertEqual(rc, 0, err)
                 self.assertIn("  /var/mnt/cache     not provisioned", out)
                 self.assertNotIn("  systemd  ", out)
-                self.assertNotIn(MOUNT_UNITS_SHOW, self.runner.calls)
+                self.assertFalse(self._asked_mount_units(), self.runner.calls)
         # The cache drive's base line alone (no user attached yet) is a cache set up: status says it.
         self.runner.show_fails = False
+        self.runner.calls.clear()
         with open(os.path.join(self.tmp, "etc", "fstab"), "a", encoding="utf-8") as fh:
             fh.write("/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,nofail 0 0\n")
         _, out, _ = self._run(["status"])
         self.assertIn("  systemd            has not loaded /etc/fstab as it is on disk", out)
+        self.assertTrue(self._asked_mount_units(), self.runner.calls)
+
+    def _asked_mount_units(self) -> bool:
+        """Whether a call asked systemd for its mount units, with any options: `systemctl show ... '*.mount'`
+        (as FakeMountRunner answers it), not only the exact MOUNT_UNITS_SHOW."""
+        return any(c[:2] == ["systemctl", "show"] and c[-1:] == ["*.mount"] for c in self.runner.calls)
 
     def test_a_catch_up_reload_that_fails_changes_nothing(self) -> None:
         self._killed_at_reload(["attach"])
