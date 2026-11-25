@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 import time
 from typing import TypedDict, Unpack
 
-from cst_core.domain.units import LoadState, parse_show_props, parse_show_units
+from cst_core.domain.units import parse_show_props, parse_show_units, show_units_argv
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode, StdinMode, SystemctlHost, UnitName
 
 
@@ -144,12 +144,9 @@ class SystemctlAdapter:
         """Remove what systemd keeps for unit (what: state, cache, logs, ...); its exit status and output."""
         return self._systemctl("clean", f"--what={what}", unit, output=output)
 
-    def _show(
-        self, head: Sequence[str], props: Sequence[str], target: str, *, options: Sequence[str] = ()
-    ) -> CommandResult:
-        """`systemctl show [OPTION...] -p PROP... TARGET` as show and show_units run it: on_host as the
-        adapter's policy says for show, the C locale, 20 s at most or the adapter's timeout."""
-        argv = [*head, "show", *options, *(a for p in props for a in ("-p", p)), target]
+    def _show(self, argv: list[str]) -> CommandResult:
+        """A `systemctl show` argv as show and show_units run it: on_host as the adapter's policy says for
+        show, the C locale, 20 s at most or the adapter's timeout."""
         timeout = 20 if self._timeout is None else self._timeout
         scope = _ScopeOptions(self._scope, on_host=self._show_on_host)
         return self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
@@ -161,7 +158,7 @@ class SystemctlAdapter:
         unit each is), in systemctl's order; [] when it lists none; None when systemctl fails or cannot
         start (no answer). As show: on the host from a toolbox unless the adapter's on_host is LOCAL, the C
         locale, 20 s at most or the adapter's timeout."""
-        res = self._show(self._head, props, pattern, options=(f"--state={LoadState.LOADED}",))
+        res = self._show(show_units_argv(self._head, pattern, props))
         if res.returncode != 0:
             return None
         return parse_show_units(res.stdout)
@@ -177,5 +174,5 @@ class SystemctlAdapter:
         user's own manager (`systemctl --user`; an adapter whose scope is user already has it); {} when
         systemctl fails or cannot start. 20 s at most, or the adapter's timeout when it has one."""
         head = [*self._head, "--user"] if user and "--user" not in self._head else self._head
-        res = self._show(head, props, unit)
+        res = self._show([*head, "show", *(a for p in props for a in ("-p", p)), unit])
         return parse_show_props(res.stdout) if res.returncode == 0 else {}

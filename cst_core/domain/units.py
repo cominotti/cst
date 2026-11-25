@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """systemd units: their files as CST writes them (header comment lines, then sections), the answer
-of `systemctl show` (parse_show_props, parse_show_units), and systemd's ActiveState words (ActiveState).
+of `systemctl show` (parse_show_props, parse_show_units), the question of every loaded unit of a glob
+(show_units_argv), and systemd's ActiveState words (ActiveState).
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])
 
@@ -33,6 +34,14 @@ def parse_show_units(text: str) -> list[dict[str, str]]:
     (parse_show_props of each block, blocks parted by an empty line), in systemctl's order; a block with
     no PROP=VALUE line is skipped."""
     return [unit for block in text.split("\n\n") if (unit := parse_show_props(block))]
+
+
+def show_units_argv(head: Sequence[str], pattern: str, props: Sequence[str]) -> list[str]:
+    """`HEAD... show --state=loaded -p PROP... PATTERN` (HEAD: `systemctl`, or `systemctl --user`): every
+    unit the manager has loaded whose name matches the glob, active or not (without --state=loaded a glob
+    hides the inactive units), and it loads none. SystemctlAdapter.show_units runs it; a caller that runs
+    systemctl through another runner (cst doctor's host) builds it here, so both ask the same question."""
+    return [*head, "show", f"--state={LoadState.LOADED}", *(a for p in props for a in ("-p", p)), pattern]
 
 
 def render_unit_file(header: Sequence[str], sections: Sequence[tuple[str, Sequence[str]]]) -> str:

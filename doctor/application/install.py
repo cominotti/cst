@@ -16,7 +16,7 @@ from cst_core.domain.record import (
     RecordFormatError,
 )
 from cst_core.domain.text import YES_WORDS, enum_member
-from cst_core.domain.units import LoadState, parse_show_units
+from cst_core.domain.units import LoadState, parse_show_units, show_units_argv
 from doctor.application.shared import check, facts, refresh, runs
 from doctor.domain import (
     INFO,
@@ -307,8 +307,7 @@ def _units_not_loaded(host: DoctorHostPort, scope: UnitScope) -> list[str]:
     inactive, and it loads none (a literal name would load it; a glob without --state=loaded lists only the
     active ones). [] when the manager cannot be asked."""
     user = ["--user"] if scope == UnitScope.USER else []
-    cmd = ["systemctl", *user, "show", "--state=loaded", *(a for p in LOADED_UNIT_PROPS for a in ("-p", p)), "*"]
-    rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
+    rc, out, _ = host.run(show_units_argv(["systemctl", *user], "*", LOADED_UNIT_PROPS), timeout=20, locale_c=True)
     if rc != 0:
         return []
     return sorted(
