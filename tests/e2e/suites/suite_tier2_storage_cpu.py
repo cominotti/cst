@@ -470,7 +470,9 @@ wait_lines() {   # wait_lines T TEXT N: up to 10 s for N such lines; the journal
 # folder is read-only (a read-only bind mount over /etc/btrfs-setup) while the
 # count's is not. The count of 2 must stay with the flag: three boots each give
 # up again at once (no copy, no alert); once the mount is gone, the next boot
-# gives up for good, removes both and keeps one alert for the next login.
+# gives up for good, removes both and keeps one alert for the next login. Each
+# give-up records itself first (/var/lib/docker-volumes-nocow/outcome, 0644):
+# status shows it once the flag is gone, and a later boot leaves it.
 NOCOW_GIVE_UP_SCRIPT = (
     r"""
 set -E
@@ -489,7 +491,7 @@ cleanup() {
     local f
     while mountpoint -q /etc/btrfs-setup; do umount /etc/btrfs-setup || break; done
     rm -rf "${vols:?}/$vol"
-    rm -f "$flag" "$attempts" "$state/postponed"
+    rm -f "$flag" "$attempts" "$state/postponed" "$state/outcome"
     for f in $(ours); do rm -f "$f"; done
     if [[ -d "$aside" ]]; then
         for f in "$aside"/*.alert; do
@@ -518,7 +520,7 @@ d="$vols/$vol/_data"
 ino="$(stat -c %i "$d")"
 sum="$(sha256sum <"$d/db")"
 install -d -m 0755 "$state"
-rm -f "$state/postponed"
+rm -f "$state/postponed" "$state/outcome"
 touch "$flag"
 printf 2 >"$attempts"   # two boots have tried: the next one gives up
 mount --bind /etc/btrfs-setup /etc/btrfs-setup
@@ -541,6 +543,8 @@ done
 [[ "$(ls -A "$vols/$vol")" == _data ]]   # no copy beside it
 [[ "$(lsattr "$d/db" | awk '{print $1}')" != *C* ]]
 [[ -z "$(ours)" ]] || fail "an alert was kept before the give-up: $(ours)"
+grep -qF '"outcome": "gave-up"' "$state/outcome" || fail "no record of the give-up: $(cat "$state/outcome" 2>&1)"
+if grep -q 'migration gave up' <<<"$("$helper" status)"; then fail "status shows the give-up beside the flag"; fi
 echo "E2E-NOCOW give-up with /etc/btrfs-setup read-only: 3 boots, count $(cat "$attempts"), flag kept"
 
 # 2. The flag's folder writable again: the next boot gives up for good and keeps one alert.
@@ -555,12 +559,17 @@ grep -qx 'count=1' "$kept"
 [[ "$(stat -c %i "$d")" == "$ino" ]]
 [[ "$(lines "$t0" "$rewriting")" == 0 ]]
 grep -q 'migration not scheduled' <<<"$("$helper" status)"
+[[ "$(stat -c %a "$state/outcome")" == 644 ]]
+grep -qF '"outcome": "gave-up"' "$state/outcome"
+grep -qF 'did not finish after 2 boot(s)' "$state/outcome"
+grep -qE '^  migration gave up [0-9-]+ [0-9:]+: the migration did not finish after 2 boot\(s\)' <<<"$("$helper" status)"
 
-# 3. A later boot has nothing left to give up: no second alert.
+# 3. A later boot has nothing left to give up: no second alert, and the record stays.
 run_unit
 [[ "$(lines "$t0" "$gave_up")" == 1 ]]
 [[ "$(lines "$t0" "$erofs")" == 3 ]]
 grep -qx 'count=1' "$kept"
+grep -qF '"outcome": "gave-up"' "$state/outcome"
 echo E2E-OK
 """
 )

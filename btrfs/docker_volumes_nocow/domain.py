@@ -8,9 +8,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import time
-from typing import Final, TypedDict, TypeIs
+from typing import Final, NotRequired, TypedDict, TypeIs
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
+from cst_core.domain.shapes import KeyTypes, has_shape, parse_json
+from cst_core.domain.text import enum_member
 from cst_core.domain.values import GIB
 from cst_core.domain.units import ActiveState
 
@@ -118,6 +120,8 @@ class NocowPaths:
     # The boots at which migrate had to wait (JSON, world-readable): shown by
     # status and by `cst doctor`, removed at the first boot that is not held back.
     postponed: str = "/var/lib/docker-volumes-nocow/postponed"
+    # Why no migration is scheduled, when the helper knows (JSON, world-readable): status shows it.
+    outcome: str = state_format(StateFormatKey.DOCKER_NOCOW_OUTCOME).path
     notify: str = NOTIFY_PROGRAM
     # Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
     alerts: str = state_format(StateFormatKey.ALERT_SPOOL).folder
@@ -255,6 +259,88 @@ def next_postponed(rec: StoredPostponed | None, *, why: str, boot: str, now: int
     if not boots or old.get("boot_id") != boot:
         boots += 1
     return {"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}
+
+
+# ---- the outcome record: why no migration is scheduled -----------------------------------------
+OUTCOME_FORMAT: Final = state_format(StateFormatKey.DOCKER_NOCOW_OUTCOME)
+OUTCOME_VERSION: Final = "v"  # the record's key that holds its format version
+
+
+class NocowOutcome(StrEnum):
+    """Why no migration is scheduled, as the helper recorded it (the outcome record's "outcome")."""
+
+    GAVE_UP = "gave-up"  # the migration did not finish after GIVE_UP_AFTER boots
+
+
+class OutcomeRecord(TypedDict):
+    """The outcome file (JSON): its format version, the outcome's word (NocowOutcome), when (epoch
+    seconds), the volumes folder and why."""
+
+    v: NotRequired[int]
+    outcome: str
+    at: int
+    volumes: str
+    reason: str
+
+
+_OUTCOME_REQUIRED: Final[KeyTypes] = {"outcome": (str,), "at": (int,), "volumes": (str,), "reason": (str,)}
+_OUTCOME_OPTIONAL: Final[KeyTypes] = {OUTCOME_VERSION: (int,)}
+
+
+def is_outcome_record(value: object) -> TypeIs[OutcomeRecord]:
+    return has_shape(value, _OUTCOME_REQUIRED, _OUTCOME_OPTIONAL)
+
+
+def outcome_record(outcome: NocowOutcome, *, at: int, volumes: str, reason: str) -> OutcomeRecord:
+    """The record the helper writes."""
+    return {"v": OUTCOME_FORMAT.version, "outcome": outcome, "at": at, "volumes": volumes, "reason": reason}
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeRead:
+    """The outcome file as read back: no file (record None, problem ""), a record and its outcome, or
+    why it cannot be used (problem: a line for status and cst doctor)."""
+
+    record: OutcomeRecord | None = None
+    outcome: NocowOutcome | None = None
+    problem: str = ""
+
+
+def outcome_unreadable(path: str) -> OutcomeRead:
+    return OutcomeRead(problem=f"cannot read {path}")
+
+
+def parse_outcome(text: str | None, path: str) -> OutcomeRead:
+    """The outcome file's text (None: there is none), read as this checkout reads its format: one of a
+    newer format is named so, never taken for a broken one; an outcome word this checkout does not know
+    is unreadable."""
+    if text is None:
+        return OutcomeRead()
+    try:
+        data = parse_json(text)
+    except ValueError, RecursionError:
+        return outcome_unreadable(path)
+    newer = OUTCOME_FORMAT.newer(data, OUTCOME_VERSION)
+    if newer is not None:
+        return OutcomeRead(problem=OUTCOME_FORMAT.newer_text(path, newer))
+    if not OUTCOME_FORMAT.readable(data, OUTCOME_VERSION) or not is_outcome_record(data):
+        return outcome_unreadable(path)
+    outcome = enum_member(NocowOutcome, data["outcome"])
+    if outcome is None:
+        return outcome_unreadable(path)
+    return OutcomeRead(data, outcome)
+
+
+def outcome_line(read: OutcomeRead) -> str:
+    """The status line of the outcome record, or "" (no record)."""
+    if read.problem:
+        return f"  {read.problem}"
+    if read.record is None or read.outcome is None:
+        return ""
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(read.record["at"]))
+    match read.outcome:
+        case NocowOutcome.GAVE_UP:
+            return f"  migration gave up {when}: {read.record['reason']}; run cst btrfs install to try again"
 
 
 def postponed_line(rec: StoredPostponed | None) -> str:

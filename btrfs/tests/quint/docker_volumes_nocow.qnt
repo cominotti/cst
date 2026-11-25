@@ -15,7 +15,8 @@
 // Abstraction: a volume's folders hold contents, not files: "cow" (the original, copy-on-write), "copy"
 // (a complete NOCOW copy of it), "partial" (an incomplete or wrong copy), "empty" (the twin just made),
 // "absent". Not modelled: scan(fix) setting +C in place on folders and empty files, the postponed
-// record, journal lines and the alert, daemon.json problems, a dockerd outside docker.service, status
+// record, the outcome record (written and removed best effort, read by no decision of migrate or
+// mark), journal lines and the alert, daemon.json problems, a dockerd outside docker.service, status
 // and unmark, a failing remove_tree, containers writing during an install (mark's second scan finds
 // what the first did), durability of metadata, and the start an older install could leave (+C on
 // the folder, copy-on-write data, no flag: requestKept rules it out; MarkUnmarkTest and tier 2

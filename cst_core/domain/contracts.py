@@ -40,6 +40,7 @@ class StateFormatKey(StrEnum):
     INSTALL_RECORD = "install-record"
     GAME_STATE = "game-state"
     GAME_INTENDED = "game-intended"
+    DOCKER_NOCOW_OUTCOME = "docker-nocow-outcome"
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +132,9 @@ def version_of(data: object, field: str) -> int | None:
 #   change, and it has no version. game.intended (what 'on' set, for the
 #   drift repair) names its format on its first line; an installed bash copy
 #   of an older CST skips that line (it is no record it knows).
+# docker-nocow-outcome: why docker-volumes-nocow left no migration scheduled
+#   (it gave up), for its status; written and removed best effort, read by no
+#   decision of the helper.
 _TABLE: Final = r"""
 alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/pending_alerts/domain.py doctor/application/alerts.py | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/adapters/monitor.py | btrfs/stall_report/domain/window.py                | "v" of each record
@@ -143,6 +147,7 @@ vm-nas-torn        | /var/lib/cst/vm-nas-torn.json              | 1 | vm/adapter
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py cpu/cli.py cpu/power/adapters.py doctor/application/cpu.py | none (its existence is the contract)
 game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py doctor/application/cpu.py | first line "cst-game-intended 1" (none: 0)
+docker-nocow-outcome | /var/lib/docker-volumes-nocow/outcome    | 1 | btrfs/docker_volumes_nocow/adapters.py | btrfs/docker_volumes_nocow/adapters.py | "v" (none: 0)
 """
 
 

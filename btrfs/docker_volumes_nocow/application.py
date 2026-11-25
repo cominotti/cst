@@ -12,6 +12,7 @@ from btrfs.docker_volumes_nocow.domain import (
     MARGIN,
     NEW_SUFFIX,
     NocowCommand,
+    NocowOutcome,
     NocowPaths,
     PendingVolume,
     copy_check_failed,
@@ -20,6 +21,8 @@ from btrfs.docker_volumes_nocow.domain import (
     label_mismatch,
     next_postponed,
     old_copy_name,
+    outcome_line,
+    outcome_record,
     postponed_line,
     recovery,
 )
@@ -164,7 +167,25 @@ class DockerVolumesNocow:
                 f"cannot schedule the migration ({e}); {self.paths.volumes} keeps copy-on-write, the next boot tries again",
             )
             return False
+        self.forget_outcome()  # a new request: the last one's outcome is over
         return True
+
+    # ---- the outcome record: shown by status, read by no decision here ------------------------
+    def record_outcome(self, outcome: NocowOutcome, reason: str) -> None:
+        """Record why no migration is scheduled. Best effort: a failure is one journal line."""
+        record = outcome_record(outcome, at=int(self.clock.now()), volumes=self.paths.volumes, reason=reason)
+        try:
+            self.state.write_outcome(record)
+        except OSError as e:
+            self.out.log(4, f"cannot record the outcome ({outcome}) in {self.paths.outcome} for status: {e}")
+
+    def forget_outcome(self) -> None:
+        """Remove the outcome record (a new request, the end of a migration, nothing to migrate). Best
+        effort: a failure is one journal line."""
+        try:
+            self.state.clear_outcome()
+        except OSError as e:
+            self.out.log(4, f"cannot remove the outcome record {self.paths.outcome}: {e}")
 
     def note_postponed(self, why: str) -> None:
         """Count this boot as postponed (once per boot) and keep the latest reason."""
@@ -186,6 +207,13 @@ class DockerVolumesNocow:
             self.state.clear_postponed()
 
     def give_up(self, attempts: int) -> None:
+        # The record before the removals: a stop between them leaves it beside the flag, and the next
+        # boot gives up again (the count is still there) or, with no counter, runs a round whose end
+        # removes it. Written after them, a stop in between would leave no record at all.
+        self.record_outcome(
+            NocowOutcome.GAVE_UP,
+            f"the migration did not finish after {attempts} boot(s); see journalctl -u docker-volumes-nocow",
+        )
         # The counter before the flag: a stop between the two leaves the flag (the next boot tries
         # again), never a counter without its flag (a later request would give up without a try).
         self.state.remove_attempts()  # a later 'install' starts afresh
@@ -262,6 +290,7 @@ class DockerVolumesNocow:
         if not self.rewrite(todo):
             self.state.remove_attempts()  # before the flag, as in give_up
             self.state.remove_flag()
+            self.forget_outcome()
             self.out.log(5, "all Docker volumes are NOCOW now")
 
     def mark(self) -> int:
@@ -279,6 +308,7 @@ class DockerVolumesNocow:
         requested = bool(self.pending())
         if not requested:
             self.state.forget_attempts()
+            self.forget_outcome()  # nothing left to ask for
         elif not self.request_migration(renew=True):  # a new request gets its two boots again
             return 2
         self.tree.set_nocow(vols, on=True)
@@ -298,6 +328,7 @@ class DockerVolumesNocow:
     def unmark(self) -> None:
         """Clear +C on the volumes folder (uninstall); the volumes keep theirs."""
         self.state.clear_postponed()
+        self.forget_outcome()
         if self.tree.is_dir(self.paths.volumes):
             self.tree.set_nocow(self.paths.volumes, on=False)
 
@@ -305,6 +336,12 @@ class DockerVolumesNocow:
         vols = self.paths.volumes
         if self.paths.config_problem:
             self.out.say(f"{self.paths.config_problem}: the boot's migration waits until it is fixed")
+        flagged = self.state.flag_exists()
+        # With the flag there a migration is scheduled: a record beside it (a removal that failed) is old.
+        recorded = self.state.read_outcome() if not flagged else None
+        line = outcome_line(recorded) if recorded is not None else ""
+        if line:
+            self.out.say(line)
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent")
             return
@@ -316,10 +353,13 @@ class DockerVolumesNocow:
             f"{count - len(self.not_fully_nocow())} of {count} volume(s) fully NOCOW"
         )
         if todo:
-            when = "at the next boot" if self.state.flag_exists() else "not scheduled"
+            when = "at the next boot" if flagged else "not scheduled"
             self.out.say(
                 f"  {len(todo)} with copy-on-write data ({sum(t.size for t in todo) >> 20} MiB), migration {when}"
             )
+            if on and not flagged and not line:
+                # +C, no flag, no record: no boot looks again (a boot asks only for a folder without +C).
+                self.out.say("  no boot asks for it: run cst btrfs install")
         line = postponed_line(self.state.read_postponed())
         if line:
             self.out.say(line)

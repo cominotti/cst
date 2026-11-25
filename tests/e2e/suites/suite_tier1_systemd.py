@@ -5585,7 +5585,11 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         copy-on-write data (an empty file) and a folder where the count of boots belongs: mark exits 2
         with a journal line naming that path and "Is a directory", before it tries +C, and the folder
         stays. Before, CounterFile.forget swallowed the error and mark went on to the +C that tmpfs
-        refuses, so its line named that refusal instead."""
+        refuses, so its line named that refusal instead. Part 2: a give-up's record planted in
+        /var/lib/docker-volumes-nocow/outcome (the boot's give-up needs its two failed boots first):
+        status shows when and why with no flag; mark with a copy-on-write volume writes the flag and
+        removes the record (it exits 2: tmpfs refuses +C); unmark removes a record planted again; a
+        record of format 99 is named as one of a newer CST."""
         c = self.SYSTEMD_CONTAINER
         root = "/var/tmp/e2e-191-docker"
         state = "/var/lib/docker-volumes-nocow"
@@ -5629,6 +5633,29 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ -d "$state/attempts" ]]
             [[ ! -e "$flag" ]]
             rmdir "$state/attempts"
+            # Part 2: the record of a give-up.
+            plant() {{   # a give-up's record of format $1
+                printf '{{"v": %s, "outcome": "gave-up", "at": 1700000000, "volumes": "%s", "reason": "it did not finish"}}\n' "$1" "$vols" >"$state/outcome"
+            }}
+            plant 1
+            out="$($prog status 2>&1)"
+            echo "test_191 status, a give-up recorded: $out" >&2
+            grep -qE '^  migration gave up 2023-11-1[45] [0-9]{{2}}:[0-9]{{2}}: it did not finish; run cst btrfs install to try again$' <<<"$out" || {{ echo "status did not show the give-up" >&2; exit 1; }}
+            printf 'data\n' >"$vols/v/_data/file"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_191 mark, a give-up recorded: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]
+            [[ -e "$flag" ]] || {{ echo "mark wrote no request" >&2; exit 1; }}
+            [[ ! -e "$state/outcome" ]] || {{ echo "the new request left the give-up's record" >&2; exit 1; }}
+            rm -f "$flag"
+            plant 1
+            $prog unmark
+            [[ ! -e "$state/outcome" ]] || {{ echo "unmark left the record" >&2; exit 1; }}
+            plant 99
+            out="$($prog status 2>&1)"
+            echo "test_191 status, a record of format 99: $out" >&2
+            grep -qF "$state/outcome is format 99 of the docker-nocow-outcome (this CST reads format 1 and older): written by a newer CST" <<<"$out"
+            rm -f "$state/outcome"
             echo E2E-OK
             """,
         ).stdout

@@ -1064,7 +1064,9 @@ older helper left (any count up to `GIVE_UP_AFTER`): with an install that
 touched the flag beside it after a failed reset, `attemptsMatch` fails. A
 volume's folders hold contents, not files ("cow",
 "copy", "partial", "empty", "absent"). The spec's header lists what it does
-not model: `scan(fix)`, the postponed record, journal lines and alerts,
+not model: `scan(fix)`, the postponed record, the outcome record (written
+and removed best effort, read by no decision of `migrate` or `mark`),
+journal lines and alerts,
 `daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
 a failing `remove_tree`, containers writing during an install, the
 durability of metadata, and the start an older install could leave (+C on
@@ -1165,8 +1167,8 @@ error) the checked-in trace is left as it is and the run stops with exit 1. Abou
 all; the replay takes a fraction of a second.
 
 What the replay does not compare: `scan(fix)` setting +C in place on
-folders and empty files, the postponed record, journal lines and the alert,
-`daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
+folders and empty files, the postponed record, the outcome record, journal
+lines and the alert, `daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
 a failing `remove_tree`, containers writing during an install, and the
 durability of metadata (the unit tests and the fault tests cover those).
 

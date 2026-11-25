@@ -191,6 +191,7 @@ class Base(unittest.TestCase):
         self.flag = os.path.join(self.tmp, "etc/btrfs-setup/docker-nocow-pending")
         self.attempts = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/attempts")
         self.postponed = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/postponed")
+        self.outcome = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/outcome")
         self.notify = os.path.join(self.tmp, "usr/local/sbin/btrfs-notify")
         # The processes the helper looks at: none, unless a test adds one.
         self.proc = os.path.join(self.tmp, "proc")
@@ -207,6 +208,7 @@ class Base(unittest.TestCase):
             flag=self.flag,
             attempts=self.attempts,
             postponed=self.postponed,
+            outcome=self.outcome,
             notify=self.notify,
             alerts=os.path.join(self.tmp, "alerts", "pending"),
             proc=self.proc,
@@ -222,6 +224,7 @@ class Base(unittest.TestCase):
             paths.flag,
             paths.attempts,
             paths.postponed,
+            paths.outcome,
             paths.notify,
             paths.alerts,
             paths.proc,
@@ -354,6 +357,7 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(paths.flag, "/etc/btrfs-setup/docker-nocow-pending")
         self.assertEqual(paths.attempts, "/var/lib/docker-volumes-nocow/attempts")
         self.assertEqual(paths.postponed, "/var/lib/docker-volumes-nocow/postponed")
+        self.assertEqual(paths.outcome, "/var/lib/docker-volumes-nocow/outcome")
         self.assertEqual(paths.proc, "/proc")
         self.assertEqual(paths, NocowPaths())
 
@@ -421,7 +425,8 @@ class StatusTest(Base):
         self.assertEqual(
             out,
             f"{self.vols}: new volumes NOCOW; 1 of 3 volume(s) fully NOCOW\n"
-            "  1 with copy-on-write data (2 MiB), migration not scheduled\n",
+            "  1 with copy-on-write data (2 MiB), migration not scheduled\n"
+            "  no boot asks for it: run cst btrfs install\n",
         )
         schedule(self)
         rc, out = self.call(self.cli.status)
@@ -2262,6 +2267,193 @@ class PostponedDurableTest(PostponeBase):
             self.call(self.cli.migrate)
         assert_replaced_durably(self, self.postponed, synced)
         self.assertTrue(os.path.exists(self.postponed))
+
+
+class OutcomeRecordTest(Base):
+    """The outcome record (/var/lib/docker-volumes-nocow/outcome): written by a give-up, shown by status,
+    removed by a new request, by a migration that ends, by mark with nothing to migrate and by unmark."""
+
+    def gave_up(self, at: int = 1_700_000_000, *, version: int = 1) -> None:
+        """A record of a give-up, as give_up writes it."""
+        os.makedirs(os.path.dirname(self.outcome), exist_ok=True)
+        with open(self.outcome, "w") as f:
+            json.dump(
+                {"v": version, "outcome": "gave-up", "at": at, "volumes": self.vols, "reason": "it did not finish"}, f
+            )
+
+    def record(self) -> dict[str, object]:
+        with open(self.outcome) as f:
+            return object_of(parse_json(f.read()))
+
+    def give_up_boot(self) -> str:
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts("2")
+        _rc, out = self.call(self.cli.migrate)
+        return out
+
+    def test_a_give_up_is_recorded_durably_before_the_counter_and_the_flag_go(self) -> None:
+        seen: list[tuple[str, bool]] = []
+        state = nocow_adapters.NocowStateFiles
+        real_remove_attempts, real_remove_flag = state.remove_attempts, state.remove_flag
+
+        def remove_attempts(this: nocow_adapters.NocowStateFiles) -> None:
+            seen.append(("remove_attempts", os.path.exists(self.outcome)))
+            real_remove_attempts(this)
+
+        def remove_flag(this: nocow_adapters.NocowStateFiles) -> None:
+            seen.append(("remove_flag", os.path.exists(self.outcome)))
+            real_remove_flag(this)
+
+        with (
+            mock.patch.object(state, "remove_attempts", remove_attempts),
+            mock.patch.object(state, "remove_flag", remove_flag),
+            recorded_fsyncs() as synced,
+            mock.patch.object(time, "time", return_value=1_700_000_000.5),
+        ):
+            out = self.give_up_boot()
+        self.assertEqual(seen, [("remove_attempts", True), ("remove_flag", True)])
+        assert_replaced_durably(self, self.outcome, synced)
+        self.assertEqual(stat.S_IMODE(os.stat(self.outcome).st_mode), 0o644)
+        self.assertEqual(
+            self.record(),
+            {
+                "v": 1,
+                "outcome": "gave-up",
+                "at": 1_700_000_000,
+                "volumes": self.vols,
+                "reason": "the migration did not finish after 2 boot(s); see journalctl -u docker-volumes-nocow",
+            },
+        )
+        self.assertIn("Gave up after two boots", out)
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+        self.assertEqual(len(self.fs.commands(self.notify)), 1)
+
+    def test_a_record_that_cannot_be_written_changes_nothing_else(self) -> None:
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "write_outcome", side_effect=denied):
+            out = self.give_up_boot()
+        self.assertEqual(
+            out,
+            f"<4>{TAG}: cannot record the outcome (gave-up) in {self.outcome} for status: [Errno 13] Permission denied\n"
+            f"<3>{TAG}: Gave up after two boots; see journalctl -u docker-volumes-nocow.\n",
+        )
+        self.assertFalse(os.path.exists(self.outcome))
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+        self.assertEqual(len(self.fs.commands(self.notify)), 1)
+
+    def test_a_give_up_whose_flag_stays_keeps_the_record_and_the_count(self) -> None:
+        erofs = OSError(errno.EROFS, "Read-only file system")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "remove_flag", side_effect=erofs):
+            self.volume("cow")
+            schedule(self)
+            self.set_attempts("2")
+            rc, _out = self.call(lambda: self.cli.service.execute(NocowCommand.MIGRATE))
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.record()["outcome"], "gave-up")
+        self.assertEqual(read_attempts(self), "2")
+        self.assertTrue(os.path.exists(self.flag))
+
+    def test_status_shows_a_give_up_without_the_flag(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        line = f"  migration gave up {when}: it did not finish; run cst btrfs install to try again\n"
+        rc, out = self.call(self.cli.status)
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            out,
+            line + f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
+            "  1 with copy-on-write data (2 MiB), migration not scheduled\n",
+        )
+        # The volumes folder gone: the record is still shown.
+        shutil.rmtree(self.vols)
+        self.assertEqual(self.call(self.cli.status), (0, line + f"{self.vols}: absent\n"))
+
+    def test_status_hides_the_record_beside_the_flag(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        schedule(self)
+        _rc, out = self.call(self.cli.status)
+        self.assertNotIn("gave up", out)
+        self.assertIn("migration at the next boot\n", out)
+        self.assertNotIn("no boot asks", out)
+
+    def test_status_of_a_record_it_cannot_read_or_of_a_newer_cst(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        for text in (
+            "not json",
+            "[1]",
+            '{"outcome": "gave-up"}',
+            '{"outcome": "lost", "at": 1, "volumes": "v", "reason": "r"}',
+        ):
+            with self.subTest(text=text):
+                os.makedirs(os.path.dirname(self.outcome), exist_ok=True)
+                with open(self.outcome, "w") as f:
+                    f.write(text)
+                _rc, out = self.call(self.cli.status)
+                self.assertTrue(out.startswith(f"  cannot read {self.outcome}\n"), out)
+        os.remove(self.outcome)
+        os.mkdir(self.outcome)
+        _rc, out = self.call(self.cli.status)
+        self.assertTrue(out.startswith(f"  cannot read {self.outcome}\n"), out)
+        os.rmdir(self.outcome)
+        self.gave_up(version=99)
+        _rc, out = self.call(self.cli.status)
+        self.assertTrue(
+            out.startswith(
+                f"  {self.outcome} is format 99 of the docker-nocow-outcome (this CST reads format 1 and older): "
+                "written by a newer CST\n"
+            ),
+            out,
+        )
+
+    def test_a_new_request_removes_the_record(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        rc, _out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_mark_with_nothing_to_migrate_removes_the_record(self) -> None:
+        self.volume("done", nocow=True)
+        self.gave_up()
+        self.assertEqual(self.call(self.cli.mark), (0, ""))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_the_end_of_a_migration_removes_the_record(self) -> None:
+        # A record left beside the flag (a stop between give_up's write and its removals, then no counter).
+        self.fs.set(self.vols, nocow=True)
+        top = self.volume("cow")
+        schedule(self)
+        self.gave_up()
+        _rc, out = self.call(self.cli.migrate)
+        self.assertIn("all Docker volumes are NOCOW now", out)
+        self.assert_all_nocow(top)
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_unmark_removes_the_record(self) -> None:
+        self.gave_up()
+        self.assertEqual(self.call(self.cli.unmark), (0, ""))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_a_removal_that_fails_is_one_line_and_the_request_stands(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "clear_outcome", side_effect=denied):
+            rc, out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"<4>{TAG}: cannot remove the outcome record {self.outcome}: [Errno 13] Permission denied\n", out)
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertTrue(self.fs.nocow(self.vols))
 
 
 class PostponedLineTest(unittest.TestCase):

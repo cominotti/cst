@@ -18,6 +18,8 @@ from btrfs.docker_volumes_nocow.domain import (
     NEW_SUFFIX,
     OLD_MARK,
     NocowPaths,
+    OutcomeRead,
+    OutcomeRecord,
     PostponedRecord,
     StoredPostponed,
     TreeScan,
@@ -25,6 +27,8 @@ from btrfs.docker_volumes_nocow.domain import (
     daemon_args,
     is_stored_postponed,
     oldest_first,
+    outcome_unreadable,
+    parse_outcome,
     service_wait_reason,
 )
 from cst_core.adapters.files import CounterFile, write_atomic
@@ -260,7 +264,7 @@ class LocalVolumeTree:
 
 
 class NocowStateFiles:
-    """NocowStatePort over the flag, the attempts counter and the postponed record."""
+    """NocowStatePort over the flag, the attempts counter, the postponed record and the outcome record."""
 
     def __init__(self, paths: NocowPaths) -> None:
         self.paths = paths
@@ -321,6 +325,26 @@ class NocowStateFiles:
     def clear_postponed(self) -> None:
         with contextlib.suppress(FileNotFoundError):  # nothing postponed
             os.remove(self.paths.postponed)
+
+    def read_outcome(self) -> OutcomeRead:
+        try:
+            with open(self.paths.outcome, encoding="utf-8") as f:
+                text = f.read()
+        except FileNotFoundError:
+            return parse_outcome(None, self.paths.outcome)
+        except OSError, ValueError:  # a folder in its place, no permission, bytes that are not UTF-8
+            return outcome_unreadable(self.paths.outcome)
+        return parse_outcome(text, self.paths.outcome)
+
+    def write_outcome(self, record: OutcomeRecord) -> None:
+        os.makedirs(os.path.dirname(self.paths.outcome), exist_ok=True)
+        # 0644: status and cst doctor read it as the user. Durable: a reset right after a give-up
+        # must not lose why no migration is scheduled.
+        write_atomic(self.paths.outcome, json.dumps(record) + "\n", mode=0o644, relabel=False)
+
+    def clear_outcome(self) -> None:
+        with contextlib.suppress(FileNotFoundError):  # none recorded
+            os.remove(self.paths.outcome)
 
 
 def is_dockerd(proc: str) -> bool:
