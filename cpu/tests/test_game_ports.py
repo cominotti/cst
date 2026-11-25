@@ -12,6 +12,7 @@ import io
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from typing import override
 
@@ -348,6 +349,17 @@ class PinTest(Case):
         self.put(self.path("plain"), b"")
         self.assertFalse(GameRunLock(self.path("plain", "run"), self.path("plain", "run", "lock"), timeout=0.1).take())
 
+    def test_the_run_lock_waits_for_a_lock_given_back_meanwhile(self) -> None:
+        run = self.path("run")
+        holder = GameRunLock(run, os.path.join(run, "lock"), timeout=0.1)
+        self.assertTrue(holder.take())
+        timer = threading.Timer(0.2, holder.release)
+        timer.start()
+        self.addCleanup(timer.join)
+        waiter = GameRunLock(run, os.path.join(run, "lock"), timeout=10)
+        self.assertTrue(waiter.take())
+        waiter.release()
+
     def test_the_front_waits_60_seconds_for_the_lock(self) -> None:
         lock = machine_ports(GamePaths(), RecordingRunner()).lock
         assert isinstance(lock, GameRunLock)
@@ -369,3 +381,56 @@ class PinTest(Case):
         with contextlib.redirect_stdout(sys_out):
             GameStreamOutput().say("to stdout")  # no stream given: stdout as it is when it says
         self.assertEqual(sys_out.getvalue(), "to stdout\n")
+
+
+class DrmDiscoveryPinTest(Case):
+    """The DRM discovery (GameSysfsFiles): which cards have a display, which a process renders on. A connector
+    listed among other entries (in the middle, so neither creation order nor its reverse lists it first)."""
+
+    def among(self, folder: str, make: Callable[[str], None], name: str) -> None:
+        for i in range(10):
+            self.put(os.path.join(folder, f"a{i}"), b"")
+        make(os.path.join(folder, name))
+        for i in range(10):
+            self.put(os.path.join(folder, f"z{i}"), b"")
+
+    def test_a_card_with_a_connected_connector_counts_once(self) -> None:
+        drm = self.path("drm")
+        for card in ("card0", "card1", "card2"):
+            os.makedirs(os.path.join(drm, card))
+
+        def connector(status: bytes | None) -> Callable[[str], None]:
+            def make(path: str) -> None:
+                os.makedirs(path)
+                if status is not None:
+                    self.put(os.path.join(path, "status"), status)
+
+            return make
+
+        def two_connected(path: str) -> None:
+            connector(b"connected\n")(path)
+            connector(b"connected\n")(path.replace("DP-1", "DP-2"))
+
+        self.among(os.path.join(drm, "card0"), two_connected, "card0-DP-1")
+        self.among(os.path.join(drm, "card1"), connector(None), "card1-HDMI-A-1")  # no status: not connected
+        self.among(os.path.join(drm, "card2"), connector(b"disconnected\n"), "card2-DP-1")
+        self.assertEqual(GameSysfsFiles().connected_cards(drm, ["card0", "card1", "card2"]), ["card0"])
+
+    def test_the_cards_a_process_holds_open(self) -> None:
+        proc, drm = self.path("proc"), self.path("drm")
+        fd = os.path.join(proc, "42", "fd")
+        os.makedirs(fd)
+        dev_to_card = {os.path.realpath(os.path.join(drm, "renderD128", "device")): "card1"}
+        self.among(fd, lambda p: os.symlink("/dev/dri/renderD128", p), "7")
+        self.put(os.path.join(fd, "8"), b"")  # no link: its readlink fails
+        os.symlink("/dev/null", os.path.join(fd, "9"))
+        files = GameSysfsFiles()
+        self.assertEqual(files.pid_cards(proc, drm, "42", dev_to_card), {"card1"})
+        os.unlink(os.path.join(fd, "7"))
+        self.among(os.path.join(proc, "43", "fd"), lambda p: self.put(p, b""), "1")  # readlink fails mid-list
+        os.symlink("/dev/dri/renderD128", os.path.join(proc, "43", "fd", "zz"))
+        self.assertEqual(files.pid_cards(proc, drm, "43", dev_to_card), {"card1"})
+        self.among(os.path.join(proc, "44", "fd"), lambda p: os.symlink("/dev/null", p), "1")  # no DRM node mid-list
+        os.symlink("/dev/dri/renderD128", os.path.join(proc, "44", "fd", "zz"))
+        self.assertEqual(files.pid_cards(proc, drm, "44", dev_to_card), {"card1"})
+        self.assertEqual(files.pid_cards(proc, drm, "45", dev_to_card), set())  # gone: its fds cannot be listed
