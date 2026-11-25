@@ -77,16 +77,28 @@ def _based(base: int, digits: str) -> int:
     return bash_wrap(n)
 
 
+# The operators bash's arithmetic reads: after a name, one of these (or another name) is read later, as
+# the expression goes on; any other token after a name is an error bash meets before the name's value.
+_ARITH_OPERATORS: Final = frozenset("+-*/%<>=!&|^~?:,()[]") | {"**"}
+_ARITH_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A token after bash's blanks (space, tab and newline only: a no-break space, \r, \f, \v or another
+# blank is a token of its own, which no rule takes).
+_ARITH_TOKEN: Final = re.compile(r"[ \t\n]*(\*\*|[0-9A-Za-z_#@]+|[^ \t\n])")
+
+
 class _Arith:
     """The part of bash arithmetic a setting can hold: integer constants (decimal, a leading 0
     octal, 0x hexadecimal, BASE#DIGITS with no leading 0 in BASE), unary + and -, ** (right to left,
-    below unary -: -2**2 is 4), * / %, + -, parentheses, blanks. Every constant and every result
-    wraps around as bash's 64-bit integers do. A name is an unset variable (NOT_A_NUMBER): the file is read as
-    data, a name is no value; anything else, a division by 0 or a negative exponent is an error
-    (BAD_NUMBER)."""
+    below unary -: -2**2 is 4), * / %, + -, parentheses, blanks (space, tab and newline, as bash's:
+    any other character, a no-break space or a carriage return among them, is an error). Every constant and every
+    result wraps around as bash's 64-bit integers do. A name is an unset variable (NOT_A_NUMBER): the
+    file is read as data, a name is no value; but bash reads the token after a name before the name's
+    value, so a name followed by a token that is neither an operator nor a name (x;, x 08, x
+    <no-break space>) is bash's error of that token. Anything else, a division by 0 or a negative
+    exponent is an error (BAD_NUMBER)."""
 
     def __init__(self, text: str) -> None:
-        self.tokens = [group(m, 1) for m in re.finditer(r"\s*(\*\*|[0-9A-Za-z_#@]+|\S)", text)]
+        self.tokens = [group(m, 1) for m in _ARITH_TOKEN.finditer(text)]
         self.pos = 0
 
     def peek(self) -> str:
@@ -141,7 +153,10 @@ class _Arith:
             if self.take() != ")":
                 raise ValueError("missing )")
             return n
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tok):
+        if _ARITH_NAME.fullmatch(tok):
+            nxt = self.peek()
+            if nxt and nxt not in _ARITH_OPERATORS and not _ARITH_NAME.fullmatch(nxt):
+                self._constant(nxt)  # bash reads the token after a name first: a bad one is its error
             raise LookupError(tok)
         return self._constant(tok)
 

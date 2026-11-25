@@ -2681,7 +2681,7 @@ How it works, as a sequence:
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
 `RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`. Each limit is read as
 bash arithmetic reads it (64-bit: a number too large wraps around; `010` is
-8, `2#1010` is 10); a value bash cannot compute (`250GiB`, digits of
+8, `2#1010` is 10; blanks are spaces, tabs and newlines); a value bash cannot compute (`250GiB`, digits of
 another script) holds nothing.
 
 `cst btrfs bulk steam apply --copy` respects them: a real copy of a game

@@ -151,6 +151,21 @@ class GuardNumberTest(unittest.TestCase):
             return "stop"
         return "le" if free <= n else "gt"
 
+    def test_blanks_and_the_token_after_a_name_as_bash_reads_them(self) -> None:
+        # bash's blanks in arithmetic are space, tab and newline: a no-break space, U+3000, \r, \f, \v,
+        # U+001C, U+0085 or U+2028 is an error (the runtime skipped them as \s). And bash reads the token
+        # after a name before the name's value: "x;" or "x 08" is that token's error (the comparison is
+        # false, the run goes on), where the runtime stopped as for an unset name.
+        nbsp, ideo, acute = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}", "\N{LATIN SMALL LETTER E WITH ACUTE}"
+        values = [f"1{nbsp}+ 1", f"{nbsp}1", f"1{ideo}", "1\r", "1\f", "1\v", "1\x1c", "1\x85", "1\N{LINE SEPARATOR}"]
+        values += ["1 +\n1", f"a{acute}", f"x {acute}", f"x{nbsp}", "x;", "x $", "x @", "x.", "x'", 'x"', "x\\", "x\r"]
+        values += ["x 08", "x 2#2", "x 1#0", f"x+{acute}", f"(x){nbsp}", "x)", "x(", "x[0]", "x 1", "x?", "x:1", "x,1"]
+        values += ["x!", "x~", f"{acute} x", f"{acute}a", f"1{acute}", "x", "x y", "x#"]
+        for value in values:
+            for free in (0, 251, 2**40):
+                with self.subTest(value=value, free=free):
+                    self.assertEqual(self.bash(value, free), self.want(value, free))
+
     def test_long_numbers_and_bases_as_bash_reads_them(self) -> None:
         # A decimal constant wraps at 64 bits at any length: 5000 digits are a number in bash (the
         # runtime read them as BAD_NUMBER past int()'s 4300 digits). Octal too, and BASE#DIGITS.
