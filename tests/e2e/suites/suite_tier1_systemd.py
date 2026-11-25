@@ -889,7 +889,7 @@ echo E2E-OK
 )
 
 
-# test_151: helpers for its bash steps, and cst vm's torn-snapshot steps (vm/application/nas.py) over the
+# test_151: helpers for its bash steps, and cst vm's torn-snapshot steps (vm/application/nas_torn.py) over the
 # real restic; argv[1] the step. "summary" and "ids" read restic's JSON on stdin; "record" and "entries"
 # write and read the torn record; "retry" (the torn snapshots of earlier runs, then the retention) and
 # "forget" (forget_torn of a snapshot, as a torn run does) run cst vm's code, with the settings, the record
