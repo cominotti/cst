@@ -10,7 +10,7 @@ import re
 from typing import Final
 
 from cst_core.domain.shapes import json_object, parse_json
-from cst_core.domain.values import MINUTE
+from cst_core.domain.values import MINUTE, parse_integer, parse_whole_number
 from cst_core.domain.text import (
     file_lines,
     is_mount_comment,
@@ -212,10 +212,8 @@ def parse_compress_spec(token: str) -> CompressSpec | None:
     mode = CompressMode.COMPRESS_FORCE if key == CompressMode.COMPRESS_FORCE else CompressMode.COMPRESS
     if ":" in value:
         algo, lvl_str = value.split(":", 1)
-        try:
-            lvl: int | None = int(lvl_str)
-        except ValueError:
-            lvl = None
+        # As the kernel's kstrtoint (btrfs_compress_str2level): one optional "+" or "-", then ASCII digits.
+        lvl = parse_whole_number(lvl_str[1:]) if lvl_str.startswith("+") else parse_integer(lvl_str)
         return CompressSpec(mode=mode, algo=algo, level=lvl, raw=token)
     return CompressSpec(mode=mode, algo=value, level=None, raw=token)
 

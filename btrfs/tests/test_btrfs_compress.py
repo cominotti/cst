@@ -265,6 +265,27 @@ class DomainTests(unittest.TestCase):
             parse_compress_spec("compress-force=zstd:1"),
         )
 
+    def test_a_level_is_read_as_the_kernel_reads_it(self) -> None:
+        # The kernel reads the level with kstrtoint: one optional sign, then ASCII decimal digits. int() also
+        # took a no-break space around it, a digit of another script and "_" between digits.
+        cases = (
+            ("zstd:3", 3),
+            ("zstd:+3", 3),
+            ("zstd:-3", -3),
+            ("zstd:+-3", None),
+            ("zstd:++3", None),
+            ("zstd:1\N{NO-BREAK SPACE}", None),
+            ("zstd:\N{NO-BREAK SPACE}1", None),
+            ("zstd:\N{ARABIC-INDIC DIGIT ONE}", None),
+            ("zstd:1_0", None),
+            ("zstd:", None),
+        )
+        for value, level in cases:
+            with self.subTest(value=value):
+                spec = parse_compress_spec(f"compress-force={value}")
+                self.assertEqual(spec.level if spec is not None else "no spec", level)
+                self.assertEqual(spec.algo if spec is not None else None, "zstd")
+
     def test_rewrite_fstab_preserves_formatting_and_unrelated_entries(self) -> None:
         out = rewrite_fstab(SAMPLE_FSTAB, "compress-force=zstd:1", SAMPLE_UUID)
         lines = out.splitlines()
