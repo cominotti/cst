@@ -343,7 +343,11 @@ class IocostLockFile:
         self._fd: int | None = None
 
     def take(self) -> bool:
-        """The lock, once its folder is made; False when another run holds it after timeout seconds."""
+        """The lock, once its folder is made; False when another run holds it after timeout seconds. A take
+        while this object holds it is a programming error (AssertionError), as in the fake: it would wait on
+        this run's own lock and leak the first descriptor."""
+        if self._fd is not None:
+            raise AssertionError(f"{self.path} taken twice")
         ensure_dir(os.path.dirname(self.path), 0o755)
         fd = take_lock(self.path, wait=True, mode=0o644, timeout=self.timeout)
         if fd is None:

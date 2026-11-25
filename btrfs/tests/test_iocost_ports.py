@@ -747,6 +747,15 @@ class _PortsContract(unittest.TestCase):
                 self.assertTrue(lock.take())
                 lock.release()
 
+    def test_a_lock_this_run_holds_cannot_be_taken_again(self) -> None:
+        lock = self.side.lock("qos")
+        self.assertTrue(lock.take())
+        with self.assertRaises(AssertionError):
+            lock.take()
+        lock.release()
+        self.assertTrue(lock.take())  # the first take's hold was kept and let go
+        lock.release()
+
     def test_a_lock_another_run_holds_is_not_taken(self) -> None:
         self.side.lock_busy("qos")
         self.assertFalse(self.side.lock("qos").take())
