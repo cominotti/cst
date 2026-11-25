@@ -202,12 +202,9 @@ class ScrubLimit:
     def plan(self, target_limit: str | None) -> tuple[int, list[str]]:
         """Read-only dry run of set|off, the daemon-reload included that apply runs when systemd has not
         loaded the drop-in as it is on disk."""
-        conf_text, conf_unreadable = self.settings.read()
-        if conf_unreadable:
-            return 1, [f"ERROR: cannot read {self.settings.path}"]
-        dropin_text, dropin_unreadable = self.dropin.read()
-        if dropin_unreadable:
-            return 1, [f"ERROR: cannot read {self.dropin.path}"]
+        conf_text, dropin_text, read_error = _read_conf_and_dropin(self.settings, self.dropin)
+        if read_error is not None:
+            return 1, [read_error]
         lines = scrub_limit_plan_lines(
             conf_path=self.settings.path,
             conf_text=conf_text,
