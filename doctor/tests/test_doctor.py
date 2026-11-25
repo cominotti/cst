@@ -4374,6 +4374,18 @@ class UnitsLoadedTest(Scratch):
         for dest, h, want in cases:
             with self.subTest(dest=dest, home=h):
                 self.assertEqual(doc_domain.recorded_unit(dest, h), want)
+        # XDG_CONFIG_HOME's folder (cst bluetooth writes the LDAC watcher's unit there when it is set).
+        ldac = "/home/u/.cfg/systemd/user/cst-bt-ldac48.service"
+        for dest, h, config, want in (
+            (ldac, home, "/home/u/.cfg", (usr, "cst-bt-ldac48.service")),
+            (ldac, home, "/home/u/.cfg/", (usr, "cst-bt-ldac48.service")),
+            ("/home/u/.cfg/systemd/user/x.service.d/10.conf", home, "/home/u/.cfg", (usr, "x.service")),
+            (ldac, home, "", None),
+            (ldac, "", "/home/u/.cfg", None),  # root's record: no folder of a user
+            ("/home/u/.config/systemd/user/x.service", home, "/home/u/.cfg", (usr, "x.service")),
+        ):
+            with self.subTest(dest=dest, home=h, config=config):
+                self.assertEqual(doc_domain.recorded_unit(dest, h, config), want)
 
     def test_unit_applies(self) -> None:
         for name, unit_id, want in (
@@ -4462,6 +4474,17 @@ class UnitsLoadedTest(Scratch):
         r = self.run_tool()
         self.assertIn("fix: systemctl --user daemon-reload", r.stdout)
         self.assert_read_only()
+
+    def test_a_user_unit_under_xdg_config_home_is_checked(self) -> None:
+        config = self.home + "/.cfg"
+        self.env["XDG_CONFIG_HOME"] = config
+        self.host = doc_adapters.Host(self.env, repo=REPO)
+        unit = config + "/systemd/user/cst-bt-ldac48.service"
+        self.record(unit, user=True)
+        self.answer(("cst-bt-ldac48.service", "yes"), user=True)
+        self.assertEqual(
+            self.results(), [self.warning("cst-bt-ldac48.service", unit, fix="systemctl --user daemon-reload")]
+        )
 
     def test_a_unit_of_root_s_record_in_etc_systemd_user_asks_the_user_manager(self) -> None:
         unit = "/etc/systemd/user/cst-pending-alerts.service"

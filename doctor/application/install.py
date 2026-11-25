@@ -293,9 +293,9 @@ def _recorded_units(host: DoctorHostPort, installed: InstalledFilesPort) -> dict
     for owner, _, rec in _read_records(host, installed) if reads is None else reads:
         if not isinstance(rec, InstallRecord):
             continue
-        home = host.home if owner == Owner.USER else ""
+        home, config = (host.home, host.config_home) if owner == Owner.USER else ("", "")
         for dest in sorted(rec.files):
-            if (unit := recorded_unit(dest, home)) is not None:
+            if (unit := recorded_unit(dest, home, config)) is not None:
                 scope, name = unit
                 out.setdefault(scope, {}).setdefault(name, []).append(dest)
     return out

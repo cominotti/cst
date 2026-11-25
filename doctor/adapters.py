@@ -56,6 +56,9 @@ class Host:
         )
         # The user's home on the host (the same path in a toolbox).
         self.home = HostPath(env.get("HOME") or _home(self.uid))
+        # The user's XDG config folder when XDG_CONFIG_HOME names one ("" otherwise): cst bluetooth writes
+        # the LDAC watcher's unit under it.
+        self.config_home = HostPath(env.get("XDG_CONFIG_HOME") or "")
         # Every command (virsh too) starts from self.env, in doctor's words for a fault.
         self._commands: CommandRunnerPort = SubprocessCommandRunner(self, base_env=env, words=host_words)
 

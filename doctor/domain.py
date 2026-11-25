@@ -702,26 +702,33 @@ def is_unit_file(dest: str) -> bool:
     return dest.endswith(_UNIT_SUFFIXES) and not os.path.dirname(dest).endswith(".d")
 
 
-def _unit_folder_scope(folder: str, home: str) -> UnitScope | None:
-    """Whose manager loads units from folder (home: the user's, "" for root's record), or None."""
+def _unit_folder_scope(folder: str, home: str, config: str) -> UnitScope | None:
+    """Whose manager loads units from folder (home: the user's, "" for root's record; config: the user's
+    XDG_CONFIG_HOME, "" when it is not set), or None."""
     if folder == SYSTEM_UNIT_DIR:
         return UnitScope.SYSTEM
-    if folder == GLOBAL_USER_UNIT_DIR or (home and folder == os.path.join(home.rstrip("/"), USER_UNIT_DIR_REL)):
+    if folder == GLOBAL_USER_UNIT_DIR:
+        return UnitScope.USER
+    if home and folder == os.path.join(home.rstrip("/"), USER_UNIT_DIR_REL):
+        return UnitScope.USER
+    if home and config and folder == os.path.join(config.rstrip("/"), "systemd", "user"):
         return UnitScope.USER
     return None
 
 
-def recorded_unit(dest: str, home: str) -> tuple[UnitScope, str] | None:
+def recorded_unit(dest: str, home: str, config: str = "") -> tuple[UnitScope, str] | None:
     """(the manager, the unit name) of a recorded path that is a unit file (FOLDER/NAME) or a drop-in
     (FOLDER/NAME.d/FILE.conf) in a folder a manager loads units from; None for anything else (a
     *.wants link, a file of NAME.d that is no .conf, a drop-in of a manager's own settings such as
-    journald.conf.d, /run). home: the user's, for ~/.config/systemd/user; "" for root's record."""
+    journald.conf.d, /run). home: the user's, for ~/.config/systemd/user; "" for root's record. config:
+    the user's XDG_CONFIG_HOME, for CONFIG/systemd/user (where cst bluetooth writes the LDAC watcher's
+    unit when it is set); "" when it is not set, and ignored for root's record."""
     folder, base = os.path.split(dest)
-    scope = _unit_folder_scope(folder, home)
+    scope = _unit_folder_scope(folder, home, config)
     if scope is not None:
         return (scope, base) if base.endswith(_UNIT_SUFFIXES) else None
     parent, sub = os.path.split(folder)
-    scope = _unit_folder_scope(parent, home)
+    scope = _unit_folder_scope(parent, home, config)
     name = sub.removesuffix(".d")
     if scope is None or name == sub or not name.endswith(_UNIT_SUFFIXES) or not base.endswith(".conf"):
         return None
