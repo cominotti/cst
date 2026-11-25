@@ -123,7 +123,7 @@ def ensure_dir(path: str, mode: int = 0o755, *, relabel: bool = False, set_mode:
             _relabel(d)
         created.append(d)
     if set_mode:
-        os.chmod(path, mode)
+        os.chmod(os.path.abspath(path), mode)  # the folder the loop above made or found
     return created
 
 
