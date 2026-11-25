@@ -166,6 +166,18 @@ class GuardNumberTest(unittest.TestCase):
                 with self.subTest(value=value, free=free):
                     self.assertEqual(self.bash(value, free), self.want(value, free))
 
+    def test_the_token_after_a_chain_of_names_as_bash_reads_it(self) -> None:
+        # bash reads the token after each name of a chain before the first name's value: in "x y;" the
+        # ";" is its error (the comparison is false, the run goes on), where the runtime stopped as for
+        # an unset name, as it did for "x;" alone.
+        nbsp = "\N{NO-BREAK SPACE}"
+        values = ["x y;", "x y 08", "x y z;", f"x y{nbsp}", "x y z 08", "x y z w;", "x y 2#2", "x y.", "1+x y;"]
+        values += ["(x y;)", "x y 1", "x y", "x y z", "x y+1", "x y (", "x y)", "x y 7#1", "x y#"]
+        for value in values:
+            for free in (0, 251, 2**40):
+                with self.subTest(value=value, free=free):
+                    self.assertEqual(self.bash(value, free), self.want(value, free))
+
     def test_long_numbers_and_bases_as_bash_reads_them(self) -> None:
         # A decimal constant wraps at 64 bits at any length: 5000 digits are a number in bash (the
         # runtime read them as BAD_NUMBER past int()'s 4300 digits). Octal too, and BASE#DIGITS.

@@ -94,7 +94,8 @@ class _Arith:
     result wraps around as bash's 64-bit integers do. A name is an unset variable (NOT_A_NUMBER): the
     file is read as data, a name is no value; but bash reads the token after a name before the name's
     value, so a name followed by a token that is neither an operator nor a name (x;, x 08, x
-    <no-break space>) is bash's error of that token. Anything else, a division by 0 or a negative
+    <no-break space>) is bash's error of that token; after a chain of names (x y;, x y z 08), the first
+    token that is not a name. Anything else, a division by 0 or a negative
     exponent is an error (BAD_NUMBER)."""
 
     def __init__(self, text: str) -> None:
@@ -154,9 +155,14 @@ class _Arith:
                 raise ValueError("missing )")
             return n
         if _ARITH_NAME.fullmatch(tok):
-            nxt = self.peek()
-            if nxt and nxt not in _ARITH_OPERATORS and not _ARITH_NAME.fullmatch(nxt):
-                self._constant(nxt)  # bash reads the token after a name first: a bad one is its error
+            # bash reads the token after each name of a chain (x y z) before the first name's value: the
+            # first token that is not a name, when it is no operator, is bash's error.
+            after = self.pos
+            while after < len(self.tokens) and _ARITH_NAME.fullmatch(self.tokens[after]):
+                after += 1
+            nxt = self.tokens[after] if after < len(self.tokens) else ""
+            if nxt and nxt not in _ARITH_OPERATORS:
+                self._constant(nxt)
             raise LookupError(tok)
         return self._constant(tok)
 
