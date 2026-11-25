@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 import os
 from typing import Final
 
@@ -92,52 +93,50 @@ def _undo_remount(host: CompressHostPort, target: str, prev_seconds: int) -> str
     return None if ok else f"remount: {err}"
 
 
-def _step_fstab(
-    host: CompressHostPort,
-    snap: CompressSnapshot,
-    plan: CommitPlan,
-    msgs: list[str],
-    undo: list[Callable[[], str | None]],
-) -> str | None:
-    if plan.new_fstab_text is None or snap.fstab_text is None:
+@dataclass(frozen=True, slots=True)
+class _Run:
+    """One apply or revert: the host, what it read and planned, the lines it says, and the undo of each layer it
+    changed (_unwind_rollback runs them, the last first)."""
+
+    host: CompressHostPort
+    snap: CompressSnapshot
+    plan: CommitPlan
+    msgs: list[str] = field(default_factory=list)
+    undo: list[Callable[[], str | None]] = field(default_factory=list)
+
+
+def _step_fstab(run: _Run) -> str | None:
+    host, plan = run.host, run.plan
+    if plan.new_fstab_text is None or run.snap.fstab_text is None:
         return None
-    prev_fstab = snap.fstab_text
+    prev_fstab = run.snap.fstab_text
     try:
         host.write_fstab(plan.new_fstab_text)
     except (OSError, CommandFailed) as exc:
         return f"Failed to update {FSTAB_PATH}: {exc}"
-    undo.append(lambda: _undo_fstab(host, prev_fstab))
-    msgs.append(f"Updated {FSTAB_PATH} (commit={plan.target_seconds}s) and reloaded systemd.")
+    run.undo.append(lambda: _undo_fstab(host, prev_fstab))
+    run.msgs.append(f"Updated {FSTAB_PATH} (commit={plan.target_seconds}s) and reloaded systemd.")
     return None
 
 
-def _step_kargs(
-    host: CompressHostPort,
-    plan: CommitPlan,
-    msgs: list[str],
-    undo: list[Callable[[], str | None]],
-) -> str | None:
+def _step_kargs(run: _Run) -> str | None:
+    host, plan = run.host, run.plan
     if not plan.kargs_edits:
         return None
     ok, kerr = host.update_kargs(plan.kargs_edits)
     if not ok:
         return f"Failed to update rpm-ostree kargs: {kerr}"
     edits = plan.kargs_edits
-    undo.append(lambda: _undo_kargs(host, edits))
-    msgs.append(f"Updated rpm-ostree kargs (commit={plan.target_seconds}s for next boot).")
+    run.undo.append(lambda: _undo_kargs(host, edits))
+    run.msgs.append(f"Updated rpm-ostree kargs (commit={plan.target_seconds}s for next boot).")
     return None
 
 
-def _step_remount(
-    host: CompressHostPort,
-    snap: CompressSnapshot,
-    plan: CommitPlan,
-    msgs: list[str],
-    undo: list[Callable[[], str | None]],
-) -> str | None:
+def _step_remount(run: _Run) -> str | None:
+    host, plan = run.host, run.plan
     if plan.remount_target is None:
         return None
-    prior_roots = pick_root_mounts(parse_proc_mounts(snap.proc_mounts_text or ""))
+    prior_roots = pick_root_mounts(parse_proc_mounts(run.snap.proc_mounts_text or ""))
     prior_entry = next((m for m in prior_roots if m.target == plan.remount_target), None)
     prev_sec = effective_commit_seconds(prior_entry.options) if prior_entry is not None else KERNEL_DEFAULT_COMMIT_S
     opt = f"commit={plan.target_seconds}"
@@ -145,30 +144,26 @@ def _step_remount(
     ok, rerr = host.remount(target, opt)
     if not ok:
         return f"Failed to remount {target} with {opt}: {rerr}"
-    undo.append(lambda: _undo_remount(host, target, prev_sec))
+    run.undo.append(lambda: _undo_remount(host, target, prev_sec))
     after_roots = pick_root_mounts(parse_proc_mounts(host.read_proc_mounts() or ""))
     if not after_roots or any(effective_commit_seconds(m.options) != plan.target_seconds for m in after_roots):
         return f"Post-remount verification failed in {PROC_MOUNTS_PATH}: expected commit={plan.target_seconds}s"
-    msgs.append(f"Remounted {target} with {opt} (verified in {PROC_MOUNTS_PATH}).")
+    run.msgs.append(f"Remounted {target} with {opt} (verified in {PROC_MOUNTS_PATH}).")
     return None
 
 
-def _step_top_mount(
-    host: CompressHostPort,
-    snap: CompressSnapshot,
-    plan: CommitPlan,
-    msgs: list[str],
-) -> str | None:
-    if plan.new_top_mount_options is None or snap.top_mount is None:
+def _step_top_mount(run: _Run) -> str | None:
+    top, options = run.snap.top_mount, run.plan.new_top_mount_options
+    if options is None or top is None:
         return None
-    uuid = snap.top_mount.uuid or snap.root_uuid
+    uuid = top.uuid or run.snap.root_uuid
     if not uuid:
         return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
     try:
-        host.update_top_mount(uuid, plan.new_top_mount_options)
+        run.host.update_top_mount(uuid, options)
     except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
         return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
-    msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")
+    run.msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")
     return None
 
 
@@ -195,21 +190,14 @@ def execute_commit_change(
         if not confirmed:
             return 1, [*lines, "Aborted; nothing changed."]
 
-    undo: list[Callable[[], str | None]] = []
-    msgs: list[str] = []
+    run = _Run(host, snap, plan)
     # Each step runs only after the one before it worked: a failed step stops the run before the later layers.
-    steps: tuple[Callable[[], str | None], ...] = (
-        lambda: _step_fstab(host, snap, plan, msgs, undo),
-        lambda: _step_kargs(host, plan, msgs, undo),
-        lambda: _step_remount(host, snap, plan, msgs, undo),
-        lambda: _step_top_mount(host, snap, plan, msgs),
-    )
-    for step in steps:
-        err = step()
+    for step in (_step_fstab, _step_kargs, _step_remount, _step_top_mount):
+        err = step(run)
         if err is not None:
-            rollback = _unwind_rollback(undo)
-            return 1, [*lines, *msgs, f"ERROR: {err}; {rollback}"]
-    return 0, [*lines, *msgs]
+            rollback = _unwind_rollback(run.undo)
+            return 1, [*lines, *run.msgs, f"ERROR: {err}; {rollback}"]
+    return 0, [*lines, *run.msgs]
 
 
 def format_commit_status(
