@@ -3134,7 +3134,7 @@ class LeftoversTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
     def test_an_undo_reports_its_failure(self) -> None:
-        from cpu.game.adapters.leftovers import Reloads
+        from cpu.game.application.leftovers import Reloads
 
         p, _ = self.profile()
         reload = Reloads()
