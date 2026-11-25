@@ -2782,6 +2782,22 @@ class GameProfileTest(Scratch):
             [Result(doc_domain.WARN, message + ". The profile is on: the next 'off' retries them")],
         )
 
+    def test_a_format_2_file_names_its_reloads_due(self) -> None:
+        # game.leftovers format 2 (G2-G5): a user line before every entry, and the daemon-reloads due.
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write(
+                "cst-game-leftovers 2\nuser -\nprop sys machine.slice CPUWeight existed 70\nreload sys\n"
+                "user 1000\nreload usr\n"
+            )
+        res = self.leftovers_results()
+        self.assertEqual([r[0] for r in res], [doc_domain.WARN])
+        self.assertIn(
+            "3 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight, daemon-reload of the"
+            " system manager, daemon-reload of uid 1000's user manager (kept in",
+            res[0].message,
+        )
+
     def test_no_settings_off_could_not_undo_say_nothing(self) -> None:
         self.assertEqual(self.leftovers_results(), [])  # no file
         left = os.path.join(self.run_dir, "game.leftovers")

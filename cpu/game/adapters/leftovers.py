@@ -18,12 +18,15 @@ from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.domain.units import LoadState
 from cpu.game.domain import Manager, PropUndo, Record, show_values, state_undo, transient_unit
 from cpu.game.domain.leftovers import (
+    LEFTOVER_DROPINS_TEXT,
     Entry,
     UserSide,
     leftover_entries,
     leftovers_text,
     newer_leftovers,
     of_user_manager,
+    reload_entry,
+    reload_of,
     undo_text,
 )
 
@@ -124,40 +127,49 @@ def user_side(profile: GameProfile, uid: str | None, *, say: bool) -> UserSide:
     return UserSide.OWN if profile.act_for(uid, say=say) else UserSide.ORPHAN
 
 
+def _key(entry: Entry) -> Entry | Record:
+    """What tells two entries apart for keep and the retry's lines: a reload due by its manager and uid, a
+    record by itself (the uid a failed undo is kept for may differ from the one it was read with)."""
+    return entry if reload_of(entry[1]) is not None else entry[1]
+
+
 def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | None, *, off: bool = True) -> int:
     """game.leftovers holds the failed entries afterwards (removed when there are none); how many of them it
-    holds, each said kept in a warning line (off: 'off' says them; the tick does not). kept: the entries the
-    file held before (None: a file this CST does not read, left as it is). When the file cannot be written (a
-    full /run), the old one is left as it is while it holds no entry undone since (a tick that undid nothing,
-    an 'off' whose own records failed too): its entries are still kept and retried. Else it goes: it would
-    have an entry undone now undone and said again at every tick. Each failed entry the file does not hold is
-    said lost instead, once (off: in 'off''s words, else the tick's)."""
+    holds, each said kept in a warning line, after the write worked (off: 'off' says them; the tick does not).
+    kept: the entries the file held before (None: a file this CST does not read, left as it is). When the file
+    cannot be written (a full /run), the old one is left as it is while it holds no entry done since (a tick
+    that undid nothing, an 'off' whose own records failed too): its entries are still kept and retried. Else
+    it goes: it would have an entry done now done and said again at every tick. Each failed entry the file
+    does not hold is said lost instead, once (off: in 'off''s words, else the tick's)."""
     path = profile.paths.leftovers
     if kept is not None and not failed:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
         return 0
-    held: set[Record] = set()
+    held: set[Entry | Record] = set()
     if kept is not None:
         try:
             write_atomic(path, leftovers_text(failed), mode=0o644, durable=False, relabel=False)
         except OSError:
-            still = {rec for _uid, rec in failed}
-            if all(rec in still for _uid, rec in kept):
-                held = {rec for _uid, rec in kept}
+            still = {_key(e) for e in failed}
+            if all(_key(e) in still for e in kept):
+                held = {_key(e) for e in kept}
             else:
                 with contextlib.suppress(OSError):
                     os.unlink(path)
         else:
-            held = {rec for _uid, rec in failed}
+            held = {_key(e) for e in failed}
     who = "off: " if off else ""
-    for _uid, rec in failed:
-        what = undo_text(rec, profile.paths.epp)
-        if rec not in held:
-            profile.log(3, f"{who}could not keep {what} in {path}: not undone")
+    for uid, rec in failed:
+        what = undo_text(rec, profile.paths.epp, uid=uid)
+        due = reload_of(rec) is not None
+        if _key((uid, rec)) not in held:
+            profile.log(3, f"{who}could not keep {what} in {path}: " + ("not done" if due else "not undone"))
+        elif off and due:
+            profile.log(4, f"off: {what} failed: kept in {path} for the next off and tick")
         elif off:
             profile.log(4, f"off: could not undo {what}: kept in {path} for the next off and tick")
-    return sum(1 for _uid, rec in failed if rec in held)
+    return sum(1 for e in failed if _key(e) in held)
 
 
 def user_manager_gone(profile: GameProfile, uid: str) -> bool:
@@ -177,26 +189,120 @@ def unit_gone(profile: GameProfile, mgr: Manager, unit: str) -> bool:
     return res.returncode == 0 and show_values(res.stdout).get("LoadState", LoadState.LOADED) != LoadState.LOADED
 
 
+def _new_override(rec: Record, mgr: Manager) -> bool:
+    """The record's undo removes a runtime override of that manager (mode new): a daemon-reload is due after."""
+    undo = state_undo(rec)
+    return isinstance(undo, PropUndo) and undo.mgr == mgr and undo.mode == "new"
+
+
+def _name_for(profile: GameProfile, uid: str) -> str:
+    """The name of the user with that uid that a user manager's call goes to ("" when no account has it),
+    leaving the user the profile acts for as it was."""
+    settings = profile.s
+    try:
+        return profile.s.target_user if profile.act_for(uid, say=False) else ""
+    finally:
+        profile.s = settings
+
+
+def _premark(profile: GameProfile, kept: Sequence[Entry], todo: Sequence[Entry], *, dropins: bool, say: bool) -> None:
+    """Before an undo pass removes a drop-in or a runtime override: game.leftovers holds the kept entries and a
+    reload due in each manager it may remove a file in (the system manager for the drop-ins and its new
+    overrides, the user manager of each uid with a new override to undo, when that manager runs), so a pass
+    killed after a removal leaves the reload for the next 'off' or tick. Best effort and quiet: a failed write
+    (a full /run) is said by the closing keep, if anything is still due then."""
+    own = profile.uid(say=say) or None  # TARGET_USER's (or the user acted for): looked up as the undos would
+    marks: list[Entry] = []
+    if dropins or any(_new_override(rec, "sys") for _uid, rec in todo):
+        marks.append(reload_entry("sys", None))
+    for uid, rec in todo:
+        user = own if uid is None else uid
+        mark = reload_entry("usr", user)
+        if (
+            user is not None
+            and _new_override(rec, "usr")
+            and mark not in marks
+            and not user_manager_gone(profile, user)
+            and (uid is None or _name_for(profile, uid))
+        ):
+            marks.append(mark)
+    marks = [m for m in marks if m not in kept]
+    if not marks:
+        return
+    with contextlib.suppress(OSError):
+        write_atomic(profile.paths.leftovers, leftovers_text([*kept, *marks]), mode=0o644, durable=False, relabel=False)
+
+
+def _run_reloads(profile: GameProfile, reload: Reloads, due: Sequence[Entry], skipped: set[Entry]) -> list[Entry]:
+    """daemon-reload each manager an undo removed a file in (reload) and each one a kept entry says is due
+    (due): the system manager, then each user's; the reloads that failed, as reload-due entries. A user
+    manager that is not running needs none (its entry goes, into skipped); one of a uid no account has now
+    is not reached by name: kept while it runs."""
+    failed: list[Entry] = []
+    system = reload.system or any(reload_of(rec) == "sys" for _uid, rec in due)
+    if system and profile.ctl("sys", "daemon-reload") != 0:
+        failed.append(reload_entry("sys", None))
+    users = dict(reload.users)
+    for uid, rec in due:
+        if uid is not None and reload_of(rec) == "usr":
+            users.setdefault(uid, "")
+    for uid, name in users.items():
+        entry = reload_entry("usr", uid)
+        if user_manager_gone(profile, uid):
+            skipped.add(entry)
+            continue
+        user = name or _name_for(profile, uid)
+        if not user or profile.ctl("usr", "daemon-reload", user=user) != 0:
+            failed.append(entry)
+    return failed
+
+
+def undo_pass(
+    profile: GameProfile, entries: Sequence[Entry], kept: Sequence[Entry] | None, *, say: bool
+) -> tuple[list[Entry], set[Record], set[Entry]]:
+    """One pass of 'off' and of the retry: the reloads due go to game.leftovers first (_premark, when it can
+    be read: kept not None), then the drop-ins are removed, the entries undone (undo_entries, which skips
+    reload-due ones), and each manager due a reload reloaded (_run_reloads, also each reload kept entries
+    name). The entries that failed (records and reloads), the records dropped undone, and the reloads kept
+    entries name that were not run (their manager is gone)."""
+    todo = [e for e in entries if reload_of(e[1]) is None]
+    due = [e for e in kept or [] if reload_of(e[1]) is not None]
+    dropins = profile.game_dropins()
+    if kept is not None:
+        _premark(profile, kept, todo, dropins=bool(dropins), say=say)
+    reload = Reloads(system=profile.remove_game_dropins())
+    failed, dropped = undo_entries(profile, todo, reload, say=say)
+    skipped: set[Entry] = set()
+    failed += _run_reloads(profile, reload, due, skipped)
+    return failed, dropped, skipped
+
+
 def retry_kept(profile: GameProfile, *, say: bool) -> None:
-    """Undo game.leftovers' entries again ('off' with no game.state, say: each one that fails again is said;
-    the tick with the profile off, quietly), each kept record of the user manager in the manager of the user
-    it names: one notice line per entry undone now, then a daemon-reload of each manager an undo removed an
-    override in (the system manager, and each of those users' managers), then the file holds the rest
-    (removed when none is left). The profile acts for TARGET_USER again afterwards, so what the tick decides
-    next (switching on) is TARGET_USER's."""
+    """With the profile off ('off' with no game.state, say: each one that fails again is said; the tick, quietly):
+    leftover drop-ins go, and game.leftovers' entries are undone again, each kept record of the user manager in
+    the manager of the user it names: one notice line per entry done now, then the file holds the rest (removed
+    when none is left), each manager due a daemon-reload reloaded (undo_pass). A file this CST does not read
+    is left alone; drop-ins still go then (remove_leftover_dropins). The profile acts for TARGET_USER again
+    afterwards, so what the tick decides next (switching on) is TARGET_USER's."""
     kept = read_kept(profile, say=say)
-    if kept is None or not kept:
+    if kept is None:
+        profile.remove_leftover_dropins()
+        return
+    if not kept and not profile.game_dropins():
         return
     settings = profile.s
     try:
-        reload = Reloads()
-        failed, dropped = undo_entries(profile, kept, reload, say=say)
-        still = {rec for _uid, rec in failed} | dropped
-        for _uid, rec in kept:
-            if rec not in still:
-                what = undo_text(rec, profile.paths.epp)
-                profile.log(5, f"undid {what}, kept in {profile.paths.leftovers} by an earlier off")
-        profile.reload_managers(reload)
+        dropins = bool(profile.game_dropins())
+        failed, dropped, skipped = undo_pass(profile, kept, kept, say=say)
+        if dropins:
+            profile.log(4, LEFTOVER_DROPINS_TEXT)
+        still = {_key(e) for e in failed} | dropped | skipped
+        for uid, rec in kept:
+            if _key((uid, rec)) in still:
+                continue
+            what = undo_text(rec, profile.paths.epp, uid=uid)
+            done = "ran" if reload_of(rec) is not None else "undid"
+            profile.log(5, f"{done} {what}, kept in {profile.paths.leftovers} by an earlier off")
         keep(profile, failed, kept, off=say)
     finally:
         profile.s = settings

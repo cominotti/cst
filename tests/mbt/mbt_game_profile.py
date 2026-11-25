@@ -21,21 +21,24 @@ and an outside daemon-reload runs. A tick that asks systemd to stop cpu-game.ser
 its ExecStop ('off'), one that asks to start it by 'on'.
 
 Each on, tick and off arms at most one fault (tests/fault_injection.py FaultPlan), at the k-th of the
-call's points: each set-property (FaultyRunner: exit 1), each file the profile writes (game.state's
-and game.intended's appends, the sysfs, EPP and cpuidle writes: a write that fails with ENOSPC and
-no effect, or is done whole), each write_atomic (the drop-ins), and, for a kill only, its
-os.unlink, os.truncate, os.rmdir and os.makedirs. FAIL: that call fails and the run goes on; KILL:
-that call takes effect and the process dies (Killed ends the call). A point past the call's end
-is no fault.
+call's points: each set-property and daemon-reload (FaultyRunner: exit 1, no effect), each file the
+profile writes (game.state's and game.intended's appends, the sysfs, EPP and cpuidle writes: a write
+that fails with ENOSPC and no effect, or is done whole), each write_atomic (the drop-ins and
+game.leftovers), and, for a kill only, the profile's os.unlink, os.truncate, os.rmdir and os.makedirs
+and the leftovers module's os.unlink. FAIL: that call fails and the run goes on; KILL: that call
+takes effect and the process dies (Killed ends the call). A point past the call's end is no fault.
 
 Checked, relative to the baseline (the machine at the start: every runtime override file by the
 value it sets, every value systemd shows, every sysfs file; the drop-ins and the state files):
 1. Record cover, after every step: every override file, shown value and sysfs file that differs
    from the baseline has a record in game.state or game.leftovers that 'off' undoes (state_undo):
-   so with neither, nothing differs. The one exception is a MemoryLow of the memory chain that its
+   so with neither, nothing differs. Two exceptions: a MemoryLow of the memory chain that its
    zz-cst-game.conf drop-in sets after a daemon-reload: 'off' and the tick remove every such
    drop-in, with a record or without (a setp whose record could not be written is skipped, the
-   drop-ins are written for the whole chain).
+   drop-ins are written for the whole chain); and a shown value whose override file is as at the
+   baseline while game.leftovers holds a reload due of its manager (of UID for the user manager):
+   an 'off' that removed the file and was killed, or whose daemon-reload failed, before systemd
+   read it again (G2, G3); the next 'off' or tick runs that reload.
 2. Off restores: after an 'off' with no fault, whatever ran between (faults, kills, drift, outside
    reloads, more boxes): every override file and shown value as at the baseline (an 'existed'
    override comes back as its shown value: 16G as 17179869184), every sysfs file byte for byte, no
@@ -45,7 +48,11 @@ value it sets, every value systemd shows, every sysfs file; the drop-ins and the
    fails inside 'off' (O4): game.state is gone, every other undo is done, that one setting keeps the
    value it had before that 'off', and game.leftovers holds exactly its record; the baseline does not
    move, and after the next tick with no fault while the profile is off (or the next whole 'off')
-   every setting is at the baseline and game.leftovers is gone.
+   every setting is at the baseline and game.leftovers is gone. A daemon-reload that fails inside
+   'off' is judged the same way: the shown values of that manager whose files are at the baseline
+   keep the value they had, and game.leftovers holds exactly its reload due. A failed write of
+   game.leftovers inside 'off' (the reloads due, written before the removals) is no failed undo:
+   that 'off' restores everything.
 3. On twice equals on once: 'on' with game.state there changes nothing and sets nothing.
 4. A tick leaves nothing half applied: after a tick with no fault while the profile stays on,
    every running Docker scope has AllowedCPUs = BUILD_CPUS and its record, every Steam scope its
@@ -61,7 +68,7 @@ value it sets, every value systemd shows, every sysfs file; the drop-ins and the
 Not modelled: the lock between processes (one call at a time here), cpu-power, the GPU, a settings
 file with problem lines and a TARGET_USER without an account (the unit tests cover the refusals),
 a record cut short in the middle of its write (tests/mbt/mbt_game_state.py Q5), a full /run from
-some point on (FullRunFolderTest), a failing daemon-reload, and real systemd's merge of drop-ins
+some point on (FullRunFolderTest), and real systemd's merge of drop-ins
 (test_07, test_08).
 """
 
@@ -81,7 +88,7 @@ from hypothesis import settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
-from cpu.game.adapters import host as game_host, profile as game_profile
+from cpu.game.adapters import host as game_host, leftovers as game_leftovers, profile as game_profile
 from cpu.game.adapters.profile import GameProfile
 from cpu.game.domain import (
     CgroupUndo,
@@ -237,17 +244,19 @@ class FaultyAtomic:
 
 
 def _changes(argv: Sequence[str]) -> bool:
-    """The command is a point of the plan: set-property (every other command only reads, or is a
-    daemon-reload, start or stop, which do not fail here)."""
-    return "set-property" in argv
+    """The command is a point of the plan: set-property and daemon-reload (every other command only reads,
+    or is a start or stop, which do not fail here)."""
+    return "set-property" in argv or "daemon-reload" in argv
 
 
 def failed_key(name: str) -> tuple[str, str] | None:
     """What a point that failed changed nothing of: ("prop", "MGR UNIT PROP") for a set-property of one
-    setting, ("file", PATH) for a write; None for another point."""
+    setting, ("file", PATH) for a write, ("reload", MGR) for a daemon-reload; None for another point."""
     words = name.split()
     if words[:1] == ["write"]:
         return "file", name.removeprefix("write ")
+    if "daemon-reload" in words:
+        return "reload", "usr" if "--user" in words else "sys"
     if "set-property" in words:
         mgr = "usr" if "--user" in words else "sys"
         unit, setting = words[words.index("--runtime") + 1], words[-1]
@@ -349,6 +358,10 @@ class GameProfileMachine(RuleBasedStateMachine):
             )
             atomic = FaultyAtomic(self.plan, game_profile.write_atomic)
             stack.enter_context(mock.patch.object(game_profile, "write_atomic", atomic))
+            stack.enter_context(mock.patch.object(game_leftovers, "write_atomic", atomic))
+            stack.enter_context(
+                mock.patch.object(game_leftovers, "os", FaultyOs(self.plan, ("unlink",), kill_only=True))
+            )
             try:
                 rc = self.profile(runner).locked(action)
             except Killed:
@@ -386,6 +399,7 @@ class GameProfileMachine(RuleBasedStateMachine):
         was_on: bool,
         skip: frozenset[Key] = frozenset(),
         skip_files: frozenset[str] = frozenset(),
+        keeps: bool = False,
     ) -> None:
         now = self.view()
         keys, files = now.differences(self.base)
@@ -395,15 +409,19 @@ class GameProfileMachine(RuleBasedStateMachine):
         # With no game.state, off removes the by-hand mark and the drop-ins only (and undoes the leftovers).
         p = self.paths
         files = (p.state, p.intended, p.manual, p.drift_warned) if was_on else (p.state, p.manual)
-        if not (skip or skip_files):
+        if not (skip or skip_files or keeps):
             files = (*files, p.leftovers)
         left = [f for f in files if os.path.exists(f)]
         assert left == [], f"{what}: files left: {left}"
 
     def leftover_keys(self) -> set[tuple[str, str]]:
-        """What game.leftovers holds, as failed_key names a point: ("prop", "MGR UNIT PROP"), ("file", PATH)."""
+        """What game.leftovers holds, as failed_key names a point: ("prop", "MGR UNIT PROP"), ("file", PATH),
+        ("reload", MGR) (by its words: the MBT imports nothing the code before reload entries lacks)."""
         out: set[tuple[str, str]] = set()
         for _uid, rec in leftover_entries(read_text(self.paths.leftovers, "")):
+            if len(rec) >= 2 and rec[0] == "reload":
+                out.add(("reload", rec[1]))
+                continue
             match state_undo(rec):
                 case PropUndo(mgr=mgr, unit=unit, prop=prop):
                     out.add(("prop", f"{mgr} {unit} {prop}"))
@@ -422,8 +440,8 @@ class GameProfileMachine(RuleBasedStateMachine):
         machine before it, for a fault)."""
         if killed:
             return
-        if failed is None:
-            self.assert_restored(what, was_on=was_on)
+        if failed is None or failed == f"write {self.paths.leftovers}":
+            self.assert_restored(what, was_on=was_on)  # the reloads due could not be written first: no undo failed
             return
         key = failed_key(failed)
         assert key is not None, f"{what}: an off failed at a point it has not: {failed}"
@@ -432,6 +450,19 @@ class GameProfileMachine(RuleBasedStateMachine):
         if kind == "prop":
             mgr, unit, prop = which.split()
             skip = frozenset({(mgr, unit, prop)})
+        if kind == "reload":
+            # The reload did not run: that manager's shown values whose files went keep their value (the next
+            # off or tick reloads); game.leftovers holds exactly the reload due.
+            now = self.view()
+            keys, _files = now.differences(self.base)
+            same = {k for k in keys if k[0] == which and now.overrides.get(k) == self.base.overrides.get(k)}
+            self.assert_restored(f"{what} (failed at {failed})", skip=frozenset(same), keeps=True, was_on=was_on)
+            assert before is not None, f"{what}: a fault without the machine before it"
+            for k in same:
+                assert before.live.get(k) == now.live.get(k), f"{failed}: {k} went from {before.live.get(k)}"
+            kept = self.leftover_keys()
+            assert kept == {key}, f"{what} (failed at {failed}): game.leftovers holds {kept}, not {key}"
+            return
         skip_files = frozenset({which}) if kind == "file" else frozenset()
         # O4: game.state is gone, every other undo done; the failed one is as it was before this off, and
         # game.leftovers holds exactly its record, for the next off and tick.
@@ -642,11 +673,18 @@ class GameProfileMachine(RuleBasedStateMachine):
         now = self.view()
         keys, files = now.differences(self.base)
         text = self.state_text() + read_text(self.paths.leftovers, "")  # off keeps what it could not undo there
+        due = {
+            rec[1]
+            for uid, rec in leftover_entries(read_text(self.paths.leftovers, ""))
+            if len(rec) >= 2 and rec[0] == "reload" and (rec[1] == "sys" or uid == UID)
+        }
         for mgr, unit, prop in sorted(keys):
             dropin = os.path.join(self.paths.unit_runtime, f"{unit}.d", "zz-cst-game.conf")
             same_file = now.overrides.get((mgr, unit, prop)) == self.base.overrides.get((mgr, unit, prop))
             if (mgr, prop) == ("sys", "MemoryLow") and same_file and dropin in now.dropins:
                 continue  # the drop-in's value: 'off' and the tick remove every such drop-in, record or not
+            if same_file and mgr in due:
+                continue  # its file went; the reload due (G2, G3) makes systemd read the baseline again
             manager = manager_of(mgr)
             assert manager is not None
             assert has_prop_record(text, manager, unit, prop), f"{mgr} {unit} {prop} changed with no record"
@@ -654,6 +692,16 @@ class GameProfileMachine(RuleBasedStateMachine):
             cpu = os.path.basename(os.path.dirname(os.path.dirname(f))).removeprefix("cpu")
             epp = f == self.paths.epp(cpu) and f"epp {cpu} " in text
             assert epp or has_sys_record(text, f), f"{f} changed with no record"
+
+
+def whole_on(m: GameProfileMachine) -> None:
+    """A replay step: 'on' with no fault."""
+    m.on(ProfileFault.NONE, 1)
+
+
+def steam_scope(m: GameProfileMachine) -> None:
+    """A replay step: a Steam scope starts."""
+    m.scope(steam=True)
 
 
 class GameProfileMachineTest(profiles.MbtTestCase):
@@ -666,17 +714,30 @@ class GameProfileMachineTest(profiles.MbtTestCase):
     def test_any_sequence_of_on_tick_and_off_keeps_the_invariants(self) -> None:
         profiles.run_machine(GameProfileMachine)
 
-    def point(self, action: str, prefix: str, *before: Callable[[GameProfileMachine], object]) -> int:
-        """The number of the first point of action whose name starts with prefix, on a fresh machine (no
-        prior override, no cpuset, no builds.slice) after the steps before: a replay names its point so,
-        and other points the code gains or loses before it do not move the fault onto another one."""
+    def point(
+        self,
+        action: str,
+        part: str,
+        *before: Callable[[GameProfileMachine], object],
+        prior: bool = False,
+        nth: int = 1,
+    ) -> int:
+        """The number of the nth point of action whose name holds part (a path in it is the machine's own,
+        so a replay names a file by its tail), on a fresh machine (prior: the override from before the game;
+        no cpuset, no builds.slice) after the steps before: a replay names its point so, and other points the
+        code gains or loses before it do not move the fault onto another one."""
         machine = GameProfileMachine()
         self.addCleanup(machine.teardown)
-        machine.start(prior=False, cpuset=False, builds=False)
+        machine.start(prior=prior, cpuset=False, builds=False)
         for step in before:
             step(machine)
         machine.call(action, ProfileFault.NONE, 1)
-        return next(n for n, name in enumerate(machine.plan.calls, 1) if name.startswith(prefix))
+        found = [n for n, name in enumerate(machine.plan.calls, 1) if part in name]
+        return found[nth - 1]
+
+    def faulted(self, part: str, at: int) -> Callable[[GameProfileMachine], object]:
+        """A replay step: the last call's point at is the one named (a point that moved fails here)."""
+        return lambda m: self.assertIn(part, m.plan.calls[at - 1])
 
     def replay(self, *steps: Callable[[GameProfileMachine], object]) -> None:
         """A sequence of the machine's steps, in order, with its invariant after each: one that
@@ -705,11 +766,14 @@ class GameProfileMachineTest(profiles.MbtTestCase):
         # The tick sets the Steam scope's MemoryLow; an 'off' killed at its first point (the unlink of
         # that override) keeps game.state; after a user daemon-reload the scope has no MemoryLow, and
         # the next tick sets it again (O6; the old profile left it undone).
+        on, steam = whole_on, steam_scope
+        last_dropin = self.point("off", "os.unlink", on, steam, nth=3)  # no undo yet
         self.replay(
             lambda m: m.start(prior=False, cpuset=False, builds=False),
-            lambda m: m.on(ProfileFault.NONE, 1),
-            lambda m: m.scope(steam=True),
-            lambda m: m.off(ProfileFault.KILL, 5),  # at the last drop-in's unlink: no undo yet
+            on,
+            steam,
+            lambda m: m.off(ProfileFault.KILL, last_dropin),
+            self.faulted("os.unlink", last_dropin),
             lambda m: m.tick(ProfileFault.NONE, 1),
             lambda m: m.off(ProfileFault.KILL, 1),
             lambda m: m.reload("usr"),
@@ -720,7 +784,7 @@ class GameProfileMachineTest(profiles.MbtTestCase):
         # G1: machine.slice's set-property fails in 'on'; game.intended holds what 'on' meant to set (written
         # before the set), so the next whole tick's drift repair sets it. The old 'on' recorded nothing for it,
         # and machine.slice kept its own values until 'off'.
-        at = self.point("on", "systemctl set-property --runtime machine.slice ")
+        at = self.point("on", "systemctl set-property --runtime machine.slice ")  # G1's point
 
         def shows_the_profile_s_values(m: GameProfileMachine) -> None:
             got = [m.systemd.now("sys", "machine.slice", p) for p in ("AllowedCPUs", "CPUWeight", "IOWeight")]
@@ -741,19 +805,73 @@ class GameProfileMachineTest(profiles.MbtTestCase):
         # O4: the set-property that gives machine.slice its CPUWeight back fails inside 'off'; game.state
         # is gone, and game.leftovers keeps that record, which the next tick while off undoes. The old
         # profile dropped it with game.state: the setting stayed the game's until a reboot.
+        on = whole_on
+        undo = "systemctl set-property --runtime machine.slice CPUWeight="
+        at = self.point("off", undo, on, prior=True)
         self.replay(
             lambda m: m.start(prior=True, cpuset=False, builds=False),
-            lambda m: m.on(ProfileFault.NONE, 1),
-            lambda m: m.off(ProfileFault.FAIL, 17),  # systemctl set-property --runtime machine.slice CPUWeight
+            on,
+            lambda m: m.off(ProfileFault.FAIL, at),
+            self.faulted(undo, at),
             lambda m: m.tick(ProfileFault.NONE, 1),
         )
 
     def test_a_setting_an_off_could_not_undo_is_undone_by_the_next_off(self) -> None:
         # O4: the same failed undo, then a whole 'off' with no game.state undoes the kept record.
+        on = whole_on
+        undo = "systemctl set-property --runtime machine.slice CPUWeight="
+        at = self.point("off", undo, on, prior=True)
         self.replay(
             lambda m: m.start(prior=True, cpuset=False, builds=False),
-            lambda m: m.on(ProfileFault.NONE, 1),
-            lambda m: m.off(ProfileFault.FAIL, 17),
+            on,
+            lambda m: m.off(ProfileFault.FAIL, at),
+            self.faulted(undo, at),
+            lambda m: m.off(ProfileFault.NONE, 1),
+        )
+
+    def test_an_off_killed_after_it_removed_the_dropins_leaves_the_reload_due(self) -> None:
+        # G3 (R15's finding: "user@999999.service MemoryLow changed with no record"): 'on' cannot write the
+        # record of user@UID.service's MemoryLow, so it skips that set; its drop-in is written with the
+        # chain's and a daemon-reload makes it live. An 'off' killed right after it removed the last drop-in
+        # leaves that value with neither drop-in nor record: game.leftovers holds the reload due (written
+        # before the removals), and the next 'off' runs it. The old 'off' left nothing to say it was due.
+        record = self.point("on", "/run/game.state", nth=2)
+        last_dropin = self.point("off", "os.unlink", lambda m: m.on(ProfileFault.FAIL, record), nth=3)
+        self.replay(
+            lambda m: m.start(prior=False, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.FAIL, record),
+            self.faulted("/run/game.state", record),
+            lambda m: m.reload("sys"),
+            lambda m: m.off(ProfileFault.KILL, last_dropin),
+            self.faulted("os.unlink", last_dropin),
+            lambda m: m.tick(ProfileFault.NONE, 1),
+            lambda m: m.off(ProfileFault.NONE, 1),
+        )
+
+    def test_a_system_reload_that_failed_in_off_is_run_by_the_next_tick(self) -> None:
+        # G2: the system manager's daemon-reload fails inside 'off', after the memory chain's overrides went:
+        # their MemoryLow is still the game's, game.leftovers holds "reload sys" and the next tick while off
+        # reloads (the baseline is back, the file gone). The old 'off' did not read the reload's exit status.
+        on = whole_on
+        at = self.point("off", "systemctl daemon-reload", on)
+        self.replay(
+            lambda m: m.start(prior=False, cpuset=False, builds=False),
+            on,
+            lambda m: m.off(ProfileFault.FAIL, at),
+            self.faulted("systemctl daemon-reload", at),
+            lambda m: m.tick(ProfileFault.NONE, 1),
+        )
+
+    def test_a_user_manager_reload_that_failed_in_off_is_run_by_the_next_off(self) -> None:
+        # G2 and G4: the user manager's daemon-reload fails inside 'off' (user.slice's CPUWeight override went):
+        # game.leftovers holds that uid's "reload usr", and the next whole 'off' runs it.
+        on = whole_on
+        at = self.point("off", "@ daemon-reload", on)
+        self.replay(
+            lambda m: m.start(prior=False, cpuset=False, builds=False),
+            on,
+            lambda m: m.off(ProfileFault.FAIL, at),
+            self.faulted("@ daemon-reload", at),
             lambda m: m.off(ProfileFault.NONE, 1),
         )
 

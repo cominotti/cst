@@ -263,7 +263,7 @@ def check_game_leftovers(host: DoctorHostPort) -> Iterator[Result]:
     if not entries:
         return
     epp = GamePaths().epp
-    what = ", ".join(undo_text(rec, epp, short=True) for _uid, rec in entries)
+    what = ", ".join(undo_text(rec, epp, short=True, uid=uid) for uid, rec in entries)
     message = (
         f"game profile: {len(entries)} setting(s) 'off' could not undo keep the game's value: {what} (kept in "
         f"{GAME_LEFTOVERS}). The next 'off' and the watchdog's tick while the profile is off "

@@ -111,7 +111,8 @@ def line_bytes(fields: Sequence[bytes]) -> bytes:
 def state_record(draw: st.DrawFn) -> tuple[bytes, ...]:
     """One record of game.state that 'off' can read (state_undo): a prop record of six fields, or a
     cgw, epp or sysfs record of three; every field after the kind generated."""
-    kind = draw(st.sampled_from([k for k in GameRecordKind if k != GameRecordKind.USER]))  # user: game.leftovers'
+    # user and reload: game.leftovers' only (by their words: the code before reload entries has no RELOAD)
+    kind = draw(st.sampled_from([k for k in GameRecordKind if k.value not in {"user", "reload"}]))
     count = 5 if kind == GameRecordKind.PROP else 2
     return (kind.value.encode(), *draw(st.lists(FIELD_BYTES, min_size=count, max_size=count)))
 

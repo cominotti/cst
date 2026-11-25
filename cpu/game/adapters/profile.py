@@ -33,10 +33,17 @@ from cpu.game.adapters.host import (
 from cpu.game.adapters.boxes import set_again
 from cpu.game.domain.boxes import shown_form
 from cpu.game.adapters.drift import repair_drift, settings_drift
-from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_entries, unit_gone, user_side
+from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_pass, unit_gone, user_side
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
-from cpu.game.domain.leftovers import UserSide, merged_entries, of_user_manager, off_text, user_side_text
+from cpu.game.domain.leftovers import (
+    LEFTOVER_DROPINS_TEXT,
+    UserSide,
+    merged_entries,
+    of_user_manager,
+    off_text,
+    user_side_text,
+)
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -422,13 +429,15 @@ class GameProfile:
             except OSError:
                 self.log(4, f"{unit}: could not write {d}/{GAME_DROPIN}")
 
+    def game_dropins(self) -> list[str]:
+        """Every such drop-in there is, whatever unit and user it is for."""
+        found = glob.glob(os.path.join(glob.escape(self.paths.unit_runtime), "*.d", GAME_DROPIN))
+        return [f for f in sorted(found) if os.path.exists(f)]
+
     def remove_game_dropins(self) -> bool:
-        """Remove every such drop-in, whatever unit and user it is for; True when one was removed
-        (a daemon-reload is due)."""
+        """Remove every such drop-in; True when one was removed (a daemon-reload is due)."""
         removed = False
-        for f in sorted(glob.glob(os.path.join(glob.escape(self.paths.unit_runtime), "*.d", GAME_DROPIN))):
-            if not os.path.exists(f):
-                continue
+        for f in self.game_dropins():
             with contextlib.suppress(OSError):
                 os.unlink(f)
             with contextlib.suppress(OSError):
@@ -437,11 +446,12 @@ class GameProfile:
         return removed
 
     def remove_leftover_dropins(self) -> None:
-        """With the profile off: drop-ins left behind are removed, and the reload drops their MemoryLow."""
+        """With the profile off and a game.leftovers this CST does not read (retry_kept): drop-ins left behind
+        are removed, and the reload drops their MemoryLow."""
         if not self.remove_game_dropins():
             return
         self.ctl("sys", "daemon-reload")
-        self.log(4, f"profile off, but its MemoryLow drop-ins ({GAME_DROPIN}) were still there: removed them")
+        self.log(4, LEFTOVER_DROPINS_TEXT)
 
     # ---- on, off, tick ---------------------------------------------------------------------------
     def on(self) -> int:
@@ -536,10 +546,8 @@ class GameProfile:
         if not os.path.exists(p.state):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(p.manual)
-            self.remove_leftover_dropins()
             retry_kept(self, say=True)
             return 0
-        reload = Reloads(system=self.remove_game_dropins())
         text = self.state_text()
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
@@ -551,22 +559,13 @@ class GameProfile:
         if said is not None:
             self.log(*said)
         kept = read_kept(self, say=True)
-        failed, _dropped = undo_entries(self, merged_entries(kept or [], recs, owner=owner), reload, say=True)
-        self.reload_managers(reload)
+        failed, _dropped, _skipped = undo_pass(self, merged_entries(kept or [], recs, owner=owner), kept, say=True)
         held = keep(self, failed, kept)
         for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(f)
         self.log(5, off_text(len(failed), p.leftovers, kept=held))
         return 0
-
-    def reload_managers(self, reload: Reloads) -> None:
-        """daemon-reload each manager an undo removed an override in: the system manager, and the user
-        manager of each user it was removed for (an 'off' and a retry act for several users' kept records)."""
-        if reload.system:
-            self.ctl("sys", "daemon-reload")
-        for user in reload.users.values():
-            self.ctl("usr", "daemon-reload", user=user)
 
     def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> bool:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
@@ -676,8 +675,7 @@ class GameProfile:
         """The tick with the profile off: leftover drop-ins go, and a GameMode client switches the profile on,
         unless it was switched off by hand while that client runs (suppress) or 'on' would refuse."""
         p = self.paths
-        self.remove_leftover_dropins()
-        retry_kept(self, say=False)  # what an 'off' could not undo, now that the profile is off
+        retry_kept(self, say=False)  # leftover drop-ins, and what an 'off' could not undo, now that it is off
         if not self.gamemode_client():
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(p.suppress)

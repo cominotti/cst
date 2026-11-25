@@ -39,7 +39,8 @@ class GameRecordKind(StrEnum):
     CGW = "cgw"  # a cgroup file written directly
     EPP = "epp"  # a CPU's energy/performance preference (game.state only)
     SYSFS = "sysfs"  # a generic sysfs file written directly and restored on off (game.state only)
-    USER = "user"  # the uid the user manager's records after it are for (game.leftovers only)
+    USER = "user"  # the uid the user manager's records after it are for, "-" for none (game.leftovers only)
+    RELOAD = "reload"  # a daemon-reload of a manager is due (game.leftovers only)
 
 
 _MANAGERS: Final[dict[str, Manager]] = {"sys": "sys", "usr": "usr"}

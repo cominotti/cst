@@ -1984,7 +1984,7 @@ class StateContractsTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(first_line_version(text, "cst-game-intended"))
         self.assertEqual(state_format(StateFormatKey.GAME_INTENDED).version, 1)
-        self.assertEqual(state_format(StateFormatKey.GAME_LEFTOVERS).version, 1)
+        self.assertEqual(state_format(StateFormatKey.GAME_LEFTOVERS).version, 2)
 
     def test_a_version_is_a_whole_number_and_none_is_version_0(self) -> None:
         self.assertEqual(

@@ -7596,8 +7596,8 @@ PY
                 || { echo "off: $got" >&2; exit 1; }
             grep -qF "off: could not undo $knob = OLD: kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
             grep -qF "except 2 setting(s) kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
-            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 1' ]] || { cat "$lo" >&2; exit 1; }
-            [[ "$(tail -n +2 "$lo")" == "$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 2' ]] || { cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: $knob, machine.slice CPUWeight" \
                 || { gp state >&2; exit 1; }
             # cst doctor (as tester) warns about both, by name, with the fix line of a profile that is off.
@@ -7618,11 +7618,11 @@ PY
             got=$(gp tick)
             [[ "$(cat "$knob")" == OLD ]] || { echo "the knob was not written: $got" >&2; exit 1; }
             grep -qF "undid $knob = OLD, kept in $lo by an earlier off" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
-            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             # An 'off' with no game.state retries it too, and keeps it while it fails.
             got=$(gp off)
             grep -qF "off: could not undo machine.slice CPUWeight=bogus" <<<"$got" || { echo "off: $got" >&2; exit 1; }
-            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
             rm -f "$lo"
             rm -rf /run/e2e182
@@ -7689,7 +7689,7 @@ PY
             printf 'cst-game-leftovers 1\n%s\n' "$nrec" >"$lo"
             for n in 1 2; do
                 gp tick >/dev/null
-                [[ "$(tail -n +2 "$lo")" == "$nrec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+                [[ "$(tail -n +2 "$lo")" == 'user -'$'\n'"$nrec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
                 [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
                     || { echo "tick $n ran a daemon-reload" >&2; exit 1; }
             done
@@ -8177,7 +8177,7 @@ echo E2E-OK
                 || { echo "off: $got" >&2; exit 1; }
             grep -qF "kept in $lo for the next off and tick" <<<"$got" || { echo "off: $got" >&2; exit 1; }
             test ! -e "$st"
-            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 1' ]] || { cat "$lo" >&2; exit 1; }
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 2' ]] || { cat "$lo" >&2; exit 1; }
             grep -qx "user $ub" "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             grep -qx 'prop usr user.slice CPUWeight new -' "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             tester_untouched "(b) off"
@@ -8190,6 +8190,89 @@ echo E2E-OK
             test ! -e "$lo" || { echo "game.leftovers after the logout:" >&2; cat "$lo" >&2; exit 1; }
             tester_untouched "(b) tick after the logout"
             rm -f "$tov"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_206_cpu_game_profile_keeps_a_daemon_reload_that_failed_in_off_for_the_next_tick(self) -> None:
+        """The real game profile, on for tester (the memory chain's MemoryLow, its zz-cst-game.conf drop-ins and
+        tester's user.slice CPUWeight idle, each through a runtime override 'on' created), then 'off' with every
+        daemon-reload failing (a systemctl wrapper first on PATH for that one call fails it and runs the real
+        systemctl for every other call): game.state, the drop-ins and the overrides are gone, but systemd still
+        shows the game's values, and game.leftovers holds the two reloads due, each under its user line
+        (format 2: "user -" / "reload sys" / "user 1000" / "reload usr"), each said kept. The next tick with the
+        real systemctl runs both reloads: the values are tester's own again and game.leftovers is gone (G2, G4).
+        The old 'off' did not read the reloads' exit status: nothing was kept and no tick reloaded."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -rf /var/tmp/e2e-206-bin
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-206-conf.bak ]]; then mv /tmp/e2e-206-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            systemctl --user -M tester@ daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-206-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            tuid=$(id -u tester)
+            slice=user-$tuid.slice
+            # The settings 'on' makes are new runtime overrides (an 'off' removes them and reloads).
+            rm -f "/run/systemd/system.control/$slice.d/50-MemoryLow.conf" \
+                "/run/user/$tuid/systemd/user.control/user.slice.d/50-CPUWeight.conf"
+            systemctl daemon-reload
+            systemctl --user -M tester@ daemon-reload
+            low=$(systemctl show -P MemoryLow "$slice")
+            tw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            touch /run/cpu-setup/manual
+            got=$(gp on 2>&1)
+            systemctl daemon-reload
+            game_low=$(systemctl show -P MemoryLow "$slice")
+            [[ "$game_low" != "$low" ]] || { echo "the test cannot bite: $slice MemoryLow is $low already" >&2; exit 1; }
+            w=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            [[ "$w" == idle ]] || { echo "tester's user.slice CPUWeight after on: $w: $got" >&2; exit 1; }
+            install -d /var/tmp/e2e-206-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nfor a in "$@"; do if [[ "$a" == daemon-reload ]]; then echo "e2e: refused" >&2; exit 1; fi; done\nexec %s "$@"\n' \
+                "$real" >/var/tmp/e2e-206-bin/systemctl
+            chmod 0755 /var/tmp/e2e-206-bin/systemctl
+            got=$(PATH=/var/tmp/e2e-206-bin:$PATH gp off) || { echo "off failed: $got" >&2; exit 1; }
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            if compgen -G '/run/systemd/system.control/*.d/zz-cst-game.conf' >/dev/null; then echo "drop-ins left" >&2; exit 1; fi
+            [[ "$(systemctl show -P MemoryLow "$slice")" == "$game_low" ]] \
+                || { echo "the wrapper did not fail the reload: $(systemctl show -P MemoryLow "$slice")" >&2; exit 1; }
+            want=$(printf '%s\n' 'cst-game-leftovers 2' 'user -' 'reload sys' "user $tuid" 'reload usr')
+            [[ "$(cat "$lo")" == "$want" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            grep -qF "off: the daemon-reload of the system manager failed: kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "off: the daemon-reload of uid $tuid's user manager failed: kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: daemon-reload of the system manager, daemon-reload of uid $tuid's user manager" \
+                || { gp state >&2; exit 1; }
+            # The next tick, with the real systemctl, runs both reloads.
+            gp tick >/dev/null
+            [[ "$(systemctl show -P MemoryLow "$slice")" == "$low" ]] \
+                || { echo "$slice MemoryLow after the tick: $(systemctl show -P MemoryLow "$slice"), not $low" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$tw" ]] \
+                || { echo "tester's user.slice CPUWeight after the tick: not $tw" >&2; exit 1; }
+            test ! -e "$lo" || { echo "game.leftovers after the tick:" >&2; cat "$lo" >&2; exit 1; }
+            rm -rf /var/tmp/e2e-206-bin
             echo E2E-OK
             """,
         ).stdout

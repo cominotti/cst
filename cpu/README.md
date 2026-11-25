@@ -941,14 +941,36 @@ no `game.state` and the tick log `<5>undid ..., kept in
 /run/cpu-setup/game.leftovers by an earlier off` for each one done now: one
 that works now, and also one whose unit or folder is gone (below), which had
 nothing left to set. An `off` with a `game.state` undoes the kept records
-with its own and names only those that fail again. A user manager's record keeps the user it was for (a `user
-UID` line before it), so it is undone for that user whatever
+with its own and names only those that fail again. A user manager's record keeps the user it was for (every
+entry of the file is under a user line: `user UID`, or `user -` for none), so it is undone for that user whatever
 `TARGET_USER` says later, and never in another user's manager: when no
 account has that uid any more, the record stays kept while that uid's user
 manager is there (`/run/user/UID/systemd`) and is done once it is gone.
 Each manager an undo removed an override in gets its own `daemon-reload`:
 an `off` or a tick that undoes records of several users (its own and an
 earlier `off`'s for another user) reloads each of those users' managers.
+
+**A `daemon-reload` that fails, or never runs, is kept too.** Until systemd
+reads its files again, it still shows the game's value of an override or
+drop-in that was removed. So before `off` (and a tick or an `off` that
+retries kept records) removes a drop-in or a runtime override, it writes to
+`game.leftovers` a reload due for each manager it may remove a file in
+(`reload sys`, or `reload usr` under that user's line; quietly, and only
+when the file can be read): an `off` killed after a removal leaves the
+reload for the next `off` and tick. After the removals, each manager that
+lost a file is reloaded, and so is each one a reload due of an earlier run
+names; a manager marked in which nothing was removed gets no reload, and its
+entry goes. A reload whose exit status says it failed is kept
+(`<4>off: the daemon-reload of the system manager failed: kept in
+/run/cpu-setup/game.leftovers for the next off and tick`, or `... of uid
+UID's user manager ...`), and the next `off` and tick run it again; its
+entry goes once the reload works (`<5>ran the daemon-reload of ..., kept in
+/run/cpu-setup/game.leftovers by an earlier off`). A user manager that is
+not running needs none: its entry goes with no call. When the file cannot
+be written, the journal says so (`<3>off: could not keep the daemon-reload
+of ... in /run/cpu-setup/game.leftovers: not done`). (Versions before
+2026-11 never read a reload's exit status and kept nothing for it: the
+game's values stayed until a reboot or someone else's `daemon-reload`.)
 A kept new override of the user manager with no `user` line (kept while
 `TARGET_USER` named no account) is dropped while `TARGET_USER` still names
 none: no user's runtime folder holds it and no user manager can be reloaded,
@@ -977,7 +999,11 @@ kept (`<3>off: could not keep ... in /run/cpu-setup/game.leftovers: not
 undone`, without `off:` from the tick); `off` then ends with `..., except N
 setting(s) not undone` (`..., except N setting(s): K kept in
 /run/cpu-setup/game.leftovers, M not undone` when the old file still holds
-some of them). A file in a newer format is left alone, neither undone nor removed
+some of them). The file is format 2 (`cst-game-leftovers 2` on its first line); format 1
+files, which have a `user UID` line only where the user changes (so an entry
+of no user written after one of a uid reads as that uid's), are still read,
+and every write is format 2. A CST that reads only format 1 leaves a format
+2 file alone. A file in a newer format is left alone, neither undone nor removed
 (a failed setting is said not undone in the same words), and so is one that
 cannot be read (a folder in its place, a read error: `<4>... cannot be read
 (...): left alone, neither undone nor removed`), which is never taken for a
@@ -1116,7 +1142,8 @@ format there leaves the drift alone: `tick` says so in the journal once
 per boot (again when the text changes; its mark is
 `/run/cpu-setup/drift-warned`, removed by `on` and `off`), `state` and
 `cst doctor` show "drift: not checked". `game.leftovers` (7.4) is internal too
-(format `cst-game-leftovers 1` on its first line); it may exist while the
+(format `cst-game-leftovers 2` on its first line; a CST that reads only format 1 leaves such a file
+alone); it may exist while the
 profile is off, so it says nothing about a game. To be covered all the time, not only during games, run such work in
 a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
 (7.1).
