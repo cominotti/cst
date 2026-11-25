@@ -234,7 +234,8 @@ class InstallService:
                 found[path] = EMPTY_RECORD
             except OSError as e:
                 if refuse_unreadable:
-                    raise InstallRefused(f"{path}: cannot be read ({e.strerror or e}): {outcome}") from None
+                    # from e: a plan that shows the refusal tells a reader who may not read it (PermissionError).
+                    raise InstallRefused(f"{path}: cannot be read ({e.strerror or e}): {outcome}") from e
                 continue
         return found
 
@@ -411,12 +412,13 @@ class InstallService:
             self._read_records({place.record}, refuse_unreadable=False), place, data, as_root=as_root
         )
 
-    def check_record(self, record: str) -> None:
+    def check_record(self, record: str, outcome: str = "nothing was changed") -> None:
         """Refuse a record of a newer CST, or one that is there and cannot be read (InstallRefused,
         "RECORD: ...: nothing was changed"): a module that changes the machine before its first put calls it
         before its own first write, so that put cannot refuse after the module changed something (swap's
-        apply, crypttab first). No record yet, one that is no record and "" (no record) pass."""
-        self._read_records({record}, refuse_unreadable=True)
+        apply, crypttab first). No record yet, one that is no record and "" (no record) pass. outcome ends
+        the refusal (a plan that shows it says what apply would do)."""
+        self._read_records({record}, outcome, refuse_unreadable=True)
 
     def put(self, place: Placement, data: bytes, *, as_root: bool, keep_state: bool = False) -> bool:
         """Write one file a module checked itself (its own refusals first), unless current; record it.

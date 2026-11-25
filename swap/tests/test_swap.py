@@ -7,6 +7,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -29,6 +30,7 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import ArtifactKind, Owner
+from cst_core.domain.plan import PlanItem
 from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
 from tests.probes import NoUnitQueries, time_bound
 from swap.application.apply import SwapApplicationService
@@ -2753,6 +2755,47 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertFalse(os.path.exists(self.env.settings_path))
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_plan_shows_apply_s_refusal_of_the_install_record(self) -> None:
+        # Before, plan showed apply's writes, and apply then refused at check_record.
+        newer = self._newer_record()
+        folder = os.path.join(self.tmp, "var/lib/cst/folder.json")
+        os.makedirs(folder)
+        cases = (
+            ("newer", newer, f"{newer}: format 99, written by a newer CST (this one reads format 1): "),
+            ("folder", folder, f"{folder}: cannot be read (Is a directory): "),
+        )
+        for label, record, words in cases:
+            with self.subTest(label):
+                self.env = dataclasses.replace(self.env, install_record=record)
+                row = PlanItem("REFUSE", "install record", words + "apply stops before it writes anything")
+                self.assertIn(row.format_line(), self._plan_text(self.env).splitlines())
+                rc, _out, err, _systemd = self._run(mapper_present=False)
+                self.assertEqual((rc, err), (1, f"cst swap: ERROR: {words}nothing was changed\n"))
+
+    def test_a_record_this_user_may_not_read_is_a_question_and_root_s_refusal(self) -> None:
+        record = self._newer_record()
+        denied = PermissionError(errno.EACCES, "Permission denied", record)
+        cases = (
+            (
+                "a user",
+                False,
+                PlanItem("?", "install record", "cannot be read as this user: on the host, cst swap plan --root"),
+            ),
+            (
+                "the host's root",
+                True,
+                PlanItem(
+                    "REFUSE",
+                    "install record",
+                    f"{record}: cannot be read (Permission denied): apply stops before it writes anything",
+                ),
+            ),
+        )
+        for label, as_root, row in cases:
+            with self.subTest(label), mock.patch.object(JsonInstallRecord, "read", side_effect=denied):
+                plan = self._plan_text(dataclasses.replace(self.env, as_root=as_root))
+                self.assertIn(row.format_line(), plan.splitlines())
 
     def test_an_unmarked_line_is_named_before_a_record_of_a_newer_cst(self) -> None:
         self._newer_record()

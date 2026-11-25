@@ -15014,10 +15014,12 @@ echo E2E-OK
         before swap_setup, which saves root's install record and puts it back) with /etc/cst/swap.conf in
         place and a folder where root's install record goes. apply exits 1 with "REC: cannot be read (Is a
         directory): nothing was changed" on stderr, and every file, link, mode and owner under /etc and the
-        scratch tree is as before (no crypttab line, no .pre-swap-config.bak). The installer's text command
-        (as cpu-setup calls it) refuses the same record and does not write its destination. Before, apply
-        wrote crypttab and fstab and started swap0 first and failed at the record, and the text command
-        wrote its file and then failed. The test's trap removes the folder before swap_cleanup puts the
+        scratch tree is as before (no crypttab line, no .pre-swap-config.bak); plan --root shows the same
+        refusal as a REFUSE row of the install record ("apply stops before it writes anything"). The
+        installer's text command (as cpu-setup calls it) refuses the same record and does not write its
+        destination. Then a record of a newer CST (format 99): plan --root shows its REFUSE row too. Before,
+        apply wrote crypttab and fstab and started swap0 first and failed at the record, the text command
+        wrote its file and then failed, and plan showed apply's writes. The test's trap removes the folder before swap_cleanup puts the
         saved record back."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -15034,6 +15036,10 @@ printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.con
 rm -f "$REC"
 mkdir "$REC"
 s0="$(snap)"
+swap_run plan --root
+[[ $rc == 0 ]] || fail "plan with a folder at the record exited $rc"
+grep -qE "^ *REFUSE +install record +$REC: cannot be read \(Is a directory\): apply stops before it writes anything$" \
+    <<<"$out" || fail "plan's row of the folder at the record"
 swap_run apply
 [[ $rc == 1 ]] || fail "apply with a folder at the record exited $rc"
 grep -qF "ERROR: $REC: cannot be read (Is a directory): nothing was changed" <<<"$err" || fail "apply's message"
@@ -15048,6 +15054,14 @@ err="$out"
 [[ $rc == 1 ]] || fail "the installer's text command exited $rc"
 grep -qF "$REC: cannot be read (Is a directory): /etc/e2e275.conf was not written" <<<"$out" || fail "text's message"
 [[ ! -e /etc/e2e275.conf ]] || fail "the text command wrote its file"
+
+rmdir "$REC"
+printf '{"format": 99, "files": {}}' >"$REC"
+swap_run plan --root
+[[ $rc == 0 ]] || fail "plan with a newer record exited $rc"
+grep -qE "^ *REFUSE +install record +$REC: format 99, written by a newer CST .*: apply stops before it writes anything$" \
+    <<<"$out" || fail "plan's row of a newer record"
+[[ "$(snap)" == "$s0" ]] || fail "plan changed /etc or the scratch tree"
 echo E2E-OK
 """,
             check=False,

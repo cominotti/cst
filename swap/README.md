@@ -355,7 +355,10 @@ What `apply` does, in order:
    removes (refused with `<file>: a folder is in its place: nothing was
    changed`), and that
    root's install record (`/var/lib/cst/installed.json`) was not written by
-   a newer CST (a downgrade): a refusal stops it before it writes anything.
+   a newer CST (a downgrade) and, when it is there, can be read (a folder,
+   a FIFO, a read error): a refusal stops it before it writes anything.
+   `plan` and `status` show that refusal as a `REFUSE` row of the install
+   record (`?` with the `--root` advice for a user who may not read it).
    To get past a refusal of one of the files it writes whole, or of the
    paths of steps 4 and 5, move what is in the way aside (keep it if it
    holds settings of yours), or remove it, then run `apply` again: it

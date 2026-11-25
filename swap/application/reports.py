@@ -7,7 +7,7 @@ import posixpath
 import re
 from typing import Final
 
-from cst_core.application.install import InstallService
+from cst_core.application.install import InstallRefused, InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
@@ -216,6 +216,9 @@ _ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before i
 # row, whoever runs plan (after the name, for a name above a file apply writes whole that is not a folder).
 _FOLDER_IN_PLACE_NOTE: Final = "a folder is in its place: apply refuses before it writes anything"
 _NOT_A_FOLDER_NOTE: Final = "is not a folder: apply refuses before it writes anything"
+# The install record's row (check_record's refusal), and what that refusal says apply does.
+_RECORD_ROW: Final = "install record"
+_RECORD_REFUSAL_OUTCOME: Final = "apply stops before it writes anything"
 
 
 def _root_note(env: SwapEnvironment, state: ManagedState, swap_name: str, verb: str, *, cannot_read: str) -> str:
@@ -555,6 +558,9 @@ class SwapReports:
             )
 
         file_items.append(self._zram_conf_item())
+        record = self._record_item(verb)
+        if record is not None:
+            file_items.append(record)
 
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
         runtime_items = [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change)
@@ -568,6 +574,20 @@ class SwapReports:
             file_items=tuple(file_items),
             runtime_items=tuple(runtime_items),
         )
+
+    def _record_item(self, verb: str) -> PlanItem | None:
+        """The install record's row when apply would refuse it before its first write (check_record: one of a
+        newer CST, or one that is there and cannot be read); None when apply would take it. A reader that may
+        not read it and is not the host's root gets "?": the host's root may."""
+        try:
+            self._installer.check_record(self._env.install_record, _RECORD_REFUSAL_OUTCOME)
+        except InstallRefused as e:
+            if isinstance(e.__cause__, PermissionError) and not self._env.host_root:
+                return PlanItem(
+                    "?", _RECORD_ROW, f"cannot be read as this user: on the host, {self._env.prog} {verb} --root"
+                )
+            return PlanItem("REFUSE", _RECORD_ROW, str(e))
+        return None
 
     def _zram_conf_item(self) -> PlanItem:
         """The row of zram-generator.conf: masked, apply masks it, or a folder in its place that apply refuses."""
