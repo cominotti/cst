@@ -335,7 +335,11 @@ What `apply` does, in order:
    removes (refused with `<file>: a folder is in its place: nothing was
    changed`), and that
    root's install record (`/var/lib/cst/installed.json`) was not written by
-   a newer CST (a downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
+   a newer CST (a downgrade): a refusal stops it before it writes anything.
+   To get past a refusal of one of the files it writes whole, or of the
+   paths of steps 4 and 5, move what is in the way aside (keep it if it
+   holds settings of yours), or remove it, then run `apply` again: it
+   writes CST's file there. On a machine an older CST set up, it then writes
    `/etc/cst/swap.conf` (section 5).
 2. **swap0**: the marked lines in `/etc/crypttab` (mode 0600) and
    `/etc/fstab`. A marked line is replaced **in place**; a second marked line
