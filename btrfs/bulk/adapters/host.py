@@ -7,7 +7,7 @@ processes, the desktop alert, the clock; its output; who runs it.
 from __future__ import annotations
 
 from collections.abc import Callable
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import os
 import pwd
 import re
@@ -238,7 +238,7 @@ class Host:
             found = re.findall(rf"""^[ \t]*{name}=(["']?)([0-9]{{1,6}})\1[ \t]*(?:#.*)?$""", program, re.MULTILINE)
             if found:
                 vals[key] = int(found[-1][1])
-        conf = parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
+        conf = self._snapshots_conf()
         for key, name in names.items():
             if name in conf:
                 vals[key] = guard_limit(conf[name])
@@ -249,10 +249,14 @@ class Host:
         (no number guard_number computes, as the run reads them): (setting, value) pairs, in GUARD_KEYS'
         order. The hourly run stops at each, so no /home snapshot is made until it is fixed;
         snapshot_guard reads such a value as 0 (no limit)."""
-        conf = parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
+        conf = self._snapshots_conf()
         return tuple(
             (k, conf[k]) for k in GUARD_KEYS if k in conf and not isinstance(guard_number(conf[k], exact=True), int)
         )
+
+    def _snapshots_conf(self) -> Mapping[str, str]:
+        """The settings snapshots.conf in the settings folder assigns, as btrfs-snapshot reads them."""
+        return parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
 
     @staticmethod
     def _read_settings_text(path: str) -> str:
