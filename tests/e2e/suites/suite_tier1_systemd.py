@@ -5119,18 +5119,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    @e2e_tags(E2ETag.VM, E2ETag.NAS)
-    def test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic(self) -> None:
-        """cst vm's torn NAS snapshots against the real restic over SFTP (the NAS container): a record
-        naming two snapshots of the VM (a full ID and a short one, the newest of them a torn one that
-        the retention would keep in place of the good backup) and one of another VM; the retry lists
-        them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
-        their listed IDs, and the retention then keeps the good backup; the other VM's entry and
-        snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
-        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
-        libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
-        w = "/var/tmp/e2e-vm-torn"
-        nas_dir = "/srv/backup/e2e-vm-torn"
+    def _vm_torn_prelude(self, test: str, w: str, nas_dir: str) -> str:
+        """The start of test_151 and test_200: the NAS container takes the systemd container's SSH key,
+        both folders are removed after the test; the bash that sets up $w (the payload, the settings
+        cst vm reads), the repository at nas_dir and the helpers d (the driver), snap and listed."""
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
         self.addCleanup(exec_bash, self.NAS_CONTAINER, f"rm -rf {nas_dir}", check=False)
         pub = exec_bash(
@@ -5150,11 +5142,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             chmod 0600 /root/.ssh/authorized_keys
             """,
         )
-        out = exec_bash(
-            self.SYSTEMD_CONTAINER,
-            f"""
+        return f"""
             set -E
-            trap 'echo "test_151 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            trap 'echo "{test} FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             w={w}
             rm -rf "$w" && mkdir -p "$w/payload"
@@ -5178,15 +5168,34 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 restic backup --json --host e2ehost --tag "$1" "$w/payload" | d summary
             }}
             listed() {{ restic snapshots --json --no-lock | d ids; }}
+            """
+
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
+    def test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic(self) -> None:
+        """cst vm's torn NAS snapshots against the real restic over SFTP (the NAS container): a record
+        naming two snapshots of the VM (a full ID and a short one, the newest of them a torn one that
+        the retention would keep in place of the good backup) and one of another VM; the retry lists
+        them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
+        their listed IDs, and the retention then keeps the good backup; the other VM's entry and
+        snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
+        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
+        libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
+        w = "/var/tmp/e2e-vm-torn"
+        nas_dir = "/srv/backup/e2e-vm-torn"
+        prelude = self._vm_torn_prelude("test_151", w, nas_dir)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            prelude
+            + """
             good="$(snap cst-vm,vm:e2evm)"
             torn_short="$(snap cst-vm,vm:e2evm)"
             other="$(snap cst-vm,vm:e2eother)"
             torn="$(snap cst-vm,vm:e2evm)"  # the newest: the retention alone would keep it, not $good
-            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$torn" "e2evm=${{torn_short:0:8}}" "e2eother=$other"
+            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$torn" "e2evm=${torn_short:0:8}" "e2eother=$other"
             d retry e2evm >"$w/retry.out"
             cat "$w/retry.out" >&2
-            grep -qF "torn restic snapshot ${{torn:0:8}} of an earlier run forgotten" "$w/retry.out"
-            grep -qF "torn restic snapshot ${{torn_short:0:8}} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "torn restic snapshot ${torn:0:8} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "torn restic snapshot ${torn_short:0:8} of an earlier run forgotten" "$w/retry.out"
             grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
             if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
             [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
