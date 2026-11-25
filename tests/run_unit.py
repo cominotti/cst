@@ -197,6 +197,9 @@ EXPECTED_SKIPS: Final[dict[str, str]] = {
     "swap.tests.test_swap.SwapApplyBranchesTest.test_an_uresourced_conf_root_cannot_read_stops_apply_before_any_write": (
         "not as root"
     ),
+    "swap.tests.test_swap.SwapApplyBranchesTest.test_a_link_at_uresourced_conf_to_a_file_root_cannot_read_stops_apply_before_any_write": (
+        "not as root"
+    ),
     "btrfs.tests.test_snapshot_hourly.CommandLineTest.test_as_root_the_test_seam_is_ignored": (
         "needs an unprivileged user namespace (unshare -r: off in CI's container; tier 1 test_108 runs it as root)"
     ),
