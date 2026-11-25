@@ -30,6 +30,7 @@ from cst_core.adapters.install import program_installer
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import ManagedCliEnv, ManagedCliSpec, run_managed_cli, undo_python_start
 from cst_core.application.install import InstallService
+from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandRunnerPort
 
 IocostCliDeps = ManagedCliEnv
@@ -81,7 +82,7 @@ def apply_iocost(
     runner: CommandRunnerPort | None = None,
     live_only: bool = False,
     target_device: str | None = None,
-) -> tuple[int, list[str]]:
+) -> ExitAndLines:
     """Enable `blk-iocost` in `io.cost.qos` and optionally install unit + udev persistence (Iocost.apply)."""
     return build_iocost(paths, runner).apply(live_only=live_only, target_device=target_device)
 
@@ -92,7 +93,7 @@ def revert_iocost(
     live_only: bool = False,
     runner: CommandRunnerPort | None = None,
     installer: InstallService | None = None,
-) -> tuple[int, list[str]]:
+) -> ExitAndLines:
     """Disable CST-managed `blk-iocost` entries in `io.cost.qos` and optionally uninstall unit/rule
     (Iocost.revert). A full revert removes btrfs:iocost through installer (None: program_installer, built
     here, before any lock is taken)."""
@@ -104,14 +105,12 @@ def revert_iocost(
 
 def plan_iocost(
     paths: IocostPaths, runner: CommandRunnerPort, *, live_only: bool, target_device: str | None
-) -> tuple[int, list[str]]:
+) -> ExitAndLines:
     """`cst btrfs iocost plan`: what apply would write, changing nothing."""
     return build_iocost(paths, runner).plan(live_only=live_only, target_device=target_device)
 
 
-def dispatch_iocost_cli_action(
-    parsed: IocostParsedArgs, env: ManagedCliEnv, *, read_only: bool
-) -> tuple[int, list[str]]:
+def dispatch_iocost_cli_action(parsed: IocostParsedArgs, env: ManagedCliEnv, *, read_only: bool) -> ExitAndLines:
     """Resolve `IocostPaths` and invoke the requested `btrfs-iocost` subcommand."""
     paths = iocost_paths_for(env.entry_file, ctx=env.ctx, read_only=read_only, fallback_root=env.fallback_root)
     match parsed.action:

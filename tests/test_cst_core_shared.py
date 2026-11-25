@@ -2399,6 +2399,27 @@ class NotifierTest(unittest.TestCase):
         self.assertTrue(msg.startswith("alert not delivered (/x/btrfs-notify is not installed) and not kept ("), msg)
         self.assertTrue(msg.endswith("): Disk: problem; it is only in this journal"), msg)
 
+    def test_an_alert_whose_folder_sync_fails_after_its_rename_is_kept(self) -> None:
+        # write_atomic's ReplacedNotSynced: the alert's file is in place, so it is kept, not lost.
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            real_fsync(fd)
+
+        missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        with mock.patch.object(core_files.os, "fsync", fsync):
+            outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault=CommandFault.MISSING, cause=missing))
+        self.assertEqual(outcome, "kept")
+        [path] = self.kept()
+        [(prio, msg)] = self.lines
+        self.assertEqual(prio, 3)
+        self.assertTrue(
+            msg.startswith("alert not delivered (/x/btrfs-notify is not installed): Disk: problem; kept in "), msg
+        )
+        self.assertTrue(msg.endswith(f"{os.path.basename(path)}, its folder not synced: Input/output error"), msg)
+
     def test_a_folder_or_title_no_file_takes_leaves_the_alert_in_the_journal_only(self) -> None:
         # A caller's error handler sends this alert: a ValueError (a folder from an override that is no
         # plain path, a title with a lone surrogate) must end as "lost" with its line, not as a traceback.

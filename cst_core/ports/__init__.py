@@ -101,6 +101,20 @@ class WriteFailed(Exception):
         super().__init__(f"cannot write {path}: {reason}")
 
 
+class ReplacedNotSynced(OSError):
+    """write_atomic put the new file in place (its rename was done), then could not sync its folder: the new
+    content is there now, and a power cut before the folder is synced may still bring the old file back.
+
+    It is an OSError with the errno, strerror and filename of the folder sync's error, so an `except OSError`
+    catches it and prints the same text as before (it is never one of OSError's errno subclasses, such as
+    PermissionError: no caller of write_atomic catches those). dest is the file written. A caller that undoes
+    its work on a failed write must put the old content back itself: it is no longer at dest."""
+
+    def __init__(self, code: int | None, reason: str | None, filename: str | None, dest: str) -> None:
+        super().__init__(code, reason, filename)
+        self.dest: str = dest
+
+
 class CommandRunnerPort(Protocol):
     """Executes external commands without leaking shell or stdin state.
 

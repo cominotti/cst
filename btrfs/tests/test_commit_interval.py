@@ -12,7 +12,9 @@ from typing import override
 import unittest
 from unittest import mock
 
+from btrfs.commit import adapters as commit_adapters
 from btrfs.commit.adapters import (
+    dispatch_commit_cli_action,
     execute_commit_change,
     format_commit_plan_lines,
     format_commit_status,
@@ -32,6 +34,7 @@ from btrfs.commit.domain import (
     parse_commit_args,
     rewrite_commit_options,
 )
+from btrfs.compress.application import FSTAB_RELOAD_PENDING, FSTAB_RELOAD_UNKNOWN
 from btrfs.compress.domain import (
     CompressSnapshot,
     LayerStatus,
@@ -600,3 +603,51 @@ class CommitAdapterAndCliTests(unittest.TestCase):
         )
         self.assertEqual(rc_u, 2)
         self.assertIn("invalid commit interval", err_u.getvalue())
+
+
+class CommitCatchUpDispatchTest(unittest.TestCase):
+    """commit-interval status and plan, as the command runs them (dispatch_commit_cli_action), name the
+    catch-up reload the next run would do: status just before its overall line; plan only when it writes no
+    /etc/fstab (a run that writes it reloads with its write)."""
+
+    def _dispatch(self, host: _FakeHost, parsed: CommitParsedArgs) -> tuple[int, list[str]]:
+        with mock.patch.object(commit_adapters, "_host_for_env", return_value=(host, "", {})):
+            return dispatch_commit_cli_action(parsed, CommitCliDeps(), read_only=True)
+
+    def test_status_names_a_pending_reload_before_the_overall_line(self) -> None:
+        # (systemd behind /etc/fstab, None: systemctl gives no answer; the line status says, "": none)
+        for behind, said in ((True, FSTAB_RELOAD_PENDING), (None, FSTAB_RELOAD_UNKNOWN), (False, "")):
+            with self.subTest(behind=behind):
+                rc, lines = self._dispatch(
+                    _FakeHost(_FakeState(fstab_behind=behind)), CommitParsedArgs(CommitAction.STATUS)
+                )
+                self.assertEqual(rc, 0)
+                self.assertTrue(lines[-1].startswith("  overall "), lines)
+                if said:
+                    self.assertEqual(lines[-2], f"  {said}")
+                self.assertEqual(sum("daemon-reload" in line for line in lines), int(bool(said)), lines)
+
+    def test_plan_names_it_when_it_writes_no_fstab(self) -> None:
+        plan60 = CommitParsedArgs(CommitAction.PLAN, seconds=60)
+        # (at the target, so the plan writes no /etc/fstab; systemd behind, None: no answer; the line it says)
+        cases = (
+            (True, True, FSTAB_RELOAD_PENDING),
+            (True, None, FSTAB_RELOAD_UNKNOWN),
+            (False, True, ""),
+            (False, None, ""),
+        )
+        for at_target, behind, said in cases:
+            with self.subTest(at_target=at_target, behind=behind):
+                host = _FakeHost()
+                if at_target:
+                    rc_on, out_on = execute_commit_change(
+                        host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True)
+                    )
+                    self.assertEqual(rc_on, 0, out_on)
+                host.s.fstab_behind = behind
+                host.calls.clear()
+                rc, lines = self._dispatch(host, plan60)
+                self.assertEqual(rc, 0)
+                self.assertEqual([ln for ln in lines if "daemon-reload" in ln], [said] if said else [], lines)
+                self.assertTrue(lines[-1].startswith("Dry run, nothing changed."), lines)
+                self.assertEqual(host.calls, [])

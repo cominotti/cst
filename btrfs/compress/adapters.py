@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import os
 from typing import Final
 
+from btrfs.cache.adapters import loaded_mount_units, reload_failure
 from btrfs.compress.domain import (
     KARGS_SETTLE_POLL_S,
     KARGS_SETTLE_TIMEOUT_S,
@@ -32,6 +33,7 @@ from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService
 from cst_core.domain.install import INSTALL_MANIFEST, Component
 from cst_core.domain.record import ROOT_RECORD
+from cst_core.domain.values import MINUTE
 from cst_core.ports import (
     ClockPort,
     CommandFailed,
@@ -44,6 +46,9 @@ from cst_core.ports import (
 )
 
 _DEFAULT_PROC_DIR: Final[str] = "/proc"
+_FSTAB_CATCH_UP_TIMEOUT_S: Final = MINUTE
+"""How long the catch-up daemon-reload (CompressHostPort.daemon_reload) waits: a PID 1 that does not answer
+must not hold a run that has nothing else to do forever (scrub-limit's catch-up reload waits as long)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +206,16 @@ class LinuxCompressHostAdapter:
             if previous is not None:
                 self._fs.write_atomic(path, previous, mode=0o644)
             raise
+
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """The loaded mount units, on the host from a toolbox (cache's loaded_mount_units); none with a test root
+        (CST_BTRFS_*_ROOT): no systemd loaded that root's /etc/fstab, so none of its units is behind."""
+        if self._host_root:
+            return []
+        return loaded_mount_units(self._runner, from_toolbox=self._ctx.is_container())
+
+    def daemon_reload(self) -> str | None:
+        return reload_failure(self._runner, timeout=_FSTAB_CATCH_UP_TIMEOUT_S)
 
     def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
         """Update `rootflags=` in a single `rpm-ostree kargs` invocation."""

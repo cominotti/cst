@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import errno
 import fcntl
 import io
 import json
@@ -24,6 +25,7 @@ from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on_host_argv, SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
+from cst_core.adapters import files as core_files
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import beside_program, lc_ctype_handover, restore_lc_ctype, undo_python_start
 from cst_core import wiring as core_wiring
@@ -43,7 +45,7 @@ from cst_core.domain.dispatch import (
 )
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
 from cst_core.domain.plan import PlanItem
-from cst_core.domain.text import strip_ascii_blanks
+from cst_core.domain.text import split_ascii_blanks, strip_ascii_blanks
 from cst_core.domain.values import (
     ASCII_BLANKS,
     ByteSize,
@@ -60,13 +62,23 @@ from cst_core.domain.values import (
 )
 from cst_core.domain.units import (
     ActiveState,
+    SYSTEMD_WHITESPACE,
     UNIT_PATH_PROP,
     named_user_unit_dir,
     show_manager_value_argv,
+    systemd_lines,
     user_manager_head,
     user_unit_dir,
 )
-from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
+from cst_core.ports import (
+    CommandFailed,
+    CommandFault,
+    CommandResult,
+    OutputMode,
+    ReplacedNotSynced,
+    SystemctlHost,
+    UnitName,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -121,7 +133,95 @@ class AsciiBlanksTest(unittest.TestCase):
             with self.subTest(kept=kept):
                 self.assertEqual(strip_ascii_blanks(kept), kept)
                 self.assertNotEqual(kept.strip(), kept)  # what str.strip() would have trimmed
+
+    def test_words_split_at_ascii_blanks_only(self) -> None:
+        # (text, blanks or None for the default, the words)
+        nbsp, ideo = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}"
+        cases: tuple[tuple[str, str | None, list[str]], ...] = (
+            ("", None, []),
+            (" \t\n\r\f\v", None, []),
+            ("  a \tb\n\nc  ", None, ["a", "b", "c"]),
+            ("a\fb\vc\rd", None, ["a", "b", "c", "d"]),
+            (f"a{nbsp}b c", None, [f"a{nbsp}b", "c"]),
+            (f"a{ideo}b", None, [f"a{ideo}b"]),
+            ("a\x1cb\x85c", None, ["a\x1cb\x85c"]),
+            ("a b\tc\fd", " \t", ["a", "b", "c\fd"]),
+            ("a]b^c", "]^", ["a", "b", "c"]),
+        )
+        for text, blanks, words in cases:
+            with self.subTest(text=text, blanks=blanks):
+                got = split_ascii_blanks(text) if blanks is None else split_ascii_blanks(text, blanks)
+                self.assertEqual(got, words)
         self.assertEqual(strip_ascii_blanks(" \N{NO-BREAK SPACE}off\t"), "\N{NO-BREAK SPACE}off")
+
+
+class WriteAtomicReplacedNotSyncedTest(unittest.TestCase):
+    """write_atomic's ReplacedNotSynced: raised only when the rename was done and the folder's sync failed."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-wa-rns-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.dest = os.path.join(self.tmp, "fstab")
+        with open(self.dest, "wb") as fh:
+            fh.write(b"old\n")
+
+    def _failing_fsync(self, kind: Literal["folder", "file"], code: int) -> contextlib.AbstractContextManager[object]:
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            if stat.S_ISDIR(os.fstat(fd).st_mode) == (kind == "folder"):
+                raise OSError(code, os.strerror(code))
+            real_fsync(fd)
+
+        return mock.patch.object(core_files.os, "fsync", fsync)
+
+    def _content(self) -> bytes:
+        with open(self.dest, "rb") as fh:
+            return fh.read()
+
+    def test_the_signal_is_raised_only_after_the_rename_when_the_folder_sync_fails(self) -> None:
+        cases: tuple[
+            tuple[str, Literal["folder", "file"], int, bool | Literal["file"], type[OSError] | None, bytes], ...
+        ] = (
+            ("folder fsync EIO", "folder", errno.EIO, True, ReplacedNotSynced, b"new\n"),
+            ("file fsync EIO, before the rename", "file", errno.EIO, True, OSError, b"old\n"),
+            ("folder fsync EINVAL, ignored", "folder", errno.EINVAL, True, None, b"new\n"),
+            ("folder fsync ENOTSUP, ignored", "folder", errno.ENOTSUP, True, None, b"new\n"),
+            ("durable file: no folder sync", "folder", errno.EIO, "file", None, b"new\n"),
+            ("durable False: no sync", "folder", errno.EIO, False, None, b"new\n"),
+        )
+        for name, kind, code, durable, raised, content in cases:
+            with self.subTest(name):
+                with open(self.dest, "wb") as fh:
+                    fh.write(b"old\n")
+                with self._failing_fsync(kind, code):
+                    if raised is None:
+                        core_files.write_atomic(self.dest, "new\n", mode=0o644, durable=durable, relabel=False)
+                    else:
+                        with self.assertRaises(raised) as caught:
+                            core_files.write_atomic(self.dest, "new\n", mode=0o644, durable=durable, relabel=False)
+                        err = caught.exception
+                        self.assertEqual(err.errno, code)
+                        self.assertEqual(isinstance(err, ReplacedNotSynced), raised is ReplacedNotSynced)
+                        if isinstance(err, ReplacedNotSynced):
+                            self.assertEqual(err.dest, self.dest)
+                            self.assertEqual(str(err), str(OSError(code, os.strerror(code))))
+                self.assertEqual(self._content(), content)
+                self.assertEqual(os.listdir(self.tmp), ["fstab"])
+
+    def test_a_folder_that_cannot_be_opened_after_the_rename_is_the_signal_too(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root opens a folder whatever its mode")
+        os.chmod(self.tmp, 0o300)  # a file can still be made and renamed in it, the folder not opened to read
+        try:
+            with self.assertRaises(ReplacedNotSynced) as caught:
+                core_files.write_atomic(self.dest, "new\n", mode=0o644, relabel=False)
+        finally:
+            os.chmod(self.tmp, 0o755)
+        err = caught.exception
+        self.assertEqual((err.errno, err.filename), (errno.EACCES, self.tmp))
+        self.assertEqual(self._content(), b"new\n")
 
 
 class ValueObjectsTest(unittest.TestCase):
@@ -222,6 +322,31 @@ class ValueObjectsTest(unittest.TestCase):
             for bad in (digits, "-" + digits):
                 with self.subTest(bad=bad[:12]):
                     self.assertIsNone(parse_integer(bad))
+
+    def test_an_integer_with_plus_and_bounds_is_read_as_the_kernel_reads_it(self) -> None:
+        # (text, plus, bounds, the integer or None)
+        cases = (
+            ("+5", True, None, 5),
+            ("+0", True, None, 0),
+            ("-5", True, None, -5),
+            ("+-5", True, None, None),
+            ("++5", True, None, None),
+            ("-+5", True, None, None),
+            ("+", True, None, None),
+            ("+ 5", True, None, None),
+            ("+5", False, None, None),
+            ("7", False, (0, 7), 7),
+            ("8", False, (0, 7), None),
+            ("-1", False, (0, 7), None),
+            ("-8", True, (-8, 7), -8),
+            ("-9", True, (-8, 7), None),
+            ("+7", True, (-8, 7), 7),
+            ("+8", True, (-8, 7), None),
+            ("x", True, (-8, 7), None),
+        )
+        for text, plus, bounds, want in cases:
+            with self.subTest(text=text, plus=plus, bounds=bounds):
+                self.assertEqual(parse_integer(text, plus=plus, bounds=bounds), want)
 
     def test_duration_parse(self) -> None:
         self.assertEqual(Duration.parse("30s"), Duration(30))
@@ -351,6 +476,31 @@ class ActiveStateTest(unittest.TestCase):
         self.assertNotIn("", running)
         self.assertNotIn("a-word-a-newer-systemd-adds", running)
         self.assertEqual(str(ActiveState.MAINTENANCE), "maintenance")
+
+
+class SystemdLinesTest(unittest.TestCase):
+    """systemd_lines and SYSTEMD_WHITESPACE: a unit file's lines and blanks as systemd's read_line and
+    strstrip see them (src/basic/fileio.c, src/fundamental/string-util.h)."""
+
+    def test_lines_end_where_read_line_ends_them(self) -> None:
+        cases = (
+            ("", [""]),
+            ("a\nb\n", ["a", "b", ""]),
+            ("a\rb", ["a", "b"]),
+            ("a\0b", ["a", "b"]),
+            ("a\r\nb", ["a", "b"]),
+            ("a\n\rb", ["a", "b"]),
+            ("a\r\n\0b", ["a", "b"]),
+            ("a\n\n\rb", ["a", "", "b"]),
+            ("a\vb\fc\x1cd\x85e\u2028f\u2029g", ["a\vb\fc\x1cd\x85e\u2028f\u2029g"]),
+        )
+        for text, lines in cases:
+            with self.subTest(text=text):
+                self.assertEqual(systemd_lines(text), lines)
+
+    def test_the_whitespace_is_space_tab_newline_and_carriage_return(self) -> None:
+        self.assertEqual(SYSTEMD_WHITESPACE, " \t\n\r")
+        self.assertEqual(" \t\fx\v\xa0\r\n".strip(SYSTEMD_WHITESPACE), "\fx\v\xa0")
 
 
 class UserUnitDirTest(unittest.TestCase):

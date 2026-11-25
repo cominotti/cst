@@ -90,6 +90,8 @@ def render_compress_status(view: CompressStatusView, out: TextIO) -> int:
         print(line, file=out)
     for line in format_status_note_lines(view.left_alone_notes):
         print(line, file=out)
+    if view.reload_pending:
+        print(f"  {view.reload_pending}", file=out)
     print(f"  overall         {view.coherence.summary}", file=out)
     return 0
 
@@ -103,10 +105,13 @@ def render_compress_plan(res: CompressPlanResult, prog: str, out: TextIO, err: T
     if res.plan is None:
         return res.exit_code
     _render_plan(res.plan, out)
-    if not res.plan.has_changes:
+    if res.reload_pending:
+        print(res.reload_pending, file=out)
+    if not res.plan.has_changes and not res.reload_pending:
         print(f"Already at {res.plan.target_option} across all active layers; nothing to do.", file=out)
         return 0
-    print("Note: remount affects new writes immediately; existing files are never auto-defragmented.", file=out)
+    if res.plan.has_changes:
+        print("Note: remount affects new writes immediately; existing files are never auto-defragmented.", file=out)
     print(
         f"Dry run, nothing changed. Run `{prog} {res.hint_cmd.value} --level {res.plan.target_level}` to apply.",
         file=out,

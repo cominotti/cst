@@ -117,7 +117,7 @@ MAGIC_CEILINGS: Final[dict[str, int]] = {
     "btrfs/bulk int-of-text": 11,
     "btrfs/cache int-of-text": 2,
     "btrfs/commit int-of-text": 2,
-    "btrfs/compress int-of-text": 2,
+    "btrfs/compress int-of-text": 1,
     "btrfs/docker_gc int-of-text": 6,
     "btrfs/docker_volumes_nocow int-of-text": 3,
     "btrfs/health_check int-of-text": 3,

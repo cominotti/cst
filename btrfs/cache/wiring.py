@@ -8,8 +8,8 @@ btrfs/cache/cli.py hands argv to this module.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import os
+from collections.abc import Mapping, Sequence
 
 from btrfs.cache import domain as cache_mount_domain
 from btrfs.cache.adapters import (
@@ -24,6 +24,7 @@ from btrfs.cache.adapters import (
 from btrfs.cache.application import CacheMounts
 from btrfs.cache.domain import CacheMountParsedArgs
 from cst_core.adapters.runtime import ManagedCliEnv, ManagedCliSpec, run_managed_cli, undo_python_start
+from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort
 
 CacheMountCliDeps = ManagedCliEnv
@@ -53,7 +54,7 @@ def build_cache_mounts(
 
 def dispatch_cache_mount_cli_action(
     parsed: CacheMountParsedArgs, env: ManagedCliEnv, *, read_only: bool
-) -> tuple[int, list[str]]:
+) -> ExitAndLines:
     """Resolve runtime dependencies and execute the requested `cache` subcommand."""
     del read_only
     env_map = os.environ if env.env is None else env.env

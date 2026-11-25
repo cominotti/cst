@@ -37,20 +37,20 @@ Not collected as a test module (unittest finds test*.py).
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
-from dataclasses import dataclass
 import errno
 import json
 import os
-from pathlib import Path
 import posixpath
 import shutil
 import stat
 import struct
 import subprocess
 import sys
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Final, override
 
 from btrfs.cache.application import CacheMounts
@@ -94,8 +94,9 @@ from cst_core.domain.install import (
 )
 from cst_core.domain.record import ComponentState
 from cst_core.domain.units import parse_show_units
+from cst_core.domain.values import ExitAndLines
 from cst_core.installer import NAME as INSTALLER_NAME
-from cst_core.ports import CommandFault, CommandResult, WriteFailed
+from cst_core.ports import CommandFault, CommandResult, ReplacedNotSynced, WriteFailed
 from tests.fault_injection import FaultPlan
 from tests.test_install import MemoryTarget
 from tests.test_install_record import MemoryRecord
@@ -984,7 +985,7 @@ def _command_failed(argv: tuple[str, ...]) -> Callable[[OSError], CommandResult]
     return failed
 
 
-def _installer_failed_lines(err: OSError) -> tuple[int, list[str]]:
+def _installer_failed_lines(err: OSError) -> ExitAndLines:
     return 1, [err.strerror or str(err)]
 
 
@@ -1158,11 +1159,11 @@ class FakeIocostInstaller:
     def available(self) -> bool:
         return self.world.installer_available
 
-    def install(self) -> tuple[int, list[str]]:
+    def install(self) -> ExitAndLines:
         w = self.world
         w.holds("component", "the installer's install")
 
-        def install() -> tuple[int, list[str]]:
+        def install() -> ExitAndLines:
             lines: list[str] = []
             try:
                 lines.extend(w.svc.install(IOCOST_ENTRIES, w.req))
@@ -1176,11 +1177,11 @@ class FakeIocostInstaller:
 
         return w.step("installer install", install, _installer_failed_lines)
 
-    def mark_done(self) -> tuple[int, list[str]]:
+    def mark_done(self) -> ExitAndLines:
         w = self.world
         w.holds("component", "the installer's mark done")
 
-        def mark() -> tuple[int, list[str]]:
+        def mark() -> ExitAndLines:
             if w.before_mark is not None:
                 w.before_mark()
             w.svc.mark(w.record, Component.BTRFS_IOCOST.value)
@@ -1327,8 +1328,13 @@ class MountTable:
         fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
         self.add_mount(dev, tgt, fsroot=fsroot, uuid=held["uuid"], bind=True)
 
+    def mounted(self, tgt: str) -> bool:
+        """Whether anything is mounted at tgt (an umount of tgt has a mount to take off)."""
+        return any(m["target"] == tgt for m in self.mounts)
+
     def unbind(self, tgt: str) -> None:
-        """umount tgt: its top mount taken off (nothing when nothing is mounted there)."""
+        """umount tgt: its top mount taken off (nothing when nothing is mounted there: the fakes answer that
+        umount with NOT_MOUNTED_TEXT before they call this)."""
         for i in range(len(self.mounts) - 1, -1, -1):
             if self.mounts[i]["target"] == tgt:
                 del self.mounts[i]
@@ -1404,6 +1410,11 @@ def mount_units_listing(loaded: str | None, *, need_reload: bool, mounted: Seque
 # error's text): the contract, the fault matrix and the machine expect the same ERROR lines.
 MOUNT_DENIED_TEXT: Final = "mount: permission denied"
 UMOUNT_BUSY_TEXT: Final = "umount: target is busy"
+# What util-linux's umount and mount answer (exit 32) for an umount of a target nothing is mounted at and a
+# mount --bind onto a target folder that does not exist; {} is the target as the user sees it (FakeMountRunner
+# leaves its test root out, so the fakes and the real adapters word it the same).
+NOT_MOUNTED_TEXT: Final = "umount: {}: not mounted."
+NO_MOUNT_POINT_TEXT: Final = "mount: {}: mount point does not exist."
 RELOAD_FAILED_TEXT: Final = "Failed to reload daemon"
 MOUNT_DENIED: Final = OSError(errno.EPERM, MOUNT_DENIED_TEXT)
 UMOUNT_BUSY: Final = OSError(errno.EBUSY, UMOUNT_BUSY_TEXT)
@@ -1413,7 +1424,8 @@ RELOAD_FAILED: Final = OSError(errno.EIO, RELOAD_FAILED_TEXT)
 class FakeMountRunner:
     """findmnt, mount and umount over a MountTable, and systemctl over an FstabSystemdView of the test root's
     /etc/fstab. findmnt answers `-J -l -o FINDMNT_COLUMNS` as the real one does: a bind mount's source is
-    "DEVICE[FSROOT]", its fsroot the folder it shows."""
+    "DEVICE[FSROOT]", its fsroot the folder it shows. As util-linux, an umount of a target nothing is mounted at
+    and a mount --bind onto a target folder that does not exist fail with exit 32."""
 
     def __init__(self, root: str, *, same_uuid: bool = False) -> None:
         self.root = root
@@ -1482,6 +1494,8 @@ class FakeMountRunner:
         self.fstab_at_mount.append(self._fstab_now())
         if tgt_path.removeprefix(self.root) in self.mount_fails:
             return CommandResult(32, "", MOUNT_DENIED_TEXT)
+        if not os.path.isdir(tgt_path):
+            return CommandResult(32, "", NO_MOUNT_POINT_TEXT.format(tgt_path.removeprefix(self.root)))
         self.table.bind(src_path.removeprefix(self.root), tgt_path.removeprefix(self.root))
         return CommandResult(0, "", "")
 
@@ -1490,6 +1504,8 @@ class FakeMountRunner:
         logical_tgt = tgt_path.removeprefix(self.root)
         if logical_tgt in self.umount_fails:
             return CommandResult(32, "", UMOUNT_BUSY_TEXT)
+        if not self.table.mounted(logical_tgt):
+            return CommandResult(32, "", NOT_MOUNTED_TEXT.format(logical_tgt))
         self.table.unbind(logical_tgt)
         return CommandResult(0, "", "")
 
@@ -1579,13 +1595,16 @@ class CacheWorld(FaultPoints):
 
     Every mutating call is one point (FaultPoints), named as main's fault matrix named its call:
     "folder PATH" (each ensure_private), "tag SOURCE" (a CACHEDIR.TAG written: none when one is there),
-    "mount --bind SOURCE TARGET", "umount TARGET", "fstab write" (the write and the put-back),
+    "mount --bind SOURCE TARGET", "umount TARGET", two for each /etc/fstab write (the write and the put-back):
+    "fstab replace" (the new text in place) and "fstab sync" (its folder synced: no effect; a failure there
+    raises ReplacedNotSynced, with the new text in place, as write_atomic does),
     "fstab remove" (the put-back when there was no file) and "systemctl daemon-reload". A failed command
     answers "WHAT failed: REASON" (the error's text); a failed folder, tag or /etc/fstab call raises it.
     Every error the fakes model (a link at a private folder: ENOTDIR, as O_NOFOLLOW with O_DIRECTORY gives;
     a file or a dangling link in its way: EEXIST; a file at or above a tag's folder: EEXIST, as write_atomic's
     ensure_dir gives; /etc/fstab a folder: EISDIR) raises inside the call, before a
-    kill armed there fires. before_reload runs before a reload takes effect (a kill there leaves systemd
+    kill armed there fires; an umount of a target nothing is mounted at and a mount --bind onto a target that
+    is not a folder answer as util-linux does (NOT_MOUNTED_TEXT, NO_MOUNT_POINT_TEXT), inside the call too. before_reload runs before a reload takes effect (a kill there leaves systemd
     behind); a KILL of the plan at the reload point is one after it took effect. Reads are not points;
     each read gives a new object, never the one the world holds."""
 
@@ -1769,7 +1788,11 @@ class FakeFstab:
             w.fstab_writes += 1
             w.fstab, w.fstab_id = copy, w.fstab_writes
 
-        w.step("fstab write", write)
+        def not_synced(err: OSError) -> None:
+            raise ReplacedNotSynced(err.errno, err.strerror, err.filename, "/etc/fstab") from err
+
+        w.step("fstab replace", write)
+        w.step("fstab sync", lambda: None, not_synced)
 
     def remove(self) -> None:
         w = self.world
@@ -1805,6 +1828,8 @@ class FakeCacheMountTable:
         what = f"mount --bind {binding.source} {binding.target}"
 
         def bind() -> str | None:
+            if not w.is_dir(binding.target):
+                return f"{what} failed: {NO_MOUNT_POINT_TEXT.format(binding.target)}"
             w.table.bind(binding.source, binding.target)
             return None
 
@@ -1816,6 +1841,8 @@ class FakeCacheMountTable:
         what = f"umount {binding.target}"
 
         def unbind() -> str | None:
+            if not w.table.mounted(binding.target):
+                return f"{what} failed: {NOT_MOUNTED_TEXT.format(binding.target)}"
             w.table.unbind(binding.target)
             return None
 
@@ -1978,6 +2005,8 @@ class LayerHostState:
     fail_remount: str | None = None
     fake_remount_effect: bool = True
     fail_top_mount: Exception | None = None
+    fstab_behind: bool | None = False  # systemd has not loaded /etc/fstab as it is on disk; None: no answer
+    reload_error: str | None = None  # what a daemon-reload answers (None: it works)
 
 
 class LayerHost(ABC):
@@ -2025,6 +2054,21 @@ class LayerHost(ABC):
 
     def read_top_mount(self) -> TopMountInfo | None:
         return self.s.top_mount
+
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """One unit of /etc/fstab's root line, NeedDaemonReload=yes when systemd is behind; None: no answer."""
+        if self.s.fstab_behind is None:
+            return None
+        need = "yes" if self.s.fstab_behind else "no"
+        return [
+            {"Id": "-.mount", "LoadState": "loaded", "SourcePath": "/etc/fstab", "NeedDaemonReload": need, "Where": "/"}
+        ]
+
+    def daemon_reload(self) -> str | None:
+        self.calls.append("daemon_reload")
+        if self.s.reload_error is None:
+            self.s.fstab_behind = False
+        return self.s.reload_error
 
     def write_fstab(self, text: str, *, put_back: bool = True) -> None:
         del put_back  # the fake puts nothing back after a failure
@@ -2105,8 +2149,10 @@ class CompressWorld(FaultPoints):
     mounts (/proc/mounts's text), the top-mount unit (TopMountInfo, None: not installed) and the answer to a
     confirmation. The world implements the port itself.
 
-    Every mutating call is one point (FaultPoints): "fstab write" (write_fstab), "kargs" (update_kargs),
-    "remount" (remount) and "top-mount" (update_top_mount). A failed fstab write or top-mount update raises the
+    Every mutating call is one point (FaultPoints): "fstab write" (write_fstab, its daemon-reload included),
+    "kargs" (update_kargs), "remount" (remount), "top-mount" (update_top_mount) and "systemctl daemon-reload"
+    (the catch-up reload of a run that writes no /etc/fstab). What systemd has loaded of /etc/fstab is an
+    FstabSystemdView: a write reloads it, a torn one leaves it behind, show_fails makes mount_units answer None. A failed fstab write or top-mount update raises the
     error with no effect, a failed kargs update or remount answers (False, the error's text) with no effect.
     The points named in torn take effect first and then fail, as the real adapter can (btrfs/tests/
     test_compress_faults.py, AdapterFailureTest): /etc/fstab renamed into place before its folder's sync
@@ -2148,6 +2194,11 @@ class CompressWorld(FaultPoints):
         self.pending_kargs: Callable[[], object] | None = None
         self.remounts: list[tuple[str, str]] = []
         self.ignored_remounts = 0  # the next ones answer (True, "") and change nothing (the verification's case)
+        # What systemd has loaded of /etc/fstab (taken at the first call, as a systemd that booted with the start
+        # text), a new identity per write: a write reloads it, a torn one leaves it behind.
+        self.systemd = FstabSystemdView()
+        self.fstab_id = 0
+        self.show_fails = False  # systemctl show gives no answer
 
     # ---- CompressHostPort: reads ---------------------------------------------------------------------
     def is_ostree(self) -> bool:
@@ -2157,7 +2208,7 @@ class CompressWorld(FaultPoints):
         return self.uuid
 
     def read_fstab(self) -> str | None:
-        return None if "fstab write" in self.unreadable else self.fstab
+        return None if "fstab write" in self.unreadable else _fresh(self.fstab)
 
     def read_proc_mounts(self) -> str | None:
         return None if "remount" in self.unreadable else self.mounts
@@ -2185,6 +2236,33 @@ class CompressWorld(FaultPoints):
     def read_top_mount(self) -> TopMountInfo | None:
         return None if "top-mount" in self.unreadable else self.top
 
+    def look(self) -> None:
+        """Any call: systemd has booted with /etc/fstab as it is at the first one."""
+        self.systemd.boot(self.fstab_id, self.fstab)
+
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """The units mount_units_listing gives with --state=loaded, of the root mounts of /proc/mounts."""
+        self.look()
+        if self.show_fails:
+            return None
+        mounted = [f[1] for f in (line.split() for line in (self.mounts or "").splitlines()) if len(f) > 1]
+        listing = mount_units_listing(
+            self.systemd.text(), need_reload=not self.systemd.current(self.fstab_id), mounted=mounted, every_loaded=True
+        )
+        return [{p: unit[p] for p in MOUNT_UNIT_PROPS if p in unit} for unit in parse_show_units(listing)]
+
+    def daemon_reload(self) -> str | None:
+        """The catch-up reload: point "systemctl daemon-reload"."""
+        self.look()
+
+        def reload() -> str | None:
+            self.systemd.reloaded(self.fstab_id, self.fstab)
+            return None
+
+        return self.step(
+            "systemctl daemon-reload", reload, lambda err: f"systemctl daemon-reload failed: {err.strerror}"
+        )
+
     def confirm(self, prompt: str) -> bool:
         del prompt
         return self.confirm_answer
@@ -2198,12 +2276,17 @@ class CompressWorld(FaultPoints):
 
     def write_fstab(self, text: str, *, put_back: bool = True) -> None:
         del put_back  # a failure has no effect here and a torn one keeps it: nothing is put back
+        self.look()
+
+        def replace() -> None:
+            self.fstab, self.fstab_id = text, self.fstab_id + 1
 
         def write() -> None:
-            self.fstab = text
+            replace()
+            self.systemd.reloaded(self.fstab_id, self.fstab)
 
         def failed(err: OSError) -> None:
-            self._torn("fstab write", write)
+            self._torn("fstab write", replace)  # in place, systemd not reloaded
             raise err
 
         self.step("fstab write", write, failed)

@@ -37,11 +37,11 @@ counts pinned. ProtocolFaultTest stages single faults that once needed a patch o
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import errno
 import os
-from typing import ClassVar, override
 import unittest
+from dataclasses import dataclass
+from typing import ClassVar, override
 
 from btrfs.cache.domain import (
     CACHE_BASE,
@@ -55,9 +55,10 @@ from btrfs.cache.domain import (
     plan_detach_fstab,
 )
 from btrfs.tests.fakes import MOUNT_DENIED, RELOAD_FAILED, UMOUNT_BUSY, CacheWorld
+from cst_core.domain.values import ExitAndLines
 from tests.fault_injection import Fault, FaultMode, Killed, cut_points, every_fault, no_space
 
-USER = CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")
+USER = CacheMountUser("tester", 1000, 1000, "/var/home/tester")
 BINDINGS = build_user_bindings(USER)
 BASE_FSTAB = "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,nofail 0 0\n"
 INCOMPLETE = "ROLLBACK INCOMPLETE"
@@ -79,17 +80,17 @@ class Start:
 
 ATTACHED_FSTAB = plan_attach_fstab(BASE_FSTAB, BINDINGS)
 BOTH = tuple(b.target for b in BINDINGS)
-ATTACH_FRESH = Start(ATTACH, BASE_FSTAB, (), points=9, fail_then_later=6)
-ATTACH_NO_FSTAB = Start(ATTACH, None, (), points=9, fail_then_later=6)
+ATTACH_FRESH = Start(ATTACH, BASE_FSTAB, (), points=10, fail_then_later=11)
+ATTACH_NO_FSTAB = Start(ATTACH, None, (), points=10, fail_then_later=9)
 # An attach killed after its first mount: the cache bind mounted, no line yet.
-ATTACH_HALF_DONE = Start(ATTACH, BASE_FSTAB, (BOTH[0],), points=7, fail_then_later=3)
-DETACH_FULL = Start(DETACH, ATTACHED_FSTAB, BOTH, points=4, fail_then_later=6)
+ATTACH_HALF_DONE = Start(ATTACH, BASE_FSTAB, (BOTH[0],), points=8, fail_then_later=7)
+DETACH_FULL = Start(DETACH, ATTACHED_FSTAB, BOTH, points=5, fail_then_later=11)
 # A detach killed after its first umount: the lines gone and the reload done, the scratchpad still mounted.
 DETACH_HALF_DONE = Start(DETACH, BASE_FSTAB, (BOTH[1],), points=1, fail_then_later=0)
 
 
 def cache_world(fstab: str | None, mounted: tuple[str, ...] = ()) -> CacheWorld:
-    """The machine the matrix starts from: danilo's account, the two bases mounted, both sources made,
+    """The machine the matrix starts from: tester's account, the two bases mounted, both sources made,
     /etc/fstab as given and the binds of mounted in place."""
     w = CacheWorld()
     w.add_user(USER.name, USER.uid, USER.home)
@@ -105,7 +106,7 @@ def cache_world(fstab: str | None, mounted: tuple[str, ...] = ()) -> CacheWorld:
     return w
 
 
-def run_cache(world: CacheWorld, argv: list[str]) -> tuple[int, list[str]]:
+def run_cache(world: CacheWorld, argv: list[str]) -> ExitAndLines:
     """One command over the world's ports: (exit, its lines)."""
     return world.service().run(parse_cache_mount_args(argv), "cst btrfs cache")
 
@@ -136,7 +137,7 @@ class CacheFaultBase(unittest.TestCase):
         self.world = cache_world(self.start.fstab, self.start.mounted)
         return self.world
 
-    def run_once(self, *faults: Fault) -> tuple[int, list[str]] | None:
+    def run_once(self, *faults: Fault) -> ExitAndLines | None:
         """One run of the start's command with these faults: (exit, its lines); None when killed."""
         self.world.plan.arm(*faults)
         try:
@@ -337,7 +338,7 @@ class ProtocolFaultTest(unittest.TestCase):
     def setUp(self) -> None:
         self.world = cache_world(BASE_FSTAB)
 
-    def _run(self, argv: list[str]) -> tuple[int, list[str]]:
+    def _run(self, argv: list[str]) -> ExitAndLines:
         return run_cache(self.world, argv)
 
     def _mounted(self) -> list[str]:
@@ -348,59 +349,113 @@ class ProtocolFaultTest(unittest.TestCase):
         # adapter's half, that the link's target keeps its mode when the link comes after the folder
         # check, is the test of the same name in test_cache.py).
         before = self.world.fstab
-        self.world.fail("folder /var/mnt/cache/danilo", OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)))
+        self.world.fail("folder /var/mnt/cache/tester", OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR)))
         rc, lines = self._run(["attach"])
         self.assertEqual(rc, 1, lines)
-        self.assertIn("ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache:", lines[-1])
+        self.assertIn("ERROR: cannot prepare /var/mnt/cache/tester and /var/home/tester/.cache:", lines[-1])
         self.assertEqual(self.world.commands(), [])
         self.assertEqual(self.world.fstab, before)
 
     def test_a_folder_that_cannot_be_made_is_an_error_not_a_traceback(self) -> None:
-        self.world.fail("folder /var/mnt/cache/danilo", PermissionError(13, "Permission denied"))
+        self.world.fail("folder /var/mnt/cache/tester", PermissionError(13, "Permission denied"))
         rc, lines = self._run(["attach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache: Permission denied", lines
+            "ERROR: cannot prepare /var/mnt/cache/tester and /var/home/tester/.cache: Permission denied", lines
         )
         self.assertFalse(any(c.startswith("mount ") for c in self.world.calls))
 
     def test_a_bind_and_an_fstab_not_undone_are_both_named(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
-        self.world.fail("umount /var/home/danilo/Scratchpad", UMOUNT_BUSY)  # after .cache's umount
-        self.world.fail("mount --bind /var/mnt/cache/danilo /var/home/danilo/.cache", MOUNT_DENIED)  # mounting it again
-        self.world.fail_at("fstab write", 2, no_space())  # the put-back, detach's second write there
+        self.world.fail("umount /var/home/tester/Scratchpad", UMOUNT_BUSY)  # after .cache's umount
+        self.world.fail("mount --bind /var/mnt/cache/tester /var/home/tester/.cache", MOUNT_DENIED)  # mounting it again
+        self.world.fail_at("fstab replace", 2, no_space())  # the put-back, detach's second write there
         rc, lines = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: umount /var/home/danilo/Scratchpad failed: umount: target is busy; ROLLBACK INCOMPLETE "
-            "(mount --bind /var/mnt/cache/danilo /var/home/danilo/.cache failed: mount: permission denied; "
+            "ERROR: umount /var/home/tester/Scratchpad failed: umount: target is busy; ROLLBACK INCOMPLETE "
+            "(mount --bind /var/mnt/cache/tester /var/home/tester/.cache failed: mount: permission denied; "
             "cannot put /etc/fstab back: No space left on device)",
             lines,
         )
 
     def test_a_fstab_that_cannot_be_put_back_after_a_busy_umount_is_rollback_incomplete(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
-        self.world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY)
-        self.world.fail_at("fstab write", 2, no_space())  # the put-back, detach's second write there
+        self.world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY)
+        self.world.fail_at("fstab replace", 2, no_space())  # the put-back, detach's second write there
         rc, lines = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: umount /var/home/danilo/.cache failed: umount: target is busy; "
+            "ERROR: umount /var/home/tester/.cache failed: umount: target is busy; "
             "ROLLBACK INCOMPLETE (cannot put /etc/fstab back: No space left on device)",
             lines,
         )
         self.assertFalse(any("restored." in line for line in lines))
-        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        self.assertEqual(sorted(self._mounted()), ["/var/home/tester/.cache", "/var/home/tester/Scratchpad"])
+
+    def test_an_fstab_write_whose_folder_sync_failed_is_read_back_and_put_back(self) -> None:
+        # write_atomic's ReplacedNotSynced: the new text is in place, so the run puts the old one back before
+        # it says restored; a put-back whose own sync fails is in place too, and named. busy: detach's first
+        # umount fails, so its put-back after the umount is the second write (and its reload runs).
+        eio = OSError(errno.EIO, os.strerror(errno.EIO))
+        not_synced = "/etc/fstab put back, its folder not synced: Input/output error"
+        cases = (
+            (
+                "attach",
+                ATTACH,
+                False,
+                1,
+                "ERROR: cannot write /etc/fstab: Input/output error; mounts and /etc/fstab restored.",
+            ),
+            (
+                "detach",
+                DETACH,
+                False,
+                1,
+                "ERROR: cannot write /etc/fstab: Input/output error; mounts and /etc/fstab restored.",
+            ),
+            (
+                "attach, the put-back's sync failing too",
+                ATTACH,
+                False,
+                None,
+                f"ERROR: cannot write /etc/fstab: Input/output error; ROLLBACK INCOMPLETE ({not_synced})",
+            ),
+            (
+                "detach, a busy umount, the put-back's sync failing",
+                DETACH,
+                True,
+                2,
+                f"ERROR: umount /var/home/tester/.cache failed: umount: target is busy; ROLLBACK INCOMPLETE ({not_synced})",
+            ),
+        )
+        for name, action, busy, nth, want in cases:
+            with self.subTest(name):
+                self.world = cache_world(BASE_FSTAB)
+                if action == DETACH:
+                    self.assertEqual(self._run(["attach"])[0], 0)
+                start, mounted = self.world.fstab, sorted(self._mounted())
+                if busy:
+                    self.world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY)
+                if nth is None:
+                    self.world.fail("fstab sync", eio)
+                else:
+                    self.world.fail_at("fstab sync", nth, eio)
+                rc, lines = self._run([action])
+                self.assertEqual((rc, lines[-1]), (1, want))
+                self.assertEqual(self.world.fstab, start)
+                self.assertEqual(sorted(self._mounted()), mounted)
+                self.assertEqual(self.world.view_current(), busy)  # only _restore_fstab reloads after a put-back
 
     def test_a_failed_reload_after_putting_the_lines_back_is_rollback_incomplete(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
         attached = self.world.fstab
-        self.world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY)
+        self.world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY)
         self.world.fail_at("systemctl daemon-reload", 2, RELOAD_FAILED)  # the one after the put-back
         rc, lines = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: umount /var/home/danilo/.cache failed: umount: target is busy; "
+            "ERROR: umount /var/home/tester/.cache failed: umount: target is busy; "
             "ROLLBACK INCOMPLETE (systemctl daemon-reload failed: Failed to reload daemon)",
             lines,
         )
@@ -412,10 +467,10 @@ class CacheWorldStagingTest(unittest.TestCase):
 
     def test_a_one_shot_fault_keeps_the_failure_armed_before_it(self) -> None:
         world = CacheWorld()
-        world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY)  # every call
-        world.fail_at("umount /var/home/danilo/.cache", 2, RELOAD_FAILED)
+        world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY)  # every call
+        world.fail_at("umount /var/home/tester/.cache", 2, RELOAD_FAILED)
         answers = [
-            world.step("umount /var/home/danilo/.cache", lambda: "unmounted", lambda err: str(err.strerror))
+            world.step("umount /var/home/tester/.cache", lambda: "unmounted", lambda err: str(err.strerror))
             for _ in range(4)
         ]
         self.assertEqual(
@@ -433,10 +488,10 @@ class CacheWorldStagingTest(unittest.TestCase):
         ):
             with self.subTest(n=n):
                 world = CacheWorld()
-                world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY, times=2)
-                world.fail_at("umount /var/home/danilo/.cache", n, RELOAD_FAILED)
+                world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY, times=2)
+                world.fail_at("umount /var/home/tester/.cache", n, RELOAD_FAILED)
                 answers = [
-                    world.step("umount /var/home/danilo/.cache", lambda: unmounted, lambda err: str(err.strerror))
+                    world.step("umount /var/home/tester/.cache", lambda: unmounted, lambda err: str(err.strerror))
                     for _ in range(4)
                 ]
                 self.assertEqual(answers, expected)
@@ -444,10 +499,10 @@ class CacheWorldStagingTest(unittest.TestCase):
     def test_a_one_shot_fault_the_plan_failed_first_uses_up_nothing(self) -> None:
         world = CacheWorld()
         world.plan.arm((FaultMode.FAIL, 1))  # the plan's own failure, before the call runs
-        world.fail("umount /var/home/danilo/.cache", UMOUNT_BUSY, times=2)
-        world.fail_at("umount /var/home/danilo/.cache", 1, RELOAD_FAILED)
+        world.fail("umount /var/home/tester/.cache", UMOUNT_BUSY, times=2)
+        world.fail_at("umount /var/home/tester/.cache", 1, RELOAD_FAILED)
         answers = [
-            world.step("umount /var/home/danilo/.cache", lambda: "unmounted", lambda err: str(err.strerror))
+            world.step("umount /var/home/tester/.cache", lambda: "unmounted", lambda err: str(err.strerror))
             for _ in range(4)
         ]
         self.assertEqual(

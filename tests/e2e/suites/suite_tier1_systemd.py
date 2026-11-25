@@ -2598,7 +2598,8 @@ echo E2E-OK
             set -E
             trap 'echo "test_225 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w} conf={conf}
-            rm -rf "$w" && mkdir -p "$w/bin"
+            rm -rf "$w"
+            mkdir -p "$w/bin"
             [[ -d /etc/cpu-setup ]] || touch "$w/made-dir"
             [[ -d /run/cpu-setup ]] || touch "$w/made-run"
             if [[ -e "$conf" ]]; then cp -a "$conf" "$w/conf.bak"; fi
@@ -3425,7 +3426,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             f"""
             set -euo pipefail
             w={w}
-            rm -rf "$w" && mkdir -p "$w/sbin"
+            rm -rf "$w"
+            mkdir -p "$w/sbin"
             printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
             printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
             export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
@@ -3535,7 +3537,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             check=False,
         )
         docker_exec(
-            c, ["bash", "-c", f"rm -rf {w} && mkdir -p {w} && cat >{w}/fakes.bash"], input_text=DEGRADED_BOOT_FAKES
+            c,
+            ["bash", "-euo", "pipefail", "-c", f"rm -rf {w}\nmkdir -p {w}\ncat >{w}/fakes.bash"],
+            input_text=DEGRADED_BOOT_FAKES,
         )
         exec_bash(c, DEGRADED_BOOT_PREPARE)
 
@@ -4370,7 +4374,8 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
             self.SYSTEMD_CONTAINER,
             f"""
             w={w}
-            rm -rf "$w" && mkdir -p "$w/sbin"
+            rm -rf "$w"
+            mkdir -p "$w/sbin"
             printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
             printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
             export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
@@ -4947,7 +4952,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/tmpfiles/cst-nvme-apst.conf"
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/udev/65-cst-nvme-apst.rules"
             d=/var/tmp/e2e-126-tmpfiles
-            rm -rf "$d" && mkdir -p "$d/sys/module/nvme_core/parameters/default_ps_max_latency_us"
+            rm -rf "$d"
+            mkdir -p "$d/sys/module/nvme_core/parameters/default_ps_max_latency_us"
             systemd-tmpfiles --create --root="$d" - </opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf
             sed 's/^w- /w /' /opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf >"$d/old.conf"
             rc=0; systemd-tmpfiles --create --root="$d" - <"$d/old.conf" || rc=$?
@@ -5642,7 +5648,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             trap 'echo "test_113 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             w={w}
-            rm -rf "$w" && mkdir -p "$w"
+            rm -rf "$w"
+            mkdir -p "$w"
             export CST_PROG="cst vm" CST_VM_INDEX="$w/vm-backups.json"
             for text in '{{"backups": [' '{{"version": 1}}'; do
                 printf '%s' "$text" >"$CST_VM_INDEX"
@@ -5689,7 +5696,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             trap 'echo "{test} FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             w={w}
-            rm -rf "$w" && mkdir -p "$w/payload"
+            rm -rf "$w"
+            mkdir -p "$w/payload"
             if ! grep -qx 'Host btrfs-setup-nas' /root/.ssh/config 2>/dev/null; then
                 printf '%s\\n' 'Host btrfs-setup-nas' '    HostName {self.NAS_CONTAINER}' '    User root' \\
                     '    IdentityFile /root/.ssh/id_ed25519' '    StrictHostKeyChecking no' \\
@@ -6054,7 +6062,8 @@ EOF
             set -E
             trap 'echo "test_216 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w}
-            rm -rf "$w" && mkdir -p "$w/bin" "$w/units" "$w/sbin"
+            rm -rf "$w"
+            mkdir -p "$w/bin" "$w/units" "$w/sbin"
             for c in virsh restic systemctl rpm rpm-ostree flatpak-spawn; do
                 printf '#!/bin/sh\\necho "%s $*" >>%s/calls\\nexit 1\\n' "$c" "$w" >"$w/bin/$c"
                 chmod 0755 "$w/bin/$c"
@@ -11386,6 +11395,304 @@ EOF
         self.assertIn("E2E-TORN-REMOUNT-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_253_btrfs_compress_and_commit_reload_after_a_run_killed_before_its_reload(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` killed (SIGKILL, by a systemctl stand-in) at
+        their first daemon-reload, after their /etc/fstab write: a unit systemd-fstab-generator made from /etc/fstab
+        (a nofail line) says NeedDaemonReload=yes. plan then names the reload and changes nothing; apply again says
+        "reloaded: ..." and the unit says NeedDaemonReload=no; a third apply has nothing to do and runs no
+        daemon-reload. Before the fix the second apply printed no reload."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-catch-up"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+            mkdir -p {w}/mnt
+            printf 'tmpfs {w}/mnt tmpfs nofail 0 0\n' >>/etc/fstab
+            systemctl daemon-reload
+            unit="$(systemd-escape -p --suffix=mount {w}/mnt)"
+            [[ "$(systemctl show -P SourcePath "$unit")" == /etc/fstab ]] \
+                || {{ echo "the test cannot bite: $unit is not loaded from /etc/fstab" >&2; exit 1; }}
+
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+{kargs_staged(w, "    ")}
+    exit 0
+fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            # systemctl: the first daemon-reload after {w}/killed is removed kills the run (its parent); every
+            # daemon-reload is counted in {w}/reloads; every call goes on to the real one.
+            cat >{w}/bin/systemctl <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" daemon-reload "* ]]; then
+    n=$(( $(cat {w}/reloads 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >{w}/reloads
+    if [[ ! -e {w}/killed ]]; then
+        touch {w}/killed
+        kill -KILL "$PPID"
+        exit 1
+    fi
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount {w}/bin/systemctl
+
+            {kargs_tool_loop_head(w, "killed", "reloads")}
+                [[ -e {w}/killed ]] || {{ echo "$tool: no daemon-reload: $run_out" >&2; exit 1; }}
+                ! cmp -s /etc/fstab {w}/fstab.before || {{ echo "$tool: /etc/fstab not written" >&2; exit 1; }}
+                [[ "$(/usr/bin/systemctl show -P NeedDaemonReload "$unit")" == yes ]] \
+                    || {{ echo "the test cannot bite: NeedDaemonReload is not yes" >&2; exit 1; }}
+                cp /etc/fstab {w}/fstab.killed
+                n="$(cat {w}/reloads)"
+                plan_out="$(/opt/cst-rw/cst btrfs "$tool" plan 2>&1)"
+                grep -qF "daemon-reload: systemd has not loaded /etc/fstab as it is on disk" <<<"$plan_out" \
+                    || {{ echo "$tool plan: $plan_out" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.killed
+                [[ "$(cat {w}/reloads)" == "$n" ]] || {{ echo "$tool plan reloaded" >&2; exit 1; }}
+                again="$(/opt/cst-rw/cst btrfs "$tool" apply --yes 2>&1)" || {{ echo "$tool again: $again" >&2; exit 1; }}
+                grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" <<<"$again" \
+                    || {{ echo "$tool again: $again" >&2; exit 1; }}
+                [[ "$(/usr/bin/systemctl show -P NeedDaemonReload "$unit")" == no ]] \
+                    || {{ echo "$tool: NeedDaemonReload still yes" >&2; exit 1; }}
+                n="$(cat {w}/reloads)"
+                /opt/cst-rw/cst btrfs "$tool" apply --yes | grep -qF "nothing to do"
+                [[ "$(cat {w}/reloads)" == "$n" ]] || {{ echo "$tool: a run with nothing to do reloaded" >&2; exit 1; }}
+                {kargs_tool_loop_tail("E2E-CATCH-UP-OK")}
+            """,
+        ).stdout
+        self.assertIn("E2E-CATCH-UP-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_254_btrfs_compress_reads_the_top_mount_unit_as_systemd_does(self) -> None:
+        """`cst btrfs compress-force status` with a top-mount unit whose Options= starts with a no-break space
+        before compress=zstd:1: systemd keeps the no-break space in the value (it strips only " \\t\\n\\r"), so
+        the option mount gets is not compress=zstd:1, and status names the top-mount layer as drifting, with
+        the option systemd shows. Before the fix CST stripped every Unicode blank and called the layers
+        coherent."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-top-unit-blanks"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt
+            {kargs_top_mount_installed("compress=zstd:1")}
+            unit="/etc/systemd/system/{KARGS_TOP_UNIT}"
+            python3 - "$unit" <<'EOF'
+import re, sys
+p = sys.argv[1]
+text = open(p, encoding="utf-8").read()
+text = re.sub(r"(?m)^Options=.*$", "Options=\\xa0compress=zstd:1,subvolid=5,noatime,degraded,ssd,flushoncommit", text)
+open(p, "w", encoding="utf-8").write(text)
+EOF
+            systemctl daemon-reload
+            shown="$(systemctl show -P Options {shlex.quote(KARGS_TOP_UNIT)})"
+            [[ "$shown" == $'\\xc2\\xa0compress=zstd:1,subvolid=5,noatime,degraded,ssd,flushoncommit' ]] \\
+                || {{ echo "systemd's Options: $(printf '%q' "$shown")" >&2; exit 1; }}
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMPRESS_PROC="{w}/proc"
+            status_out="$(/opt/cst-rw/cst btrfs compress-force status 2>&1)" || true
+            grep -qF "drift across layers" <<<"$status_out" || {{ echo "status: $status_out" >&2; exit 1; }}
+            grep -qF "top-mount=none" <<<"$status_out" || {{ echo "status: $status_out" >&2; exit 1; }}
+            echo E2E-TOP-UNIT-BLANKS-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-TOP-UNIT-BLANKS-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_255_btrfs_cache_reads_crypttab_as_systemd_cryptsetup_generator_does(self) -> None:
+        """The /etc/crypttab reader of cst doctor's cache drive check (btrfs/cache/domain/health.py) against the real
+        systemd-cryptsetup-generator, run with SYSTEMD_CRYPTTAB on a crypttab whose lines hold a no-break space in a
+        name, fields split by vertical tabs, two lines ended by a carriage return, a leading form feed and a U+2028
+        in an option: the names of the cryptsetup units the generator writes are the names CST warns about (each
+        line a cache-* mapping without nofail). Before the fix CST split the name at the no-break space and the
+        vertical tabs ended its lines."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-crypttab-generator"
+        self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            c,
+            f"""set -euo pipefail
+            gen=/usr/lib/systemd/system-generators/systemd-cryptsetup-generator
+            [[ -x $gen ]] || {{ echo "the test cannot bite: no $gen" >&2; exit 1; }}
+            rm -rf {w}
+            mkdir -p {w}/out
+            python3 -I - {w}/crypttab <<'EOF'
+import sys
+nbsp, vt, cr, ff, ls = chr(0xA0), chr(0x0B), chr(0x0D), chr(0x0C), chr(0x2028)
+lines = [
+    "cache-a UUID=1111 none luks",
+    f"cache-b{{nbsp}}x UUID=2222 none luks",
+    vt.join(["cache-c", "UUID=3333", "none", "luks"]),
+    f"cache-d UUID=4444 none luks{{cr}}cache-e UUID=5555 none luks",
+    f"{{ff}}cache-f UUID=6666 none luks",
+    f"cache-g UUID=7777 none lu{{ls}}ks",
+]
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    f.write(chr(10).join(lines) + chr(10))
+EOF
+            SYSTEMD_CRYPTTAB={w}/crypttab SYSTEMD_LOG_LEVEL=warning "$gen" {w}/out {w}/out {w}/out
+            : >{w}/gen
+            for f in {w}/out/systemd-cryptsetup@*.service; do
+                inst="${{f##*/systemd-cryptsetup@}}"
+                systemd-escape -u -- "${{inst%.service}}" >>{w}/gen
+            done
+            python3 -I -B - {w}/crypttab {w}/gen <<'EOF'
+import sys
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.cache.domain.health import parse_crypttab_cache_issues
+with open(sys.argv[1], encoding="utf-8") as f:
+    issues = parse_crypttab_cache_issues(f.read(), [])
+with open(sys.argv[2], encoding="utf-8") as f:
+    made = sorted(repr(n) for n in f.read().split(chr(10)) if n)
+warned = sorted(i.split(" is missing ")[0].removeprefix("/etc/crypttab entry ") for i in issues)
+if len(made) != 7 or made != warned:
+    sys.exit(f"the generator made units for {{made}}; CST warns about {{warned}}")
+print("E2E-CRYPTTAB-GENERATOR-OK")
+EOF
+            """,
+        ).stdout
+        self.assertIn("E2E-CRYPTTAB-GENERATOR-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_256_btrfs_compress_and_commit_catch_up_reload_waits_at_most_a_minute(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` with every layer at its target, and a
+        systemctl stand-in whose `show` of the mount units gives no answer and whose daemon-reload never ends (a
+        PID 1 that does not answer): each run reloads, gives up after the catch-up reload's minute and ends
+        with exit 0 and the warning line that names the timed-out reload, /etc/fstab unchanged. Before the fix
+        the reload had no limit and the run waited for it (here the test's own 300 s stops it)."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-catch-up-timeout"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress-force=zstd:1,commit=60")}
+            systemctl daemon-reload
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMPRESS_PROC="{w}/proc" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            for tool in "compress-force" "commit-interval"; do
+                /opt/cst-rw/cst btrfs "$tool" apply --yes | grep -qF "nothing to do" \
+                    || {{ echo "the test cannot bite: $tool is not at its target" >&2; exit 1; }}
+            done
+
+            # systemctl: the show of the mount units fails (no answer); a daemon-reload never ends.
+            cat >{w}/bin/systemctl <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" *.mount "* ]]; then echo "Failed to connect to bus: Connection timed out" >&2; exit 1; fi
+if [[ " $* " == *" daemon-reload "* ]]; then touch {w}/reload-started; exec sleep 600; fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/bin/systemctl
+            for tool in "compress-force" "commit-interval"; do
+                rm -f {w}/reload-started
+                cp /etc/fstab {w}/fstab.before
+                start=$SECONDS
+                run_out="$(timeout 300 /opt/cst-rw/cst btrfs "$tool" apply --yes 2>&1)" \
+                    || {{ echo "$tool apply failed: $run_out" >&2; exit 1; }}
+                took=$(( SECONDS - start ))
+                [[ -e {w}/reload-started ]] || {{ echo "the test cannot bite: $tool ran no daemon-reload" >&2; exit 1; }}
+                (( took >= 55 && took < 150 )) || {{ echo "$tool took $took s: $run_out" >&2; exit 1; }}
+                grep -qF "warning: systemctl daemon-reload failed: timed out after 60s; systemctl could not say whether systemd had loaded /etc/fstab as it is on disk either" <<<"$run_out" \
+                    || {{ echo "$tool: $run_out" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+            done
+            echo E2E-CATCH-UP-TIMEOUT-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CATCH-UP-TIMEOUT-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_257_btrfs_compress_and_commit_plan_and_status_say_a_run_reloads_when_systemctl_gives_no_answer(
+        self,
+    ) -> None:
+        """`cst btrfs compress-force` and `commit-interval` with every layer at its target, and a systemctl stand-in
+        whose `show` of the mount units gives no answer (its daemon-reload the real one, counted): status and plan
+        say "daemon-reload: systemctl cannot say whether systemd has loaded /etc/fstab as it is on disk", plan
+        says no "nothing to do", and neither reloads or changes /etc/fstab; apply then reloads once and says
+        "reloaded: systemctl could not say ...". Before the fix plan said "nothing to do" and status named no
+        reload, while apply reloaded."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-catch-up-no-answer"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress-force=zstd:1,commit=60")}
+            systemctl daemon-reload
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMPRESS_PROC="{w}/proc" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            for tool in "compress-force" "commit-interval"; do
+                /opt/cst-rw/cst btrfs "$tool" apply --yes | grep -qF "nothing to do" \
+                    || {{ echo "the test cannot bite: $tool is not at its target" >&2; exit 1; }}
+            done
+
+            # systemctl: the show of the mount units fails (no answer); every daemon-reload is counted in
+            # {w}/reloads; every other call goes on to the real one.
+            cat >{w}/bin/systemctl <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" *.mount "* ]]; then echo "Failed to connect to bus: Connection timed out" >&2; exit 1; fi
+if [[ " $* " == *" daemon-reload "* ]]; then echo $(( $(cat {w}/reloads 2>/dev/null || echo 0) + 1 )) >{w}/reloads; fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/bin/systemctl
+            said="daemon-reload: systemctl cannot say whether systemd has loaded /etc/fstab as it is on disk"
+            for tool in "compress-force" "commit-interval"; do
+                rm -f {w}/reloads
+                cp /etc/fstab {w}/fstab.before
+                status_out="$(/opt/cst-rw/cst btrfs "$tool" status 2>&1)" || {{ echo "$tool status: $status_out" >&2; exit 1; }}
+                grep -qxF "  $said" <<<"$status_out" || {{ echo "$tool status: $status_out" >&2; exit 1; }}
+                plan_out="$(/opt/cst-rw/cst btrfs "$tool" plan 2>&1)" || {{ echo "$tool plan: $plan_out" >&2; exit 1; }}
+                grep -qxF "$said" <<<"$plan_out" || {{ echo "$tool plan: $plan_out" >&2; exit 1; }}
+                if grep -qF "nothing to do" <<<"$plan_out"; then echo "$tool plan: $plan_out" >&2; exit 1; fi
+                [[ ! -e {w}/reloads ]] || {{ echo "$tool status or plan reloaded" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+                apply_out="$(/opt/cst-rw/cst btrfs "$tool" apply --yes 2>&1)" || {{ echo "$tool apply: $apply_out" >&2; exit 1; }}
+                grep -qF "reloaded: systemctl could not say whether systemd had loaded /etc/fstab as it is on disk" <<<"$apply_out" \
+                    || {{ echo "$tool apply: $apply_out" >&2; exit 1; }}
+                [[ "$(cat {w}/reloads)" == 1 ]] || {{ echo "$tool: reloads $(cat {w}/reloads)" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+            done
+            echo E2E-CATCH-UP-NO-ANSWER-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CATCH-UP-NO-ANSWER-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_244_btrfs_compress_and_commit_undo_keeps_the_old_fstab_when_its_reload_fails(self) -> None:
         """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change fails with
         no effect (later calls are honest) and a systemctl whose second daemon-reload of the run fails (the undo's):
@@ -12411,7 +12718,8 @@ EOF
             set -E
             trap 'echo "test_218 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w}
-            rm -rf "$w" && mkdir -p "$w"
+            rm -rf "$w"
+            mkdir -p "$w"
             # The bytes: \302\240 a no-break space, \343\200\200 U+3000, \014 a form feed, \013 a vertical tab.
             printf '/dev/a\302\240b /mnt/x\014y btrfs compress=zstd:1\343\200\200,noatime 0 0\n' >"$w/fstab"
             printf '\t/dev/b \t  /mnt/t\tbtrfs   rw,compress=zstd:3\013\t0\t0\r\n' >>"$w/fstab"
@@ -12476,7 +12784,8 @@ PY
             set -E
             trap 'echo "test_226 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             w={w}
-            rm -rf "$w" && mkdir -p "$w"
+            rm -rf "$w"
+            mkdir -p "$w"
             # The bytes: \013 a vertical tab, \014 a form feed.
             printf 'UUID=u1 / btrfs noatime\013x,subvol=root 0 0\n' >"$w/fstab"
             printf 'UUID=u1 /var btrfs subvol=v,commit=30\013,noatime 0 0\n' >>"$w/fstab"

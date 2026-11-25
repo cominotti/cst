@@ -148,6 +148,12 @@ def strip_ascii_blanks(text: str) -> str:
     return text.strip(ASCII_BLANKS)
 
 
+def split_ascii_blanks(text: str, blanks: str = ASCII_BLANKS) -> list[str]:
+    """TEXT's words between runs of BLANKS (by default the ASCII blanks), as str.split() gives them for
+    ASCII text: no empty word at either end; a no-break space or another Unicode blank stays in a word."""
+    return [w for w in re.split(f"[{re.escape(blanks)}]+", text) if w]
+
+
 def _blank_name(ch: str) -> str:
     """How a reason names a blank character: its Unicode name in lower case with its code point
     ("a no-break space (U+00A0)"), or "a control character (U+000B)" for one with no name."""

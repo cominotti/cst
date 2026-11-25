@@ -18,10 +18,15 @@ Where the hexagonal conversion left them (main before it, same method):
   nothing: no such body was in a duplicated window);
 - shell, W=5: 0.47 % (main: 1.28 %);
 - same-name definitions: only the names in ALLOWED_SAME_NAMES, each with its
-  reason (main: 43 names, none allowed).
+  reason (main: 43 names, none allowed). A name is a module's top-level
+  function or class, type alias (`type X = ...`) or assignment to a plain
+  name (`X = ...`, `X: T = ...`), a dunder (`__all__`) aside; aliases and
+  assignments counted since r34.6, when 37 more names were in two files.
 """
 
+import os
 import sys
+import tempfile
 from typing import Final
 import unittest
 
@@ -88,6 +93,47 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "cst_core's reads with open()",
     "read_text": "doctor reads through its host port (stripped, limited); the daemon over its read_bytes",
     "read_int": "doctor reads through its host port; the daemon returns 0 for a missing file",
+    # Type aliases and module-level names, there when the gate began to count them (r34.6). The ones marked
+    # "a copy" repeat one value and should import it from one place (a later change; the program's own word
+    # otherwise).
+    "_cst_root": "the BOOTSTRAP stanza of every entry point, verbatim by rule (tests/test_entrypoints.py)",
+    "BTRFS_MAGIC": "a copy: btrfs's statfs magic number in bulk and vm; to share in cst_core",
+    "CACHE_TAG": "a copy: the CACHEDIR.TAG file name in snapshot and toolchains; to share in cst_core",
+    "CHECKS": "each doctor area's list of checks, and the registry's list of them all",
+    "CMD_TIMEOUT": "snapshot's 600 s and toolchains' one minute: each program's own command timeout",
+    "COMMANDS": "btrfs-snapshot-runtime's command table vs cst-vm's subcommand words",
+    "EXIT_USAGE": "cache's and btrfs-snapshot-runtime's usage exit 2; to name once in cst_core.domain.errors",
+    "GAME_DROPIN": "a copy: doctor repeats cpu.game's drop-in name; to import from cpu.game.domain",
+    "GAME_STATE": "cpu's path and doctor's HostPath of the same state_format(GAME_STATE) entry",
+    "IocostCliDeps": "iocost's wiring alias and its re-export in iocost's cli",
+    "KEEP_DAYS": "cst-pending-alerts keeps 7 days of alerts, the stall monitor 8 of logs: different retentions",
+    "KNOBS": "health_check's reclaim knobs vs vm's settings knobs",
+    "MARGIN": "bulk's and docker-volumes-nocow's free-space margin, each its own rule",
+    "MARKER": "bluetooth's and toolchains' managed-by line: each setup's own words",
+    "MARKS": "chrome-cache's fstab marks vs cst-pending-alerts' marks of how an alert was seen",
+    "NAME": "each program's own name (cst installer, cst-doctor, cst-toolchains, cst-vm) and the alert file pattern",
+    "PAGE": "a copy: the 4096-byte page in stall_report and swap",
+    "PROC": "the /proc folder in bulk, cpu and toolchains' adapters: each adapter's own test seam",
+    "RECLAIM_CONF": "a copy: doctor writes out the reclaim tmpfiles path health_check reads from the manifest; to read "
+    "from the manifest too",
+    "RUNNER": "each program's own SubprocessCommandRunner instance",
+    "RunCommand": "swap's run subcommands (a Literal) vs vm's restic runner callable",
+    "SEAM_PROC": "compress's and swap's own /proc test seam variable",
+    "SERVICE": "toolchains' and vm's own unit names",
+    "Scan": "snapshot's scan record vs toolchains' scan result tuple",
+    "ScrubCliDeps": "scrub_limit's wiring alias and its re-export in scrub_limit's cli",
+    "TAG": "each program's own journal tag",
+    "TIMER": "toolchains' and vm's own timer names",
+    "URI": "a copy: libvirt's qemu:///system in cpu and vm (counted in LITERAL_BUDGETS); to share in cst_core",
+    "USAGE": "each program's own usage line",
+    "USER_SLICE": "a copy: user.slice in cpu.game and swap; to share in cst_core.domain.units",
+    "WholeFileState": "cst_core's Literal of OwnedState members vs bluetooth's own subset",
+    "_BLANKS": "health_check's regex of blanks vs cst_core.domain.text's mount blanks: private, different sets",
+    "_HELP_TEXT": "compress's and swap's own help text",
+    "_MANIFEST": "two swap modules' private manifest_by_src() lookups",
+    "_OWNERS": "a copy: install's and record's private Owner lookup in cst_core; to share in cst_core.domain.install",
+    "_SETTING_KEYS": "cpu.game's and swap's own settings keys",
+    "_SPOOL": "cst-pending-alerts' and the Notifier's private handle on the ALERT_SPOOL state format",
 }
 
 
@@ -106,6 +152,11 @@ ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
     "uninstall": "each setup script's own uninstall subcommand",
     "usage": "each script's help, printed from its own header",
 }
+
+
+def _twice(src: str) -> tuple[str, str]:
+    """The same source for both planted files."""
+    return src, src
 
 
 def _shell_files() -> list[str]:
@@ -326,6 +377,27 @@ class DuplicationRatchetTest(unittest.TestCase):
     def test_shell_function_names(self) -> None:
         src = "f() {\n  :\n}\nfunction g {\n:\n}\n  h_2 ()\n{ :; }\nfunction k() { :; }\necho x() # not one\n"
         self.assertEqual(shell_function_names(src), {"f", "g", "h_2", "k"})
+
+    def test_type_aliases_and_module_level_names_count(self) -> None:
+        # (the sources of a.py and b.py, the names both define)
+        cases: tuple[tuple[tuple[str, str], list[str]], ...] = (
+            (_twice("type Outcome = tuple[int, list[str]]\n"), ["Outcome"]),
+            (_twice("from typing import Final\n\nTAG: Final = 'x'\n"), ["TAG"]),
+            (_twice("X = 1\n"), ["X"]),
+            (("X = Y = 1\n", "Y: int = 2\n"), ["Y"]),
+            (("X = 1\n", "Z = 1\n"), []),
+            (("def f() -> None:\n    X = 1\n", "def g() -> None:\n    X = 1\n"), []),
+            (_twice("__all__ = ['a']\n"), []),
+            (_twice("X, Y = 1, 2\n"), []),
+        )
+        for (a, b), names in cases:
+            with self.subTest(a=a, b=b), tempfile.TemporaryDirectory() as root:
+                for rel, src in (("a.py", a), ("b.py", b)):
+                    with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
+                        fh.write(src)
+                self.assertEqual(
+                    same_name_definitions(root, ["a.py", "b.py"], []), {n: ["a.py", "b.py"] for n in names}
+                )
 
     def test_same_name_definitions_skip_allowed_names(self) -> None:
         names = same_name_definitions(REPO, production_python(), ALLOWED_SAME_NAMES)

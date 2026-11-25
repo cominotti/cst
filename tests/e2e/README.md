@@ -144,6 +144,11 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_215`: `docker-volumes-nocow` (the checkout's program, as root) and `cst doctor` (as `tester`) on the record of postponed boots, `/var/lib/docker-volumes-nocow/postponed`: `migrate` with an `/etc/docker/daemon.json` that is not JSON, `status` with the file naming a data root of the test's own on a tmpfs. `migrate` writes format 1 (`"v": 1`, mode 0644); a record of format 99 (a newer CST) is left byte for byte, and `migrate`'s line, `status` and doctor name it; a format-1 record whose time no clock can show reads `?` in `status` and `at an unknown time` in doctor (before, `status` stopped with a traceback and doctor's check failed); a file in place of the state folder is no record for doctor (before, `cannot read` at every run); a record of format 0, as the previous version wrote it, is counted on and rewritten as format 1.
 - `test_201`: `cst btrfs cache` for u1 under a test root (test_160's stand-ins for findmnt, mount and umount, the scaffold test_202 shares) with the real systemd, where every unit of `/etc/fstab` is loaded and inactive: the tmpfs base lines are loaded and not started, and the binds' units are not mounted (the stand-ins' mounts are not real). `/etc/fstab` rewritten with no `daemon-reload` flags them all (`NeedDaemonReload=yes`), and `systemctl show '*.mount'` without `--state=loaded` lists none of them (the test fails as "cannot bite" otherwise). `status` and `cst doctor` say systemd has not loaded `/etc/fstab`; an `attach` with nothing to mount reloads once (`reloaded:`), and then neither says it. A `detach` killed at its `daemon-reload` after it took u1's lines out, the binds unmounted since: the old lines' units stay loaded, inactive and flagged; the next `detach` reloads once and leaves no mount unit of `~/.cache`; a third has nothing to do. Before, `status` and `cst doctor` said nothing, and `attach` and `detach` said "nothing to do" without a reload: a glob alone hides inactive units.
 - `test_202`: the same scaffold with both tmpfs bases started: after an `attach`, u1's binds unmounted (from the stand-ins' table). systemd has read their lines: their units are loaded from `/etc/fstab`, inactive, `NeedDaemonReload=no`, and `systemctl show '*.mount'` without `--state=loaded` lists neither (the test fails as "cannot bite" otherwise). `plan` shows the mounts and no `daemon-reload`, `attach` mounts them and runs no reload, and `status` says nothing of systemd. Before, `plan` said `attach runs systemctl daemon-reload after the mounts` and `attach` reloaded: the unmounted binds' units were not asked.
+- `test_253`: `cst btrfs compress-force` and `commit-interval` killed by SIGKILL at their first `daemon-reload` after writing `/etc/fstab` (a nofail line's unit says `NeedDaemonReload=yes`): `plan` names the reload and changes nothing; the next `apply --yes` says `reloaded:` and brings `NeedDaemonReload` to `no`; a third `apply` says `nothing to do` and runs no reload. Before, the second `apply` ran no reload.
+- `test_254`: `cst btrfs compress-force status` with a top-mount unit whose `Options=` starts with a no-break space before `compress=zstd:1`: systemd keeps the no-break space in the option, and `status` reports `drift across layers` with `top-mount=none` instead of `coherent`.
+- `test_255`: `btrfs/cache/domain/health.py` (`parse_crypttab_cache_issues`) against the real `systemd-cryptsetup-generator` on a `crypttab` with a no-break space in a name, vertical-tab fields, `\r` line ends, a leading `\f`, and U+2028 in an option: the generator's `systemd-cryptsetup@*.service` names equal the names CST warns about.
+- `test_256`: `cst btrfs compress-force apply` and `commit-interval apply` at their target when `systemctl show` of the mount units gives no answer and `daemon-reload` hangs: each run gives up after the catch-up reload's minute, exits 0 with the timed-out warning line, and keeps `/etc/fstab` unchanged.
+- `test_257`: the same scenario with a working `daemon-reload`: `status` and `plan` both print `daemon-reload: systemctl cannot say whether systemd has loaded /etc/fstab as it is on disk`, `plan` prints no `nothing to do` and neither runs a reload, and `apply --yes` reloads once.
 
 Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
@@ -273,9 +278,13 @@ checks its status), or a line ending in `|| { ...; exit 1; }`.
 `tests/e2e/test_suite_scripts.py`, run with the unit tests, reads both suite
 files and names, file:line, each line that starts with `!` and each check
 (`[[`, `[`, `test`, `grep`, `cmp`, `!`) followed by `&&` and a second check,
-unless the line has an `||` list operator (one in quotes, in `[[ ... ]]` or in
-parentheses handles nothing) or is a one-line function. It does not see a check
-chained to a function (`[[ ... ]] && unchanged`): write those on two lines too.
+and each line that holds `rm -rf X && mkdir ...` anywhere (a script line, or a
+Python string an `exec_bash` or `docker_exec` call runs: set -e does not stop
+on the rm, and the script goes on over the old folder; write `rm -rf X` and
+`mkdir -p X` on two lines, see below), unless the line has an `||` list
+operator (one in quotes, in `[[ ... ]]` or in parentheses handles nothing) or
+is a one-line function. It does not see a check chained to a function
+(`[[ ... ]] && unchanged`): write those on two lines too.
 
 ### Cleanups of the container's files
 

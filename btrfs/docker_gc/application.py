@@ -45,7 +45,7 @@ from btrfs.docker_gc.domain import (
 )
 from btrfs.docker_gc.ports import ConsolePort, DockerPort, GcHostPort, GcSettingsPort, GcStatePort
 from cst_core.domain.values import MINUTE
-from cst_core.ports import ClockPort
+from cst_core.ports import ClockPort, ReplacedNotSynced
 
 RESOLVE_TIMEOUT: Final = 30  # seconds for the image inspect behind one event
 RESOLVED_FOR: Final = MINUTE  # seconds a reference -> ID answer is reused
@@ -393,6 +393,9 @@ class DockerGc:
             return 10
         try:
             self.config.write_settings(render_settings_file(p.to_write))
+        except ReplacedNotSynced as e:  # the new file is in place, its folder not synced
+            self.console.error(f"written: {path} ({value}), but its folder could not be synced: {e.strerror}")
+            return 1
         except OSError as e:
             self.console.error(f"cannot write {path}: {e.strerror}")
             return 1

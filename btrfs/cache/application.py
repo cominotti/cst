@@ -47,7 +47,7 @@ from btrfs.cache.domain import (
     unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
-from btrfs.cache.domain.systemd_view import fstab_lines_unread, systemd_behind_fstab
+from btrfs.cache.domain.systemd_view import catch_up_words, fstab_lines_unread, systemd_behind_fstab
 from btrfs.cache.ports import (
     CacheAccountsPort,
     CacheFoldersPort,
@@ -57,10 +57,10 @@ from btrfs.cache.ports import (
     MountTablePort,
 )
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
+from cst_core.domain.values import ExitAndLines
+from cst_core.ports import ReplacedNotSynced
 
 _NOT_MOUNTED: Final = LiveMount(source="", target="", fstype="", options="", uuid="", fsroot="")
-
-type Outcome = tuple[int, list[str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +79,7 @@ class CacheMounts:
         """What the machine shows of the selected binds (read only)."""
         return _probe_snapshot(parsed, self)
 
-    def run(self, parsed: CacheMountParsedArgs, prog: str) -> Outcome:
+    def run(self, parsed: CacheMountParsedArgs, prog: str) -> ExitAndLines:
         """The requested subcommand: (exit status, its lines); prog: the command's name in plan's lines."""
         snap = self.snapshot(parsed)
         match parsed.action:
@@ -94,14 +94,14 @@ class CacheMounts:
             case _:
                 return 0, format_cache_mount_status(snap, seam_root=self.seam_root)
 
-    def status(self, snap: CacheMountSnapshot) -> Outcome:
+    def status(self, snap: CacheMountSnapshot) -> ExitAndLines:
         """The status lines; systemd is asked about /etc/fstab only where the cache is set up."""
         if snap.mounts_error is None and snap.fstab_error is None and _cache_set_up(snap):
             targets = {e.target for e in snap.all_managed}
             snap = replace(snap, fstab_behind=fstab_lines_unread(self.systemd.mount_units(), targets))
         return 0, format_cache_mount_status(snap, seam_root=self.seam_root)
 
-    def plan(self, snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, prog: str) -> Outcome:
+    def plan(self, snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, prog: str) -> ExitAndLines:
         """What attach would do, changing nothing."""
         if snap.user is not None:
             cur_fstab, new_fstab = _attach_fstab(snap)
@@ -225,16 +225,29 @@ class _FstabFailure:
 def _commit_fstab(previous: str | None, new_text: str, m: CacheMounts) -> _FstabFailure | None:
     """Write /etc/fstab and reload systemd; None, or why it failed, after /etc/fstab was put back as
     it was (the previous text, or no file when there was none) or, in undo_errors, why it could not be.
-    A failed first write leaves the file as it was (write_atomic)."""
+    A first write that failed before its rename leaves the file as it was (write_atomic); one whose
+    folder sync failed after it (ReplacedNotSynced) may have left the new text in place: it is read
+    back and put back when it is there. systemd is not reloaded then: it still has the old text loaded."""
     try:
         m.fstab.write(new_text)
+    except ReplacedNotSynced as exc:
+        return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}", _undo_replaced(previous, new_text, m))
     except OSError as exc:
         return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}")
     why = m.systemd.daemon_reload()
     if why is None:
         return None
-    put_back = _put_fstab_back(previous, m)
-    return _FstabFailure(why, () if put_back is None else (put_back,))
+    return _FstabFailure(why, _put_fstab_back(previous, m).errors)
+
+
+def _undo_replaced(previous: str | None, new_text: str, m: CacheMounts) -> tuple[str, ...]:
+    """After a write of new_text that raised once its rename was done: /etc/fstab read back, and put back
+    as it was when it holds new_text (nothing when it holds something else); what of it failed."""
+    try:
+        now = m.fstab.read()
+    except OSError as exc:
+        return (f"cannot read {FSTAB_PATH} back: {exc.strerror or exc}",)
+    return _put_fstab_back(previous, m).errors if now == new_text else ()
 
 
 def _fstab_behind(snap: CacheMountSnapshot, m: CacheMounts, mounting: Collection[str] = ()) -> bool | None:
@@ -256,31 +269,13 @@ def _catch_up_reload(
 ) -> tuple[str | None, list[str]]:
     """For a run that writes no /etc/fstab: daemon-reload when systemd has not loaded /etc/fstab as it is
     on disk (an earlier run stopped between its write and its reload), or when systemctl cannot say:
-    (why the reload failed, or None; the lines to add). A run with nothing pending reloads nothing. When
-    systemctl cannot say and the reload fails too, no systemd answers (a rescue shell, a PID 1 that does
-    not answer on D-Bus): nothing points to it being behind, so a warning line, and the run goes on (a
-    detach still unmounts)."""
+    (why the reload failed, or None; the lines to add), worded by catch_up_words. A run with nothing
+    pending reloads nothing; a failed reload when systemctl cannot say is a warning, and the run goes on
+    (a detach still unmounts)."""
     behind = _fstab_behind(snap, m, mounting)
     if behind is False:
         return None, []
-    why = m.systemd.daemon_reload()
-    if why is not None and behind is None:
-        warning = (
-            f"warning: {why}; systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk "
-            "either (run systemctl daemon-reload once it works)"
-        )
-        return None, [warning]
-    if why is not None:
-        return (
-            f"{why}; {FSTAB_PATH} is as asked, systemd has not loaded it (run systemctl daemon-reload once it works)",
-            [],
-        )
-    said = (
-        f"systemd had not loaded {FSTAB_PATH} as it is on disk (an earlier run stopped)"
-        if behind
-        else f"systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk"
-    )
-    return None, [f"reloaded: {said}"]
+    return catch_up_words(behind=behind, reload_error=m.systemd.daemon_reload())
 
 
 def _attach_fstab(snap: CacheMountSnapshot) -> tuple[str, str]:
@@ -289,22 +284,40 @@ def _attach_fstab(snap: CacheMountSnapshot) -> tuple[str, str]:
     return cur, plan_attach_fstab(cur, [p.binding for p in snap.bindings])
 
 
-def _put_fstab_back(previous: str | None, m: CacheMounts) -> str | None:
-    """/etc/fstab as it was (the previous text, or no file when there was none); None, or why not."""
+@dataclass(frozen=True, slots=True)
+class _PutBack:
+    """What putting /etc/fstab back did: whether the old text (or no file) is in place, and what failed."""
+
+    in_place: bool
+    error: str | None = None
+
+    @property
+    def errors(self) -> tuple[str, ...]:
+        """The error, if any, as the undo errors it adds."""
+        return () if self.error is None else (self.error,)
+
+
+def _put_fstab_back(previous: str | None, m: CacheMounts) -> _PutBack:
+    """/etc/fstab as it was (the previous text, or no file when there was none). A write whose folder sync
+    failed after its rename (ReplacedNotSynced) put the old text in place, not synced: an error that says
+    so."""
     try:
         if previous is None:
             m.fstab.remove()  # already gone: as it was
         else:
             m.fstab.write(previous)
+    except ReplacedNotSynced as exc:
+        return _PutBack(in_place=True, error=f"{FSTAB_PATH} put back, its folder not synced: {exc.strerror or exc}")
     except OSError as exc:
-        return f"cannot put {FSTAB_PATH} back: {exc.strerror or exc}"
-    return None
+        return _PutBack(in_place=False, error=f"cannot put {FSTAB_PATH} back: {exc.strerror or exc}")
+    return _PutBack(in_place=True)
 
 
 def _restore_fstab(previous: str | None, m: CacheMounts) -> list[str]:
-    """Put /etc/fstab back as it was and reload systemd; what of it failed."""
-    failed = _put_fstab_back(previous, m) or m.systemd.daemon_reload()
-    return [] if failed is None else [failed]
+    """Put /etc/fstab back as it was and reload systemd when the old text is in place; what of it failed."""
+    put_back = _put_fstab_back(previous, m)
+    why = m.systemd.daemon_reload() if put_back.in_place else None
+    return [*put_back.errors] if why is None else [*put_back.errors, why]
 
 
 def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
@@ -389,7 +402,7 @@ def _commit_fstab_or_undo(
     return _error_after_undo(failed.cause, undo_errors)
 
 
-def _apply_attach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> Outcome:
+def _apply_attach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> ExitAndLines:
     """Folders, then mount --bind, then /etc/fstab and daemon-reload: a failure takes back the
     binds this run mounted (and /etc/fstab), so no line is left that would mount at the next boot."""
     blockers = validate_attach_snapshot(snap, allow_nonempty=parsed.allow_nonempty)
@@ -428,7 +441,7 @@ def _apply_attach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: Cac
     return 0, lines
 
 
-def _apply_detach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> Outcome:
+def _apply_detach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> ExitAndLines:
     """Drop the user's managed lines from /etc/fstab and reload systemd first, then unmount only the
     binds CST made (the mirror of attach), so no line is left for a bind that is not mounted, even
     when the run dies halfway. A failed write or reload puts /etc/fstab back; a failed umount mounts

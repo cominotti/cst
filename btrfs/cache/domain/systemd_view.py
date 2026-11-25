@@ -77,3 +77,27 @@ def systemd_behind_fstab(
         return source != FSTAB_PATH if source is not None else target in mounting
 
     return any(unread(p) for p in bindings)
+
+
+def catch_up_words(*, behind: bool | None, reload_error: str | None) -> tuple[str | None, list[str]]:
+    """The words of a catch-up daemon-reload, the one a run that writes no /etc/fstab runs when systemd has
+    not loaded /etc/fstab as it is on disk (behind True: an earlier run stopped between its write and its
+    reload) or when systemctl cannot say (behind None): (why the run fails, or None; the lines to add).
+    reload_error: why the reload failed, or None. When systemctl cannot say and the reload fails too, no
+    systemd answers (a rescue shell, a PID 1 that does not answer on D-Bus): nothing points to it being
+    behind, so a warning line, and the run goes on."""
+    if reload_error is not None and behind is None:
+        warning = (
+            f"warning: {reload_error}; systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is "
+            "on disk either (run systemctl daemon-reload once it works)"
+        )
+        return None, [warning]
+    if reload_error is not None:
+        failed = f"{reload_error}; {FSTAB_PATH} is as asked, systemd has not loaded it (run systemctl daemon-reload once it works)"
+        return failed, []
+    said = (
+        f"systemd had not loaded {FSTAB_PATH} as it is on disk (an earlier run stopped)"
+        if behind is True
+        else f"systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk"
+    )
+    return None, [f"reloaded: {said}"]

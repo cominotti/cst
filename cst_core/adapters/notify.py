@@ -34,7 +34,7 @@ from cst_core.domain.contracts import (
     Urgency,
     state_format,
 )
-from cst_core.ports import CommandFault, CommandRunnerPort
+from cst_core.ports import CommandFault, CommandRunnerPort, ReplacedNotSynced
 
 _SPOOL = state_format(StateFormatKey.ALERT_SPOOL)
 PENDING_ALERTS = _SPOOL.folder
@@ -151,6 +151,9 @@ class Notifier:
         say = self.log or (lambda prio, msg: journal_log(prio, msg, tag=app))
         try:
             path = _keep_alert(self.pending, urgency, app, title, body)
+        except ReplacedNotSynced as e:  # the alert's file is in place, its folder not synced
+            say(3, f"alert not delivered ({why}): {title}; kept in {e.dest}, its folder not synced: {e.strerror}")
+            return NotifyOutcome.KEPT
         except (OSError, ValueError) as e:  # ValueError: a folder that is no plain path, a title no file holds
             say(3, f"alert not delivered ({why}) and not kept ({e}): {title}; it is only in this journal")
             return NotifyOutcome.LOST

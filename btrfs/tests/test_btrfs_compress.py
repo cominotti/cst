@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
-from btrfs.compress.application import CompressService
+from btrfs.compress.application import FSTAB_RELOAD_PENDING, FSTAB_RELOAD_UNKNOWN, CompressService
 from btrfs.compress.cli import CompressCliStreams, compress_cli
 from btrfs.compress.domain import (
     CompressMode,
@@ -265,6 +265,33 @@ class DomainTests(unittest.TestCase):
             parse_compress_spec("compress-force=zstd:1"),
         )
 
+    def test_a_level_is_read_as_the_kernel_reads_it(self) -> None:
+        # The kernel reads the level with kstrtoint: one optional sign, then ASCII decimal digits. int() also
+        # took a no-break space around it, a digit of another script and "_" between digits.
+        cases = (
+            ("zstd:3", 3),
+            ("zstd:+3", 3),
+            ("zstd:-3", -3),
+            ("zstd:+-3", None),
+            ("zstd:++3", None),
+            ("zstd:1\N{NO-BREAK SPACE}", None),
+            ("zstd:\N{NO-BREAK SPACE}1", None),
+            ("zstd:\N{ARABIC-INDIC DIGIT ONE}", None),
+            ("zstd:1_0", None),
+            ("zstd:", None),
+            # kstrtoint refuses a number its int cannot hold (-ERANGE).
+            ("zstd:2147483647", 2**31 - 1),
+            ("zstd:-2147483648", -(2**31)),
+            ("zstd:2147483648", None),
+            ("zstd:-2147483649", None),
+            ("zstd:+99999999999", None),
+        )
+        for value, level in cases:
+            with self.subTest(value=value):
+                spec = parse_compress_spec(f"compress-force={value}")
+                self.assertEqual(spec.level if spec is not None else "no spec", level)
+                self.assertEqual(spec.algo if spec is not None else None, "zstd")
+
     def test_rewrite_fstab_preserves_formatting_and_unrelated_entries(self) -> None:
         out = rewrite_fstab(SAMPLE_FSTAB, "compress-force=zstd:1", SAMPLE_UUID)
         lines = out.splitlines()
@@ -345,6 +372,27 @@ class DomainTests(unittest.TestCase):
             top_mount_options_from_var("rw,seclabel,subvolid=257,subvol=/var,compress-force=zstd:1,noatime"),
             "subvolid=5,compress-force=zstd:1,noatime",
         )
+
+    def test_the_top_mount_unit_is_read_as_systemd_reads_it(self) -> None:
+        # systemd strips a unit file's lines, keys and values of " \t\n\r" only and ends a line at "\n", "\r"
+        # or NUL: str.strip() and str.splitlines() also took a no-break space, a form feed and a vertical tab.
+        nbsp = "\N{NO-BREAK SPACE}"
+        head = f"[Mount]\nWhat=/dev/disk/by-uuid/{SAMPLE_UUID}\n"
+        cases = (
+            (f"Options={nbsp}compress=zstd:1\n", f"{nbsp}compress=zstd:1"),
+            ("Options= \tcompress=zstd:1 \t\n", "compress=zstd:1"),
+            ("\x0cOptions=compress=zstd:1\n", ""),
+            ("Options=compress=zstd:1\rWhere=/x\n", "compress=zstd:1"),
+            ("Options=a\vb\n", "a\vb"),
+            ("Options=a\x0cb\n", "a\x0cb"),
+            ("  ;Options=compress=zstd:1\n", ""),
+            (" \t#Options=compress=zstd:1\n", ""),
+            ("Options=x\0Options=compress=zstd:3\n", "compress=zstd:3"),
+        )
+        for body, options in cases:
+            with self.subTest(body=body):
+                top = parse_top_mount_unit(head + body)
+                self.assertEqual((top.uuid, top.options), (SAMPLE_UUID, options))
 
     def test_coherence_and_plan(self) -> None:
         top = parse_top_mount_unit(SAMPLE_TOP_MOUNT)
@@ -1149,3 +1197,87 @@ class AnacondaScriptTest(unittest.TestCase):
             upgraded = fh.read()
         self.assertIn("compress-force=%s", upgraded)
         self.assertNotIn('"compress=%s"', upgraded)
+
+
+class _SystemctlRunner:
+    """Answers `systemctl show` with one mount unit and `systemctl daemon-reload` (reload_error: its stderr
+    when it fails, "" when it works); calls holds each argv with the options the adapter passed."""
+
+    def __init__(self, *, reload_error: str = "") -> None:
+        self.reload_error = reload_error
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        cmd = list(argv)
+        self.calls.append((cmd, kw))
+        if cmd[1:2] == ["show"]:
+            return CommandResult(0, "Id=-.mount\nNeedDaemonReload=yes\n", "", tuple(cmd))
+        if cmd[1:2] == ["daemon-reload"] and self.reload_error:
+            return CommandResult(1, "", self.reload_error, tuple(cmd))
+        return CommandResult(0, "", "", tuple(cmd))
+
+
+class CompressSystemdAdapterTest(unittest.TestCase):
+    """LinuxCompressHostAdapter's mount_units and daemon_reload (the catch-up reload's two calls): the units
+    systemd loaded, asked of the host's systemd from a toolbox; none under a test root; why a reload failed."""
+
+    def _adapter(self, runner: _SystemctlRunner, *, container: bool, host_root: str = "") -> LinuxCompressHostAdapter:
+        cfg = CompressAdapterConfig(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
+            fallback_root=REPO,
+            proc_dir="/proc",
+            host_root=host_root,
+        )
+        return LinuxCompressHostAdapter(cfg, ctx=_FakeCtx(container=container), runner=runner)
+
+    def test_the_mount_units_are_asked_of_the_host_s_systemd_from_a_toolbox(self) -> None:
+        for container in (False, True):
+            with self.subTest(container=container):
+                runner = _SystemctlRunner()
+                units = self._adapter(runner, container=container).mount_units()
+                self.assertEqual(units, [{"Id": "-.mount", "NeedDaemonReload": "yes"}])
+                [(argv, kw)] = runner.calls
+                self.assertEqual(argv[:3], ["systemctl", "show", "--state=loaded"])
+                self.assertEqual(argv[-1], "*.mount")
+                self.assertEqual(kw.get("on_host"), container)
+
+    def test_no_mount_unit_and_no_call_under_a_test_root(self) -> None:
+        runner = _SystemctlRunner()
+        self.assertEqual(self._adapter(runner, container=True, host_root="/nonexistent-root").mount_units(), [])
+        self.assertEqual(runner.calls, [])
+
+    def test_a_reload_runs_here_and_says_why_it_failed(self) -> None:
+        for error, want in (("", None), ("Access denied", "systemctl daemon-reload failed: Access denied")):
+            with self.subTest(error=error):
+                runner = _SystemctlRunner(reload_error=error)
+                self.assertEqual(self._adapter(runner, container=True).daemon_reload(), want)
+                [(argv, kw)] = runner.calls
+                self.assertEqual(argv, ["systemctl", "daemon-reload"])
+                self.assertFalse(kw.get("on_host", False))
+
+    def test_the_catch_up_reload_waits_at_most_a_minute(self) -> None:
+        # A PID 1 that does not answer: the runner stops the reload after its timeout and says so.
+        runner = _SystemctlRunner(reload_error="timed out after 60s")
+        self.assertEqual(
+            self._adapter(runner, container=False).daemon_reload(),
+            "systemctl daemon-reload failed: timed out after 60s",
+        )
+        [(_, kw)] = runner.calls
+        self.assertEqual(kw.get("timeout"), 60)
+
+
+class CompressCatchUpStatusTest(unittest.TestCase):
+    """compress-force status names the catch-up reload the next run would do, just before its overall line."""
+
+    def test_status_names_a_pending_reload_before_the_overall_line(self) -> None:
+        # (systemd behind /etc/fstab, None: systemctl gives no answer; the line status says, "": none)
+        for behind, said in ((True, FSTAB_RELOAD_PENDING), (None, FSTAB_RELOAD_UNKNOWN), (False, "")):
+            with self.subTest(behind=behind):
+                out = io.StringIO()
+                svc = CompressService(_FakeHost(_FakeState(fstab_behind=behind)))
+                self.assertEqual(render_compress_status(svc.gather_status(), out), 0)
+                lines = out.getvalue().splitlines()
+                self.assertTrue(lines[-1].startswith("  overall "), lines)
+                if said:
+                    self.assertEqual(lines[-2], f"  {said}")
+                self.assertEqual(sum("daemon-reload" in line for line in lines), int(bool(said)), lines)

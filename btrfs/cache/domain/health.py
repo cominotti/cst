@@ -25,6 +25,8 @@ from btrfs.cache.domain import (
     source_fsroot,
 )
 from btrfs.compress.domain import MountEntry
+from cst_core.domain.text import split_ascii_blanks
+from cst_core.domain.units import SYSTEMD_WHITESPACE, systemd_lines
 
 
 _NOFAIL: Final = "nofail"
@@ -76,10 +78,13 @@ def mapper_names(sources: Collection[str], dm_names: Mapping[str, str]) -> froze
 
 def _crypttab_issue(raw: str, mappers: frozenset[str]) -> str | None:
     """The missing-`nofail` warning of one /etc/crypttab line of the cache drive, else None."""
-    stripped = raw.strip()
+    # As systemd-cryptsetup-generator (add_crypttab_devices): the line stripped of SYSTEMD_WHITESPACE
+    # (read_stripped_line), "" and "#" lines skipped, the fields split by sscanf's %s, at C isspace: the six
+    # ASCII blanks.
+    stripped = raw.strip(SYSTEMD_WHITESPACE)
     if not stripped or stripped.startswith("#"):
         return None
-    fields = stripped.split()
+    fields = split_ascii_blanks(stripped)
     if len(fields) < _CRYPTTAB_MIN_FIELDS:
         return None
     name = fields[0]
@@ -102,7 +107,7 @@ def parse_crypttab_cache_issues(
     if crypttab_text is None or not crypttab_text:
         return []
     mappers = mapper_names(backing_sources, dm_names or {})
-    return [issue for raw in crypttab_text.splitlines() if (issue := _crypttab_issue(raw, mappers)) is not None]
+    return [issue for raw in systemd_lines(crypttab_text) if (issue := _crypttab_issue(raw, mappers)) is not None]
 
 
 def _collect_active_bases(

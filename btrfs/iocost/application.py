@@ -46,11 +46,10 @@ from cst_core.domain.install import Component
 from cst_core.domain.record import ComponentState
 from cst_core.domain.text import enum_member
 from cst_core.domain.units import ActiveState, EnablementState
+from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandResult, WriteFailed
 
 _UNINSTALL_ERRORS: Final = (InstallRefused, WriteFailed, OSError)
-
-type Outcome = tuple[int, list[str]]
 
 
 def _with_udev_fields(disk: BlockDisk, *, hwdb_solution: str, udev_ready: bool, udev_error: str) -> BlockDisk:
@@ -84,7 +83,7 @@ def with_udev_answer(disk: BlockDisk, answer: UdevProperties) -> BlockDisk:
     )
 
 
-def _locked(lock: IocostLockPort, work: Callable[[], Outcome]) -> Outcome:
+def _locked(lock: IocostLockPort, work: Callable[[], ExitAndLines]) -> ExitAndLines:
     """work() while this run holds lock; an error, with nothing done, when it cannot take it."""
     try:
         held = lock.take()
@@ -98,7 +97,7 @@ def _locked(lock: IocostLockPort, work: Callable[[], Outcome]) -> Outcome:
         lock.release()
 
 
-def _failed(what: str, result: CommandResult) -> Outcome:
+def _failed(what: str, result: CommandResult) -> ExitAndLines:
     return (result.returncode or 1), [f"ERROR: {result.failure(what)}"]
 
 
@@ -144,11 +143,11 @@ class Iocost:
             rule_installed=self.udev.rule_installed(),
         )
 
-    def status(self) -> Outcome:
+    def status(self) -> ExitAndLines:
         """`cst btrfs iocost status`."""
         return 0, format_iocost_status(self.snapshot())
 
-    def plan(self, *, live_only: bool, target_device: str | None) -> Outcome:
+    def plan(self, *, live_only: bool, target_device: str | None) -> ExitAndLines:
         """`cst btrfs iocost plan`: what apply would write, changing nothing."""
         snap = self.snapshot(udev=target_device is None)
         pl = plan_iocost_apply(snap, target_device=target_device)
@@ -170,7 +169,7 @@ class Iocost:
             return [f"ERROR: {WriteFailed(self.managed.path, exc.strerror or str(exc))}"]
         return []
 
-    def _apply_qos_writes(self, snap: IocostSnapshot, plan: IocostPlan) -> Outcome:
+    def _apply_qos_writes(self, snap: IocostSnapshot, plan: IocostPlan) -> ExitAndLines:
         """Write the plan's io.cost.qos lines and save the devices CST manages: (1 when a write or the save
         failed, lines). apply saves the devices it is about to enable before it writes their lines, and
         then the set without the ones whose write failed."""
@@ -208,14 +207,14 @@ class Iocost:
         return (1 if err else rc), [*out, *err]
 
     # ---- apply -------------------------------------------------------------------------------------
-    def _reload_udev_rules(self) -> Outcome:
+    def _reload_udev_rules(self) -> ExitAndLines:
         """`udevadm control --reload-rules` when udevd runs; without it there is nothing to reload."""
         if not self.udev.running():
             return 0, ["note:      udevd not running; rules are read when it starts"]
         res = self.udev.reload_rules()
         return _failed("udevadm control --reload-rules", res) if res.returncode != 0 else (0, [])
 
-    def _enable_iocost_service(self) -> Outcome:
+    def _enable_iocost_service(self) -> ExitAndLines:
         dr = self.systemd.daemon_reload()
         if dr.returncode != 0:
             return _failed("systemctl daemon-reload", dr)
@@ -225,7 +224,7 @@ class Iocost:
         rc_u, lines_u = self._reload_udev_rules()
         return rc_u, [f"enabled:   {IOCOST_SERVICE}", *lines_u]
 
-    def _install_and_write(self, *, live_only: bool, target_device: str | None) -> Outcome:
+    def _install_and_write(self, *, live_only: bool, target_device: str | None) -> ExitAndLines:
         """Read, plan, install btrfs:iocost (not live-only) and write io.cost.qos: the part under the lock."""
         snap = self.snapshot(udev=target_device is None)
         plan = plan_iocost_apply(snap, target_device=target_device)
@@ -244,7 +243,7 @@ class Iocost:
         rc_w, lines_w = self._apply_qos_writes(snap, plan)
         return rc_w, [*out, *lines_w]
 
-    def apply(self, *, live_only: bool = False, target_device: str | None = None) -> Outcome:
+    def apply(self, *, live_only: bool = False, target_device: str | None = None) -> ExitAndLines:
         """Enable `blk-iocost` in `io.cost.qos` and optionally install unit + udev persistence.
 
         Not live-only: install btrfs:iocost, write, daemon-reload, enable --now, reload the udev rules, and
@@ -256,7 +255,7 @@ class Iocost:
                 "ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"
             ]
 
-        def install_and_write() -> Outcome:
+        def install_and_write() -> ExitAndLines:
             return _locked(
                 self.qos_lock, lambda: self._install_and_write(live_only=live_only, target_device=target_device)
             )
@@ -264,7 +263,7 @@ class Iocost:
         if live_only:
             return install_and_write()
 
-        def full() -> Outcome:
+        def full() -> ExitAndLines:
             rc_w, out = install_and_write()
             if rc_w != 0:
                 return rc_w, out
@@ -279,7 +278,7 @@ class Iocost:
         return _locked(self.component_lock, full)
 
     # ---- revert ------------------------------------------------------------------------------------
-    def _remove_iocost_files(self, uninstall: IocostUninstallPort) -> Outcome:
+    def _remove_iocost_files(self, uninstall: IocostUninstallPort) -> ExitAndLines:
         try:
             return 0, uninstall.remove()
         except _UNINSTALL_ERRORS as exc:
@@ -307,7 +306,7 @@ class Iocost:
             return [f"ERROR: cannot put {Component.BTRFS_IOCOST.value} back to done: {exc}"]
         return []
 
-    def _remove_iocost_component(self, uninstall: IocostUninstallPort) -> Outcome:
+    def _remove_iocost_component(self, uninstall: IocostUninstallPort) -> ExitAndLines:
         """Mark btrfs:iocost pending, stop the service, remove the component and reload systemd and udev; the
         first failure stops there. A failure after the disable leaves pending (or no state, once its last file
         and line are gone), never done; a record that cannot be marked stops revert before anything changes."""
@@ -335,13 +334,13 @@ class Iocost:
         rc_u, lines_u = self._reload_udev_rules()
         return rc_u, [*out, *lines_u]
 
-    def revert(self, *, live_only: bool = False) -> Outcome:
+    def revert(self, *, live_only: bool = False) -> ExitAndLines:
         """Disable CST-managed `blk-iocost` entries in `io.cost.qos` and optionally uninstall unit/rule.
 
         Not live-only, the service and the rule go first (so no udev event enables a disk again after its
         reset), then the managed devices are reset, all under the component lock (as a full apply)."""
 
-        def reset() -> Outcome:
+        def reset() -> ExitAndLines:
             snap = self.snapshot(udev=False)
             return self._apply_qos_writes(snap, plan_iocost_revert(snap))
 
@@ -351,7 +350,7 @@ class Iocost:
         if uninstall is None:
             raise AssertionError("a full revert needs the in-process removal of btrfs:iocost (uninstall)")
 
-        def full() -> Outcome:
+        def full() -> ExitAndLines:
             rc_c, out = self._remove_iocost_component(uninstall)
             if rc_c != 0:
                 return rc_c, out

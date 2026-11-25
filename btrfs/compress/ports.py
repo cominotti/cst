@@ -55,6 +55,16 @@ class CompressHostPort(Protocol):
         back, unless put_back is False (an undo: the previous text is the one it undoes)."""
         ...
 
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """The mount units systemd has loaded, active or not (`systemctl show --state=loaded -p
+        MOUNT_UNIT_PROPS '*.mount'`); None when systemctl gives no answer."""
+        ...
+
+    def daemon_reload(self) -> str | None:
+        """The catch-up `systemctl daemon-reload`, at most a minute: None, or why it failed (a reload that did
+        not end in time is a failed one)."""
+        ...
+
     def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
         """Apply `(old_rootflags, new_rootflags)` via `rpm-ostree kargs`."""
         ...

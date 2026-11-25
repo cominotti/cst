@@ -46,7 +46,7 @@ sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "steam")
-REAL_ROOT = "/var/home/danilo/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+REAL_ROOT = "/var/home/tester/.var/app/com.valvesoftware.Steam/.local/share/Steam"
 
 if TYPE_CHECKING:
     from btrfs.tests import test_btrfs_bulk as tb

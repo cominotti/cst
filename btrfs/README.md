@@ -1554,7 +1554,11 @@ cst btrfs compress-force revert        # root on host; back to compress=zstd:N
 ```
 
 N is a zstd level 1..15 in ASCII digits; anything else is a usage error
-(exit 2).
+(exit 2). A level read from `/etc/fstab`, the kernel arguments or a mount
+is read as the kernel reads it (`kstrtoint`): one optional `+` or `-`,
+then ASCII digits, within the kernel's `int` (-2147483648 to 2147483647);
+anything else, a no-break space, a digit of another script or a number too
+large for an `int` for example, gives no level.
 
 **Why:** with plain `compress=zstd:1`, btrfs runs a fast pre-compression estimator
 before invoking zstd and skips compression altogether when the sample looks only
@@ -1577,7 +1581,11 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
    `snapshots setup` installed it), rendered through CST's installer so
    `installed.json` stays current. Only the compress option of the unit's own
    `Options=` changes; its other options stay as they are (the live `/var`'s
-   options are not copied in).
+   options are not copied in). The unit is read as systemd reads a unit
+   file: a line ends at a newline, a carriage return or a NUL, and a line, a
+   key and a value lose only spaces, tabs, newlines and carriage returns at
+   their ends (a no-break space or a form feed stays in the value, as
+   systemd passes it to `mount`).
 
 **When a step fails:** a step that fails stops the run before the later
 layers, and the earlier ones are undone in reverse (the live remount, then
@@ -1614,7 +1622,25 @@ layers disagreeing. The next boot still boots: every value is a valid mount
 option, and the previous deployment stays in the boot menu. `status` and
 `cst doctor` show the drift, and running the same command again (or
 `revert`) converges. `btrfs/tests/test_compress_faults.py` checks this at
-every step, for `commit-interval` (section 9.3) too.
+every step, for `commit-interval` (section 9.3) too. A run killed between
+its `/etc/fstab` write and the `systemctl daemon-reload` after it leaves
+systemd with the old text loaded (a unit made from `/etc/fstab` says
+`NeedDaemonReload=yes`). A later run that writes no `/etc/fstab` then
+reloads systemd first, as `cache` does (section 9.4): `plan` and `status`
+say `daemon-reload: systemd has not loaded /etc/fstab as it is on disk` (or,
+when `systemctl show` gives no answer, `daemon-reload: systemctl cannot say
+whether systemd has loaded /etc/fstab as it is on disk`, since a run then
+reloads too),
+and `apply` or `revert` says `reloaded: systemd had not loaded /etc/fstab
+as it is on disk (an earlier run stopped)` (or, when `systemctl show`
+gives no answer, `reloaded: systemctl could not say ...`) before the other
+layers. Such a catch-up reload waits at most a minute, so a PID 1 that does
+not answer cannot hold a run that has nothing else to do; one that has not
+ended by then is a failed reload. A reload that fails stops the run with
+exit 1 and changes nothing else; one that fails when `systemctl show` gave
+no answer either is a `warning:` line, and the run goes on. Only the `NeedDaemonReload` of the
+units systemd loaded from `/etc/fstab` counts. `commit-interval` does the
+same.
 
 **Only the root filesystem:** `apply` and `revert` (here and in
 `commit-interval`, section 9.3) change only the root btrfs filesystem's
@@ -1779,7 +1805,10 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
   `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
   partial error. A step that fails stops the run before the later layers are
   touched (the top-mount unit is not changed after one), and the layers it
-  changed are put back in reverse (section 9.1). Like `compress-force`, it changes only the root filesystem's
+  changed are put back in reverse (section 9.1). A run after one killed
+  between its `/etc/fstab` write and its reload reloads systemd first, with
+  the same plan, status and failure words as `compress-force` (section 9.1).
+  Like `compress-force`, it changes only the root filesystem's
   fstab lines and mounts: a separate btrfs `/home` or `/var/home` is never
   touched (section 9.1, "Only the root filesystem"). In `btrfs:top-mount` only
   the `commit=` of the unit's own `Options=` changes.
@@ -1877,6 +1906,15 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   `/var/mnt/scratchpad`, is not mounted) or when another mount sits on top
   of CST's bind (unmounting the target would take that one away instead):
   mount the base, or unmount the other mount, and run `detach` again.
+  A write of `/etc/fstab` whose new text was already in place when it
+  failed (its folder could not be synced after the rename) is undone the
+  same way: the run reads `/etc/fstab` back and puts the old text back
+  when the new one is there, before it says `restored.`. systemd was not
+  reloaded then and still has the old text loaded; the next run's catch-up
+  reload clears the `NeedDaemonReload` flag the rewrite sets. A put-back
+  whose own folder sync fails is in place too, and `ROLLBACK INCOMPLETE
+  (/etc/fstab put back, its folder not synced: ...)` says so; a detach then
+  still reloads systemd after it.
   `status` shows these two as `mounted (source not checked: base not
   mounted)` and `mounted (other source on top of CST's bind!)`.
 - **A run stopped before its reload:** a run killed (or the machine reset)
@@ -1961,7 +1999,10 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   doctor` checks the base mounts, the absence of `flushoncommit`, `nofail`
   in `/etc/crypttab` (for the mapping behind the bases, found through
   `/dev/mapper/NAME` or the name of `/dev/dm-N`, and for the default names
-  `cache`, `cache-*`, `luks-cache*`), and the live bind mounts.
+  `cache`, `cache-*`, `luks-cache*`), and the live bind mounts. It reads
+  `/etc/crypttab` as systemd-cryptsetup-generator does: a line ends at a
+  newline, a carriage return or a NUL, and its fields are split at the six
+  ASCII blanks only (a no-break space stays in a field).
 - **Homes through a link:** the targets use the home's real path (passwd's
   `/home/u` is `/var/home/u` on Silverblue), the one the kernel and
   findmnt show, so an attached bind is found and never mounted twice.
@@ -2420,7 +2461,9 @@ does the same: `cst_core/installer.py install` or `remove` of
 `btrfs/docker-gc` (by name, `--component btrfs:docker-gc`, `--module btrfs`
 or `--owner root`) first writes the missing file from the installed copy
 (`installer.py plan` lists it as `would write:`), and stops before it changes
-anything when that fails. With no docker-gc installed the file gets an empty
+anything when that fails. A write whose file is in place but whose folder
+could not be synced says `written: PATH (...), but its folder could not be
+synced: ...` (exit 1), not `cannot write`. With no docker-gc installed the file gets an empty
 list. When the installed program is not one it knows, it refuses (exit 78)
 and asks you to write the file yourself.
 
@@ -2956,8 +2999,8 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), the safeguards, snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`, and the values the ports and the presenter pass (`Scan`, `CacheWalk`, `RunOptions`, `Listing`); no I/O. `ports.py`: the host, btrfs, state directory, pin file, run lock and log boundaries. `application.py`: one `Run` per invocation (clock guards, state lists, creation, sealing, deletions under the circuit breaker and their re-checks), the scan of the snapshot folder and the bodies of the six commands. `adapters.py`: the `Host` (commands, clock, directory entries, the cache-folder walk; tests replace it), the btrfs commands, the state directory, the pin file (it resolves pinned paths on the filesystem), the run lock, the journal lines and the local time zone. `wiring.py`: `$TZ`, the time zone and the adapters. `presenter.py`: what `list`, `caches` and `latest` print. `cli.py`: the argument parser and `main()`. |
 | `btrfs-snapshot-runtime` | `snapshot_runtime/` | The Python side of `btrfs-snapshot` (`hourly`, `nas`, `list`, `caches`, `prune`, `purge`, `configure`), which the bash front `btrfs/btrfs-snapshot` execs for them; the front's conversion engine (`convert`, `convert-boot`, `convert-one`, `convert-planned`, `planned-left`) and `busy` stay bash for good. `domain.py`: the settings and their defaults (`DEFAULTS`; the space-guard numbers also stay as three lines in the front, for btrfs-bulk), bash arithmetic as the guard reads it (`guard_number`), the core's sources and cache options, `CORE_REASON` and the blocked alert, the NAS texts, durations and summary, the vocabularies (`AlertKind`, `CoreExit`, `ResticExit`, ...); no I/O. `adapters/`: `machine.py` (`SnapshotRun`: the paths below `CST_SNAPSHOT_ROOT` for a run that is not root, `snapshots.conf` read as data with cst_core's `parse_snapshots_conf`, its NAS numbers bash would wrap past 64 bits refused as problem lines (`nas_out_of_range`), the commands with the run's lock fds handed on, the files as the bash's commands treated them, the trapped signals), `hourly.py` (`hourly`, `prune`, `purge`: the lock, the space guard, the waits, the core's runs and alerts), `nas.py` (`Nas`: the NAS backup), `commands.py` (`list`, `caches`, `configure`, the table of commands). `cli.py`: `main()`. |
 | `btrfs-bulk` | `bulk/` | `domain/`, no I/O: `__init__.py` (the items, `Item`, `ITEMS`, whose home, `Ctx`, and the program's paths, `BulkPaths`, the CACHEDIR.TAG text, sizes and texts, the record of an item's journal, `ItemJournal`) and `steam.py` (Steam's file formats: VDF as the recursive type `Vdf`, the `libraryfolders.vdf` checks and edits, app manifests; the steam command's arguments and the record of a game's journal, `SteamJournal`; `ItemJournal` and `SteamJournal` keep the same JSON keys as before). `ports.py`: the changes made as the user (`UserFilesPort`), the looks at the home that never follow a link (`HomeTreePort`), the program's own files (`BulkStatePort`), the boot counter, the rest of the machine (`HostPort`) and the output. `application/`: `items.py` (each item's state, its move and link with its journal, recovery, `apply`, the plan/status report), `steam.py` (reading Steam's files as the user, one game's plan, its move with its journal and recovery), `commands.py` (`steam plan/apply`, the boot step, `keep/unkeep`), all over one `Bulk` (`context.py`). `adapters/`: `machine.py` (the btrfs and filesystem primitives, `Primitives`, and the lstat-only looks built on them, `HomeTree`), `child.py` (the child process that runs as the user, `as_user`, and the check of the result each step sends back), `user.py` (the steps it runs, `UserFiles`), `state.py` (bulk.conf, the journals, the boot flag, the keep list, convert-plan, the run lock), `host.py` (btrfs-snapshot's busy check, conversion and space limits, Steam's processes, the alert, the output). `wiring.py`: root or not, the `BTRFS_BULK_*` overrides (never as root), whose home (`--user`, `BULK_USER`), where `btrfs-snapshot` is (the checkout's copy from a checkout, the installed one from the zipapp) and the ports over the real adapters. `cli.py`: the arguments and `main()`. |
-| `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain/args.py` (the command line: `CompressCommand`, `CompressArgs`, `parse_compress_args`); `domain/__init__.py` (`CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, which fstab lines and mounts are the root filesystem's, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
-| `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`). |
+| `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain/args.py` (the command line: `CompressCommand`, `CompressArgs`, `parse_compress_args`); `domain/__init__.py` (`CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, which fstab lines and mounts are the root filesystem's, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification; the layer run it shares with `commit-interval`: `LayerRun`, the four steps `step_fstab`, `step_kargs`, `step_remount`, `step_top_mount` and `run_layers`, one undo list unwound last first); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
+| `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`) and compress's layer run (`run_layers` over its own words, remount option and check). |
 | `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs cache`: manages per-user `/var/mnt/cache/<user>` -> `~/.cache` and `/var/mnt/scratchpad/<user>` -> `~/Scratchpad` bind mounts, `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_CACHE_ROOT`: a test root for every path it reads and writes). `domain/` (the command line, `/etc/fstab`'s managed lines, the plans and status lines, the health rules, the systemd view; no I/O); `ports.py` (the six boundaries the use cases go through: `/etc/fstab`, the live mount table, systemd, the private folders and the tag, the host's read-only facts, the accounts); `application.py` (`CacheMounts`: the probe, `status`, `plan`, `attach` with its mounts before `/etc/fstab` and the reload, `detach` with the lines and the reload before the unmounts, the catch-up reload and the rollbacks; no I/O); `adapters.py` (the ports over the host's files and commands, the test root and `/run/host` from a toolbox, cst_core's `ensure_dir` and `write_atomic`, findmnt, mount and umount, systemctl through `SystemctlAdapter` with `--state=loaded`); `wiring.py` (the composition root: the use cases built over the real adapters, the command line's action, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
 | `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox (section 9.2). `domain.py` (the command line, the disks and what udev says of them (`BlockDisk`, `UdevProperties`), reading `io.cost.qos`, the apply and revert plans, the status and plan lines; no I/O); `ports.py` (the eight boundaries the use cases go through: `io.cost.qos`, the managed-devices file, sysfs, udev, systemd, the installer, the in-process removal of `btrfs:iocost` and the two locks); `application.py` (`Iocost`: `status`, `plan`, `apply` and `revert`, live-only or not: the order of the steps, the managed devices saved before their lines are written, the component marked done last and pending first, which lock each step holds, and the error line of each failure; no I/O); `adapters.py` (the ports over the files and commands as the host sees them, `/run/host` from a toolbox for `status` and `plan`: `io.cost.qos` and sysfs, the managed-devices file through cst_core's `ensure_dir` and `write_atomic`, `udevadm`, systemctl through `SystemctlAdapter`, the installer, `InstallService` and the lock files through `take_lock`; and where they are, `IocostPaths`); `wiring.py` (the composition root: the use cases built over the real adapters, `status`/`plan`/`apply`/`revert` from the command line, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
 | `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `ports.py` (the four boundaries the use cases go through: `snapshots.conf`, the drop-in, systemd, sysfs); `application.py` (`ScrubLimit`: `status`, `plan` and `set`/`off`: `snapshots.conf`, then the drop-in, then `daemon-reload` when this run changed the drop-in or systemd has not loaded it as it is on disk (`NeedDaemonReload`, which `status` and `plan` also ask), and the rollback of both files on a failure; no I/O); `adapters.py` (the ports over the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`: `snapshots.conf` written by cst_core's `ensure_dir` and `write_atomic`, the drop-in through the installer without changing `btrfs:core`'s state in the install record, systemctl through `SystemctlAdapter`, on the host from a toolbox for `NeedDaemonReload`, and sysfs); `wiring.py` (the composition root: the use case built over the real adapters, `status`/`plan`/`set`/`off` from the command line, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |

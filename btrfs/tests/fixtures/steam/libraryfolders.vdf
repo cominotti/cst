@@ -2,7 +2,7 @@
 {
 	"0"
 	{
-		"path"		"/var/home/danilo/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+		"path"		"/var/home/tester/.var/app/com.valvesoftware.Steam/.local/share/Steam"
 		"label"		"Flatpak Library"
 		"contentid"		"2229816400160898885"
 		"totalsize"		"0"

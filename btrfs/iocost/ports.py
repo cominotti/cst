@@ -13,6 +13,7 @@ from typing import Protocol
 
 from btrfs.iocost.domain import BlockDisk, UdevProperties
 from cst_core.domain.record import ComponentState
+from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandResult
 
 
@@ -114,11 +115,11 @@ class IocostInstallerPort(Protocol):
         """Whether a checkout's installer is there to install from (the installed zipapp has none)."""
         ...
 
-    def install(self) -> tuple[int, list[str]]:
+    def install(self) -> ExitAndLines:
         """`install --component btrfs:iocost`: (exit status, its lines and its error line)."""
         ...
 
-    def mark_done(self) -> tuple[int, list[str]]:
+    def mark_done(self) -> ExitAndLines:
         """`mark --component btrfs:iocost done`: (exit status, its lines and its error line)."""
         ...
 
