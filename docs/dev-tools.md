@@ -1048,7 +1048,8 @@ network is used. `tests/test_quint_task.py` checks the task's flags.
 helper's files (the methods of `VolumeTreePort` and `NocowStatePort`), in
 the code's order: `install`'s `mark` (with copy-on-write data, the request
 first: an old count reset, then the flag, then +C on the volumes folder;
-without, the count forgotten, then +C), after which `btrfs-setup.sh` writes
+without, the count forgotten, then +C; a forget that fails ends mark there,
+with the count kept and no +C), after which `btrfs-setup.sh` writes
 nothing whatever mark's exit status; each boot's
 `migrate` (the recovery of an interrupted migration, volume by volume; the
 folder's +C and its request; the give-up check; the counter; the rewrite of
@@ -1056,7 +1057,7 @@ each volume: twin, label, copy, sync, the two renames, the old copy's
 removal; `give_up`); and Docker recreating a volume. A crash can come after
 any step: a kill, or a power loss that also loses a copy not yet synced. A
 step can fail where the code checks the outcome (a rename, the flag's
-removal, the counter, the copy). The label each action leaves in `step` is
+removal, the counter, install's forget of it, the copy). The label each action leaves in `step` is
 the call the replay records from the real code, so the spec's traces can be
 replayed against it. A start without the flag may hold a count of boots an
 older helper left (any count up to `GIVE_UP_AFTER`): with an install that
