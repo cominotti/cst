@@ -35,6 +35,7 @@ from cpu.setup.domain import (
     toolbox_dropin,
 )
 from cpu.setup.wiring import Handed
+from cpu.tests.fakes import RecordingRunner
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import SYSTEM_PYTHON
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
@@ -493,17 +494,6 @@ def remove_text_files(argv: list[str]) -> None:
     for i, w in enumerate(words):
         if not w.startswith("--") and (i == 0 or words[i - 1] != "--home") and os.path.lexists(w):
             os.remove(w)
-
-
-class RecordingRunner:
-    """CommandRunnerPort: records each call's argv and every keyword it was given; answers exit 0."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[list[str], dict[str, object]]] = []
-
-    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
-        self.calls.append((list(argv), kw))
-        return CommandResult(0, "", "")
 
 
 class UserManagerArgvTest(CpuSetupCase):

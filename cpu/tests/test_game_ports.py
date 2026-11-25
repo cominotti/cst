@@ -5,7 +5,7 @@ adapter in a temporary folder, a full disk staged with RLIMIT_FSIZE 0), and the 
 pass on: systemctl's argv and options, the files' encoding and modes, the run lock, the order of the boxes and
 the output's lines; and the start of the composition root (cpu.game.wiring) for each action."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 import contextlib
 import fcntl
 import io
@@ -32,22 +32,12 @@ from cpu.tests.fakes import (
     FaultyStateFiles,
     FaultySysfsFiles,
     FaultyUnitFiles,
+    RecordingRunner,
 )
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import CommandResult, OutputMode
 from tests.fault_injection import FaultMode, FaultPlan, Killed, no_file_may_grow
-
-
-class RecordingRunner:
-    """A command runner that answers exit 0 and keeps each call with its options."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[list[str], dict[str, object]]] = []
-
-    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
-        self.calls.append((list(argv), kw))
-        return CommandResult(0, "out\n", "err\n")
 
 
 class Case(unittest.TestCase):

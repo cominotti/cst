@@ -3,7 +3,8 @@
 its machines (tests/mbt/mbt_game_profile.py, mbt_game_state.py) and the contract of its adapters
 (cpu/tests/test_game_ports.py): a fake systemctl for both managers (FakeSystemd; ReloadingSystemd, whose
 daemon-reload sets each shown value from the files, as systemd does) and a fake cgroup tree, /proc and sysfs in a
-temporary folder (game_scratch).
+temporary folder (game_scratch). RecordingRunner, a command runner that keeps each call with its options,
+serves the adapters' contract and cpu-setup's tests (cpu/tests/test_cpu_setup.py) alike.
 
 The Faulty* adapters are the real ones (cpu.game.adapters) with each mutating call one point of a FaultPlan
 (tests/fault_injection.py), named as the machine names them: "write PATH" for a file written (a failure raises
@@ -31,6 +32,17 @@ USER = "testuser"
 UID = "999999"
 SYS = "systemctl"
 USR = f"systemctl --user -M {USER}@"
+
+
+class RecordingRunner:
+    """CommandRunnerPort: records each call's argv and every keyword it was given; answers exit 0, no output."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        self.calls.append((list(argv), kw))
+        return CommandResult(0, "", "")
 
 
 def override_path(root: str, mgr: str, unit: str, prop: str) -> str:
