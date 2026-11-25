@@ -10321,6 +10321,8 @@ echo E2E-OK
             exec_bash,
             c,
             f"""
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            set +e
             {fstab_put_back(w)}
             {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
             {file_put_back("/run/ostree-booted", w, "ostree-booted")}
@@ -10532,6 +10534,8 @@ EOF
             exec_bash,
             c,
             f"""
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            set +e
             {fstab_put_back(w)}
             {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
             {file_put_back("/run/ostree-booted", w, "ostree-booted")}
@@ -11009,6 +11013,8 @@ EOF
             exec_bash,
             c,
             f"""
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            set +e
             {fstab_put_back(w)}
             {file_put_back("/etc/crypttab", w, "crypttab")}
             systemctl daemon-reload || true
