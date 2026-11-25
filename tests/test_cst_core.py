@@ -62,9 +62,11 @@ from cst_core.domain.values import (
 )
 from cst_core.domain.units import (
     ActiveState,
+    SYSTEMD_WHITESPACE,
     UNIT_PATH_PROP,
     named_user_unit_dir,
     show_manager_value_argv,
+    systemd_lines,
     user_manager_head,
     user_unit_dir,
 )
@@ -430,6 +432,31 @@ class ActiveStateTest(unittest.TestCase):
         self.assertNotIn("", running)
         self.assertNotIn("a-word-a-newer-systemd-adds", running)
         self.assertEqual(str(ActiveState.MAINTENANCE), "maintenance")
+
+
+class SystemdLinesTest(unittest.TestCase):
+    """systemd_lines and SYSTEMD_WHITESPACE: a unit file's lines and blanks as systemd's read_line and
+    strstrip see them (src/basic/fileio.c, src/fundamental/string-util.h)."""
+
+    def test_lines_end_where_read_line_ends_them(self) -> None:
+        cases = (
+            ("", [""]),
+            ("a\nb\n", ["a", "b", ""]),
+            ("a\rb", ["a", "b"]),
+            ("a\0b", ["a", "b"]),
+            ("a\r\nb", ["a", "b"]),
+            ("a\n\rb", ["a", "b"]),
+            ("a\r\n\0b", ["a", "b"]),
+            ("a\n\n\rb", ["a", "", "b"]),
+            ("a\vb\fc\x1cd\x85e\u2028f\u2029g", ["a\vb\fc\x1cd\x85e\u2028f\u2029g"]),
+        )
+        for text, lines in cases:
+            with self.subTest(text=text):
+                self.assertEqual(systemd_lines(text), lines)
+
+    def test_the_whitespace_is_space_tab_newline_and_carriage_return(self) -> None:
+        self.assertEqual(SYSTEMD_WHITESPACE, " \t\n\r")
+        self.assertEqual(" \t\fx\v\xa0\r\n".strip(SYSTEMD_WHITESPACE), "\fx\v\xa0")
 
 
 class UserUnitDirTest(unittest.TestCase):

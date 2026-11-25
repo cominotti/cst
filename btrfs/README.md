@@ -1580,7 +1580,11 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
    `snapshots setup` installed it), rendered through CST's installer so
    `installed.json` stays current. Only the compress option of the unit's own
    `Options=` changes; its other options stay as they are (the live `/var`'s
-   options are not copied in).
+   options are not copied in). The unit is read as systemd reads a unit
+   file: a line ends at a newline, a carriage return or a NUL, and a line, a
+   key and a value lose only spaces, tabs, newlines and carriage returns at
+   their ends (a no-break space or a form feed stays in the value, as
+   systemd passes it to `mount`).
 
 **When a step fails:** a step that fails stops the run before the later
 layers, and the earlier ones are undone in reverse (the live remount, then

@@ -10,6 +10,7 @@ import re
 from typing import Final
 
 from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.units import SYSTEMD_WHITESPACE, systemd_lines
 from cst_core.domain.values import MINUTE, parse_integer, parse_whole_number
 from cst_core.domain.text import (
     file_lines,
@@ -432,8 +433,9 @@ def rewrite_kargs_rootflags(kargs_stdout: str, target_option: str) -> tuple[tupl
 def _extract_mount_lines(unit_text: str) -> list[tuple[str, str]]:
     section = ""
     pairs: list[tuple[str, str]] = []
-    for line in unit_text.splitlines():
-        s = line.strip()
+    # As systemd's config_parse (conf-parser.c): read_line's lines, key and value strip SYSTEMD_WHITESPACE.
+    for line in systemd_lines(unit_text):
+        s = line.strip(SYSTEMD_WHITESPACE)
         if not s or s.startswith(("#", ";")):
             continue
         if s.startswith("[") and s.endswith("]"):
@@ -441,7 +443,7 @@ def _extract_mount_lines(unit_text: str) -> list[tuple[str, str]]:
             continue
         if section == "[Mount]" and "=" in s:
             k, v = s.split("=", 1)
-            pairs.append((k.strip(), v.strip()))
+            pairs.append((k.strip(SYSTEMD_WHITESPACE), v.strip(SYSTEMD_WHITESPACE)))
     return pairs
 
 

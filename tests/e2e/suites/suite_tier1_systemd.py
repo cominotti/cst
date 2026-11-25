@@ -11463,6 +11463,50 @@ EOF
         self.assertIn("E2E-CATCH-UP-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_254_btrfs_compress_reads_the_top_mount_unit_as_systemd_does(self) -> None:
+        """`cst btrfs compress-force status` with a top-mount unit whose Options= starts with a no-break space
+        before compress=zstd:1: systemd keeps the no-break space in the value (it strips only " \\t\\n\\r"), so
+        the option mount gets is not compress=zstd:1, and status names the top-mount layer as drifting, with
+        the option systemd shows. Before the fix CST stripped every Unicode blank and called the layers
+        coherent."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-top-unit-blanks"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt
+            {kargs_top_mount_installed("compress=zstd:1")}
+            unit="/etc/systemd/system/{KARGS_TOP_UNIT}"
+            python3 - "$unit" <<'EOF'
+import re, sys
+p = sys.argv[1]
+text = open(p, encoding="utf-8").read()
+text = re.sub(r"(?m)^Options=.*$", "Options=\\xa0compress=zstd:1,subvolid=5,noatime,degraded,ssd,flushoncommit", text)
+open(p, "w", encoding="utf-8").write(text)
+EOF
+            systemctl daemon-reload
+            shown="$(systemctl show -P Options {shlex.quote(KARGS_TOP_UNIT)})"
+            [[ "$shown" == $'\\xc2\\xa0compress=zstd:1,subvolid=5,noatime,degraded,ssd,flushoncommit' ]] \\
+                || {{ echo "systemd's Options: $(printf '%q' "$shown")" >&2; exit 1; }}
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMPRESS_PROC="{w}/proc"
+            status_out="$(/opt/cst-rw/cst btrfs compress-force status 2>&1)" || true
+            grep -qF "drift across layers" <<<"$status_out" || {{ echo "status: $status_out" >&2; exit 1; }}
+            grep -qF "top-mount=none" <<<"$status_out" || {{ echo "status: $status_out" >&2; exit 1; }}
+            echo E2E-TOP-UNIT-BLANKS-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-TOP-UNIT-BLANKS-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_244_btrfs_compress_and_commit_undo_keeps_the_old_fstab_when_its_reload_fails(self) -> None:
         """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change fails with
         no effect (later calls are honest) and a systemctl whose second daemon-reload of the run fails (the undo's):

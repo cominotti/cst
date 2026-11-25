@@ -3,8 +3,9 @@
 of `systemctl show` (parse_show_props, parse_show_units), the question of every loaded unit of a glob
 (show_units_argv) and of a property of the manager itself (show_manager_value_argv), the head that
 reaches another user's user manager (user_manager_head), the folder a user manager reads the user's
-own units from (user_unit_dir; named_user_unit_dir when it must have said so), and systemd's
-ActiveState words (ActiveState).
+own units from (user_unit_dir; named_user_unit_dir when it must have said so), systemd's
+ActiveState words (ActiveState), and how systemd reads a unit file's lines (systemd_lines,
+SYSTEMD_WHITESPACE).
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])
 
@@ -15,7 +16,10 @@ allowed), sections separated by one blank line, ending in a newline.
 from collections.abc import Sequence
 from enum import StrEnum
 import posixpath
+import re
 from typing import Final
+
+from cst_core.domain.text import split
 
 # `systemctl mask NAME` leaves a link to this file where the unit file goes.
 MASK_TARGET = "/dev/null"
@@ -31,6 +35,23 @@ UNIT_PATH_PROP: Final = "UnitPath"
 # Folders of systemd's own and the system's, never the user's own: where a UnitPath split in the wrong place
 # (a folder with a space) could land.
 _SYSTEM_UNIT_ROOTS: Final = ("/etc/", "/run/", "/usr/")  # not /var/: homes live in /var/home on Fedora Atomic
+
+
+# What systemd strips from a unit file's lines, keys and values (WHITESPACE in src/fundamental/string-util.h,
+# which src/basic/string-util.h re-exports): space, tab, newline and carriage return; not a form feed, a
+# vertical tab or a Unicode blank.
+SYSTEMD_WHITESPACE: Final = " \t\n\r"
+# Where systemd's read_line (src/basic/fileio.c) ends a line: a newline, a carriage return or a NUL, the pairs
+# "\r\n" and "\n\r" as one end, either followed by a NUL.
+_SYSTEMD_LINE_END: Final = re.compile(r"\r\n\x00?|\n\r\x00?|[\n\r\x00]")
+
+
+def systemd_lines(text: str) -> list[str]:
+    """TEXT's lines as systemd's read_line ends them (a unit file, /etc/crypttab), without their ends; not at
+    a vertical tab, a form feed, U+0085, U+2028 or U+2029, where str.splitlines() ends one. The piece after
+    the last end is a line too (empty when the text ends with one): a reader skips empty lines, as systemd's
+    do."""
+    return split(_SYSTEMD_LINE_END, text)
 
 
 def parse_show_props(text: str) -> dict[str, str]:

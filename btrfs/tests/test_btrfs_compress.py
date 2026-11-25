@@ -367,6 +367,27 @@ class DomainTests(unittest.TestCase):
             "subvolid=5,compress-force=zstd:1,noatime",
         )
 
+    def test_the_top_mount_unit_is_read_as_systemd_reads_it(self) -> None:
+        # systemd strips a unit file's lines, keys and values of " \t\n\r" only and ends a line at "\n", "\r"
+        # or NUL: str.strip() and str.splitlines() also took a no-break space, a form feed and a vertical tab.
+        nbsp = "\N{NO-BREAK SPACE}"
+        head = f"[Mount]\nWhat=/dev/disk/by-uuid/{SAMPLE_UUID}\n"
+        cases = (
+            (f"Options={nbsp}compress=zstd:1\n", f"{nbsp}compress=zstd:1"),
+            ("Options= \tcompress=zstd:1 \t\n", "compress=zstd:1"),
+            ("\x0cOptions=compress=zstd:1\n", ""),
+            ("Options=compress=zstd:1\rWhere=/x\n", "compress=zstd:1"),
+            ("Options=a\vb\n", "a\vb"),
+            ("Options=a\x0cb\n", "a\x0cb"),
+            ("  ;Options=compress=zstd:1\n", ""),
+            (" \t#Options=compress=zstd:1\n", ""),
+            ("Options=x\0Options=compress=zstd:3\n", "compress=zstd:3"),
+        )
+        for body, options in cases:
+            with self.subTest(body=body):
+                top = parse_top_mount_unit(head + body)
+                self.assertEqual((top.uuid, top.options), (SAMPLE_UUID, options))
+
     def test_coherence_and_plan(self) -> None:
         top = parse_top_mount_unit(SAMPLE_TOP_MOUNT)
         rep_ok = assess_coherence(
