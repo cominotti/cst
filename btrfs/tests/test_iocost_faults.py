@@ -31,12 +31,13 @@ A guard for a7c5e92 (iocost marks the component done last): on its parent these 
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import os
 from typing import override
 import unittest
 
-from btrfs.tests.fakes import IocostWorld
+from btrfs.tests.fakes import FakeManagedDevices, IocostWorld
 from tests.fault_injection import Fault, FaultMode, Killed, cut_points, every_fault
 
 QOS_LINE = "259:1 enable=1 ctrl=auto"  # what apply writes for the fixture's NVMe disk
@@ -149,6 +150,19 @@ class IocostApplyFaultTest(unittest.TestCase):
         self.assertEqual(cases, CASES_FAIL_THEN_KILL)
 
 
+class _RecordingManagedDevices(FakeManagedDevices):
+    """FakeManagedDevices that also keeps the set each save was given, the failed ones too."""
+
+    def __init__(self, world: IocostWorld, saves: list[frozenset[str]]) -> None:
+        super().__init__(world)
+        self.saves = saves
+
+    @override
+    def save(self, devnos: frozenset[str]) -> None:
+        self.saves.append(devnos)
+        super().save(devnos)
+
+
 class IocostManagedSaveFailureTest(unittest.TestCase):
     """A failed save of the managed-devices file is an ERROR line (moved from test_iocost.py, where it
     patched the adapters' write_atomic and ensure_dir and their save of the managed-devices file): on the
@@ -195,12 +209,15 @@ class IocostManagedSaveFailureTest(unittest.TestCase):
         # The save after the writes fails (the one before them worked): the line apply wrote stays CST's,
         # so the next apply keeps it as its own and revert resets it.
         w = self.world
+        saves: list[frozenset[str]] = []
+        managed = _RecordingManagedDevices(w, saves)
         w.plan.arm((FaultMode.FAIL, 4))  # install, save, the qos write, then the second save
-        rc, out = w.service().apply()
+        rc, out = dataclasses.replace(w.service(), managed=managed).apply()
         self.assertEqual(rc, 1, out)
         self.assertEqual(out[-1], f"ERROR: cannot write {w.managed_path}: No space left on device")
         self.assertIn("set:       ", "\n".join(out))
         self.assertEqual(w.plan.calls, ["installer install", "managed save", f"qos {QOS_LINE}", "managed save"])
+        self.assertEqual(saves, [frozenset({"259:1"}), frozenset({"259:1"})])
         self.assertEqual(w.managed, {"259:1"})
         w.plan.arm()
         rc, out = w.service().apply()
