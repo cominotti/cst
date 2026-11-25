@@ -200,6 +200,8 @@ NAS_WITNESSES: Final = (
     ("remove_failed", "nas_mixed", "neverRemoveFailed"),
     ("overlay_removed", "nas_mixed", "neverOverlayRemoved"),
     ("partial_refused", "nas_partial", "neverPartialRefused"),
+    ("partial_stop_dropped", "nas_partial", "neverPartialStopDropped"),
+    ("partial_ok", "nas_partial", "neverPartialOk"),
     ("stop_after_commit", "nas_mixed", "neverStopAfterCommit"),
     ("retention_failed", "nas_mixed", "neverRetentionFailed"),
     ("stop_after_commit_recorded", "nas_shutoff", "neverStopAfterCommitRecorded"),

@@ -2875,6 +2875,80 @@ class _StopAtHeldEnd(FakeNasSignals):
         return _HeldStop() if self.helds == 1 else contextlib.nullcontext()
 
 
+class NasHeldStopDropTest(unittest.TestCase):
+    """A stop held through a settled snapshot call that left some disks unswitched is raised once the files
+    of those disks are dropped (in the held block): none stays behind for a disk libvirt never used. An
+    unsettled answer drops nothing (libvirt may still switch), nor does a poll that failed."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+    overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+    overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+
+    def _run(
+        self, rc: int, switched: Sequence[str], *, disks: int = 2, poll_fails: bool = False
+    ) -> tuple[BaseException, FakeNasCommands, FakeNasStore]:
+        """nas_run of a running VM whose crash-consistent snapshot call answers rc, having made every
+        disk's file and switched the disks named, with a stop held through it; (what nas_run raised, the
+        commands, the store)."""
+        pairs = [("vda", self.disk_a), ("vdb", self.disk_b)][:disks]
+        overlays = {"vda": self.overlay_a, "vdb": self.overlay_b}
+        snapped: list[bool] = []
+
+        def hook(
+            args: Sequence[str],
+            cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "snapshot-create-as":
+                snapped.append(True)
+                store.overlays.update(overlays[t] for t, _ in pairs)
+                for t in switched:
+                    live[t] = overlays[t]
+                return rc, "", ("" if rc == ExitStatus.TIMED_OUT else "error: internal error: snapshot failed")
+            if args[0] == "domblklist" and poll_fails and snapped and not cmds.in_detached:
+                raise OSError("libvirt vanished")
+            return None
+
+        port, commands, store, _signals, _alerts = self._make_backup(
+            pairs, on_virsh=hook, signals=_StopAtHeldEnd(), clock=FakeNasMovingClock()
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(BaseException) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        return ctx.exception, commands, store
+
+    def test_a_failed_call_that_switched_nothing_drops_its_files_before_the_stop(self) -> None:
+        raised, commands, store = self._run(1, [], disks=1)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)
+        self.assertEqual(store.dropped, [self.overlay_a])
+        self.assertNotIn("blockcommit", [c[0][0] for c in commands.virsh_log])
+
+    def test_a_call_that_switched_some_disks_drops_the_others_files_before_the_stop(self) -> None:
+        for rc in (0, 1):
+            with self.subTest(rc=rc):
+                raised, commands, store = self._run(rc, ["vda"])
+                self.assertIsInstance(raised, vm_domain_backup.Stop)
+                self.assertEqual(store.dropped, [self.overlay_b])
+                self.assertEqual(store.removed, [self.overlay_a], "vda merged back")
+                self.assertEqual([c[0][2] for c in commands.virsh_log if c[0][0] == "blockcommit"], ["vda"])
+
+    def test_an_unsettled_answer_drops_nothing(self) -> None:
+        raised, _commands, store = self._run(int(ExitStatus.TIMED_OUT), ["vda"])
+        self.assertIsInstance(raised, Refused)
+        self.assertIn("may still switch to it", str(raised))
+        self.assertEqual(store.dropped, [])
+
+    def test_a_poll_that_fails_drops_nothing(self) -> None:
+        # Passes on the code before the fix too: it guards the drop's condition (the poll answered).
+        raised, _commands, store = self._run(1, [], poll_fails=True)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)  # the fake's held block ends with its stop
+        self.assertEqual(store.dropped, [])
+
+
 class FakeNasMovingClock(FakeNasClock):
     """A clock whose sleep moves monotonic on, so a poll until a deadline ends."""
 

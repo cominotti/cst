@@ -1260,8 +1260,8 @@ quint by hand, as `cst-quint` runs it). The instance `nas_partial` (not
 checked either) drops the `--atomic` assumption: a settled answer that
 switched only some disks is refused (`_refuse_partial`: the others' files
 dropped, the switched ones merged back), so `consistentRead` holds there;
-a stop held through such an answer still leaves the stray files
-(`mergedOrAlerted`, `noOverlayLost`).
+the stray files of a settled answer are dropped in the snapshot's held
+block, so a stop held through the call is raised only after them.
 
 **What the checker found.** Two paths lost the alert of a snapshot whose
 outcome stayed unclear (fixed with the spec, in the same pull request): a

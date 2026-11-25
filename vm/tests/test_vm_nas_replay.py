@@ -92,7 +92,7 @@ SPEC_CALLS: Final = frozenset(
         ("restic_ready", OK),
         ("restic_ready", FAIL),
         *(("snapshot", o) for o in ("ok", "fail_none", "fail_in_place", "timeout_all", "timeout_some")),
-        ("snapshot", "ok_some"),  # nas_partial's (without --atomic): refused
+        *(("snapshot", o) for o in ("ok_some", "fail_some")),  # nas_partial's (without --atomic): refused
         ("drop_overlay", ""),
         *(("restic_backup", o) for o in ("ok", "incomplete", FAIL, "stopped_after_commit", "stopped_answered")),
         ("check_after", "same"),

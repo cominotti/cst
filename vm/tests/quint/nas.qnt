@@ -281,22 +281,28 @@ module nas {
         // An unclear outcome is the read's failure even when a stop waited for the block's end (the
         // stop is then the backup's own failure in the refusal).
         s' = if (not(settled) and ov != TSET) toMerge(st, "uncertain") // PS6
+             // a settled answer: the files of the disks it did not switch are dropped (in the held
+             // block), a stop held through the call is raised after them
+             else if (ov != TSET) {
+               ...st, pc: "drop", todo: TARGETS.select(t => not(ov.contains(t))), ci: 0,
+               failure: if (stopIn) "stop" else s.failure,
+             }
              else if (stopIn) toMerge(st, "stop")
-             else if (ov == TSET) { ...st, pc: "backup" }
-             else { ...st, pc: "drop", todo: TARGETS.select(t => not(ov.contains(t))), ci: 0 },
+             else { ...st, pc: "backup" },
         step' = label,
       }
     }
   }
   // _drop_stray_overlays: the overlay files of the disks that did not switch (after a settled
   // answer: not in use), then the crash-consistent attempt, or the refusal after it; after a partial
-  // switch (some disks overlaid) the refusal at once.
+  // switch (some disks overlaid) the refusal at once; after a stop held through the call, the stop.
   action drop = all {
     s.pc == "drop",
     val t = s.todo[s.ci]
     val st = removeFile(s, t)
     all {
       s' = if (s.ci + 1 < s.todo.length()) { ...st, ci: s.ci + 1 }
+           else if (s.failure == "stop") toMerge(st, "stop")
            else if (s.attempt == 1 and s.overlaid == Set()) { ...st, pc: "snapshot", attempt: 2 }
            else toMerge(st, "refused"),
       step' = lbl("drop_overlay", t, ""),
@@ -579,13 +585,15 @@ module nas {
 
   // ---- the environment ---------------------------------------------------------------------------
   // A stop (SIGTERM, SIGINT, SIGHUP) between two steps, outside a held block: not in the merge back
-  // (the stops ignored) nor from restic's answer on (held: the stopIn of "after" and "record").
+  // (the stops ignored), nor in the drop of the stray files (held: the snapshot's stopIn), nor from
+  // restic's answer on (held: the stopIn of "after" and "record").
   action stop = all {
     running(s),
     not(s.stopped),
     s.stops < MAX_STOPS,
     not(MERGE.contains(s.pc)), // PS5
     not(ANSWERED.contains(s.pc)),
+    s.pc != "drop", // held: the stray files are dropped in the snapshot's held block
     val st = { ...s, stopped: true, stops: s.stops + 1 }
     all {
       s' = if (READ.contains(s.pc)) {
@@ -730,6 +738,8 @@ module nas {
   val wRemoveFailed = step.name == "remove_overlay" and step.outcome == "fail"
   val wOverlayRemoved = step.name == "remove_overlay" and step.outcome == "ok"
   val wPartialRefused = step.name == "drop_overlay" and s.overlaid != Set()
+  val wPartialStopDropped = step.name == "drop_overlay" and s.failure == "stop" and s.overlaid != Set()
+  val wPartialOk = step.name == "snapshot" and step.outcome == "ok_some"
   val wStopAfterCommit = step.name == "restic_backup" and step.outcome == "stopped_after_commit"
   val wStopAfterCommitRecorded = step.name == "record_torn" and step.ctx == "stop" and step.outcome == "ok"
   val wStopAnswered = step.name == "restic_backup" and step.outcome == "stopped_answered"
@@ -762,6 +772,8 @@ module nas {
   val neverRemoveFailed = not(wRemoveFailed)
   val neverOverlayRemoved = not(wOverlayRemoved)
   val neverPartialRefused = not(wPartialRefused)
+  val neverPartialStopDropped = not(wPartialStopDropped)
+  val neverPartialOk = not(wPartialOk)
   val neverStopAfterCommit = not(wStopAfterCommit)
   val neverStopAfterCommitRecorded = not(wStopAfterCommitRecorded)
   val neverStopAnswered = not(wStopAnswered)
