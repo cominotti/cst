@@ -10,14 +10,19 @@ import os
 from typing import Final
 
 from btrfs.compress.domain import (
+    KARGS_SETTLE_POLL_S,
+    KARGS_SETTLE_TIMEOUT_S,
+    KARGS_STILL_RUNNING,
     PROC_CMDLINE_PATH,
     PROC_MOUNTS_PATH,
     ROOT_ANCHOR_TARGETS,
     TOP_MOUNT_UNIT_NAME,
     TopMountInfo,
     parse_top_mount_unit,
+    transaction_running,
 )
-from cst_core.adapters import SystemctlAdapter
+from btrfs.compress.ports import TOP_MOUNT_ERRORS
+from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, SystemdUnitVerifier
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
@@ -25,10 +30,10 @@ from cst_core.adapters.runtime import checkout_commit, checkout_root
 from cst_core.adapters.terminal import confirm as terminal_confirm
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService
-from cst_core.domain.errors import Refused
 from cst_core.domain.install import INSTALL_MANIFEST, Component
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import (
+    ClockPort,
     CommandFailed,
     CommandRunnerPort,
     ExecutionContextPort,
@@ -39,9 +44,6 @@ from cst_core.ports import (
 )
 
 _DEFAULT_PROC_DIR: Final[str] = "/proc"
-
-# What installing the top-mount unit, marking it and reloading systemd can raise.
-_TOP_MOUNT_ERRORS: Final = (CommandFailed, OSError, WriteFailed, Refused, ValueError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +75,7 @@ class LinuxCompressHostAdapter:
         ctx: ExecutionContextPort | None = None,
         runner: CommandRunnerPort | None = None,
         fs: FileSystemPort | None = None,
+        clock: ClockPort | None = None,
     ) -> None:
         self._entry_file = config.entry_file
         self._fallback_root = config.fallback_root
@@ -81,6 +84,7 @@ class LinuxCompressHostAdapter:
         self._ctx = HostExecutionContext() if ctx is None else ctx
         self._runner = SubprocessCommandRunner() if runner is None else runner
         self._fs = LocalFileSystemAdapter() if fs is None else fs
+        self._clock = SystemClockAdapter() if clock is None else clock
         self._systemctl = SystemctlAdapter(self._runner, on_host=SystemctlHost.LOCAL)
 
     def _etc_file(self, *parts: str) -> str:
@@ -154,6 +158,30 @@ class LinuxCompressHostAdapter:
         )
         return (res.returncode == 0, res.stdout, res.stderr.strip() or res.stdout.strip())
 
+    def read_settled_kargs(self) -> tuple[bool, str, str]:
+        """`read_kargs` once `rpm-ostree status --json` names no running transaction, asking every
+        KARGS_SETTLE_POLL_S for at most KARGS_SETTLE_TIMEOUT_S: `(False, "", why)` when one still runs then or
+        rpm-ostree cannot say."""
+        deadline = self._clock.monotonic() + KARGS_SETTLE_TIMEOUT_S
+        while True:
+            res = self._runner.run(
+                ["rpm-ostree", "status", "--json"],
+                on_host=True,
+                timeout=30,
+                locale_c=True,
+                output=OutputMode.CAPTURE,
+            )
+            if res.returncode != 0:
+                return False, "", res.failure("rpm-ostree status")
+            running = transaction_running(res.stdout)
+            if running is None:
+                return False, "", "rpm-ostree status --json named no transaction state"
+            if not running:
+                return self.read_kargs()
+            if self._clock.monotonic() >= deadline:
+                return False, "", KARGS_STILL_RUNNING
+            self._clock.sleep(KARGS_SETTLE_POLL_S)
+
     def read_top_mount(self) -> TopMountInfo | None:
         """Read installed `var-mnt-btrfs\\x2dtop.mount`, or return None when not installed."""
         text = self._fs.read_text(self._etc_file("systemd", "system", TOP_MOUNT_UNIT_NAME), None)
@@ -161,10 +189,11 @@ class LinuxCompressHostAdapter:
             return None
         return parse_top_mount_unit(text)
 
-    def write_fstab(self, text: str) -> None:
-        """Atomically write `/etc/fstab` and reload systemd units (restoring previous text on reload error)."""
+    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
+        """Atomically write `/etc/fstab` and reload systemd units (restoring previous text on reload error, unless
+        put_back is False: an undo, whose previous text is the one it undoes)."""
         path = self._etc_file("fstab")
-        previous = self._fs.read_text(path, None)
+        previous = self._fs.read_text(path, None) if put_back else None
         self._fs.write_atomic(path, text, mode=0o644)
         try:
             self._systemctl.daemon_reload()
@@ -194,10 +223,11 @@ class LinuxCompressHostAdapter:
         )
         return (res.returncode == 0, res.stderr.strip() or res.stdout.strip())
 
-    def update_top_mount(self, uuid: str, options: str) -> None:
-        """Re-render and verify `btrfs:top-mount` through `InstallService`, reload systemd, and mark done."""
+    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
+        """Re-render and verify `btrfs:top-mount` through `InstallService`, reload systemd, and mark done (the
+        previous unit put back on an error, unless put_back is False: an undo)."""
         root = checkout_root(self._entry_file) or self._fallback_root
-        prev_top = self.read_top_mount()
+        prev_top = self.read_top_mount() if put_back else None
         installer = InstallService(
             LocalInstallTarget(),
             lambda e: entry_payload(root, e),
@@ -212,7 +242,7 @@ class LinuxCompressHostAdapter:
             list(installer.install(entries, req))
             installer.mark(rec_path, Component.BTRFS_TOP_MOUNT)
             self._systemctl.daemon_reload()
-        except _TOP_MOUNT_ERRORS:
+        except TOP_MOUNT_ERRORS:
             # Put the previous unit back only when something was written (a refusal writes nothing).
             if prev_top is not None and self.read_top_mount() != prev_top:
                 prev_req = InstallRequest(

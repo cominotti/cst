@@ -424,11 +424,12 @@ class _Held(contextlib.AbstractContextManager[object]):
         return self
 
     @override
-    def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
+    def __exit__(self, *_: object) -> None:
         self.rec.depth -= 1
         if self.freezes:
             self.rec.holding = self.was
-        if self.rec.depth == 0 and self.rec.held_stop and exc_type is None:
+        # A stop pending at the outermost end is raised also when the block raised, as signals_held does.
+        if self.rec.depth == 0 and self.rec.held_stop:
             self.rec.held_stop = False
             raise vm_domain_backup.Stop("stopped by signal SIGTERM")
 
@@ -822,6 +823,26 @@ class NasReplayTest(unittest.TestCase):
             seen |= replay(self, path)
         self.assertEqual(sorted(SPEC_CALLS - seen), [], "no checked-in trace replays these")
         self.assertEqual(sorted(seen - SPEC_CALLS), [], "SPEC_CALLS lacks these")
+
+
+class HeldMatchesSignalsHeldTest(unittest.TestCase):
+    """The replay's held block does what signals_held does (PendingStopsMatchSignalsHeldTest in
+    test_vm_nas.py): a stop that came in it is raised at the end of the outermost one, also when the block
+    raised, with that failure as its __context__."""
+
+    def test_a_stop_pending_when_the_block_raises_is_raised(self) -> None:
+        rec = Recorder(World(targets=()), [], truncated=False)
+        with self.assertRaises(vm_domain_backup.Stop) as ctx, _Held(rec, freezes=True), _Held(rec, freezes=False):
+            rec.held_stop = True
+            raise RuntimeError("the block failed")
+        self.assertIsInstance(ctx.exception.__context__, RuntimeError)
+        self.assertEqual((rec.held_stop, rec.depth, rec.holding), (False, 0, False))
+
+    def test_a_failure_with_no_stop_pending_goes_on(self) -> None:
+        rec = Recorder(World(targets=()), [], truncated=False)
+        with self.assertRaisesRegex(RuntimeError, "the block failed"), _Held(rec, freezes=True):
+            raise RuntimeError("the block failed")
+        self.assertEqual(rec.depth, 0)
 
 
 if __name__ == "__main__":

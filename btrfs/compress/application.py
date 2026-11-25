@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from btrfs.compress.domain import (
     FSTAB_PATH,
+    FSTAB_UNREAD,
     PROC_MOUNTS_PATH,
+    REMOUNT_UNREAD,
     TOP_MOUNT_UNIT_PATH,
+    TOP_MOUNT_UNREAD,
     CoherenceReport,
     CompressMode,
     CompressPlan,
@@ -19,14 +22,18 @@ from btrfs.compress.domain import (
     build_plan,
     effective_compress_spec,
     extract_rootflags_tokens,
+    kargs_edits_staged,
+    kargs_unread,
     matches_target_spec,
     parse_proc_mounts,
     pick_root_mounts,
+    top_mount_changed,
 )
 from btrfs.compress.domain.args import CompressArgs, CompressCommand
-from btrfs.compress.ports import CompressHostPort
+from btrfs.compress.domain.rpm_ostree import kargs_refused
+from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
 from cst_core.domain.errors import Refused
-from cst_core.ports import CommandFailed, WriteFailed
+from cst_core.ports import CommandFailed
 
 
 @dataclass(slots=True)
@@ -34,7 +41,9 @@ class _ApplyProgress:
     fstab_written: bool = False
     kargs_applied: tuple[tuple[str, str], ...] = ()
     remounted: bool = False
+    top_written: bool = False
     orig_live_spec: CompressSpec | None = None
+    unknown: list[str] = field(default_factory=list)  # the layers that cannot be read back after their step failed
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +165,9 @@ class CompressService:
         plan = build_plan(snap, target_mode=target_mode, level_override=args.level)
         return CompressPlanResult(0, self._seam_proc, plan=plan, hint_cmd=hint_cmd)
 
-    def _apply_top_mount(self, snap: CompressSnapshot, plan: CompressPlan, msgs: list[str]) -> str | None:
+    def _apply_top_mount(
+        self, snap: CompressSnapshot, plan: CompressPlan, prog: _ApplyProgress, msgs: list[str]
+    ) -> str | None:
         if plan.new_top_mount_options is None or snap.top_mount is None:
             return None
         uuid = snap.top_mount.uuid or snap.root_uuid
@@ -164,7 +175,13 @@ class CompressService:
             return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
         try:
             self._host.update_top_mount(uuid, plan.new_top_mount_options)
-        except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
+        except TOP_MOUNT_ERRORS as exc:
+            # A failure whose put-back failed too leaves the new unit: it is undone with the rest; a unit that
+            # cannot be read back is named.
+            now = self._host.read_top_mount()
+            if now is None:
+                prog.unknown.append(TOP_MOUNT_UNREAD)
+            prog.top_written = top_mount_changed(now, plan.new_top_mount_options)
             return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
         msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")
         return None
@@ -174,6 +191,18 @@ class CompressService:
             return None
         ok, rerr = self._host.remount(plan.remount_target, plan.target_option)
         if not ok:
+            # mount(8) can answer a failure after the kernel changed the mount (it could not update its mount
+            # table, or it was killed after the call): a mount that shows the new value is undone with the
+            # rest; mounts that cannot be read back are named.
+            now = self._host.read_proc_mounts()
+            if now is None:
+                prog.unknown.append(REMOUNT_UNREAD)
+            else:
+                prog.remounted = any(
+                    e.target == plan.remount_target
+                    and matches_target_spec(effective_compress_spec(e.options), plan.target_mode, plan.target_level)
+                    for e in pick_root_mounts(parse_proc_mounts(now))
+                )
             return f"Failed to remount {plan.remount_target} with {plan.target_option}: {rerr}"
         prog.remounted = True
         after_roots = pick_root_mounts(parse_proc_mounts(self._host.read_proc_mounts() or ""))
@@ -186,7 +215,14 @@ class CompressService:
         return None
 
     def _rollback_layers(self, snap: CompressSnapshot, plan: CompressPlan, prog: _ApplyProgress) -> str:
-        errors: list[str] = []
+        errors: list[str] = list(prog.unknown)
+        if prog.top_written and snap.top_mount is not None:
+            try:
+                self._host.update_top_mount(
+                    snap.top_mount.uuid or snap.root_uuid, snap.top_mount.options, put_back=False
+                )
+            except TOP_MOUNT_ERRORS as exc:
+                errors.append(f"top-mount: {exc}")
         if prog.remounted and plan.remount_target is not None:
             revert_opt = prog.orig_live_spec.raw if prog.orig_live_spec is not None else "compress=no"
             ok, rerr = self._host.remount(plan.remount_target, revert_opt)
@@ -198,7 +234,7 @@ class CompressService:
                 errors.append(f"kargs: {kerr}")
         if prog.fstab_written and snap.fstab_text is not None:
             try:
-                self._host.write_fstab(snap.fstab_text)
+                self._host.write_fstab(snap.fstab_text, put_back=False)
             except (OSError, CommandFailed) as exc:
                 errors.append(f"fstab: {exc}")
         return f"ROLLBACK INCOMPLETE ({'; '.join(errors)})" if errors else "previous configuration restored."
@@ -220,13 +256,31 @@ class CompressService:
             try:
                 self._host.write_fstab(plan.new_fstab_text)
             except (OSError, CommandFailed) as exc:
-                return tuple(msgs), f"Failed to update {FSTAB_PATH}: {exc}"
+                failure = f"Failed to update {FSTAB_PATH}: {exc}"
+                # A write that failed after the new text was in place is undone like one that worked; one
+                # that cannot be read back is named.
+                now = self._host.read_fstab()
+                if now is None:
+                    prog.unknown.append(FSTAB_UNREAD)
+                elif now != plan.new_fstab_text:
+                    return tuple(msgs), failure
+                else:
+                    prog.fstab_written = True
+                return tuple(msgs), f"{failure}; {self._rollback_layers(snap, plan, prog)}"
             prog.fstab_written = True
             msgs.append(f"Updated {FSTAB_PATH} ({plan.target_option}) and reloaded systemd.")
 
         if plan.kargs_edits:
             ok, kerr = self._host.update_kargs(plan.kargs_edits)
             if not ok:
+                # rpm-ostree can stage the change and still answer a failure (a client that timed out while
+                # its transaction went on): the kernel arguments are read once no transaction runs. A change
+                # refused while another transaction runs staged nothing: they are read at once.
+                read = self._host.read_kargs() if kargs_refused(kerr) else self._host.read_settled_kargs()
+                if not read[0]:
+                    prog.unknown.append(kargs_unread(read[2]))
+                elif kargs_edits_staged(read, plan.kargs_edits):
+                    prog.kargs_applied = plan.kargs_edits
                 return tuple(
                     msgs
                 ), f"Failed to update rpm-ostree kargs: {kerr}; {self._rollback_layers(snap, plan, prog)}"
@@ -237,7 +291,7 @@ class CompressService:
         if remount_err is not None:
             return tuple(msgs), f"{remount_err}; {self._rollback_layers(snap, plan, prog)}"
 
-        top_err = self._apply_top_mount(snap, plan, msgs)
+        top_err = self._apply_top_mount(snap, plan, prog, msgs)
         if top_err is not None:
             return tuple(msgs), f"{top_err}; {self._rollback_layers(snap, plan, prog)}"
         return tuple(msgs), None

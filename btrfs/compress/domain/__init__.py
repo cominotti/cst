@@ -9,6 +9,8 @@ from enum import StrEnum
 import re
 from typing import Final
 
+from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.values import MINUTE
 from cst_core.domain.text import (
     file_lines,
     is_mount_comment,
@@ -29,6 +31,15 @@ PROC_CMDLINE_PATH: Final[str] = "/proc/cmdline"
 OSTREE_BOOTED_PATH: Final[str] = "/run/ostree-booted"
 TOP_MOUNT_UNIT_PATH: Final[str] = r"/etc/systemd/system/var-mnt-btrfs\x2dtop.mount"
 TOP_MOUNT_UNIT_NAME: Final[str] = r"var-mnt-btrfs\x2dtop.mount"
+# What ROLLBACK INCOMPLETE says of a layer that cannot be read back after its step failed.
+FSTAB_UNREAD: Final[str] = f"fstab: cannot read {FSTAB_PATH} back, its state is unknown"
+TOP_MOUNT_UNREAD: Final[str] = f"top-mount: cannot read {TOP_MOUNT_UNIT_PATH} back, its state is unknown"
+REMOUNT_UNREAD: Final[str] = "remount: cannot read the live mounts back, their state is unknown"
+# After a kargs change that answered a failure, how long the run waits for rpm-ostree to end the transaction
+# the change may have started (a client that timed out while the daemon went on), and how often it asks.
+KARGS_SETTLE_TIMEOUT_S: Final = 3 * MINUTE
+KARGS_SETTLE_POLL_S: Final = 2
+KARGS_STILL_RUNNING: Final[str] = "an rpm-ostree transaction is still running"
 
 # rpm-ostree mounts the booted deployment's root filesystem there too.
 _SYSROOT: Final = "/sysroot"
@@ -377,6 +388,41 @@ def rewrite_kargs_options(kargs_stdout: str, option_rewriter: Callable[[str], st
         if new_val != val:
             edits.append((tok, f"{ROOTFLAGS_PREFIX}{new_val}"))
     return tuple(edits)
+
+
+def kargs_edits_staged(read: tuple[bool, str, str], edits: Sequence[tuple[str, str]]) -> bool:
+    """Whether `rpm-ostree kargs`'s answer (read_kargs's `(ok, stdout, err)`) already holds each new
+    `rootflags=` token of edits and none of the old ones: a change that answered a failure but was staged
+    (rpm-ostree runs a transaction it started to its end). False when the read fails."""
+    ok, text, _err = read
+    if not ok or not edits:
+        return False
+    toks = set(extract_rootflags_tokens(text))
+    return all(new in toks and old not in toks for old, new in edits)
+
+
+def kargs_unread(err: str) -> str:
+    """What ROLLBACK INCOMPLETE says of the kernel arguments when they cannot be read back after a failed
+    change (the read's error, or KARGS_STILL_RUNNING)."""
+    return f"kargs: cannot read rpm-ostree kargs back ({err}), its state is unknown"
+
+
+def transaction_running(status_json: str) -> bool | None:
+    """Whether `rpm-ostree status --json`'s answer names a transaction that is running (its "transaction" is
+    not null); None when the text is not that answer."""
+    try:
+        doc = parse_json(status_json)
+    except ValueError:
+        return None
+    if not json_object(doc) or "transaction" not in doc:
+        return None
+    return doc["transaction"] is not None
+
+
+def top_mount_changed(top: TopMountInfo | None, new_options: str | None) -> bool:
+    """Whether the installed top-mount unit holds new_options: an update that failed and could not put
+    the previous unit back."""
+    return top is not None and new_options is not None and top.options == new_options
 
 
 def rewrite_kargs_rootflags(kargs_stdout: str, target_option: str) -> tuple[tuple[str, str], ...]:

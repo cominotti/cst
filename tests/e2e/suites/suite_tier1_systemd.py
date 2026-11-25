@@ -1365,6 +1365,155 @@ EOF
             """
 
 
+# test_240 to test_244: `cst btrfs compress-force` and `commit-interval` on an rpm-ostree booted host of stand-ins
+# (rpm-ostree, findmnt, mount) whose root filesystem has this UUID, with the btrfs top-mount unit really installed.
+KARGS_HOST_UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
+KARGS_TOP_UNIT = r"var-mnt-btrfs\x2dtop.mount"
+KARGS_TOP_UNITS = " ".join(
+    shlex.quote(f"/etc/systemd/system/{u}") for u in (KARGS_TOP_UNIT, r"var-mnt-btrfs\x2dtop.automount")
+)
+
+
+def kargs_host_guard(test: unittest.TestCase, c: str, w: str) -> None:
+    """Skips test when the btrfs top-mount unit or its automount already exists (another test's: the cleanup
+    removes them), and adds the cleanup of kargs_host_scaffold(w, ...) and kargs_top_mount_installed(...):
+    /etc/fstab, installed.json and /run/ostree-booted put back, the two units removed and loaded, w removed.
+    exec_bash runs bash -e: every step of the cleanup must run, also after one that fails."""
+    if exec_bash(c, f"for u in {KARGS_TOP_UNITS}; do [[ ! -e $u ]] || echo $u; done").stdout.strip():
+        test.skipTest("the btrfs top-mount unit or automount already exists (another test's)")
+    test.addCleanup(
+        exec_bash,
+        c,
+        f"""
+            set +e
+            {fstab_put_back(w)}
+            {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_put_back("/run/ostree-booted", w, "ostree-booted")}
+            rm -f {KARGS_TOP_UNITS}
+            systemctl daemon-reload
+            rm -rf {w}
+            """,
+        check=False,
+    )
+
+
+def kargs_host_scaffold(w: str, compress: str) -> str:
+    """The start of a bash script of test_240 to test_244: the work folder w (w/bin for the stand-ins, w/proc
+    for CST_BTRFS_COMPRESS_PROC and CST_BTRFS_COMMIT_PROC), /etc/fstab, installed.json and /run/ostree-booted
+    saved (kargs_host_guard puts them back), and an rpm-ostree booted host whose root filesystem's /etc/fstab
+    lines, live mounts (w/proc/mounts), staged kernel arguments (w/kargs) and booted ones (w/proc/cmdline)
+    carry compress (compress=zstd:1 or compress-force=zstd:1)."""
+    return f"""set -euo pipefail
+            rm -rf {w}
+            mkdir -p {w}/bin {w}/proc
+            {fstab_saved(w)}
+            {file_saved("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_saved("/run/ostree-booted", w, "ostree-booted")}
+            touch /run/ostree-booted
+            printf 'UUID={KARGS_HOST_UUID} / btrfs subvol=root,degraded,{compress},noatime,flushoncommit 0 0\\nUUID={KARGS_HOST_UUID} /var btrfs subvol=var,degraded,{compress},noatime,flushoncommit 0 0\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,{compress},ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,{compress},ssd,flushoncommit,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={KARGS_HOST_UUID} rw rootflags=subvol=root,degraded,{compress},noatime,flushoncommit\\n' >{w}/kargs
+            cp {w}/kargs {w}/proc/cmdline"""
+
+
+def kargs_findmnt_stub(w: str) -> str:
+    """The bash lines that write w/bin/findmnt: the root's UUID for `--target ... UUID`, the mounts of
+    w/proc/mounts (source, target, options) for a call that asks OPTIONS, the real findmnt for the rest."""
+    return f"""cat >{w}/bin/findmnt <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then echo "{KARGS_HOST_UUID}"; exit 0; fi
+if [[ " $* " == *"OPTIONS"* ]]; then
+    while read -r src tgt _ opts _; do printf '%s %s %s\\n' "$src" "$tgt" "$opts"; done <{w}/proc/mounts
+    exit 0
+fi
+exec /usr/bin/findmnt "$@"
+EOF"""
+
+
+def kargs_mount_stub(w: str, then: str = "") -> str:
+    """The bash lines that write w/bin/mount: a remount (`-o remount,OPTION ... TARGET`) changes every mount
+    of TARGET's device in w/proc/mounts as the kernel does (the option of the same family replaced, compress
+    and compress-force being one; commit=30 not shown); then (bash lines, each ending in a newline) runs after
+    it."""
+    return f"""cat >{w}/bin/mount <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+opt=""
+for a in "$@"; do case "$a" in remount,*) opt="${{a#remount,}}" ;; esac; done
+if [[ -n "$opt" ]]; then
+    # The kernel changes every mount of the device: the option of the same family replaced (compress and
+    # compress-force are one), commit=30 not shown.
+    python3 -c '
+import sys
+p, opt, target = sys.argv[1], sys.argv[2], sys.argv[3]
+fam = lambda t: "compress" if t.split("=")[0] in ("compress", "compress-force") else t.split("=")[0]
+lines = open(p).read().splitlines(keepends=True)
+dev = next(ln.split()[0] for ln in lines if ln.split()[1] == target)
+out = []
+for ln in lines:
+    toks = ln.split()
+    if toks[0] == dev:
+        kept = [t for t in toks[3].split(",") if fam(t) != fam(opt)]
+        toks[3] = ",".join(kept + ([] if opt == "commit=30" else [opt]))
+    out.append(" ".join(toks) + "\\n")
+open(p, "w").write("".join(out))
+' {w}/proc/mounts "$opt" "${{@: -1}}"
+{then}fi
+EOF"""
+
+
+def kargs_staged(w: str, indent: str = "") -> str:
+    """The bash lines of an rpm-ostree stand-in that stage `kargs --delete=OLD --append=NEW ...` (its
+    arguments after `kargs`) in w/kargs, each after indent."""
+    lines = f"""cur="$(cat {w}/kargs)"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --delete=*) old="${{1#--delete=}}"; cur="${{cur//${{old}}/}}" ;;
+        --append=*) add="${{1#--append=}}"; cur="${{cur}} ${{add}}" ;;
+    esac
+    shift
+done
+printf '%s\\n' "$(echo "${{cur}}" | xargs)" >{w}/kargs"""
+    return "\n".join(indent + line for line in lines.splitlines())
+
+
+def kargs_top_mount_installed(compress: str) -> str:
+    """The bash lines that install the btrfs top-mount unit of the root filesystem with compress in its
+    options, mark it in installed.json (kargs_host_guard removes it) and load it."""
+    return f""". /opt/cst-rw/cst-install.bash
+            cst_install --set "UUID={KARGS_HOST_UUID}" --set "OPTIONS=subvolid=5,noatime,degraded,{compress},ssd,flushoncommit" --component btrfs:top-mount
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload"""
+
+
+def kargs_tool_loop_head(w: str, *counted: str) -> str:
+    """The bash lines that put the stand-ins first on PATH, define rootflags (the last rootflags= of w/kargs)
+    and start a loop over compress-force and commit-interval ($tool): the files the stand-ins count in
+    (counted, in w) removed, /etc/fstab and rootflags= saved (w/fstab.before, w/rootflags.before), and an
+    apply that must fail, its output in $run_out. The test's checks follow, then KARGS_TOOL_LOOP_TAIL."""
+    reset = " ".join(f"{w}/{name}" for name in counted)
+    return f"""export PATH="{w}/bin:$PATH" CST_BTRFS_COMPRESS_PROC="{w}/proc" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            rootflags() {{ grep -oE 'rootflags=[^ ]+' {w}/kargs | tail -n 1; }}
+            for tool in "compress-force" "commit-interval"; do
+                rm -f {reset}
+                cp /etc/fstab {w}/fstab.before
+                rootflags >{w}/rootflags.before
+                if run_out="$(/opt/cst-rw/cst btrfs "$tool" apply --yes 2>&1)"; then
+                    echo "$tool apply exited 0: $run_out" >&2; exit 1
+                fi"""
+
+
+def kargs_tool_loop_tail(marker: str) -> str:
+    """The end of kargs_tool_loop_head's loop: the same apply again converges, and a third has nothing to do;
+    after both tools, rootflags= carries the value of each, and the script prints marker."""
+    return f"""/opt/cst-rw/cst btrfs "$tool" apply --yes >/dev/null
+                /opt/cst-rw/cst btrfs "$tool" apply --yes | grep -qF "nothing to do"
+            done
+            rootflags | grep -qF "compress-force=zstd:1"
+            rootflags | grep -qF "commit=60"
+            echo {marker}"""
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER: ClassVar[str] = ""
     NAS_CONTAINER: ClassVar[str] = ""
@@ -10561,10 +10710,16 @@ echo E2E-OK
         uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
         home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0"
         home_mount = "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0"
+        # The cleanup removes the top-mount units: never ones the test did not make.
+        units = " ".join(shlex.quote(f"/etc/systemd/system/{u}") for u in (top_unit, auto_unit))
+        if exec_bash(c, f"for u in {units}; do [[ ! -e $u ]] || echo $u; done").stdout.strip():
+            self.skipTest("the btrfs top-mount unit or automount already exists (another test's)")
         self.addCleanup(
             exec_bash,
             c,
             f"""
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            set +e
             {fstab_put_back(w)}
             {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
             {file_put_back("/run/ostree-booted", w, "ostree-booted")}
@@ -10776,6 +10931,8 @@ EOF
             exec_bash,
             c,
             f"""
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            set +e
             {fstab_put_back(w)}
             {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
             {file_put_back("/run/ostree-booted", w, "ostree-booted")}
@@ -11000,6 +11157,292 @@ EOF
         ).stdout
         self.assertIn("E2E-COMMIT-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_240_btrfs_commit_interval_stops_at_a_failed_kargs_step(self) -> None:
+        """`cst btrfs commit-interval apply` with an rpm-ostree whose `kargs --delete... --append...` is refused
+        with rpm-ostreed's words while another transaction runs (`status --json` names an Upgrade throughout):
+        the run exits 1 saying the previous configuration was restored, without waiting for that transaction or
+        asking status (the refused change staged nothing), /etc/fstab is back at its bytes, no remount runs, and
+        the top-mount unit, really installed, verified and recorded in installed.json and loaded by PID 1, keeps
+        its bytes, as installed.json does (B0: the run used to remount and to write commit=60 into the unit after
+        the failure, and never undo the unit; and it used to wait 3 minutes for the other transaction, then end
+        ROLLBACK INCOMPLETE naming the kernel arguments unknown)."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-commit-b0"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress-force=zstd:1")}
+
+            # rpm-ostree: kargs reads answer; another transaction (an Upgrade) runs throughout, so every change is
+            # refused with no effect, in rpmostreed's words; each status call is written down.
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then
+    echo status >>{w}/status-calls
+    echo '{{"deployments": [], "transaction": ["Upgrade", ":1.42", "/org/projectatomic/rpmostree1/fedora/Transaction"]}}'
+    exit 0
+fi
+printf 'error: Transaction in progress: upgrade\\n You can cancel the current transaction with `rpm-ostree cancel`\\n' >&2
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            # mount: every call written down, nothing changed.
+            cat >{w}/bin/mount <<'EOF'
+#!/usr/bin/env bash
+echo "mount $*" >>{w}/calls
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            {kargs_top_mount_installed("compress-force=zstd:1")}
+            systemctl show -p LoadState --value {shlex.quote(KARGS_TOP_UNIT)} | grep -qxF loaded
+            cp "/etc/systemd/system/{KARGS_TOP_UNIT}" {w}/unit.before
+            cp /var/lib/cst/installed.json {w}/record.before
+            cp /etc/fstab {w}/fstab.before
+
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            if apply_out="$(/opt/cst-rw/cst btrfs commit-interval apply --yes 2>&1)"; then
+                echo "apply exited 0: $apply_out" >&2; exit 1
+            fi
+            grep -qF "Failed to update rpm-ostree kargs: error: Transaction in progress: upgrade" <<<"$apply_out"
+            grep -qF ' You can cancel the current transaction with `rpm-ostree cancel`; previous configuration restored.' <<<"$apply_out" || {{ echo "not restored: $apply_out" >&2; exit 1; }}
+            if [[ -e {w}/status-calls ]]; then echo "the run waited on the other transaction: $apply_out" >&2; exit 1; fi
+            cmp -s /etc/fstab {w}/fstab.before
+            cmp -s "/etc/systemd/system/{KARGS_TOP_UNIT}" {w}/unit.before
+            cmp -s /var/lib/cst/installed.json {w}/record.before
+            if [[ -e {w}/calls ]]; then echo "a remount ran: $(cat {w}/calls)" >&2; exit 1; fi
+            echo E2E-COMMIT-B0-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-COMMIT-B0-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_241_btrfs_compress_and_commit_undo_kargs_staged_by_a_call_that_failed(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change is
+        staged and then answers a failure (a client that timed out after its transaction started; later calls
+        are honest): each run exits 1 saying the previous configuration was restored, the staged rootflags= is
+        back at its start (the run read it again and undid it) and /etc/fstab at its bytes; the same command
+        again then converges. Before the fix the next boot's rootflags= kept the new value."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-torn-kargs"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+
+            # rpm-ostree: the first change after {w}/changes is removed is staged, then answers a failure.
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+{kargs_staged(w, "    ")}
+    n=$(( $(cat {w}/changes 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >{w}/changes
+    if [[ $n -eq 1 ]]; then echo "error: timed out" >&2; exit 1; fi
+    exit 0
+fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            {kargs_top_mount_installed("compress=zstd:1")}
+
+            {kargs_tool_loop_head(w, "changes")}
+                grep -qF "Failed to update rpm-ostree kargs: error: timed out; previous configuration restored." <<<"$run_out"
+                [[ "$(rootflags)" == "$(cat {w}/rootflags.before)" ]] || {{ echo "$tool: rootflags left at $(rootflags)" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+                [[ "$(cat {w}/changes)" == 2 ]]  # the change, then its undo
+                {kargs_tool_loop_tail("E2E-TORN-KARGS-OK")}
+            """,
+        ).stdout
+        self.assertIn("E2E-TORN-KARGS-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_242_btrfs_compress_and_commit_wait_for_a_kargs_transaction_that_goes_on(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change answers a
+        failure at once while its transaction goes on and stages the change 3 s later (`rpm-ostree status --json`
+        names the transaction until then; later calls are honest): each run exits 1 saying the previous
+        configuration was restored, only after the transaction ended (the run waited for it), with the staged
+        rootflags= back at its start and /etc/fstab at its bytes; the same command again then converges. Before
+        the fix the run read the kernel arguments at once, saw the old ones, and the change was staged after it
+        said it had restored everything."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-lagging-kargs"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+
+            # rpm-ostree: the first change after {w}/changes is removed answers a failure at once and is staged 3 s
+            # later, by a transaction that status --json names until then; a change while it runs is refused.
+            cat >{w}/bin/stage-kargs <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+{kargs_staged(w)}
+EOF
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then
+    if [[ -e {w}/txn ]]; then
+        echo '{{"deployments": [], "transaction": ["KernelArgs", ":1.9", "/org/projectatomic/rpmostree1/fedora/Transaction"]}}'
+    else
+        echo '{{"deployments": [], "transaction": null}}'
+    fi
+    exit 0
+fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+    if [[ -e {w}/txn ]]; then echo "error: Transaction in progress" >&2; exit 1; fi
+    n=$(( $(cat {w}/changes 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >{w}/changes
+    if [[ $n -eq 1 ]]; then
+        touch {w}/txn
+        ( sleep 3; {w}/bin/stage-kargs "$@"; rm -f {w}/txn ) </dev/null >/dev/null 2>&1 &
+        echo "error: timed out" >&2
+        exit 1
+    fi
+    {w}/bin/stage-kargs "$@"
+    exit 0
+fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/stage-kargs {w}/bin/findmnt {w}/bin/mount
+
+            {kargs_top_mount_installed("compress=zstd:1")}
+
+            {kargs_tool_loop_head(w, "changes")}
+                grep -qF "Failed to update rpm-ostree kargs: error: timed out; previous configuration restored." <<<"$run_out"
+                [[ ! -e {w}/txn ]] || {{ echo "$tool: the run ended while the kargs transaction still ran" >&2; exit 1; }}
+                [[ "$(rootflags)" == "$(cat {w}/rootflags.before)" ]] || {{ echo "$tool: rootflags left at $(rootflags)" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+                [[ "$(cat {w}/changes)" == 2 ]]  # the change, then its undo
+                {kargs_tool_loop_tail("E2E-LAGGING-KARGS-OK")}
+            """,
+        ).stdout
+        self.assertIn("E2E-LAGGING-KARGS-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_243_btrfs_compress_and_commit_undo_a_remount_that_failed_after_it_took_effect(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` with a mount whose first remount changes the
+        mounts and then exits 16, as mount(8) does when it could not update its mount table after the kernel made
+        the change (later calls are honest): each run exits 1 saying the previous configuration was restored,
+        the live mounts are back at their start (the run read them again and remounted back), and the kernel
+        arguments and /etc/fstab too; the same command again then converges. Before the fix the live mounts kept
+        the new value while the run said it restored everything."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-torn-remount"
+        kargs_host_guard(self, c, w)
+        # mount: the first remount takes effect and then exits 16, as mount(8) does when it cannot update its table.
+        torn_remount = f"""    n=$(( $(cat {w}/remounts 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >{w}/remounts
+    if [[ $n -eq 1 ]]; then echo "mount: ${{@: -1}}: filesystem was remounted, but cannot update its mount table." >&2; exit 16; fi
+"""
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+
+            # rpm-ostree: every change is staged and answers that it worked.
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+{kargs_staged(w, "    ")}
+    exit 0
+fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w, then=torn_remount)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            {kargs_top_mount_installed("compress=zstd:1")}
+
+            {kargs_tool_loop_head(w, "remounts")}
+                grep -qF "cannot update its mount table.; previous configuration restored." <<<"$run_out"
+                new_opt="compress-force=zstd:1"; [[ "$tool" == "compress-force" ]] || new_opt="commit=60"
+                if grep -qF "$new_opt" {w}/proc/mounts; then echo "$tool: mounts left at $(cat {w}/proc/mounts)" >&2; exit 1; fi
+                [[ "$(rootflags)" == "$(cat {w}/rootflags.before)" ]] || {{ echo "$tool: rootflags left at $(rootflags)" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+                [[ "$(cat {w}/remounts)" == 2 ]]  # the remount, then its undo
+                {kargs_tool_loop_tail("E2E-TORN-REMOUNT-OK")}
+            """,
+        ).stdout
+        self.assertIn("E2E-TORN-REMOUNT-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_244_btrfs_compress_and_commit_undo_keeps_the_old_fstab_when_its_reload_fails(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change fails with
+        no effect (later calls are honest) and a systemctl whose second daemon-reload of the run fails (the undo's):
+        each run exits 1 with ROLLBACK INCOMPLETE naming /etc/fstab, and /etc/fstab holds its old bytes (the undo
+        wrote them and did not put the new text back after its reload failed), the staged rootflags= its start;
+        the same command again then converges. Before the fix the undo put the new text back."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-undo-reload"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+
+            # rpm-ostree: the first change after {w}/changes is removed fails with no effect.
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    n=$(( $(cat {w}/changes 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >{w}/changes
+    if [[ $n -eq 1 ]]; then echo "error: Transaction in progress" >&2; exit 1; fi
+    shift
+{kargs_staged(w, "    ")}
+    exit 0
+fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            # systemctl: the second daemon-reload after {w}/reloads is removed fails; every call goes on to the real one.
+            cat >{w}/bin/systemctl <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" daemon-reload "* ]]; then
+    n=$(( $(cat {w}/reloads 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >{w}/reloads
+    if [[ $n -eq 2 ]]; then echo "Failed to reload daemon: Access denied" >&2; exit 1; fi
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount {w}/bin/systemctl
+
+            {kargs_top_mount_installed("compress=zstd:1")}
+
+            {kargs_tool_loop_head(w, "changes", "reloads")}
+                grep -qF "Failed to update rpm-ostree kargs: error: Transaction in progress; ROLLBACK INCOMPLETE (fstab: " <<<"$run_out" || {{ echo "$tool: $run_out" >&2; exit 1; }}
+                [[ "$(cat {w}/reloads)" == 2 ]] || {{ echo "$tool: reloads $(cat {w}/reloads)" >&2; exit 1; }}  # the forward write's, then the undo's
+                [[ "$(rootflags)" == "$(cat {w}/rootflags.before)" ]] || {{ echo "$tool: rootflags left at $(rootflags)" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+                [[ "$(cat {w}/changes)" == 1 ]]  # the failed change, no undo
+                {kargs_tool_loop_tail("E2E-UNDO-RELOAD-OK")}
+            """,
+        ).stdout
+        self.assertIn("E2E-UNDO-RELOAD-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
     def test_160_btrfs_cache_attach_detach_and_doctor(self) -> None:
         """`cst btrfs cache` per user, under a test root (CST_BTRFS_CACHE_ROOT), with real systemd and `cst doctor`.
@@ -11032,6 +11475,8 @@ EOF
             exec_bash,
             c,
             f"""
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            set +e
             {fstab_put_back(w)}
             {file_put_back("/etc/crypttab", w, "crypttab")}
             systemctl daemon-reload || true

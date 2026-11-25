@@ -3653,6 +3653,44 @@ class LeftoversTest(GameProfileCase):
         out, _ = self.run_profile("state")
         self.assertNotIn("leftovers", out)
 
+    def test_a_failed_undo_of_another_uid_s_entry_stays_that_uid_s(self) -> None:
+        # USER's 'off' retries uid 1001's kept entry; its undo, in the manager of other (uid 1001's name), fails
+        # again. The entry stays uid 1001's, even where the name other now looks up to another uid (1002: the
+        # accounts changed between the two lookups), never the uid of the user acted for.
+        for uid in ("1001", "1002"):  # both user managers run
+            os.makedirs(os.path.join(self.paths.run_user, uid, "systemd"))
+        kept = "cst-game-leftovers 2\nuser 1001\nprop usr background.slice CPUWeight existed 100\n"
+        self.write(self.paths.leftovers, kept)
+        self.systemd.fail_set.add(("usr", "background.slice"))
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            self.settings,
+            self.systemd,
+            uid_of=lambda u: {USER: UID, "other": "1002"}.get(u, ""),
+            name_of=lambda uid: {UID: USER, "1001": "other"}.get(uid, ""),
+            out=out,
+        )
+        p.off()
+        self.assertIn("-M other@ set-property --runtime background.slice CPUWeight=100", " ".join(self.systemd.actions))
+        self.assertEqual(self.read(self.paths.leftovers), kept)
+        self.assertIn("off: could not undo background.slice CPUWeight=100", out.getvalue())
+
+    def test_a_file_that_cannot_be_written_keeps_one_user_s_entry_not_another_s_of_the_same_record(self) -> None:
+        # uid 1001's entry and USER's of one record both failed; the file held 1001's and cannot be written: it
+        # is left as it is, so 1001's entry is still kept and USER's is said lost.
+        from cpu.game.application.leftovers import keep
+
+        rec = ("prop", "usr", "user.slice", "CPUWeight", "new", "-")
+        out = io.StringIO()
+        ports = machine_ports(self.paths, self.systemd, uid_of=lambda _u: UID, out=out)
+        p = GameProfileSteps(
+            self.paths, self.settings, dataclasses.replace(ports, leftovers=FullLeftovers(self.paths.leftovers))
+        )
+        self.assertEqual(keep(p, [(UID, rec), ("1001", rec)], [("1001", rec)]), 1)
+        self.assertEqual(out.getvalue().count("could not keep"), 1, out.getvalue())
+        self.assertEqual(out.getvalue().count("kept in"), 1, out.getvalue())
+
 
 class GameProfileWatchdogTest(GameProfileCase):
     """tick switches the profile on and off with the game, and leaves a by-hand choice alone."""

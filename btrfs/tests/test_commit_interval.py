@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 import io
 import os
 import shutil
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -39,7 +39,7 @@ from btrfs.compress.domain import (
     parse_fstab_root_entries,
     parse_top_mount_unit,
 )
-from cst_core.domain.errors import Refused
+from btrfs.tests.fakes import CacheTestCtx, LayerHost, LayerHostState
 from tests.repo_files import REPO
 
 SAMPLE_UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
@@ -74,111 +74,37 @@ SAMPLE_TOP_MOUNT = (
 )
 
 
-class _FakeCtx:
-    def __init__(self, *, container: bool = False, root: bool = True) -> None:
-        self._container = container
-        self._root = root
-
-    def is_container(self) -> bool:
-        return self._container
-
-    def is_root(self) -> bool:
-        return self._root
-
-    def path(self, host_path: str) -> str:
-        return f"/run/host/{host_path.lstrip('/')}" if self._container and host_path.startswith("/") else host_path
-
-    def etc_dir(self) -> str:
-        return "/run/host/etc" if self._container else "/etc"
-
-    def host_run_dir(self, subpath: str) -> str:
-        return f"/run/host/{subpath}" if self._container else f"/run/{subpath}"
-
-
 @dataclass
-class _FakeState:
-    is_ostree: bool = True
+class _FakeState(LayerHostState):
     root_uuid: str = SAMPLE_UUID
     fstab: str | None = SAMPLE_FSTAB
     proc_mounts: str | None = SAMPLE_PROC_MOUNTS
     proc_cmdline: str | None = SAMPLE_KARGS
-    kargs_ok: bool = True
     kargs_text: str = SAMPLE_KARGS
-    kargs_err: str = ""
     top_mount: TopMountInfo | None = field(default_factory=lambda: parse_top_mount_unit(SAMPLE_TOP_MOUNT))
-    confirm_answer: bool | None = True
-    fail_kargs: str | None = None
-    fail_remount: str | None = None
-    fake_remount_effect: bool = True
-    fail_top_mount: Exception | None = None
 
 
-class _FakeHost:
-    def __init__(self, state: _FakeState | None = None) -> None:
-        self.s = _FakeState() if state is None else state
-        self.calls: list[str] = []
+class _FakeHost(LayerHost):
+    def __init__(self, state: _FakeState | None = None, *, torn: str | None = None) -> None:
+        super().__init__(_FakeState() if state is None else state, torn=torn)
 
-    def is_ostree(self) -> bool:
-        return self.s.is_ostree
+    @override
+    def remounted(self, mounts: str, target: str, option: str) -> str:
+        val = int(option.removeprefix("commit="))
+        target_opt = None if val == 30 else val
+        # The kernel changes every mount of the remounted filesystem (its device), and only those.
+        lines = [line.split() for line in mounts.splitlines()]
+        device = next((f[0] for f in lines if f[1] == target), None)
+        updated = [
+            f"{f[0]} {f[1]} btrfs {rewrite_commit_options(f[3], target_opt) if f[0] == device else f[3]} 0 0"
+            for f in lines
+        ]
+        return "\n".join(updated) + "\n"
 
-    def root_uuid(self) -> str:
-        return self.s.root_uuid
-
-    def read_fstab(self) -> str | None:
-        return self.s.fstab
-
-    def read_proc_mounts(self) -> str | None:
-        return self.s.proc_mounts
-
-    def read_proc_cmdline(self) -> str | None:
-        return self.s.proc_cmdline
-
-    def read_kargs(self) -> tuple[bool, str, str]:
-        return (self.s.kargs_ok, self.s.kargs_text, self.s.kargs_err)
-
-    def read_top_mount(self) -> TopMountInfo | None:
-        return self.s.top_mount
-
-    def write_fstab(self, text: str) -> None:
-        self.calls.append("write_fstab")
-        self.s.fstab = text
-
-    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
-        self.calls.append(f"update_kargs:{edits}")
-        if self.s.fail_kargs is not None:
-            return False, self.s.fail_kargs
-        for old_tok, new_tok in edits:
-            self.s.kargs_text = self.s.kargs_text.replace(old_tok, new_tok, 1)
-        return True, ""
-
-    def remount(self, target: str, option: str) -> tuple[bool, str]:
-        self.calls.append(f"remount:{target}:{option}")
-        if self.s.fail_remount is not None:
-            return False, self.s.fail_remount
-        if self.s.fake_remount_effect and self.s.proc_mounts is not None:
-            val = int(option.removeprefix("commit="))
-            target_opt = None if val == 30 else val
-            # The kernel changes every mount of the remounted filesystem (its device), and only those.
-            lines = [line.split() for line in self.s.proc_mounts.splitlines()]
-            device = next((f[0] for f in lines if f[1] == target), None)
-            updated = [
-                f"{f[0]} {f[1]} btrfs {rewrite_commit_options(f[3], target_opt) if f[0] == device else f[3]} 0 0"
-                for f in lines
-            ]
-            self.s.proc_mounts = "\n".join(updated) + "\n"
-        return True, ""
-
-    def update_top_mount(self, uuid: str, options: str) -> None:
-        self.calls.append(f"update_top_mount:{uuid}")
-        if self.s.fail_top_mount is not None:
-            raise self.s.fail_top_mount
-        self.s.top_mount = TopMountInfo(installed=True, uuid=uuid, options=options)
-
-    def confirm(self, prompt: str) -> bool:
-        self.calls.append(f"confirm:{prompt}")
-        if self.s.confirm_answer is None:
-            raise Refused("apply asks for confirmation: run it in a terminal")
-        return self.s.confirm_answer
+    @override
+    def top_mount_call(self, uuid: str, options: str) -> str:
+        del options  # written down by its UUID only
+        return f"update_top_mount:{uuid}"
 
 
 class CommitDomainTests(unittest.TestCase):
@@ -421,6 +347,62 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             self.assertNotIn("commit=60", bad_host.s.proc_mounts or "")
             self.assertIn("previous configuration restored", "\n".join(out_b))
 
+    def test_a_failed_step_that_changed_its_layer_is_undone_too(self) -> None:
+        # /etc/fstab in place before its folder's sync failed, rpm-ostree staged before it timed out, a
+        # top-mount unit whose put-back failed: each is undone with the earlier layers.
+        start = _FakeState()
+        for torn, undone in (
+            ("fstab", ["write_fstab", "write_fstab"]),
+            ("kargs", ["write_fstab", "update_kargs", "update_kargs", "write_fstab"]),
+            (
+                "top",
+                [
+                    "write_fstab",
+                    "update_kargs",
+                    "remount",
+                    "update_top_mount",
+                    "update_top_mount",
+                    "remount",
+                    "update_kargs",
+                    "write_fstab",
+                ],
+            ),
+        ):
+            with self.subTest(torn=torn):
+                host = _FakeHost(torn=torn)
+                rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+                self.assertEqual(rc, 1, out)
+                self.assertTrue(out[-1].endswith("; previous configuration restored."), out[-1])
+                self.assertEqual([c.split(":", 1)[0] for c in host.calls], undone)
+                self.assertEqual(host.s.fstab, start.fstab)
+                self.assertEqual(host.s.kargs_text, start.kargs_text)
+                self.assertEqual(host.s.top_mount, start.top_mount)
+                self.assertEqual(host.s.proc_mounts, start.proc_mounts)
+
+    def test_a_failed_step_stops_the_run_before_the_later_layers(self) -> None:
+        # A failed kargs step runs no remount; no failure is followed by a top-mount update; every earlier layer
+        # is put back, in reverse.
+        cases = (
+            (_FakeState(fail_kargs="busy"), ["write_fstab", "update_kargs", "write_fstab"]),
+            (
+                _FakeState(fail_remount="mount failed"),
+                ["write_fstab", "update_kargs", "remount", "update_kargs", "write_fstab"],
+            ),
+            (
+                _FakeState(fake_remount_effect=False),  # the verification after the remount fails
+                ["write_fstab", "update_kargs", "remount", "remount", "update_kargs", "write_fstab"],
+            ),
+        )
+        for state, calls in cases:
+            with self.subTest(calls=calls):
+                host = _FakeHost(state)
+                top_before = host.s.top_mount
+                rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+                self.assertEqual(rc, 1, out)
+                self.assertEqual([c.split(":", 1)[0] for c in host.calls], calls)
+                self.assertEqual(host.s.top_mount, top_before)
+                self.assertTrue(out[-1].endswith("; previous configuration restored."), out[-1])
+
     def test_a_separate_btrfs_home_is_left_alone(self) -> None:
         # /var/home is another btrfs filesystem (dm-1, its own UUID): apply and revert change only the root's.
         home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /home btrfs subvol=home,compress=zstd:3,noatime 0 0\n"
@@ -586,7 +568,7 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             env={"CST_BTRFS_COMMIT_ROOT": tmp, "CST_BTRFS_COMMIT_PROC": os.path.join(tmp, "proc")},
             out=out,
             err=err,
-            ctx=_FakeCtx(container=True, root=False),
+            ctx=CacheTestCtx(container=True, root=False),
         )
         self.assertEqual(run_commit_cli(["status"], deps=deps), 0, err.getvalue())
         self.assertIn("coherent (commit=30 (default))", out.getvalue())

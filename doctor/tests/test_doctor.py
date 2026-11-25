@@ -3092,6 +3092,40 @@ class GameProfileTest(Scratch):
         self.profile_on()
         self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 7 settings it made still hold")])
 
+    def test_a_recorded_uid_with_no_account_falls_back_to_target_user(self) -> None:
+        # game.state names a uid no account has (999999) and TARGET_USER names tester: the profile acts for
+        # tester, and the user manager boxes looked at are tester's (a slice of tester's own warns).
+        tester = types.SimpleNamespace(pw_name="tester", pw_uid=4243)
+        mine = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", "user-4243.slice", "user@4243.service")
+        os.makedirs(os.path.join(mine, "x.slice"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='tester'\n")
+        with open(os.path.join(self.run_dir, "game.state"), "w") as f:
+            f.write("prop sys user@999999.service MemoryLow new -\n")
+
+        def by_uid(uid: int) -> types.SimpleNamespace:
+            if uid != tester.pw_uid:
+                raise KeyError(uid)
+            return tester
+
+        def by_name(name: str) -> types.SimpleNamespace:
+            if name != tester.pw_name:
+                raise KeyError(name)
+            return tester
+
+        host = doc_adapters.Host(self.env, repo=REPO)
+        host.uid = 0
+        with (
+            mock.patch.dict(os.environ, self.env, clear=True),
+            mock.patch.object(doc_adapters.pwd, "getpwuid", by_uid),
+            mock.patch.object(doc_adapters.pwd, "getpwnam", by_name),
+        ):
+            user = doc_cpu.profile_user(host)
+            res = list(doc_cpu.check_user_manager_boxes(host))
+        self.assertEqual(user, "tester")
+        self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+        self.assertIn("user manager: x.slice is a slice of its own", res[0].message)
+
 
 class UserManagerBoxesTest(Scratch):
     """The cpu check of the user manager's cgroup tree: top-level slices CST

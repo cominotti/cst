@@ -3168,9 +3168,11 @@ assert d["samples"] >= 1, d["samples"]
             self.PRIV_CONTAINER,
             f"""
             /opt/cst-rw/cst btrfs compress-force revert --yes >/dev/null 2>&1 || true
+            # /etc/fstab is put back, removed only where the script found none (no-fstab), and left alone
+            # where the script stopped before it looked.
             if [[ -f {w}/fstab.bak ]]; then
                 cp -a {w}/fstab.bak /etc/fstab
-            else
+            elif [[ -f {w}/no-fstab ]]; then
                 rm -f /etc/fstab
             fi
             rm -rf {w}
@@ -3181,8 +3183,9 @@ assert d["samples"] >= 1, d["samples"]
             self.PRIV_CONTAINER,
             f"""
             set -euo pipefail
-            rm -rf {w} && mkdir -p {w}
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            rm -rf {w}
+            mkdir -p {w}
+            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
             loop_uuid="$(cat /run/e2e-loop-uuid)"
             printf 'UUID=%s /sysroot btrfs subvol=root,degraded,compress=zstd:1,noatime,discard=async,space_cache=v2,ssd,flushoncommit 0 0\\nUUID=%s /var btrfs subvol=var,degraded,compress=zstd:1,noatime,discard=async,space_cache=v2,ssd,flushoncommit 0 0\\nUUID=%s /var/home btrfs subvol=home,degraded,compress=zstd:1,noatime,discard=async,space_cache=v2,ssd,flushoncommit 0 0\\n' "$loop_uuid" "$loop_uuid" "$loop_uuid" >/etc/fstab
 

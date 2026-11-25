@@ -93,4 +93,6 @@ This plan has been carried out. The gates, profiles, worker counts and measured 
 - **Not adopted:**
   - CrossHair (technique 4): the pilot found no proof and gave false counterexamples. The three real gaps it pointed at became unit tests.
   - A Hypothesis machine for docker-volumes-nocow: exhaustive fault injection and TLC already cover its whole state space.
+  - A Hypothesis machine for the NAS backup: its Quint spec and the replay of its traces cover its runs.
+  - A Hypothesis machine for toolchains' prune and bluetooth's apply and revert: exhaustive fault injection covers their whole cut-point space.
   - Quint for the game profile: not until its lock contention grows.

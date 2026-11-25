@@ -1579,7 +1579,42 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
    `Options=` changes; its other options stay as they are (the live `/var`'s
    options are not copied in).
 
-On failure at any step, prior changes are rolled back so the layers never drift.
+**When a step fails:** a step that fails stops the run before the later
+layers, and the earlier ones are undone in reverse (the live remount, then
+the kernel arguments, then `/etc/fstab`). That includes a step that
+reported a failure but changed its layer anyway: an `/etc/fstab` whose
+folder could not be synced after the rename (or that could not be put back
+after a failed reload), an `rpm-ostree kargs` that timed out after its
+transaction started, a remount that `mount` reported as failed after the
+kernel made it (it could not update its mount table, or it was killed after
+the call), a top-mount unit that could not be put back. The run
+reads that layer again after the failure and undoes it with the others (the
+top-mount unit first). For the kernel arguments it first waits, up to 3
+minutes, until `rpm-ostree status --json` names no running transaction: a
+client that timed out leaves its transaction running, and the change it
+stages later would otherwise be missed. A transaction still running after
+that counts as a layer it cannot read again (below). A change that
+rpm-ostree refused because another transaction was running (an automatic
+update, an upgrade someone started: `Transaction in progress: ...`)
+started no transaction of its own and staged nothing: the run reads the
+kernel arguments at once, without waiting, and ends with `previous
+configuration restored.`. The error ends with
+`previous configuration restored.`, or with `ROLLBACK INCOMPLETE (...)`
+naming each layer that could not be put back. An undo of `/etc/fstab` or of
+the top-mount unit keeps the old value it wrote even when the
+`daemon-reload` after it fails (that error is named): a forward write puts
+its previous text back on such a failure, but for an undo that text is the
+new value. A layer the run cannot read
+again after its step failed is named there too, as unknown (`fstab: cannot
+read /etc/fstab back, its state is unknown`), and is left as it is. In
+`compress-force`, a failed `/etc/fstab` write that left the old text, the
+first step, ends with its own error only: nothing was changed before it.
+A run that is killed (or loses power) between its steps can leave the
+layers disagreeing. The next boot still boots: every value is a valid mount
+option, and the previous deployment stays in the boot menu. `status` and
+`cst doctor` show the drift, and running the same command again (or
+`revert`) converges. `btrfs/tests/test_compress_faults.py` checks this at
+every step, for `commit-interval` (section 9.3) too.
 
 **Only the root filesystem:** `apply` and `revert` (here and in
 `commit-interval`, section 9.3) change only the root btrfs filesystem's
@@ -1742,7 +1777,9 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
 - Spaces periodic btrfs transaction commits from the 30 s default to **60 s**
   (allowed range `15..300` s) across all four layers (`/etc/fstab`, next-boot
   `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
-  partial error. Like `compress-force`, it changes only the root filesystem's
+  partial error. A step that fails stops the run before the later layers are
+  touched (the top-mount unit is not changed after one), and the layers it
+  changed are put back in reverse (section 9.1). Like `compress-force`, it changes only the root filesystem's
   fstab lines and mounts: a separate btrfs `/home` or `/var/home` is never
   touched (section 9.1, "Only the root filesystem"). In `btrfs:top-mount` only
   the `commit=` of the unit's own `Options=` changes.
