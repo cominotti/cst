@@ -517,6 +517,30 @@ class HealthCheckTest(unittest.TestCase):
         self.assert_healthy(self.run_check())
         self.assertEqual(self.read(state), f"{BOOT} 08\n")
 
+    def test_reclaim_counts_wrap_as_bash_arithmetic(self) -> None:
+        # bash's (( errs > seen )) and $(( errs - seen )) are 64-bit and wrap around: a state file at
+        # 18446744073709551615 is -1, so 5 errors are 6 new ones; 5000 digits are a number (wrapped), not
+        # a ValueError out of the check.
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        state = f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-data"
+        self.write(state, f"{BOOT} 18446744073709551615\n")
+        self.write(f"{alloc}/data/reclaim_errors", "5\n")
+        self.assert_problems(
+            self.run_check(),
+            "btrfs /var: automatic data reclaim failed 6 time(s) since the last check (reclaim_errors=5) - see "
+            "'journalctl -k -g BTRFS'",
+        )
+        self.assertEqual(self.read(state), f"{BOOT} 5\n")
+        huge = "1" * 5000  # 8198552921648689607 in bash
+        self.write(state, f"{BOOT} 3\n")
+        self.write(f"{alloc}/data/reclaim_errors", huge + "\n")
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs /var: automatic data reclaim failed 8198552921648689604 time(s) since the last check "
+            f"(reclaim_errors={huge}) - see 'journalctl -k -g BTRFS'",
+        )
+        self.assertEqual(self.read(state), f"{BOOT} {huge}\n")
+
     def test_reclaim_not_configured_is_not_checked(self) -> None:
         os.unlink(self.path("etc/tmpfiles.d/btrfs-automatic-reclaim.conf"))
         self.write(f"sys/fs/btrfs/{UUID}/allocation/data/dynamic_reclaim", "0\n")
@@ -997,6 +1021,121 @@ class HealthCheckTest(unittest.TestCase):
         r = self.run_check()
         self.assertEqual(r.returncode, 1)
         self.assertEqual(len(self.alerts()), 1)
+
+
+# Every bash run of the differential tests below: a clean environment and no stdin (AGENTS.md, "Test
+# gotchas"); C.UTF-8, built into glibc, so [[ =~ ^[0-9]+$ ]] takes ASCII digits only, as the Python does.
+BASH_ENV: Final = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
+
+
+def run_bash(script: str, *args: str) -> list[str]:
+    """The stdout lines of bash -c SCRIPT _ ARGS... in BASH_ENV."""
+    r = subprocess.run(
+        ["/usr/bin/bash", "-c", script, "_", *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=True,
+        env=BASH_ENV,
+        timeout=60,
+    )
+    return r.stdout.splitlines()
+
+
+def nul_file(folder: str, items: list[str]) -> str:
+    """A file of FOLDER holding ITEMS, each ended by a NUL byte (for bash's read -r -d '')."""
+    path = os.path.join(folder, "values")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(item + "\0" for item in items))
+    return path
+
+
+class BashArithmeticTest(unittest.TestCase):
+    """bash_int and the reclaim decision against the real bash, case by case (bash's own result)."""
+
+    # Each value in a subshell, so an arithmetic error ends only its own case.
+    BASH_INT = """while IFS= read -r -d '' v; do ( echo "$(( $v ))" ) 2>/dev/null || echo error; done < "$1"\n"""
+    DIGIT_VALUES: Final = (
+        "0",
+        "7",
+        "1234567890123456789",
+        "12345678901234567890",
+        "9223372036854775807",
+        "9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+        "18446744073709551617",
+        "99999999999999999999",
+        "1" * 5000,
+        "9" * 4301,
+        "0" + "7" * 30,
+        "0" * 5000 + "1",
+        "0777",
+        "00",
+        "08",
+        "0" + "1" * 5000 + "8",
+        "\N{ARABIC-INDIC DIGIT THREE}",
+        "\N{SUPERSCRIPT TWO}",
+        "\N{FULLWIDTH DIGIT ONE}",
+        "1\N{ARABIC-INDIC DIGIT THREE}",
+    )
+
+    def test_bash_int_reads_digits_as_bash_arithmetic(self) -> None:
+        from btrfs.health_check.domain import bash_int
+
+        with tempfile.TemporaryDirectory() as tmp:
+            got = run_bash(self.BASH_INT, nul_file(tmp, list(self.DIGIT_VALUES)))
+        self.assertEqual(len(got), len(self.DIGIT_VALUES))
+        for value, bash in zip(self.DIGIT_VALUES, got, strict=True):
+            with self.subTest(value=value[:24], digits=len(value)):
+                n = bash_int(value)
+                self.assertEqual("error" if n is None else str(n), bash)
+
+    # The old btrfs-health-check's reclaim count (git show b819032f^:btrfs/btrfs-health-check, lines
+    # 169-179), its state file's read replaced by the value: skip, no problem, or the problem's count.
+    RECLAIM = """while IFS= read -r -d '' errs && IFS= read -r -d '' seen; do
+    (
+        [[ "${errs}" =~ ^[0-9]+$ ]] || { echo skip; exit 0; }
+        [[ "${seen}" =~ ^[0-9]+$ ]] || seen=0
+        if (( errs > seen )); then echo "problem $(( errs - seen ))"; else echo none; fi
+    ) 2>/dev/null || echo error
+done < "$1"
+"""
+
+    def test_reclaim_decision_matches_the_old_bash(self) -> None:
+        from btrfs.health_check import adapters
+        from cst_core.adapters.runner import SubprocessCommandRunner
+
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        errs_values = ("5", "08", "18446744073709551617", "9223372036854775807", "1" * 5000, three, "0777")
+        seen_values = ("0", "3", "08", "18446744073709551615", "1" * 5000, three, "99999999999999999999")
+        pairs = [(e, s) for e in errs_values for s in seen_values]
+        with tempfile.TemporaryDirectory() as tmp:
+            bash = run_bash(self.RECLAIM, nul_file(tmp, [x for pair in pairs for x in pair]))
+            root = os.path.join(tmp, "root")
+            alloc = f"{root}/sys/fs/btrfs/{UUID}/allocation"
+            os.makedirs(f"{alloc}/data")
+            os.makedirs(f"{root}/proc/sys/kernel/random")
+            os.makedirs(f"{root}/var/lib/btrfs-health-check")
+            with open(f"{root}/proc/sys/kernel/random/boot_id", "w", encoding="utf-8") as f:
+                f.write(BOOT + "\n")
+            state = f"{root}/var/lib/btrfs-health-check/reclaim-errors-{UUID}-data"
+            probe = adapters.Probe(root, SubprocessCommandRunner())
+            self.assertEqual(len(bash), len(pairs))
+            for (errs, seen), want in zip(pairs, bash, strict=True):
+                with self.subTest(errs=errs[:24], seen=seen[:24]):
+                    with open(f"{alloc}/data/reclaim_errors", "w", encoding="utf-8") as f:
+                        f.write(errs + "\n")
+                    with open(state, "w", encoding="utf-8") as f:
+                        f.write(f"{BOOT} {seen}\n")
+                    before = os.stat(state).st_ino
+                    found = adapters._reclaim_error_problems(probe, "/var", UUID, alloc)
+                    data = [p for p in found if " data reclaim " in p]
+                    if data:
+                        got = "problem " + data[0].split(" failed ", 1)[1].split(" ", 1)[0]
+                    else:
+                        got = "skip" if os.stat(state).st_ino == before else "none"
+                    self.assertEqual(got, want)
 
 
 class MemberDisksTest(unittest.TestCase):

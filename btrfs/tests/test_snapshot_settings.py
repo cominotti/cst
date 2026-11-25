@@ -141,3 +141,30 @@ class GuardNumberTest(unittest.TestCase):
                     else:
                         want = "le" if free <= n else "gt"
                     self.assertEqual(self.bash(value, free), want)
+
+    def want(self, value: str, free: int) -> str:
+        """What bash prints for VALUE and FREE, by guard_number's answer."""
+        n = guard_number(value)
+        if n is GuardError.BAD_NUMBER:
+            return "gt"
+        if n is GuardError.NOT_A_NUMBER:
+            return "stop"
+        return "le" if free <= n else "gt"
+
+    def test_long_numbers_and_bases_as_bash_reads_them(self) -> None:
+        # A decimal constant wraps at 64 bits at any length: 5000 digits are a number in bash (the
+        # runtime read them as BAD_NUMBER past int()'s 4300 digits). Octal too, and BASE#DIGITS.
+        values = ["1" * 5000, "9" * 4301, "0" + "7" * 30, "0" * 5000 + "1", "10#" + "1" * 5000, "2#" + "1" * 100]
+        values += ["1" * 5000 + "#1", "2#101", "10#08", "36#zz", "36#ZZ", "37#a", "37#A", "64#@", "64#_"]
+        # Digits and letters of other scripts are arithmetic errors in bash, in every locale.
+        values += ["\N{ARABIC-INDIC DIGIT THREE}", "\N{SUPERSCRIPT TWO}", "\N{FULLWIDTH DIGIT ONE}"]
+        values += ["\N{LATIN SMALL LETTER E WITH ACUTE}", "\N{CYRILLIC SMALL LETTER ZHE}"]
+        values += [
+            "2#\N{ARABIC-INDIC DIGIT THREE}",
+            "36#\N{LATIN SMALL LETTER E WITH ACUTE}",
+            "10#\N{FULLWIDTH DIGIT ONE}",
+        ]
+        for value in values:
+            for free in (0, 251, 2**40):
+                with self.subTest(value=value[:24], digits=len(value), free=free):
+                    self.assertEqual(self.bash(value, free), self.want(value, free))

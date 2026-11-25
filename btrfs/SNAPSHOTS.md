@@ -2677,7 +2677,10 @@ How it works, as a sequence:
      fails with `cannot read free space` if it still cannot.
 
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
-`RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`.
+`RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`. Each limit is read as
+bash arithmetic reads it (64-bit: a number too large wraps around; `010` is
+8, `2#1010` is 10); a value bash cannot compute (`250GiB`, digits of
+another script) holds nothing.
 
 `cst btrfs bulk steam apply --copy` respects them: a real copy of a game
 needs its size plus the emergency limit plus 20 GiB free, and `plan` warns

@@ -32,6 +32,7 @@ from btrfs.health_check.domain import (
     awk_int,
     bash_div,
     bash_int,
+    bash_wrap,
     controller,
     disks_of,
     has_missing,
@@ -261,10 +262,12 @@ def _reclaim_error_problems(m: Probe, mnt: str, uuid: str, alloc: str) -> list[s
         seen_boot, seen = read_fields((m.text(seen_file) or "").split("\n")[0], 2)
         if seen_boot != boot_id or not seen.isascii() or not seen.isdigit():
             seen = "0"
-        count, seen_count = bash_int(errs), bash_int(seen)  # None: bash's arithmetic fails on it (08)
+        # bash's (( errs > seen )) and $(( errs - seen )): 64-bit, wrapping. None: bash's arithmetic fails
+        # on it (08).
+        count, seen_count = bash_int(errs), bash_int(seen)
         if count is not None and seen_count is not None and count > seen_count:
             problems.append(
-                f"btrfs {mnt}: automatic {kind} reclaim failed {count - seen_count} time(s) since the last check "
+                f"btrfs {mnt}: automatic {kind} reclaim failed {bash_wrap(count - seen_count)} time(s) since the last check "
                 f"(reclaim_errors={errs}) - see 'journalctl -k -g BTRFS'"
             )
         replace_state(seen_file, f"{boot_id} {errs}\n")

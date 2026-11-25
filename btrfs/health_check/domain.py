@@ -78,14 +78,27 @@ def bash_wrap(n: int) -> int:
     return n - (1 << 64) if n >= 1 << 63 else n
 
 
+# The decimal digits bash_int reads at a time: below int()'s digit limit (sys.get_int_max_str_digits,
+# 4300 by default), so a longer string is read in parts, linear in its length as bash reads it.
+_DECIMAL_CHUNK: Final = 1000
+
+
 def bash_int(text: str) -> int | None:
-    """A string of digits as bash arithmetic reads it (a leading 0 is octal); None where bash fails
-    (not digits, or an 8 or 9 after a leading 0)."""
+    """A string of ASCII digits as bash arithmetic reads it: 64-bit, wrapping around at any length
+    (99999999999999999999 is 7766279631452241919), a leading 0 octal; None where bash fails (not
+    ASCII digits, or an 8 or 9 after a leading 0).
+
+    Every caller reads a value the old bash read in arithmetic, so the wrapped value is bash's."""
     if not _DIGITS.fullmatch(text):
         return None
     if len(text) > 1 and text.startswith("0"):
-        return int(text, 8) if all(c in "01234567" for c in text) else None
-    return int(text)
+        # A power-of-two base has no digit limit in int().
+        return bash_wrap(int(text, 8)) if all(c in "01234567" for c in text) else None
+    n = 0
+    for i in range(0, len(text), _DECIMAL_CHUNK):
+        chunk = text[i : i + _DECIMAL_CHUNK]
+        n = bash_wrap(n * 10 ** len(chunk) + int(chunk))
+    return n
 
 
 def bash_div(a: int, b: int) -> int:
