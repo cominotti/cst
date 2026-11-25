@@ -37,6 +37,7 @@ from bluetooth.setup.domain import (
     BearerState,
     BluetoothCommand,
     LeState,
+    OlderCopy,
     WpState,
     backup_name,
     backup_name_taken,
@@ -541,12 +542,22 @@ class Change(Checks):
     def lw_remove_stale(self) -> None:
         """An older CST's copies of the watcher's unit (lw_stale: recorded where the user manager does not
         read units) removed through the installer, which forgets them in the record too; a file there
-        that CST did not write is left alone and only forgotten, with a warning. The manager never
+        that CST did not write is left alone and only forgotten, with a warning, and so is another path to
+        the current unit file (only its record line goes). The manager never
         loaded them: no disable, no reload. With --check: only said."""
+        current = self.lw_unit_file
         for path in self.lw_stale:
-            if self.o.check:
+            kind = watcher_unit.copy_kind(self.m.files, path, current)
+            if kind == OlderCopy.SAME:
+                # The live unit file by another path: removing it would remove the unit.
+                if self.o.check:
+                    self.out(f"would forget {path} (the same file as {current})\n")
+                else:
+                    self.checked(["forget-text", "--home", self.p.home, path])
+                    self.out(f"forgotten: {path} (the same file as {current})\n")
+            elif self.o.check:
                 self.out(f"would remove {path} (an older CST's copy)\n")
-            elif not watcher_unit.is_ours_or_gone(self.m.files, path):
+            elif kind == OlderCopy.FOREIGN:
                 self.checked(["forget-text", "--home", self.p.home, path])
                 self.err(f"WARNING: {path} was not written by CST: left alone (forgotten from the install record)\n")
             else:

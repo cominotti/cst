@@ -667,7 +667,7 @@ class Survey:
 
     def _lw_stale_report(self) -> None:
         """The rows of an older CST's copies of the watcher's unit (watcher_unit.stale_rows)."""
-        for row in watcher_unit.stale_rows(self.m.files, self.lw_stale, self.tilde):
+        for row in watcher_unit.stale_rows(self.m.files, self.lw_stale, self.lw_unit_file, self.tilde):
             self.item(*row)
 
     def lw_last_failure(self) -> bool:

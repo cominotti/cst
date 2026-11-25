@@ -9,7 +9,7 @@ import posixpath
 from collections.abc import Callable
 
 from bluetooth.domain import LDAC_UNIT, MARKER
-from bluetooth.setup.domain import LW_STALE_FOREIGN_NOTE, LW_STALE_NOTE
+from bluetooth.setup.domain import LW_STALE_FOREIGN_NOTE, LW_STALE_NOTE, LW_STALE_SAME_NOTE, OlderCopy
 from bluetooth.setup.ports import SetupFilesPort
 from cst_core.application.install import record_file
 from cst_core.domain.install import Component, Owner
@@ -49,20 +49,29 @@ def older_copies(records: InstallRecordPort, home: str, current: str, answer: st
     return tuple(d for d in dests if posixpath.basename(d) == LDAC_UNIT and d != current)
 
 
-def is_ours_or_gone(files: SetupFilesPort, path: str) -> bool:
-    """An older copy apply removes: CST's (its marker), or gone already (only its record line is left);
-    any other file there is left alone."""
-    return not files.exists(path) or files.contains(path, MARKER, quiet=True)
+def copy_kind(files: SetupFilesPort, path: str, current: str) -> OlderCopy:
+    """What apply does with a recorded copy at path: the current unit file by another path (a link in
+    its folders, /home and /var/home) only loses its record line; CST's (its marker), or one gone
+    already, is removed; any other file there is left alone."""
+    if files.exists(path) and files.realpath(path) == files.realpath(current):
+        return OlderCopy.SAME
+    if not files.exists(path) or files.contains(path, MARKER, quiet=True):
+        return OlderCopy.REMOVE
+    return OlderCopy.FOREIGN
 
 
 def stale_rows(
-    files: SetupFilesPort, copies: tuple[str, ...], tilde: Callable[[str], str]
+    files: SetupFilesPort, copies: tuple[str, ...], current: str, tilde: Callable[[str], str]
 ) -> list[tuple[str, str, str]]:
-    """plan's row of each older copy (word, label, note): apply removes it, or, one CST did not write,
-    leaves it alone and drops its record line."""
-    return [
-        ("remove", tilde(p), LW_STALE_NOTE)
-        if is_ours_or_gone(files, p)
-        else ("forget", tilde(p), LW_STALE_FOREIGN_NOTE)
-        for p in copies
-    ]
+    """plan's row of each older copy (word, label, note): apply removes it, or drops only its record
+    line (one CST did not write, left alone; another path to the current file)."""
+    notes = {
+        OlderCopy.REMOVE: ("remove", LW_STALE_NOTE),
+        OlderCopy.FOREIGN: ("forget", LW_STALE_FOREIGN_NOTE),
+        OlderCopy.SAME: ("forget", LW_STALE_SAME_NOTE),
+    }
+    rows = []
+    for p in copies:
+        word, note = notes[copy_kind(files, p, current)]
+        rows.append((word, tilde(p), note))
+    return rows

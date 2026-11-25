@@ -198,6 +198,7 @@ OWED = "(still owed: an earlier run did not restart it)"
 # The rows of an older CST's copy of the watcher's unit (where the user manager does not read units).
 LW_STALE = "an older CST's copy, where your user manager does not read units: apply removes it"
 LW_STALE_FOREIGN = "recorded as CST's, not written by CST: left alone; apply drops its record line"
+LW_STALE_SAME = "the same file as the unit's, by another path: apply only drops this record line"
 
 
 def row(word: str, label: str, note: str = "") -> str:
@@ -1807,6 +1808,41 @@ class WatcherTest(SetupCase):
                 self.assertNotIn("Traceback", r.stderr)
                 self.assertIn(f"systemd/user/{LW}", r.stdout)
                 self.assertNotIn(LW_STALE, r.stdout)
+
+    def test_a_copy_recorded_by_another_path_to_the_unit_is_only_forgotten(self) -> None:
+        # An older CST recorded the unit through a link (~/cfg -> ~/.config, a dotfiles set-up): the same
+        # file as the one the manager loads now. plan says apply only drops that record line; apply does,
+        # and leaves the unit as it is (no write, no reload, no restart); revert --check names no removal
+        # of it; revert removes the unit once. Before, apply and revert removed the live unit through the
+        # other path (apply then wrote it again, reloaded and restarted the watcher).
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        os.makedirs(os.path.join(m.home, ".config"), exist_ok=True)
+        os.symlink(".config", os.path.join(m.home, "cfg"))
+        alias = os.path.join(m.home, "cfg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(alias)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        self.assertIn(alias, json.loads(self.text(m.record))["files"])
+        os.unlink(m.state + "/unit-path")
+        before = os.stat(m.lw_unit)
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(row("forget", "~/cfg/systemd/user/" + LW, LW_STALE_SAME), r.stdout)
+        self.assertNotIn(LW_STALE, r.stdout)
+        r = m.run("revert", "--check")
+        self.assertIn(f"would forget {alias} (the same file as {m.lw_unit})\n", r.stdout)
+        self.assertNotIn(f"would remove {alias}", r.stdout)
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"forgotten: {alias} (the same file as {m.lw_unit})\n", r.stdout)
+        self.assertNotIn("older CST", r.stdout)
+        self.assertIn(f"unchanged: {LW} enabled and active\n", r.stdout)
+        self.assertNotIn("systemctl --user daemon-reload", r.calls)
+        after = os.stat(m.lw_unit)
+        self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+        self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, m.lw_unit]))
+        self.assertNotIn(LW_STALE_SAME, m.run("plan").stdout)
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
+        self.assertEqual(json.loads(self.text(m.record))["files"], {})
 
     def test_an_older_copy_cst_did_not_write_is_left_alone(self) -> None:
         m = self.machine(DONE, "LDAC_RATE=48000\n")

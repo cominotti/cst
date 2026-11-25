@@ -39,6 +39,18 @@ LE_AUDIO_LABEL: Final = "LE Audio"  # LE Audio's row in plan and status (and sta
 # The row of an older CST's copy of the watcher's unit, under the shell's XDG_CONFIG_HOME.
 LW_STALE_NOTE: Final = "an older CST's copy, where your user manager does not read units: apply removes it"
 LW_STALE_FOREIGN_NOTE: Final = "recorded as CST's, not written by CST: left alone; apply drops its record line"
+LW_STALE_SAME_NOTE: Final = "the same file as the unit's, by another path: apply only drops this record line"
+
+
+class OlderCopy(StrEnum):
+    """What apply and revert do with a copy of the watcher's unit the record lists elsewhere
+    (watcher_unit.copy_kind)."""
+
+    REMOVE = "remove"  # CST's, or gone already: removed through the installer
+    FOREIGN = "foreign"  # a file CST did not write: left alone, its record line dropped
+    SAME = "same"  # another path to the current unit file (a link in its folders): only its record line dropped
+
+
 # plan's reasons for bluetoothd's restart: main.conf changes, or only the record owes it (an earlier run
 # that did not restart it: --no-restart, --force --no-restart, a question answered no, a stopped run).
 _BT_RESTART_DROPS: Final = "apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
