@@ -14,6 +14,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import host_view_path, undo_python_start
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
+from cst_core.domain.text import strip_ascii_blanks
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import ExecutionContextPort
 from cpu.game.adapters.host import read_settings, read_stripped, write_sysfs_line
@@ -208,7 +209,7 @@ def collect_power_snapshot(paths: PowerPaths) -> PowerSnapshot:
     # A file without the setting leaves it "" (GameSettings' default): the driver then decides the cap.
     cstate_limit, cs_err = boot_cstate_limit_us(
         settings.cpu_cstate_max_latency_us,
-        explicit=bool(settings.cpu_cstate_max_latency_us.strip()),
+        explicit=bool(strip_ascii_blanks(settings.cpu_cstate_max_latency_us)),  # as the parse reads it
         cpuidle_driver=_cpuidle_driver(paths.sys_cpu),
     )
     if cs_err is not None:

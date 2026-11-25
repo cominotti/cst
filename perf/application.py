@@ -6,6 +6,7 @@ import posixpath
 from typing import Final
 
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
+from cst_core.domain.values import parse_whole_number
 
 from perf.domain.evaluate import evaluate_perf_snapshot
 from perf.domain.models import (
@@ -99,7 +100,8 @@ def collect_memory_from_reader(reader: PerfFsReader) -> MemoryProbeSnapshot:
         if not (entry.startswith(_USER_UID_PREFIX) and entry.endswith(_SLICE_SUFFIX)):
             continue
         uid_part = entry[len(_USER_UID_PREFIX) : -len(_SLICE_SUFFIX)]
-        if not uid_part.isdigit():
+        uid = parse_whole_number(uid_part)  # ASCII digits within int()'s limit, else no session slice
+        if uid is None:
             continue
         user_rel = posixpath.join(_CG_USER_SLICE, entry)
         service_rel = posixpath.join(user_rel, _USER_SERVICE_FMT.format(uid=uid_part))
@@ -125,7 +127,7 @@ def collect_memory_from_reader(reader: PerfFsReader) -> MemoryProbeSnapshot:
                     min_bytes=sess_min,
                     low_bytes=sess_low or 0,
                     parent_min_bytes=parent_min,
-                    uid=int(uid_part),
+                    uid=uid,
                 )
             )
     machine_low = parse_optional_int(
@@ -138,7 +140,7 @@ def _collect_idle_states(reader: PerfFsReader) -> tuple[CpuIdleStateSample, ...]
     base = "devices/system/cpu/cpu0/cpuidle"
     samples: list[CpuIdleStateSample] = []
     for entry in reader.list_rel(PerfRootKind.SYS, base):
-        if not (entry.startswith(_STATE_PREFIX) and entry[len(_STATE_PREFIX) :].isdigit()):
+        if not (entry.startswith(_STATE_PREFIX) and parse_whole_number(entry[len(_STATE_PREFIX) :]) is not None):
             continue
         state_rel = posixpath.join(base, entry)
         raw_name = reader.read_rel(PerfRootKind.SYS, posixpath.join(state_rel, "name"))
@@ -165,7 +167,7 @@ def _irq_lines_with_affinity(reader: PerfFsReader, interrupts: str | None) -> tu
                 reader.read_rel(PerfRootKind.PROC, posixpath.join("irq", line.irq_id, "effective_affinity_list"))
             ),
         )
-        if line.irq_id.isdigit() and line.total_count >= IRQ_ACTIVE_MIN_COUNT
+        if parse_whole_number(line.irq_id) is not None and line.total_count >= IRQ_ACTIVE_MIN_COUNT
         else line
         for line in parse_proc_interrupts(interrupts)
     )

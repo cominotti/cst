@@ -456,6 +456,23 @@ class HealthCheckTest(unittest.TestCase):
                 else:
                     self.assert_healthy(r)
 
+    def test_unallocated_count_divides_as_bash_arithmetic(self) -> None:
+        # The old bash prints $(( unalloc / 1024 ** 2 )): an Unallocated of 2**64 - 1 is -1 there, and bash's
+        # division truncates towards zero, so the CRITICAL line says 0 MiB (floor division said -1). The real
+        # bash is the oracle for the count.
+        value = str(2**64 - 1)
+        (mib,) = run_bash('echo "$(( $1 / 1024 ** 2 ))"', value)
+        self.assertEqual(mib, "0")
+        self.fs["device_usage"] = device_usage(2**64 - 1, 800 * GIB)
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs /var: CRITICAL: only {mib} MiB unallocated on /dev/mapper/cst-test-1: ENOSPC is close. First free "
+            "space (old snapshots, caches, images), then 'btrfs balance start -dusage=0 /var', then -dusage=5, 15, 30; "
+            "never a metadata or full balance. If a balance hangs the PC or the boot: boot once with ,skip_balance "
+            "added to the rootflags= of the kernel command line, then 'btrfs balance cancel /var' (cst btrfs README, "
+            "section 13)",
+        )
+
     def test_metadata_almost_full(self) -> None:
         alloc = f"sys/fs/btrfs/{UUID}/allocation"
         self.write(f"{alloc}/metadata/bytes_used", f"{20 * GIB - 600 * 1024**2}\n")
@@ -467,6 +484,59 @@ class HealthCheckTest(unittest.TestCase):
             f"<2>{TAG}: btrfs /var: CRITICAL: metadata almost full (600 MiB free in metadata chunks, 1024 MiB "
             "unallocated): writes may fail with ENOSPC soon",
         )
+
+    def test_metadata_room_wraps_as_bash_arithmetic(self) -> None:
+        # The old bash's meta_free=$(( total - used )) is 64-bit and wraps: total 2**63 - 1 and used
+        # 2**64 - 1 (-1 there) give -2**63, so the CRITICAL line fires with 1 GiB unallocated. Without the
+        # wrap the room was 2**63 and the check stayed silent.
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        total, used = "9223372036854775807", "18446744073709551615"
+        self.write(f"{alloc}/metadata/total_bytes", f"{total}\n")
+        self.write(f"{alloc}/metadata/bytes_used", f"{used}\n")
+        self.fs["device_usage"] = device_usage(GIB, 800 * GIB)
+        (free_mib,) = run_bash('echo "$(( ($1 - $2) / 1024 ** 2 ))"', total, used)
+        r = self.run_check()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            r.stderr.splitlines()[1],
+            f"<2>{TAG}: btrfs /var: CRITICAL: metadata almost full ({free_mib} MiB free in metadata chunks, 1024 MiB "
+            "unallocated): writes may fail with ENOSPC soon",
+        )
+
+    def test_metadata_reserve_wraps_as_bash_arithmetic(self) -> None:
+        # The old bash's (( meta_free < 2 * rsv )) doubles the reserve in 64-bit arithmetic and wraps: a
+        # reserve of 2**63 + 5 is -2**63 + 5 there and its double is 10 (fires with no room left); one of
+        # 2**62 doubles to -2**63 (silent). The old bash fragment (git show b819032f^:btrfs/btrfs-health-check,
+        # lines 151-154) is the oracle for each reserve.
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        room = str(20 * GIB)
+        reserves = [str(2**63 + 5), str(2**62)]
+        script = (
+            "total=$1 used=$2 min_unalloc=$3; shift 3; for rsv; do meta_free=$(( total - used )); "
+            "if (( meta_free < 2 * rsv && min_unalloc < 2 * 1024 ** 3 )); then "
+            'echo "$(( meta_free / 1024 ** 2 )) $(( min_unalloc / 1024 ** 2 ))"; else echo silent; fi; done'
+        )
+        want = run_bash(script, room, room, str(GIB), *reserves)
+        self.assertEqual(want[1], "silent")  # both outcomes are covered
+        self.assertNotEqual(want[0], "silent")
+        self.write(f"{alloc}/metadata/total_bytes", f"{room}\n")
+        self.write(f"{alloc}/metadata/bytes_used", f"{room}\n")
+        self.fs["device_usage"] = device_usage(GIB, 800 * GIB)
+        for reserve, bash in zip(reserves, want, strict=True):
+            with self.subTest(reserve=reserve, bash=bash):
+                self.write(f"{alloc}/global_rsv_size", f"{reserve}\n")
+                r = self.run_check()
+                self.assertEqual(r.returncode, 1, r.stderr)
+                got = [line for line in r.stderr.splitlines() if "metadata almost full" in line]
+                if bash == "silent":
+                    self.assertEqual(got, [])
+                else:
+                    free_mib, least_mib = bash.split()
+                    line = (
+                        f"<2>{TAG}: btrfs /var: CRITICAL: metadata almost full ({free_mib} MiB free in metadata "
+                        f"chunks, {least_mib} MiB unallocated): writes may fail with ENOSPC soon"
+                    )
+                    self.assertEqual(got, [line])
 
     def test_reclaim(self) -> None:
         alloc = f"sys/fs/btrfs/{UUID}/allocation"
@@ -516,6 +586,30 @@ class HealthCheckTest(unittest.TestCase):
         self.write(f"{alloc}/metadata/reclaim_errors", "08\n")
         self.assert_healthy(self.run_check())
         self.assertEqual(self.read(state), f"{BOOT} 08\n")
+
+    def test_reclaim_counts_wrap_as_bash_arithmetic(self) -> None:
+        # bash's (( errs > seen )) and $(( errs - seen )) are 64-bit and wrap around: a state file at
+        # 18446744073709551615 is -1, so 5 errors are 6 new ones; 5000 digits are a number (wrapped), not
+        # a ValueError out of the check.
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        state = f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-data"
+        self.write(state, f"{BOOT} 18446744073709551615\n")
+        self.write(f"{alloc}/data/reclaim_errors", "5\n")
+        self.assert_problems(
+            self.run_check(),
+            "btrfs /var: automatic data reclaim failed 6 time(s) since the last check (reclaim_errors=5) - see "
+            "'journalctl -k -g BTRFS'",
+        )
+        self.assertEqual(self.read(state), f"{BOOT} 5\n")
+        huge = "1" * 5000  # 8198552921648689607 in bash
+        self.write(state, f"{BOOT} 3\n")
+        self.write(f"{alloc}/data/reclaim_errors", huge + "\n")
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs /var: automatic data reclaim failed 8198552921648689604 time(s) since the last check "
+            f"(reclaim_errors={huge}) - see 'journalctl -k -g BTRFS'",
+        )
+        self.assertEqual(self.read(state), f"{BOOT} {huge}\n")
 
     def test_reclaim_not_configured_is_not_checked(self) -> None:
         os.unlink(self.path("etc/tmpfiles.d/btrfs-automatic-reclaim.conf"))
@@ -873,6 +967,27 @@ class HealthCheckTest(unittest.TestCase):
         self.machine["suspend"] = f"{self.now - 3600}.5 host systemd[1]: Finished System Suspend.\n"
         self.assertEqual(self.run_check().returncode, 1)
 
+    def test_snapshot_age_wraps_as_bash_arithmetic(self) -> None:
+        # The old bash's (( $(date +%s) - last > 3 * 3600 )) is 64-bit and wraps: a last-ok of 2**63 is
+        # -2**63 there and the difference wraps negative (not stale); one of 2**64 - 1 is -1 (stale). The
+        # bash below is the oracle for each value.
+        stale = "snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'"
+        lasts = [str(2**63), str(2**64 - 1), str(2**63 + 5), "1" * 5000, str(self.now - 4 * 3600)]
+        script = (
+            "now=$1; shift; for last; do if (( now - last > 3 * 3600 )); then echo stale; else echo fresh; fi; done"
+        )
+        want = run_bash(script, str(self.now), *lasts)
+        self.assertEqual(set(want), {"fresh", "stale"})  # both outcomes are covered
+        for last, bash in zip(lasts, want, strict=True):
+            with self.subTest(last=last[:24], bash=bash):
+                self.machine["enabled"] = ["btrfs-snapshot.timer"]
+                self.write("var/lib/btrfs-snapshot/last-ok", f"{last}\n")
+                r = self.run_check()
+                if bash == "stale":
+                    self.assert_problems(r, stale)
+                else:
+                    self.assert_healthy(r)
+
     def test_snapshots_recent_or_unknown_are_fine(self) -> None:
         self.snapshots(self.now - 3600)
         self.assert_healthy(self.run_check())
@@ -997,6 +1112,121 @@ class HealthCheckTest(unittest.TestCase):
         r = self.run_check()
         self.assertEqual(r.returncode, 1)
         self.assertEqual(len(self.alerts()), 1)
+
+
+# Every bash run of the differential tests below: a clean environment and no stdin (AGENTS.md, "Test
+# gotchas"); C.UTF-8, built into glibc, so [[ =~ ^[0-9]+$ ]] takes ASCII digits only, as the Python does.
+BASH_ENV: Final = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
+
+
+def run_bash(script: str, *args: str) -> list[str]:
+    """The stdout lines of bash -c SCRIPT _ ARGS... in BASH_ENV."""
+    r = subprocess.run(
+        ["/usr/bin/bash", "-c", script, "_", *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=True,
+        env=BASH_ENV,
+        timeout=60,
+    )
+    return r.stdout.splitlines()
+
+
+def nul_file(folder: str, items: list[str]) -> str:
+    """A file of FOLDER holding ITEMS, each ended by a NUL byte (for bash's read -r -d '')."""
+    path = os.path.join(folder, "values")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(item + "\0" for item in items))
+    return path
+
+
+class BashArithmeticTest(unittest.TestCase):
+    """bash_int and the reclaim decision against the real bash, case by case (bash's own result)."""
+
+    # Each value in a subshell, so an arithmetic error ends only its own case.
+    BASH_INT = """while IFS= read -r -d '' v; do ( echo "$(( $v ))" ) 2>/dev/null || echo error; done < "$1"\n"""
+    DIGIT_VALUES: Final = (
+        "0",
+        "7",
+        "1234567890123456789",
+        "12345678901234567890",
+        "9223372036854775807",
+        "9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+        "18446744073709551617",
+        "99999999999999999999",
+        "1" * 5000,
+        "9" * 4301,
+        "0" + "7" * 30,
+        "0" * 5000 + "1",
+        "0777",
+        "00",
+        "08",
+        "0" + "1" * 5000 + "8",
+        "\N{ARABIC-INDIC DIGIT THREE}",
+        "\N{SUPERSCRIPT TWO}",
+        "\N{FULLWIDTH DIGIT ONE}",
+        "1\N{ARABIC-INDIC DIGIT THREE}",
+    )
+
+    def test_bash_int_reads_digits_as_bash_arithmetic(self) -> None:
+        from btrfs.health_check.domain import bash_int
+
+        with tempfile.TemporaryDirectory() as tmp:
+            got = run_bash(self.BASH_INT, nul_file(tmp, list(self.DIGIT_VALUES)))
+        self.assertEqual(len(got), len(self.DIGIT_VALUES))
+        for value, bash in zip(self.DIGIT_VALUES, got, strict=True):
+            with self.subTest(value=value[:24], digits=len(value)):
+                n = bash_int(value)
+                self.assertEqual("error" if n is None else str(n), bash)
+
+    # The old btrfs-health-check's reclaim count (git show b819032f^:btrfs/btrfs-health-check, lines
+    # 169-179), its state file's read replaced by the value: skip, no problem, or the problem's count.
+    RECLAIM = """while IFS= read -r -d '' errs && IFS= read -r -d '' seen; do
+    (
+        [[ "${errs}" =~ ^[0-9]+$ ]] || { echo skip; exit 0; }
+        [[ "${seen}" =~ ^[0-9]+$ ]] || seen=0
+        if (( errs > seen )); then echo "problem $(( errs - seen ))"; else echo none; fi
+    ) 2>/dev/null || echo error
+done < "$1"
+"""
+
+    def test_reclaim_decision_matches_the_old_bash(self) -> None:
+        from btrfs.health_check import adapters
+        from cst_core.adapters.runner import SubprocessCommandRunner
+
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        errs_values = ("5", "08", "18446744073709551617", "9223372036854775807", "1" * 5000, three, "0777")
+        seen_values = ("0", "3", "08", "18446744073709551615", "1" * 5000, three, "99999999999999999999")
+        pairs = [(e, s) for e in errs_values for s in seen_values]
+        with tempfile.TemporaryDirectory() as tmp:
+            bash = run_bash(self.RECLAIM, nul_file(tmp, [x for pair in pairs for x in pair]))
+            root = os.path.join(tmp, "root")
+            alloc = f"{root}/sys/fs/btrfs/{UUID}/allocation"
+            os.makedirs(f"{alloc}/data")
+            os.makedirs(f"{root}/proc/sys/kernel/random")
+            os.makedirs(f"{root}/var/lib/btrfs-health-check")
+            with open(f"{root}/proc/sys/kernel/random/boot_id", "w", encoding="utf-8") as f:
+                f.write(BOOT + "\n")
+            state = f"{root}/var/lib/btrfs-health-check/reclaim-errors-{UUID}-data"
+            probe = adapters.Probe(root, SubprocessCommandRunner())
+            self.assertEqual(len(bash), len(pairs))
+            for (errs, seen), want in zip(pairs, bash, strict=True):
+                with self.subTest(errs=errs[:24], seen=seen[:24]):
+                    with open(f"{alloc}/data/reclaim_errors", "w", encoding="utf-8") as f:
+                        f.write(errs + "\n")
+                    with open(state, "w", encoding="utf-8") as f:
+                        f.write(f"{BOOT} {seen}\n")
+                    before = os.stat(state).st_ino
+                    found = adapters._reclaim_error_problems(probe, "/var", UUID, alloc)
+                    data = [p for p in found if " data reclaim " in p]
+                    if data:
+                        got = "problem " + data[0].split(" failed ", 1)[1].split(" ", 1)[0]
+                    else:
+                        got = "skip" if os.stat(state).st_ino == before else "none"
+                    self.assertEqual(got, want)
 
 
 class MemberDisksTest(unittest.TestCase):

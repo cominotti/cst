@@ -72,14 +72,33 @@ def lines_of(items: Sequence[str]) -> str:
     return output("".join(item + "\n" for item in items))
 
 
+def bash_wrap(n: int) -> int:
+    """n as bash's 64-bit integer arithmetic gives it (it wraps around)."""
+    n &= (1 << 64) - 1
+    return n - (1 << 64) if n >= 1 << 63 else n
+
+
+# The decimal digits bash_int reads at a time: below int()'s digit limit (sys.get_int_max_str_digits,
+# 4300 by default), so a longer string is read in parts, linear in its length as bash reads it.
+_DECIMAL_CHUNK: Final = 1000
+
+
 def bash_int(text: str) -> int | None:
-    """A string of digits as bash arithmetic reads it (a leading 0 is octal); None where bash fails
-    (not digits, or an 8 or 9 after a leading 0)."""
+    """A string of ASCII digits as bash arithmetic reads it: 64-bit, wrapping around at any length
+    (99999999999999999999 is 7766279631452241919), a leading 0 octal; None where bash fails (not
+    ASCII digits, or an 8 or 9 after a leading 0).
+
+    Every caller reads a value the old bash read in arithmetic, so the wrapped value is bash's."""
     if not _DIGITS.fullmatch(text):
         return None
     if len(text) > 1 and text.startswith("0"):
-        return int(text, 8) if all(c in "01234567" for c in text) else None
-    return int(text)
+        # A power-of-two base has no digit limit in int().
+        return bash_wrap(int(text, 8)) if all(c in "01234567" for c in text) else None
+    n = 0
+    for i in range(0, len(text), _DECIMAL_CHUNK):
+        chunk = text[i : i + _DECIMAL_CHUNK]
+        n = bash_wrap(n * 10 ** len(chunk) + int(chunk))
+    return n
 
 
 def bash_div(a: int, b: int) -> int:
@@ -183,7 +202,7 @@ def unallocated_problems(mnt: str, rows: Sequence[tuple[str, str]]) -> tuple[lis
             # One line (one alert line per problem). Order matters: a balance needs unallocated room to
             # work in, so freeing space comes first; the ladder starts at -dusage=0 (empty chunks, no copying).
             problems.append(
-                f"btrfs {mnt}: CRITICAL: only {unalloc // MIB} MiB unallocated on {dev}: ENOSPC is close. First free "
+                f"btrfs {mnt}: CRITICAL: only {bash_div(unalloc, MIB)} MiB unallocated on {dev}: ENOSPC is close. First free "
                 f"space (old snapshots, caches, images), then 'btrfs balance start -dusage=0 {mnt}', then "
                 "-dusage=5, 15, 30; never a metadata or full balance. If a balance hangs the PC or the boot: boot once "
                 "with ,skip_balance added to the rootflags= of the kernel command line, then "
@@ -191,7 +210,7 @@ def unallocated_problems(mnt: str, rows: Sequence[tuple[str, str]]) -> tuple[lis
             )
         elif unalloc < UNALLOC_MIN_GIB * GIB:
             problems.append(
-                f"btrfs {mnt}: only {unalloc // GIB} GiB unallocated on {dev} (warning below {UNALLOC_MIN_GIB} GiB; "
+                f"btrfs {mnt}: only {bash_div(unalloc, GIB)} GiB unallocated on {dev} (warning below {UNALLOC_MIN_GIB} GiB; "
                 "metadata grows only from unallocated space). Free space, or compact half-empty data chunks: "
                 f"'btrfs balance start -dusage=20 {mnt}'"
             )
@@ -201,7 +220,8 @@ def unallocated_problems(mnt: str, rows: Sequence[tuple[str, str]]) -> tuple[lis
 def metadata_problem(mnt: str, meta_free: int, reserve: int, least: int | None) -> str | None:
     """Metadata ENOSPC proper: little room left in metadata chunks (less than twice the global
     reserve) and almost nothing to allocate more."""
-    if least is None or not (meta_free < 2 * reserve and least < 2 * GIB):
+    # bash's (( meta_free < 2 * rsv )): the double wraps at 64 bits, as reserve does when bash_int read it.
+    if least is None or not (meta_free < bash_wrap(2 * reserve) and least < 2 * GIB):
         return None
     return (
         f"btrfs {mnt}: CRITICAL: metadata almost full ({bash_div(meta_free, MIB)} MiB free in metadata chunks, "

@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Set as AbstractSet
-import contextlib
 import glob
 import os
 import queue
+import re
 import threading
 import time
 from typing import Final, override
@@ -20,7 +20,7 @@ from btrfs.stall_monitord.domain import (
 from cst_core.adapters.files import ensure_dir
 from cst_core.adapters.journal import log as journal_log
 from cst_core.domain.text import cgroup_v2_path
-from cst_core.domain.values import DAY, parse_integer
+from cst_core.domain.values import DAY, parse_integer, parse_whole_number
 
 CGROUP_ROOT = "/sys/fs/cgroup"
 
@@ -62,14 +62,15 @@ def read_text(path: str) -> str | None:
 
 
 def read_kv(path: str) -> dict[str, int]:
-    out = {}
+    """The 'name value' lines of a file (/proc/vmstat, memory.stat) as {name: int}; a value that is not an
+    integer in ASCII digits within int()'s limit (parse_integer) leaves its name out."""
+    out: dict[str, int] = {}
     text = read_text(path)
     if text is not None and text != "":
         for line in text.splitlines():
             parts = line.split()
-            if len(parts) >= 2:
-                with contextlib.suppress(ValueError):
-                    out[parts[0]] = int(parts[1])
+            if len(parts) >= 2 and (value := parse_integer(parts[1])) is not None:
+                out[parts[0]] = value
     return out
 
 
@@ -79,11 +80,21 @@ def read_int(path: str) -> int:
     return 0 if number is None else number
 
 
-def parse_psi(path: str) -> list[float | int] | None:
-    """Return [some_avg10, some_total_us, full_avg10, full_total_us]."""
+# An avg10 as the kernel writes it ("%lu.%02lu"): ASCII digits, an optional fraction. float() alone also
+# takes "nan", "inf", "1e9", "1_0" and digits of other scripts.
+_PSI_AVG: Final = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def parse_psi(path: str, *, unreadable: list[float | int] | None = None) -> list[float | int] | None:
+    """Return [some_avg10, some_total_us, full_avg10, full_total_us].
+
+    UNREADABLE (None by default) for a file that cannot be read or is empty. None for one whose avg10 or
+    total is not a number as the kernel writes it (the total: ASCII digits within int()'s limit): the
+    whole reading, not a 0 for one field, since the totals are cumulative and a 0 would make the next
+    sample's difference a false spike. A field that is not there stays 0."""
     text = read_text(path)
     if text is None or text == "":
-        return None
+        return unreadable
     res: list[float | int] = [0.0, 0, 0.0, 0]
     for line in text.splitlines():
         fields = line.split()
@@ -91,30 +102,41 @@ def parse_psi(path: str) -> list[float | int] | None:
             continue
         vals = {k: v for k, _, v in (f.partition("=") for f in fields[1:] if "=" in f)}
         idx = 0 if fields[0] == "some" else 2
-        res[idx] = float(vals.get("avg10", 0))
-        res[idx + 1] = int(vals.get("total", 0))
+        avg = vals.get("avg10", "0")
+        total = parse_whole_number(vals.get("total", "0"))
+        if total is None or not _PSI_AVG.fullmatch(avg):
+            return None
+        res[idx] = float(avg)
+        res[idx + 1] = total
     return res
 
 
-def parse_io_stat(path: str, devices: AbstractSet[str]) -> list[int] | None:
+def parse_io_stat(path: str, devices: AbstractSet[str], *, unreadable: list[int] | None = None) -> list[int] | None:
     """Sum rbytes/wbytes of a cgroup io.stat over the given "maj:min" devices.
 
     Only the top-level devices (dm-crypt of each btrfs member, swap) are
-    counted, otherwise every byte is counted again for the NVMe below it.
+    counted, otherwise every byte is counted again for the NVMe below it. UNREADABLE (None by default)
+    for a file that cannot be read; None for one whose rbytes or wbytes is not ASCII digits within
+    int()'s limit.
     """
     text = read_text(path)
     if text is None:
-        return None
+        return unreadable
     rb = wb = 0
     for line in text.splitlines():
         if line.split(" ", 1)[0] not in devices:
             continue
         for item in line.split()[1:]:
             k, _, v = item.partition("=")
+            if k not in ("rbytes", "wbytes"):
+                continue
+            n = parse_whole_number(v)
+            if n is None:
+                return None
             if k == "rbytes":
-                rb += int(v)
-            elif k == "wbytes":
-                wb += int(v)
+                rb += n
+            else:
+                wb += n
     return [rb, wb]
 
 

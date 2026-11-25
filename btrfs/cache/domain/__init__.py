@@ -19,6 +19,7 @@ from cst_core.domain.text import (
     file_lines,
     group,
     parse_subcommand_head,
+    strip_ascii_blanks,
     unescape_mount_field,
 )
 
@@ -352,14 +353,16 @@ class _FlagState:
 
 
 def _consume_user_flag(tok: str, next_tok: str | None, state: _FlagState) -> tuple[_FlagState, str | None, int]:
+    """--user=NAME or --user NAME, the name without the ASCII blanks around it (a no-break space stays,
+    and the name is then no valid user name)."""
     if tok.startswith("--user="):
-        val = tok.split("=", 1)[1].strip()
+        val = strip_ascii_blanks(tok.split("=", 1)[1])
         if not val:
             return state, "--user requires a non-empty username", 0
         return replace(state, user=val), None, 1
-    if next_tok is None or not next_tok.strip():
+    if next_tok is None or not strip_ascii_blanks(next_tok):
         return state, "--user requires a username", 0
-    return replace(state, user=next_tok.strip()), None, 2
+    return replace(state, user=strip_ascii_blanks(next_tok)), None, 2
 
 
 def _step_cache_mount_flag(

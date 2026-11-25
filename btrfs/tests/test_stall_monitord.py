@@ -258,6 +258,47 @@ class ReadBytesTest(unittest.TestCase):
             with self.subTest(text=text[:8]):
                 self.assertEqual(self.m.read_int(self.write("v", text.encode())), want)
 
+    def test_kv_psi_and_io_stat_skip_a_value_they_cannot_read(self) -> None:
+        # int() and float() also took "+5", "1_0", "nan", "inf", "1e9" and digits of other scripts
+        # ("\N{ARABIC-INDIC DIGIT THREE}" as 3), and raised ValueError past 4300 digits, out of the
+        # sample and the daemon's loop. A name with such a value is left out of read_kv; a PSI or io.stat
+        # file with one is unreadable (None), the fall-through the callers already have.
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        huge = "1" * 5000
+        for bad in ("+5", "1_0", three, huge):
+            with self.subTest(kv=bad[:8]):
+                path = self.write("vmstat", f"zswpout {bad}\nnr -5\npswpin 7\n".encode())
+                self.assertEqual(self.m.read_kv(path), {"nr": -5, "pswpin": 7})
+        good_psi = "some avg10=1.50 avg60=0.00 avg300=0.00 total=20\nfull avg10=0.50 avg60=0.00 avg300=0.00 total=10\n"
+        self.assertEqual(md_proc.parse_psi(self.write("io", good_psi.encode())), [1.5, 20, 0.5, 10])
+        # A field the file does not have stays 0, as before.
+        self.assertEqual(md_proc.parse_psi(self.write("io", b"some avg10=2.00 total=4\n")), [2.0, 4, 0.0, 0])
+        for avg, total in (
+            ("nan", "20"),
+            ("inf", "20"),
+            ("1e9", "20"),
+            ("1_0", "20"),
+            (three, "20"),
+            ("1.50", three),
+            ("1.50", "+20"),
+            ("1.50", huge),
+            ("1.50", "-1"),
+        ):
+            with self.subTest(avg=avg, total=total[:8]):
+                text = f"some avg10={avg} avg60=0.00 avg300=0.00 total={total}\n"
+                self.assertIsNone(md_proc.parse_psi(self.write("io", text.encode())))
+        devs = {"253:0"}
+        self.assertEqual(
+            md_proc.parse_io_stat(self.write("io.stat", b"253:0 rbytes=5 wbytes=7 rios=1\n"), devs), [5, 7]
+        )
+        for bad in ("+5", three, huge, "x"):
+            with self.subTest(io_stat=bad[:8]):
+                text = f"253:0 rbytes={bad} wbytes=7 rios=1\n8:0 rbytes=x\n"
+                self.assertIsNone(md_proc.parse_io_stat(self.write("io.stat", text.encode()), devs))
+        # A device that is not counted is not read either.
+        path = self.write("io.stat", f"253:0 rbytes=5 wbytes=7\n8:0 rbytes={three}\n".encode())
+        self.assertEqual(md_proc.parse_io_stat(path, devs), [5, 7])
+
     def test_error_during_first_read(self) -> None:
         path = self.write("big", b"a" * (2 * PAGE))
 
@@ -597,9 +638,11 @@ class SampleRecordTest(unittest.TestCase):
             mock.patch.object(md_monitor, "read_kv", lambda path: kv.get(path, {})),
             mock.patch.object(md_monitor, "read_int", read_int),
             mock.patch.object(md_monitor, "read_text", texts.get),
-            mock.patch.object(md_monitor, "parse_psi", psi.get),
+            mock.patch.object(md_monitor, "parse_psi", lambda path, unreadable=None: psi.get(path, unreadable)),
             mock.patch.object(
-                md_monitor, "parse_io_stat", lambda path, devs: io_stat.get(path) if devs == {"253:0"} else None
+                md_monitor,
+                "parse_io_stat",
+                lambda path, devs, unreadable=None: io_stat.get(path, unreadable) if devs == {"253:0"} else None,
             ),
         ):
             rec = dict(mon.sample([]))
@@ -641,6 +684,48 @@ class SampleRecordTest(unittest.TestCase):
             },
         )
         self.assertEqual(mon.cmax, {"gone": 5})
+
+    def test_a_cgroup_with_a_value_it_cannot_read_is_left_out(self) -> None:
+        # A bad total in memory.pressure or a bad rbytes in io.stat used to be recorded as 0, a cumulative
+        # counter gone back to 0: the report then counted every byte since boot at the next sample. Such
+        # a cgroup is left out of the sample; a file that cannot be read still counts as 0.
+        mon = monitor(load())
+        mon.topo.top_devs = {"253:0"}
+        psi_line = "some avg10=0.00 avg60=0.00 avg300=0.00 total={}\nfull avg10=0.00 avg60=0.00 avg300=0.00 total={}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {
+                "system.slice/io.pressure": psi_line.format(7, 6),
+                "system.slice/memory.pressure": psi_line.format(5, 4),
+                "system.slice/io.stat": "253:0 rbytes=\N{ARABIC-INDIC DIGIT THREE} wbytes=7\n",
+                "user.slice/io.pressure": psi_line.format(9, 8),
+                "user.slice/memory.pressure": psi_line.format("+5", 4),
+                "user.slice/io.stat": "253:0 rbytes=1 wbytes=2\n",
+                "machine.slice/io.pressure": psi_line.format(3, 2),
+                "bad/io.pressure": psi_line.format(30, 20),
+                "bad/io.stat": "253:0 rbytes=" + "1" * 5000 + " wbytes=2\n",
+                "good/io.pressure": psi_line.format(31, 21),
+                "good/io.stat": "253:0 rbytes=10 wbytes=20\n",
+            }
+            for rel, text in files.items():
+                os.makedirs(os.path.dirname(f"{tmp}/{rel}"), exist_ok=True)
+                with open(f"{tmp}/{rel}", "w", encoding="utf-8") as f:
+                    f.write(text)
+            mon.topo.fs, mon.topo.disks = {}, {}
+            mon.topo.containers = {"docker-bad": f"{tmp}/bad", "docker-good": f"{tmp}/good"}
+
+            def cgroup_psi(path: str, unreadable: list[float | int] | None = None) -> list[float | int] | None:
+                # The real reader for the cgroup files of the temporary folder; none for /proc/pressure.
+                return md_proc.parse_psi(path, unreadable=unreadable) if path.startswith(tmp) else None
+
+            with (
+                mock.patch.object(md_monitor, "CGROUP_ROOT", tmp),
+                mock.patch.object(md_monitor, "parse_psi", cgroup_psi),
+                mock.patch.object(md_monitor, "read_kv", lambda path: {}),
+                mock.patch.object(md_monitor, "read_text", lambda path: None),
+            ):
+                got = mon.sample([])["cg"]
+        # machine.slice has no memory.pressure and no io.stat: zeros, as before.
+        self.assertEqual(got, {"machine.slice": [3, 2, 0, 0, 0, 0], "docker-good": [31, 21, 0, 0, 10, 20]})
 
 
 class WaitKindTest(unittest.TestCase):

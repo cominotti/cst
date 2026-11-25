@@ -17,7 +17,7 @@ from cst_core.application.install import InstallRefused, InstallService, Placeme
 from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.domain.text import parse_shell_assignments
+from cst_core.domain.text import parse_shell_assignments, strip_ascii_blanks
 from cst_core.domain.units import ActiveState, EnablementState
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
@@ -107,7 +107,7 @@ def collect_irq_snapshot(
     notes: tuple[str, ...] = ()
     build_set: CpuSet | None = None
     msg: str | None = None
-    if not settings.build_cpus.strip():
+    if not strip_ascii_blanks(settings.build_cpus):  # as CpuSet.parse reads it
         msg = f"BUILD_CPUS is empty in {paths.conf}"
     else:
         try:

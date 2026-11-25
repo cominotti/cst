@@ -869,10 +869,13 @@ def _parse_jobs_value(raw: str) -> int:
 
 
 def _parse_worker_fds(raw: str) -> tuple[int, int]:
+    """RAW as "READ,WRITE": two descriptors in ASCII digits within int()'s limit (_ascii_whole_number);
+    SystemExit for anything else."""
+    invalid = f"run_unit: invalid {_WORKER_FDS_FLAG} value {raw!r}"
     parts = raw.split(",")
-    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-        raise SystemExit(f"run_unit: invalid {_WORKER_FDS_FLAG} value {raw!r}")
-    return int(parts[0]), int(parts[1])
+    if len(parts) != 2:
+        raise SystemExit(invalid)
+    return _ascii_whole_number(parts[0], invalid), _ascii_whole_number(parts[1], invalid)
 
 
 def _consume_simple_flag(tok: str, acc: _ParseAcc) -> bool:

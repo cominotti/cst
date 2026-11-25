@@ -1357,6 +1357,12 @@ Rules the script follows about the password:
    snapshots per source. Every 7 days it also runs `--prune` (which really
    frees space on the NAS). Every 30 days, `restic check
    --read-data-subset=5%` reads a random 5 % of the data to find damage.
+   The two intervals (`NAS_PRUNE_EVERY_DAYS`, `NAS_CHECK_EVERY_DAYS`) are
+   whole days: write a plain number. Each one goes into the old bash's
+   `NOW - last >= DAYS * 86400` as text, so an expression is not read as
+   one number there: `7+7` is 7 days and 7 seconds, not 14 days. The alert
+   about an unchecked repository (after `2 * NAS_CHECK_EVERY_DAYS` days)
+   reads the value as one number, 28 days for `7+7`.
 
 Step 6 runs **only if all backups of this run succeeded**. Steps 4 to 6 share
 one time budget of 6 hours (`NAS_TIMEOUT=6h`): forget, prune and check use
@@ -2680,7 +2686,10 @@ How it works, as a sequence:
      fails with `cannot read free space` if it still cannot.
 
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
-`RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`.
+`RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`. Each limit is read as
+bash arithmetic reads it (64-bit: a number too large wraps around; `010` is
+8, `2#1010` is 10; blanks are spaces, tabs and newlines); a value bash cannot compute (`250GiB`, digits of
+another script) holds nothing.
 
 `cst btrfs bulk steam apply --copy` respects them: a real copy of a game
 needs its size plus the emergency limit plus 20 GiB free, and `plan` warns

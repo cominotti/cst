@@ -286,6 +286,8 @@ class ChromeCacheTest(unittest.TestCase):
         no_cap = "WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
         ours = "--disk-cache-dir=/tmp/chrome-cache"
         wide = "\uff15" + "\uff10" * 9  # 5000000000 in fullwidth digits
+        arabic = "\N{ARABIC-INDIC DIGIT FIVE}" + "\N{ARABIC-INDIC DIGIT ZERO}" * 9
+        huge = "9" * 5000
         for text, state, msg in (
             (f"{self.m.OFF_LINE}\n", "off", "off by your choice (marker without the flags): nothing added"),
             (
@@ -316,7 +318,8 @@ class ChromeCacheTest(unittest.TestCase):
             (f"{ours}\n", "user", f"set by you ({ours}): left as it is; {no_cap}"),
             (f"{ours} --disk-cache-size=big\n", "user", f"set by you ({ours} --disk-cache-size=big): left as it is"),
             (f"{ours} --disk-cache-size=100\n", "user", f"set by you ({ours} --disk-cache-size=100): left as it is"),
-            # A digit int() does not read (a superscript) is no number; one it reads (fullwidth) is.
+            # A digit that is not ASCII is no number, as Chrome reads one: a superscript (int() refuses
+            # it) and fullwidth or Arabic-Indic digits (int() reads them) alike.
             (
                 f"{ours} --disk-cache-size=\u00b2\n",
                 "user",
@@ -325,7 +328,18 @@ class ChromeCacheTest(unittest.TestCase):
             (
                 f"{ours} --disk-cache-size={wide}\n",
                 "user",
-                f"set by you ({ours} --disk-cache-size={wide}): left as it is; {ram}",
+                f"set by you ({ours} --disk-cache-size={wide}): left as it is",
+            ),
+            (
+                f"{ours} --disk-cache-size={arabic}\n",
+                "user",
+                f"set by you ({ours} --disk-cache-size={arabic}): left as it is",
+            ),
+            # More digits than int() reads: no number either, not a ValueError.
+            (
+                f"{ours} --disk-cache-size={huge}\n",
+                "user",
+                f"set by you ({ours} --disk-cache-size={huge}): left as it is",
             ),
             (
                 "--disk-cache-dir=/elsewhere --disk-cache-size=0\n",
