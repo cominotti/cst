@@ -445,6 +445,23 @@ test -f "$flag"
 test ! -e "$outcome"
 [[ "$(cat "$attempts")" == 0 ]]
 echo "E2E-NOCOW part 7: mark on +C with copy-on-write data and a count it cannot reset records no boot asks"
+
+# 8. The same with the flag of an earlier request still there (a boot's copy failed: a count of 1 beside
+# the flag): the next boot runs the migration, so mark says so and records nothing. The old line said no
+# boot asks again, and a not-scheduled record was left beside the flag.
+printf '1\n' >"$attempts"
+mount --bind "$attempts" "$attempts"
+mount -o remount,bind,ro "$attempts"
+rc=0; out="$("$helper" mark 2>&1)" || rc=$?
+printf '%s\n' "$out" | sed 's/^/E2E-NOCOW part 8: /'
+[[ "$rc" == 2 ]]
+grep -qF "$vols keeps copy-on-write, the next boot tries again" <<<"$out"
+if grep -qF "no boot asks again" <<<"$out"; then echo "mark says no boot asks beside the flag" >&2; exit 1; fi
+test -f "$flag"
+test ! -e "$outcome"
+[[ "$(cat "$attempts")" == 1 ]]
+umount "$attempts"
+echo "E2E-NOCOW part 8: mark beside an earlier flag with a count it cannot reset says the next boot tries"
 """
 
 

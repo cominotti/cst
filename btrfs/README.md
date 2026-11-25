@@ -829,8 +829,8 @@ docker volume rm <name>         # or one volume by name
   either, the folder keeps no `+C`, the journal says why, and the next boot
   asks again. That holds only for a folder without `+C`: a boot asks only
   for such a folder. When the folder has `+C` already (an older install
-  stopped between its `+C` and its flag, below) and the request fails, no
-  boot asks again: `mark` exits 2 with `... has +C already, so no boot asks
+  stopped between its `+C` and its flag, below), no flag of an earlier
+  request is there and the request fails, no boot asks again: `mark` exits 2 with `... has +C already, so no boot asks
   again: fix that, then run cst btrfs install`, and records it in
   `/var/lib/docker-volumes-nocow/outcome` (`not-scheduled`), which `status`
   shows as `migration not scheduled by the install at <time> (<why>)`. The

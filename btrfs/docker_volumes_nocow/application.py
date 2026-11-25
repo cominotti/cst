@@ -153,8 +153,9 @@ class DockerVolumesNocow:
         another filesystem than /etc, and after a power loss +C must not stay while the flag
         is lost. renew (install's request): the request gets its two boots again even when a
         flag is there already. False, with a log line, when that fails. install (mark's own
-        request): when that fails on a volumes folder with +C already, no boot asks again; the
-        line says so and the outcome record keeps it for status and cst doctor."""
+        request): when that fails on a volumes folder with +C already and no flag of an earlier
+        request, no boot asks again; the line says so and the outcome record keeps it for status
+        and cst doctor. With that flag there the next boot runs the migration (from the old count)."""
         try:
             if (renew or not self.state.flag_exists()) and self.state.attempts():
                 # A count of boots without its flag is not this request's (an older helper removed the
@@ -166,7 +167,7 @@ class DockerVolumesNocow:
         except OSError as e:
             vols = self.paths.volumes
             # Probed after the failure (a probe before it could stop a mark that goes on today).
-            if install and self.has_nocow(vols):
+            if install and self.has_nocow(vols) and not self.state.flag_exists():
                 self.out.log(
                     3,
                     f"cannot schedule the migration ({e}); {vols} has +C already, so no boot asks again: "
@@ -315,8 +316,8 @@ class DockerVolumesNocow:
         """+C on the volumes folder (new volumes inherit it). Its exit status: 0 nothing left to
         migrate; 1 existing volumes still need migrating, and the flag that asks the next boot is
         written; 2 the request could not be written (a journal line says why; no +C then, so the
-        next boot asks again, unless the folder had +C already: then no boot asks, and the outcome
-        record says so)."""
+        next boot asks again, unless the folder had +C already and no flag was there: then no boot
+        asks, and the outcome record says so)."""
         vols = self.paths.volumes
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent (Docker not set up yet): nothing to mark")

@@ -649,6 +649,28 @@ class MarkUnmarkTest(Base):
         self.assertTrue(os.path.exists(self.flag))
         self.assertFalse(os.path.exists(self.outcome))
 
+    def test_mark_beside_an_earlier_flag_that_cannot_reset_the_count_says_the_next_boot_tries(self) -> None:
+        # A boot's copy failed (a count of 1, the flag kept) on a folder with +C, and the install's
+        # reset of that count fails: the flag is still there, so the next boot runs the migration.
+        # The line said no boot asks again, and a not-scheduled record was left beside the flag.
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts("1")
+        with mock.patch.object(
+            nocow_adapters.NocowStateFiles, "save_attempts", side_effect=OSError(errno.EIO, "Input/output error")
+        ):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} keeps "
+            "copy-on-write, the next boot tries again\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), "1")
+        self.assertFalse(os.path.exists(self.outcome))
+
     def test_mark_on_a_folder_with_nocow_already_that_cannot_write_the_flag_says_no_boot_asks(self) -> None:
         shutil.rmtree(os.path.dirname(self.flag))
         with open(os.path.dirname(self.flag), "w") as f:
