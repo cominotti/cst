@@ -695,6 +695,23 @@ class LiveBackupTest(Nas):
         self.assertFalse(os.path.exists(self.index))
         self.assertNotIn("forget", [c["args"][0] for c in self.restic_calls()])
 
+    def test_a_good_read_whose_merge_back_fails_names_its_snapshot(self) -> None:
+        # No stop came: the read was good, only the merge back failed. The snapshot is not indexed, so the
+        # refusal names it with the commands that keep or forget it (else the next run names it as a
+        # snapshot no record names, with no word of where it came from).
+        self.vm(fail=["commit"], agent="connected")
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("DISK NOT MERGED BACK", r.stderr)
+        self.assertIn(
+            f"(the backup itself: the restic snapshot {SNAP_ID[:8]} of win is a backup, its read checked, but it is "
+            "not in the index: the snapshot stays in the repository",
+            r.stderr,
+        )
+        self.assertIn(f"restic tag --add cst-adopted {SNAP_ID}", r.stderr)
+        self.assertIn(f"restic forget {SNAP_ID}", r.stderr)
+        self.assertFalse(os.path.exists(self.index))
+
     def test_persistent_definition_still_on_the_overlay(self) -> None:
         self.vm(fail=["persistent-stays"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
@@ -2985,7 +3002,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
             msg,
         )
         self.assertIn(overlay_a, msg)
-        self.assertNotIn("(the backup itself:", msg)
+        # The read was good (no stop, no failure of its own): its snapshot is named, not indexed.
+        self.assertIn(
+            f"(the backup itself: the restic snapshot {SNAP_ID[:8]} of win is a backup, its read checked", msg
+        )
         self.assertEqual(len(alerts), 1)
         self.assertIn("list failed", alerts[0][1])
         self.assertIn("commit crashed", alerts[0][1])

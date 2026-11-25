@@ -131,6 +131,14 @@ def not_indexed_text(backup: str, kept: str, e: IndexRefused) -> str:
     )
 
 
+def unindexed_backup_text(vm: str, snap: str) -> str:
+    """A good read's snapshot that the index does not name (its merge back failed), and how to keep it."""
+    return (
+        f"the restic snapshot {snap[:8]} of {vm} is a backup, its read checked, but it is not in the index: "
+        + kept_unindexed_text(snap)
+    )
+
+
 def kept_unindexed_text(snap: str) -> str:
     """Where a NAS backup left out of the index stays, what the next runs do with it, and how to keep it."""
     return (

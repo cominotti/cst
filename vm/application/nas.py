@@ -67,6 +67,7 @@ from vm.domain.backup import (
     restic_failure_why,
     snapshot_args,
     torn_entry,
+    unindexed_backup_text,
     unreadable_keep_keys,
     unreadable_nas_number,
 )
@@ -609,11 +610,11 @@ def _nas_not_merged_back(
         + "\nNothing was undone or removed. Put each disk back by hand (read each line first):\n  "
         + "\n  ".join(lines)
     )
-    if isinstance(failure, StopAfterBackup):  # a good read: its snapshot named, with what keeps it
-        msg += (
-            f"\n(the backup itself: {failure}; the restic snapshot {failure.snap[:8]} of {run.vm} is a backup, its "
-            f"read checked, but it is not in the index: {kept_unindexed_text(failure.snap)})"
-        )
+    # A good read (a stop after it, or none: run.read has it): its snapshot named, with what keeps it.
+    if isinstance(failure, StopAfterBackup):
+        msg += f"\n(the backup itself: {failure}; {unindexed_backup_text(run.vm, failure.snap)})"
+    elif failure is None and run.read:
+        msg += f"\n(the backup itself: {unindexed_backup_text(run.vm, run.read[0].snap)})"
     elif failure is not None and not isinstance(failure, Uncertain):
         msg += f"\n(the backup itself: {failure})"
     return Refused(msg)
