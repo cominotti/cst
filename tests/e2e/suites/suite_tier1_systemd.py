@@ -8071,7 +8071,8 @@ echo E2E-OK
         them, and once that manager is stopped the next tick drops them. (c) With that game.state still there, a
         tick sets nothing in tester's manager (a Steam-named scope there gets no MemoryLow and no record) and
         says why once; the old tick acted in tester's manager. cst doctor (as root) compares no drift of that
-        uid's user manager in tester's, and says why; the old doctor warned of a drift in tester's manager."""
+        uid's user manager in tester's, and says why; the old doctor warned of a drift in tester's manager. 'state'
+        says those settings were not compared; the old 'state' said every setting held."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -8171,6 +8172,11 @@ echo E2E-OK
             if grep -qF "$steam" "$st"; then echo "game.state has a record of tester's Steam scope" >&2; exit 1; fi
             got=$(gp tick 2>&1)
             if grep -qF "not handled" <<<"$got"; then echo "said twice: $got" >&2; exit 1; fi
+            # 'state' says the user manager's settings were not compared, and why.
+            s=$(gp state)
+            grep -qF "drift: the user manager's settings not checked (no account has uid $ub, the user 'on' acted for)" <<<"$s" \
+                || { echo "state: $s" >&2; exit 1; }
+            if grep -qF "every setting the profile made still holds" <<<"$s"; then echo "state: $s" >&2; exit 1; fi
             # cst doctor compares no drift of that uid's user manager in tester's either, and says why.
             d=$(/opt/cst-rw/cst doctor 2>&1 || true)
             grep -qF "drift not checked for user.slice (no account has uid $ub, the user 'on' acted for)" <<<"$d" \

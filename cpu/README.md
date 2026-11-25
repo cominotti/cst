@@ -865,7 +865,11 @@ manager's side alone (no Steam scope, no box next to the game, no drift of
 the user manager set in `TARGET_USER`'s manager, which is another user's)
 and says why once per boot (`<4>profile on, its user manager's side not
 handled: no account has uid UID, the user 'on' acted for (fix it; said once
-per boot)`); `cst cpu game state` compares no drift of it either. It still
+per boot)`); `cst cpu game state` compares no drift of it either, and
+says so (`drift: the user manager's settings not checked (no account has
+uid UID, the user 'on' acted for)`, after `drift: none in the system
+manager's settings and the files` when nothing else drifted), and so does
+`cst doctor` (`drift not checked for UNIT (...)`). It still
 pins Docker, the GPU and the system manager's settings. When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to

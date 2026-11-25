@@ -699,10 +699,16 @@ def again_cmd(*, manual: bool) -> str:
 
 
 def drift_lines(
-    drifts: Sequence[Drift] | None, *, manual: bool, newer: str | None = None, not_held: Sequence[Drift] = ()
+    drifts: Sequence[Drift] | None,
+    *,
+    manual: bool,
+    newer: str | None = None,
+    not_held: Sequence[Drift] = (),
+    unchecked: str | None = None,
 ) -> list[str]:
     """The drift part of 'state' (drifts None: no game.intended, switched on by an older version; newer:
-    why game.intended cannot be compared; not_held: the drifts the watchdog does not set again, unheld)."""
+    why game.intended cannot be compared; not_held: the drifts the watchdog does not set again, unheld;
+    unchecked: why the user manager's settings were not compared, None when they were)."""
     if newer is not None:
         return [f"  drift: not checked ({newer})"]
     if drifts is None:
@@ -723,8 +729,12 @@ def drift_lines(
         lines.append(f"   if they stay: {again_cmd(manual=manual)})")
     elif drifts:
         lines.append(f"  (the watchdog does not set these again; {again_cmd(manual=manual)} records them afresh)")
-    else:
+    elif unchecked is None:
         lines.append("  drift: none (every setting the profile made still holds)")
+    else:
+        lines.append("  drift: none in the system manager's settings and the files")
+    if unchecked is not None:
+        lines.append(f"  drift: the user manager's settings not checked ({unchecked})")
     return lines
 
 

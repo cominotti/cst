@@ -1749,7 +1749,13 @@ class TickForARecordedUidWithoutAccountTest(GameProfileCase):
         self.assertEqual(p.state(), 0)
         self.assertEqual([a for a in self.systemd.actions if "--user" in a and "LoadState" in a], [])
         self.assertNotIn("DRIFT: user.slice", out.getvalue())
-        self.assertIn("  drift: none (every setting the profile made still holds)\n", out.getvalue())
+        # It says so: the user manager's settings were not compared (the old 'state' said every setting held).
+        self.assertNotIn("every setting the profile made still holds", out.getvalue())
+        self.assertIn(
+            "  drift: none in the system manager's settings and the files\n"
+            f"  drift: the user manager's settings not checked (no account has uid {UID}, the user 'on' acted for)\n",
+            out.getvalue(),
+        )
 
 
 class OnTargetUserWithoutAccountTest(GameProfileCase):

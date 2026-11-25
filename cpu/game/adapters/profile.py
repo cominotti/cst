@@ -528,11 +528,12 @@ class GameProfile:
             return f"TARGET_USER names no account: {name} (in {conf})"
         return None
 
-    def foreign_refusal(self) -> str | None:
+    def foreign_refusal(self, recs: Sequence[Record] | None = None) -> str | None:
         """Why the tick leaves the user manager's side alone while the profile is on: no account has the uid
         game.state records (the user 'on' acted for), so no name reaches that uid's manager, and TARGET_USER's
-        is another user's (G7). None when game.state records no uid, or an account has it."""
-        uid = state_uid(records(self.state_text()))
+        is another user's (G7). None when game.state records no uid, or an account has it. recs: game.state's
+        records, as a snapshot read them (None: read the file now)."""
+        uid = state_uid(records(self.state_text()) if recs is None else recs)
         target = self.s.target_user
         if uid is None or (target and self._lookup_uid(target, say=False) == uid) or self._name_of(uid):
             return None
@@ -758,13 +759,14 @@ class GameProfile:
         user_manager: bool = True,
     ) -> list[str]:
         """The drift part of 'state' from its snapshot (game.state's records, game.intended's text or None, why
-        it cannot be compared, the by-hand mark; user_manager: see drift): each setting that no longer holds,
-        or that none drifted."""
+        it cannot be compared, the by-hand mark; user_manager: see drift, and when False a line says why the user
+        manager's settings were not compared): each setting that no longer holds, or that none drifted."""
         if intended_text is None:
             return drift_lines(None, manual=manual)
         drifts = self.drift(intended_text, user_manager=user_manager) if newer is None else None
         not_held = [] if drifts is None else unheld(drifts, state_recs)
-        return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held)
+        unchecked = None if user_manager else self.foreign_refusal(state_recs)
+        return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held, unchecked=unchecked)
 
     def intended(self) -> tuple[str, str | None]:
         """game.intended's text, and why it cannot be compared (None: it can)."""
