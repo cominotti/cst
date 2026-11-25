@@ -130,15 +130,11 @@ class ChromeFaultBase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.plan = FaultPlan(dead_after_kill=True)
         self.enterContext(mock.patch.object(adapters, "os", FaultyOs(self.plan, POINTS)))
-        self.fds = set(os.listdir("/proc/self/fd"))
-        self.addCleanup(self.close_left_fds)
         self.n = 0
 
-    def close_left_fds(self) -> None:
-        """A kill right after an os.open loses the descriptor it gave (as a dead process would): closed here."""
-        for fd in set(os.listdir("/proc/self/fd")) - self.fds:
-            with contextlib.suppress(OSError):
-                os.close(int(fd))
+    @staticmethod
+    def open_fds() -> set[str]:
+        return set(os.listdir("/proc/self/fd"))
 
     # ---- the fixture ------------------------------------------------------
     def fresh(self) -> str:
@@ -161,14 +157,22 @@ class ChromeFaultBase(unittest.TestCase):
 
     def run_once(self, home: str, *faults: Fault) -> tuple[bool, bool] | None:
         """One run with these faults: (it raised OSError, it changed the file); None when killed."""
+        before = self.open_fds()
         self.plan.arm(*faults)
         try:
             changed = adapters.apply(home)[2] if self.start.command == Command.APPLY else adapters.off(home)[1]
         except Killed:
+            # A kill right after an os.open loses the descriptor it gave (as a dead process would): closed here.
+            for fd in self.open_fds() - before:
+                with contextlib.suppress(OSError):
+                    os.close(int(fd))
             return None
         except OSError:
-            return True, False
-        return False, changed
+            result = (True, False)
+        else:
+            result = (False, changed)
+        self.assertEqual(self.open_fds() - before, set(), f"{self.start.name} {faults}: a descriptor left open")
+        return result
 
     # ---- what the state is --------------------------------------------------
     def file(self, home: str) -> tuple[str | None, int | None]:
