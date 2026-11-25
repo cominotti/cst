@@ -3564,9 +3564,10 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
         self.assertEqual((store.written, store.torn), ([], []))
         self.assertEqual(
             msg,
-            f"stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is a backup, but the index could "
-            "not be written ([Errno 28] No space left on device); the snapshot stays in the repository: the next NAS "
-            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept "
+            f"stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is a backup, but writing the index "
+            "failed ([Errno 28] No space left on device): the index may not name it; the snapshot stays in the "
+            "repository: the next NAS backups may name it as a snapshot no record names, and their retention waits "
+            "for it until it is kept "
             f"as a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore "
             'it by its ID: vm/README.md, section "Restore from the NAS")',
         )

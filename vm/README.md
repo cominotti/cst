@@ -152,7 +152,12 @@ its notes (a TPM state not found, ...) and its restore lines, as a backup that
 is indexed prints them. For a NAS backup the message also says that the next
 NAS backups may name the snapshot as one no record names (section 10.6), and
 wait with their retention until it is kept as a backup (`restic tag --add
-cst-adopted ID`) or forgotten. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+cst-adopted ID`) or forgotten. When writing the index fails after a good NAS
+backup (a full `/var`, or its folder's fsync after the file was already
+replaced), the backup is kept and the run ends with exit 1 after its notes
+and restore lines, with "writing the index failed (...): the index may not
+name it" and the same commands: the words hold whether the index was
+replaced or not. An entry this `cst vm` does not understand (no `vm`, a NAS entry
 without its snapshot, a local one without its folder, a known key of another
 type) is not listed or pruned, and is written back as it is after the others.
 
@@ -643,7 +648,8 @@ retention and no listing then, nothing forgotten. A stop that
 comes after the merge back of a good read (while the retention, a listing or
 the index's write runs) ends the run the same way: the snapshot is indexed
 first, with the same words, and nothing more is forgotten or listed. If the
-index cannot be written then (a full disk, say), the stop says so instead,
+index cannot be written then (a full disk, say), the stop says so instead
+("writing the index failed (...): the index may not name it"),
 names the snapshot as a backup and gives the commands that keep or forget
 it. If the merge
 back fails, the snapshot is not indexed, as without a stop (above); the

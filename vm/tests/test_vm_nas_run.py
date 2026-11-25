@@ -4,7 +4,7 @@ vm.conf it reads once, the index after a good read, and the refusal of a disk no
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 from dataclasses import dataclass, field, replace
 import os
@@ -16,6 +16,7 @@ from cst_core.domain.errors import Refused
 from vm import domain as vm_domain, wiring as vm_wiring
 from vm.adapters import conf_number
 from vm.application import nas as vm_app_nas
+from vm.domain import backup as vm_domain_backup
 from vm.tests.test_vm_nas import (
     NOW,
     SNAP_ID,
@@ -88,6 +89,49 @@ class _Run:
         raise AssertionError("the run was not refused")
 
 
+class _IndexFails(FakeNasStore):
+    """The index write fails with ENOSPC: before the index is replaced, or after (replaced: the rename
+    done, the folder's fsync failed)."""
+
+    def __init__(self, *, replaced: bool) -> None:
+        super().__init__([DISK])
+        self.replaced = replaced
+
+    @override
+    def write_index(self, entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+        if self.replaced:
+            super().write_index(entries)
+        raise OSError(28, "No space left on device")
+
+
+class _Defaults(FakeNasSettings):
+    """vm.conf with no NAS number: each one's default (a retention that runs restic forget)."""
+
+    @override
+    def number(self, key: str) -> int | None:
+        return vm_domain.NAS_DEFAULTS[key]
+
+
+class _StopInRetention(FakeNasRestic):
+    """A stop comes while the retention's restic forget runs."""
+
+    @override
+    def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+        answer = super().run(env, args, timeout)
+        if "--keep-weekly" in args:
+            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+        return answer
+
+
+def _write_failed() -> str:
+    """The words of a good NAS backup of win whose index write failed with ENOSPC."""
+    return (
+        f"the restic snapshot {SNAP_ID[:8]} of win is a backup, but writing the index failed ([Errno 28] No space "
+        "left on device): the index may not name it; the snapshot stays in the repository: the next NAS backups "
+        "may name it as a snapshot no record names"
+    )
+
+
 class _ConfNumbers(FakeNasSettings):
     """The numbers of a vm.conf file, read as cst vm reads them."""
 
@@ -137,6 +181,26 @@ class NasNumbersTest(unittest.TestCase):
                 run = self._run(key, "7")
                 run.go()
                 self.assertTrue([c for c in run.restic.calls if c[0] == "forget"], run.restic.calls)
+
+
+class NasIndexWriteFailsTest(unittest.TestCase):
+    """An OSError writing the index after a good NAS backup (a full /var; the folder's fsync after the
+    rename) is the backup's refusal, after its done lines, with words true whether the index was replaced
+    or not; after a stop, the stop says so."""
+
+    def test_a_good_backup_whose_index_write_fails_is_refused_after_its_done_lines(self) -> None:
+        for replaced in (False, True):
+            with self.subTest(replaced=replaced):
+                run = _Run(store=_IndexFails(replaced=replaced))
+                msg = run.refusal()
+                self.assertTrue(msg.startswith(_write_failed()), msg)
+                self.assertIn(f"Done: restic snapshot {SNAP_ID[:8]} of win (crash-consistent).", run.out.lines)
+
+    def test_a_stop_whose_index_write_fails_says_so(self) -> None:
+        run = _Run(store=_IndexFails(replaced=False), restic=_StopInRetention(), settings=_Defaults())
+        with self.assertRaises(vm_domain_backup.Stop) as e:
+            run.go()
+        self.assertTrue(str(e.exception).startswith(f"stopped by signal SIGTERM; {_write_failed()}"), str(e.exception))
 
 
 if __name__ == "__main__":

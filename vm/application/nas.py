@@ -638,10 +638,7 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
     except IndexRefused as e:
         return Stop(f"{stop}; {_not_indexed(snap, vm, e)}")
     except OSError as e:
-        return Stop(
-            f"{stop}; the restic snapshot {snap[:8]} of {vm} is a backup, but the index could not be written ({e}); "
-            f"{_kept_unindexed(snap)}"
-        )
+        return Stop(f"{stop}; {_index_write_failed(snap, vm, e)}")
     return Stop(
         f"{stop}; restic snapshot {snap[:8]} of {vm} is a backup: indexed (the retention runs at the next backup)"
     )
@@ -650,6 +647,15 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
 def _not_indexed(snap: str, vm: str, e: IndexRefused) -> str:
     """What a NAS backup the index could not take says of its snapshot."""
     return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", _kept_unindexed(snap), e)
+
+
+def _index_write_failed(snap: str, vm: str, e: OSError) -> str:
+    """What a NAS backup whose index write failed says of its snapshot: true whether the index was replaced
+    or not (write_atomic can fail at the folder's fsync, after the rename)."""
+    return (
+        f"the restic snapshot {snap[:8]} of {vm} is a backup, but writing the index failed ({e}): the index may "
+        f"not name it; {_kept_unindexed(snap)}"
+    )
 
 
 def _kept_unindexed(snap: str) -> str:
@@ -663,7 +669,8 @@ def _kept_unindexed(snap: str) -> str:
 
 def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) -> Refused | None:
     """The index with the new NAS backup (and without the VM's NAS entries whose snapshot restic no
-    longer lists); the refusal to raise after the notes when the index is not this cst vm's."""
+    longer lists); the refusal to raise after the notes when the index is not this cst vm's or cannot
+    be written."""
     # The index was read before the snapshot too, but a newer cst vm (or a damage) can have changed it
     # since: the snapshot stays, and its notes and restore line are printed before the refusal.
     snap = entry["snapshot"]
@@ -672,6 +679,8 @@ def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) ->
         p.store.write_index(nas_index(entries, entry, nas_snapshot_ids(p.restic, vm, nas)))
     except IndexRefused as e:
         return Refused(_not_indexed(snap, vm, e))
+    except OSError as e:
+        return Refused(_index_write_failed(snap, vm, e))
     return None
 
 
