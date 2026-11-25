@@ -73,6 +73,7 @@ from doctor.application import (
 )
 from btrfs.docker_volumes_nocow import adapters as nocow_adapters, domain as nocow_domain
 from btrfs.health_check import domain as hc_domain
+from btrfs.snapshot_runtime import domain as snap_domain
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.zipapp import entry_payload
@@ -2379,6 +2380,72 @@ class ReadsNeverWaitTest(Scratch):
                 finally:
                     os.remove(path)
                 self.assertEqual([r.message for r in rows], want)
+
+
+class SnapshotNumbersDoctorTest(Scratch):
+    """check_snapshot_numbers: a number of snapshots.conf the hourly run cannot use, judged by the runtime's
+    own parsers (guard_number of each GUARD_KEYS value, nas_unreadable), on the settings merged as the
+    runtime merges them. Before, doctor said nothing: only the run's journal named them."""
+
+    def _rows(self, text: str | None) -> list[str]:
+        conf = os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf")
+        if text is not None:
+            os.makedirs(os.path.dirname(conf), exist_ok=True)
+            with open(conf, "w") as f:
+                f.write(text)
+        try:
+            return [r.message for r in doc_btrfs.check_snapshot_numbers(doc_adapters.Host(dict(self.env)))]
+        finally:
+            if os.path.exists(conf):
+                os.remove(conf)
+
+    def test_each_value_the_guard_cannot_hold_at_is_named(self) -> None:
+        guard = (
+            "snapshots: SKIP_AT_OR_BELOW_GIB={!r} in /etc/btrfs-setup/snapshots.conf: not a number of GiB the space"
+            " guard can hold at: the hourly run takes no snapshot until it is fixed"
+        )
+        cases: tuple[tuple[str, bool], ...] = (
+            ("250GiB", True),
+            ("abc", True),
+            ("1 x", True),
+            ("1\N{NO-BREAK SPACE}", True),
+            ("08", True),
+            (str(2**63), True),
+            ("200", False),
+            ("", False),
+            ("100 + 20", False),
+        )
+        for value, warned in cases:
+            with self.subTest(value=value):
+                # The oracle: the runtime's own reading of the value.
+                self.assertEqual(not isinstance(snap_domain.guard_number(value, exact=True), int), warned)
+                want = [guard.format(value)] if warned else []
+                self.assertEqual(self._rows(f"SKIP_AT_OR_BELOW_GIB='{value}'\n"), want)
+
+    def test_a_nas_number_is_named_only_with_the_nas_backup_on(self) -> None:
+        nas = (
+            "snapshots: NAS_STALE_DAYS='abc' in /etc/btrfs-setup/snapshots.conf: the NAS run cannot compute it: the"
+            " step it governs is skipped and the run fails"
+        )
+        cases: tuple[tuple[str, str, list[str]], ...] = (
+            ("on", "NAS_ENABLED=1\nNAS_STALE_DAYS=abc\n", [nas]),
+            ("off", "NAS_ENABLED=0\nNAS_STALE_DAYS=abc\n", []),
+            ("on, a good number", "NAS_ENABLED=1\nNAS_STALE_DAYS=3\nNAS_PRUNE_EVERY_DAYS=7\n", []),
+        )
+        for label, text, want in cases:
+            with self.subTest(label):
+                self.assertEqual(self._rows(text), want)
+
+    def test_nothing_for_defaults_a_problem_line_an_unknown_key_or_no_file(self) -> None:
+        cases: tuple[tuple[str, str | None], ...] = (
+            ("defaults only", "TOP=/var/mnt/btrfs-top\n"),
+            ("a problem line sets nothing", "SKIP_AT_OR_BELOW_GIB = abc\n"),
+            ("a key the runtime does not read", "OTHER_GIB=abc\n"),
+            ("no file", None),
+        )
+        for label, text in cases:
+            with self.subTest(label):
+                self.assertEqual(self._rows(text), [])
 
 
 class DockerNocowPostponedTest(Scratch):
