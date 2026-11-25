@@ -2966,6 +2966,52 @@ class SwapApplyBranchesTest(_SwapScratch):
                 self.assertEqual(rc, 0, out + err)
                 self.assertTrue(os.path.isfile(dest))
 
+    def _file_rows(self) -> dict[str, dict[str, tuple[str, str]]]:
+        """plan's and status's rows of the files: verb -> target -> (state word, note)."""
+        fs = self._fs()
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=swap_installer(),
+        )
+        status = service.status_report().config
+        assert status is not None
+        return {
+            verb: {item.target: (item.state_word, item.note) for item in report.file_items}
+            for verb, report in (("plan", service.plan_report().config), ("status", status))
+        }
+
+    def test_plan_and_status_say_apply_refuses_a_path_in_its_way(self) -> None:
+        # The paths apply refuses before its first write: a folder at zram-generator.conf or at the legacy sysctl
+        # file, a file in place of a folder above a file apply writes whole. Before, plan and status said "mask",
+        # "remove" and "write" for them, and apply then refused.
+        folder_note = "a folder is in its place: apply refuses before it writes anything"
+        cases = (  # the path relative to /etc, a folder there (or a file), the row's target and note
+            ("systemd/zram-generator.conf", True, "systemd/zram-generator.conf", folder_note),
+            ("sysctl.d/99-zram-tuning.conf", True, "sysctl.d/99-zram-tuning.conf", folder_note),
+            (
+                "systemd/system/machine.slice.d",
+                False,
+                "machine.slice.d/10-swap-memory-low.conf",
+                "{path} is not a folder: apply refuses before it writes anything",
+            ),
+        )
+        for rel, folder, target, note in cases:
+            self._fresh_scratch()
+            path = os.path.join(self.env.etc_dir, rel)
+            with self.subTest(path=rel):
+                if folder:
+                    os.makedirs(path)
+                else:
+                    shutil.rmtree(path, ignore_errors=True)
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write("# not a folder\n")
+                for verb, rows in self._file_rows().items():
+                    self.assertEqual(rows[target], ("?", note.format(path=path)), verb)
+
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the
         # earlier files first, and stopped only at that step.

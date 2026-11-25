@@ -16,6 +16,7 @@ from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from perf.application import collect_memory_from_reader
 from perf.domain.evaluate import evaluate_perf_memory
 from perf.domain.models import PerfRootKind, PerfVerdict
+from swap.application.in_the_way import folder_in_place, non_folder_above
 from swap.application.memory_tuning import (
     MM_TMPFILES_ENTRY,
     THP_EXPERIMENT,
@@ -211,6 +212,10 @@ class SwapEnvironment:
 # drop-in), that root cannot read (a folder in its place, a security policy, a root-squashed mount): --root cannot
 # help, and apply refuses it before the first write.
 _ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before it writes anything"
+# A path in apply's way (swap.application.in_the_way), which apply refuses before its first write: the note of its
+# row, whoever runs plan (after the name, for a name above a file apply writes whole that is not a folder).
+_FOLDER_IN_PLACE_NOTE: Final = "a folder is in its place: apply refuses before it writes anything"
+_NOT_A_FOLDER_NOTE: Final = "is not a folder: apply refuses before it writes anything"
 
 
 def _root_note(env: SwapEnvironment, state: ManagedState, swap_name: str, verb: str, *, cannot_read: str) -> str:
@@ -525,11 +530,17 @@ class SwapReports:
         name = DEFAULT_SWAP_NAME if spec is None else spec.name
 
         for src, dest in env.managed_files:
+            above = non_folder_above(self._fs, dest)
+            if above is not None:
+                file_items.append(PlanItem("?", _short_etc_path(env.etc_dir, dest), f"{above} {_NOT_A_FOLDER_NOTE}"))
+                continue
             st = self._managed_state(src, dest)
             note = _root_note(env, st, name, verb, cannot_read=_ROOT_CANNOT_READ)
             file_items.append(PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), note))
 
-        if self._fs.exists(env.old_sysctl_conf):
+        if folder_in_place(self._fs, env.old_sysctl_conf):
+            file_items.append(PlanItem("?", _short_etc_path(env.etc_dir, env.old_sysctl_conf), _FOLDER_IN_PLACE_NOTE))
+        elif self._fs.exists(env.old_sysctl_conf):
             file_items.append(
                 PlanItem("remove", _short_etc_path(env.etc_dir, env.old_sysctl_conf), "legacy file of the zram setup")
             )
@@ -558,8 +569,10 @@ class SwapReports:
         )
 
     def _zram_conf_item(self) -> PlanItem:
-        """The row of zram-generator.conf: masked, or apply masks it."""
+        """The row of zram-generator.conf: masked, apply masks it, or a folder in its place that apply refuses."""
         path = _short_etc_path(self._env.etc_dir, self._env.zram_conf)
+        if folder_in_place(self._fs, self._env.zram_conf):
+            return PlanItem("?", path, _FOLDER_IN_PLACE_NOTE)
         if self._zram_masked():
             return PlanItem("ok", path, "masked (-> /dev/null): no zram devices at boot")
         return PlanItem("mask", path, "not masked: zram-generator would create zram0 at boot")
