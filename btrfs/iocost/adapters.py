@@ -21,7 +21,7 @@ from cst_core.adapters.runtime import (
     run_installer,
 )
 from cst_core.application.install import InstallRequest, InstallService, record_file
-from cst_core.domain.install import INSTALL_MANIFEST, Component, Owner, select_entries
+from cst_core.domain.install import INSTALL_MANIFEST, Component, InstallReportWord, Owner, select_entries
 from cst_core.domain.record import ComponentState
 from cst_core.domain.text import first_line, group
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode
@@ -43,7 +43,6 @@ from btrfs.iocost.domain import (
 
 _DEVNO_RE: Final = re.compile(r"^[0-9]+:[0-9]+$")
 _ACTIVE_SCHED_RE: Final = re.compile(r"\[([^\]]+)\]")
-_INSTALL_PLAN_CHANGES: Final = ("would write:", "would record:")  # the installer plan's lines for a change
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +306,7 @@ class IocostInstaller:
         return tuple(
             line.partition(": ")[2].strip().removeprefix(self.install_root)
             for line in lines
-            if line.startswith(_INSTALL_PLAN_CHANGES)
+            if line.startswith((InstallReportWord.WOULD_WRITE, InstallReportWord.WOULD_RECORD))
         )
 
 
