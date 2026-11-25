@@ -3981,6 +3981,15 @@ class NasStopHeldFromAnswerTest(unittest.TestCase):
         self.assertIsInstance(refused, Refused)
         self.assertNotIsInstance(refused, vm_domain_backup.Stop)
         self.assertEqual((store.written, store.torn), ([], []))
+        # The refusal names the good snapshot, which the next run names as one no record names.
+        self.assertIn(
+            f"\n(the backup itself: stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is a backup, "
+            "its read checked, but it is not in the index: the snapshot stays in the repository: the next NAS "
+            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept "
+            f"as a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore "
+            'it by its ID: vm/README.md, section "Restore from the NAS"))',
+            str(refused),
+        )
 
     def _check_raises(self, *, stop: bool) -> tuple[BaseException, FakeNasStore, FakeNasRestic]:
         """nas_run of a shut-off VM whose restic answers exit 0 with a snapshot, no stop carried, and whose

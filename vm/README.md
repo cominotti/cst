@@ -646,7 +646,9 @@ first, with the same words, and nothing more is forgotten or listed. If the
 index cannot be written then (a full disk, say), the stop says so instead,
 names the snapshot as a backup and gives the commands that keep or forget
 it. If the merge
-back fails, the snapshot is not indexed, as without a stop (above). After a
+back fails, the snapshot is not indexed, as without a stop (above); the
+refusal then names it as a backup whose read was checked, with the commands
+that keep it (`restic tag --add cst-adopted ID`) or forget it. After a
 stop that ended restic, a snapshot whose check could not be done at all (an
 error of libvirt or of a file read, not a change it found) is recorded as
 torn (what tore it: "check failed"), and the next NAS backup forgets it;

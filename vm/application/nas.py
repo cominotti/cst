@@ -586,7 +586,12 @@ def _nas_not_merged_back(
         + "\nNothing was undone or removed. Put each disk back by hand (read each line first):\n  "
         + "\n  ".join(lines)
     )
-    if failure is not None and not isinstance(failure, Uncertain):
+    if isinstance(failure, StopAfterBackup):  # a good read: its snapshot named, with what keeps it
+        msg += (
+            f"\n(the backup itself: {failure}; the restic snapshot {failure.snap[:8]} of {run.vm} is a backup, its "
+            f"read checked, but it is not in the index: {_kept_unindexed(failure.snap)})"
+        )
+    elif failure is not None and not isinstance(failure, Uncertain):
         msg += f"\n(the backup itself: {failure})"
     return Refused(msg)
 
