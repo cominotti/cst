@@ -15,15 +15,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
-from btrfs.iocost.adapters import (
-    IocostPaths,
-    apply_iocost,
-    collect_iocost_snapshot,
-    iocost_paths_for,
-    plan_iocost,
-    revert_iocost,
-    with_udev_properties,
-)
+from btrfs.iocost.adapters import IocostPaths, iocost_paths_for
 from btrfs.iocost.cli import IocostCliDeps, run_iocost_cli
 from btrfs.iocost.domain import (
     IOCOST_QOS_PATH,
@@ -37,6 +29,13 @@ from btrfs.iocost.domain import (
     parse_iocost_args,
     parse_iocost_qos,
     plan_iocost_apply,
+)
+from btrfs.iocost.wiring import (
+    apply_iocost,
+    collect_iocost_snapshot,
+    plan_iocost,
+    revert_iocost,
+    with_udev_properties,
 )
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, program_installer
