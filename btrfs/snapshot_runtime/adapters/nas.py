@@ -18,7 +18,7 @@ import signal
 import sys
 from typing import TextIO
 
-from btrfs.health_check.domain import bash_div
+from btrfs.health_check.domain import bash_div, bash_wrap
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
@@ -102,8 +102,14 @@ class Nas:
     # ---- numbers, as bash arithmetic read them -----------------------------------------------
     def number(self, key: str) -> int | None:
         """A numeric setting; None where bash's comparison failed (and was false)."""
+        return self._computed(key, self.m.settings[key])
+
+    def _computed(self, key: str, text: str) -> int | None:
+        """TEXT, an expression that holds KEY's value as bash put it in (as text), as bash arithmetic
+        computed it under set -u: RunStopped (after its line) where bash stopped (a name), None where
+        the comparison failed and was false (after its error line). Both lines name KEY's value."""
         value = self.m.settings[key]
-        n = guard_number(value)
+        n = guard_number(text)
         if n is GuardError.NOT_A_NUMBER:
             print(f"{self.m.front}: {key}={value!r} in {self.m.conf}: not a number", file=sys.stderr, flush=True)
             raise RunStopped
@@ -119,14 +125,18 @@ class Nas:
         return bash_div(self.m.now() - last, DAY)
 
     def due(self, path: str, key: str) -> bool:
-        """The epoch in PATH is missing, no number, or KEY days old."""
+        """The epoch in PATH is missing, no number, or KEY days old, as the old bash's due() decided:
+        (( NOW - last >= KEY * 86400 )), with KEY's value put in as text (DAYS "1+1" is 1 + 86400
+        seconds), 64-bit and wrapping, the left side first (a last of 08 fails before KEY is read). A
+        last of digits of another script is due: the C locale's answer of its [[ =~ ^[0-9]+$ ]]."""
         last = self.m.read(path)
         if last is None or not last.isascii() or not last.isdigit():
             return True
-        days, n = self.number(key), guard_number(last)
-        if days is None or not isinstance(n, int):
+        n = guard_number(last)
+        if not isinstance(n, int):  # 08: bash's NOW - last fails first, KEY is not read
             return False
-        return self.m.now() - n >= days * DAY
+        right = self._computed(key, f"{self.m.settings[key]} * {DAY}")
+        return right is not None and bash_wrap(self.m.now() - n) >= right
 
     # ---- staleness -------------------------------------------------------------------------
     def since(self) -> int:
