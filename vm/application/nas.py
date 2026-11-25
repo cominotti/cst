@@ -56,14 +56,14 @@ from vm.domain.backup import (
     StopAfterBackup,
     StopAfterSnapshot,
     Uncertain,
-    kept_unindexed_text,
+    index_write_failed_text,
     manifest_text,
     nas_done_lines,
     nas_index,
     nas_index_entry,
     nas_manifest,
     nas_tags,
-    not_indexed_text,
+    not_indexed_backup_text,
     restic_failure_why,
     snapshot_args,
     torn_entry,
@@ -636,30 +636,20 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
     """The index with the backup a stop came after (a stop held through its checked read, or one after
     the merge back; no listing: its other entries stay as they are); the stop to raise, which says so,
     or that the index is not this cst vm's."""
+    return Stop(f"{stop}; {_index_alone(p, vm, entry)}")
+
+
+def _index_alone(p: NasBackup, vm: str, entry: IndexEntry) -> str:
+    """The index with the backup of entry and no listing (its other entries stay as they are): the words
+    that say it is indexed, or why it is not."""
     snap = entry["snapshot"]
     try:
         p.store.update_index(lambda entries: nas_index(entries, entry, None))
     except IndexRefused as e:
-        return Stop(f"{stop}; {_not_indexed(snap, vm, e)}")
+        return not_indexed_backup_text(snap, vm, e)
     except OSError as e:
-        return Stop(f"{stop}; {_index_write_failed(snap, vm, e)}")
-    return Stop(
-        f"{stop}; restic snapshot {snap[:8]} of {vm} is a backup: indexed (the retention runs at the next backup)"
-    )
-
-
-def _not_indexed(snap: str, vm: str, e: IndexRefused) -> str:
-    """What a NAS backup the index could not take says of its snapshot."""
-    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept_unindexed_text(snap), e)
-
-
-def _index_write_failed(snap: str, vm: str, e: OSError) -> str:
-    """What a NAS backup whose index write failed says of its snapshot: true whether the index was replaced
-    or not (write_atomic can fail at the folder's fsync, after the rename)."""
-    return (
-        f"the restic snapshot {snap[:8]} of {vm} is a backup, but writing the index failed ({e}): the index may "
-        f"not name it; {kept_unindexed_text(snap)}"
-    )
+        return index_write_failed_text(snap, vm, e)
+    return f"restic snapshot {snap[:8]} of {vm} is a backup: indexed (the retention runs at the next backup)"
 
 
 def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) -> Refused | None:
@@ -677,9 +667,9 @@ def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) ->
         alive, unkept = (None, frozenset[str]()) if listing is None else listing
         p.store.update_index(lambda entries: nas_index(entries, entry, alive, unkept=unkept))
     except IndexRefused as e:
-        return Refused(_not_indexed(snap, vm, e))
+        return Refused(not_indexed_backup_text(snap, vm, e))
     except OSError as e:
-        return Refused(_index_write_failed(snap, vm, e))
+        return Refused(index_write_failed_text(snap, vm, e))
     return None
 
 

@@ -139,6 +139,20 @@ def unindexed_backup_text(vm: str, snap: str) -> str:
     )
 
 
+def not_indexed_backup_text(snap: str, vm: str, e: IndexRefused) -> str:
+    """What a NAS backup the index could not take says of its snapshot."""
+    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept_unindexed_text(snap), e)
+
+
+def index_write_failed_text(snap: str, vm: str, e: OSError) -> str:
+    """What a NAS backup whose index write failed says of its snapshot: true whether the index was replaced
+    or not (write_atomic can fail at the folder's fsync, after the rename)."""
+    return (
+        f"the restic snapshot {snap[:8]} of {vm} is a backup, but writing the index failed ({e}): the index may "
+        f"not name it; {kept_unindexed_text(snap)}"
+    )
+
+
 def kept_unindexed_text(snap: str) -> str:
     """Where a NAS backup left out of the index stays, what the next runs do with it, and how to keep it."""
     return (
