@@ -2548,6 +2548,8 @@ class OutcomeRecordTest(Base):
             # stopped with a traceback, or with "[Errno 75]" and exit 2).
             '{"v": 1, "outcome": "gave-up", "at": 100000000000000000000, "volumes": "v", "reason": "r"}',
             '{"v": 1, "outcome": "gave-up", "at": 1000000000000000000, "volumes": "v", "reason": "r"}',
+            # A time localtime accepts but strftime cannot show (a year past a C int, in UTC and west).
+            '{"v": 1, "outcome": "gave-up", "at": 67768036191676799, "volumes": "v", "reason": "r"}',
         ):
             with self.subTest(text=text):
                 os.makedirs(os.path.dirname(self.outcome), exist_ok=True)

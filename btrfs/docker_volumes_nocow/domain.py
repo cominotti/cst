@@ -314,9 +314,11 @@ def outcome_unreadable(path: str) -> OutcomeRead:
 
 
 def _is_local_time(at: int) -> bool:
-    """at (epoch seconds) is a time the C library can show (time.localtime raises past its range)."""
+    """at (epoch seconds) is a time the C library can show: the readers' own call (status's outcome_line,
+    cst doctor's check) works. time.localtime raises past its range, and time.strftime raises on some
+    times localtime accepts (a year past what a C int holds)."""
     try:
-        time.localtime(at)
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
     except OverflowError, OSError, ValueError:
         return False
     return True

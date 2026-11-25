@@ -2473,6 +2473,8 @@ class DockerNocowOutcomeTest(Scratch):
             # A time past what the C library can show: the check itself failed before.
             '{"v": 1, "outcome": "not-scheduled", "at": 100000000000000000000, "volumes": "v", "reason": "r"}',
             '{"v": 1, "outcome": "not-scheduled", "at": 1000000000000000000, "volumes": "v", "reason": "r"}',
+            # A time localtime accepts but strftime cannot show (a year past a C int, in UTC and west).
+            '{"v": 1, "outcome": "not-scheduled", "at": 67768036191676799, "volumes": "v", "reason": "r"}',
         ):
             with self.subTest(text=text):
                 with open(os.path.join(self.state_dir, "outcome"), "w") as f:
