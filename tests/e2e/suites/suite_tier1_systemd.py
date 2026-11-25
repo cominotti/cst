@@ -9193,6 +9193,73 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_250_cpu_game_profile_off_calls_no_user_manager_for_a_user_with_no_account(self) -> None:
+        """The real game profile and systemd, as root, with root's own user manager running (user@0.service).
+        'off' with a game.state whose record of the user manager has no uid to act for (an 'on' whose first
+        record failed: no user@UID.service record), `prop usr app.slice CPUWeight existed 100`, and TARGET_USER
+        unset. A logging systemctl wrapper first on PATH notes every call and runs the real systemctl: 'off' runs
+        its system manager's undo (the wrapper ran) and no `systemctl --user` at all, says the record is dropped,
+        and root's app.slice keeps its CPUWeight. The old 'off' ran `systemctl --user -M @ set-property --runtime
+        app.slice CPUWeight=100`, which systemd sends to the caller's own user manager: root's (r26.2)."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            rm -rf /var/tmp/e2e-250-bin /var/tmp/e2e-250-calls
+            rm -f /run/user/0/systemd/user.control/app.slice.d/50-CPUWeight.conf
+            systemctl stop user@0.service 2>/dev/null || true
+            rm -f /run/systemd/system.control/machine.slice.d/50-CPUWeight.conf
+            if [[ -e /tmp/e2e-250-machine.bak ]]; then
+                mv /tmp/e2e-250-machine.bak /run/systemd/system.control/machine.slice.d/50-CPUWeight.conf
+            fi
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-250-conf.bak ]]; then mv /tmp/e2e-250-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-250-conf.bak
+            mo=/run/systemd/system.control/machine.slice.d/50-CPUWeight.conf
+            [[ ! -e "$mo" ]] || cp -a "$mo" /tmp/e2e-250-machine.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf   # no TARGET_USER
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            systemctl start user@0.service
+            systemctl --user -M root@ set-property --runtime app.slice CPUWeight=55
+            [[ "$(systemctl --user -M root@ show -P CPUWeight app.slice)" == 55 ]]
+            systemctl set-property --runtime machine.slice CPUWeight=60   # a value of its own, which 'off' sets back
+            printf '%s\n' 'prop usr app.slice CPUWeight existed 100' 'prop sys machine.slice CPUWeight existed 60' >"$st"
+            install -d /var/tmp/e2e-250-bin  # not /tmp: noexec here, and a PATH entry there is skipped
+            real=$(command -v systemctl)
+            printf '#!/bin/bash\nprintf "%%s\\n" "$*" >>/var/tmp/e2e-250-calls\nexec %s "$@"\n' "$real" \
+                >/var/tmp/e2e-250-bin/systemctl
+            chmod 0755 /var/tmp/e2e-250-bin/systemctl
+            got=$(PATH=/var/tmp/e2e-250-bin:$PATH gp off 2>&1) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qx "set-property --runtime machine.slice CPUWeight=60" /var/tmp/e2e-250-calls \
+                || { echo "the wrapper did not run (or off did not undo machine.slice):" >&2; cat /var/tmp/e2e-250-calls >&2; exit 1; }
+            if grep -q -- '--user' /var/tmp/e2e-250-calls; then
+                echo "off called a user manager:" >&2; cat /var/tmp/e2e-250-calls >&2; exit 1
+            fi
+            grep -qF "off: could not undo app.slice CPUWeight=100: TARGET_USER names no account, no user manager to undo it in: dropped" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(systemctl --user -M root@ show -P CPUWeight app.slice)" == 55 ]] \
+                || { echo "root's app.slice CPUWeight: $(systemctl --user -M root@ show -P CPUWeight app.slice)" >&2; exit 1; }
+            test ! -e "$st"
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS)
     def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
         """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose

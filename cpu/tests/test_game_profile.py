@@ -32,6 +32,7 @@ from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFil
 from cpu.game.adapters.kernel import GameKernelFiles
 from cpu.game.adapters.power import GameSysfsFiles
 from cpu.game.adapters.profile import GameProfile, load_profile, machine_ports
+from cpu.game.application.leftovers import unit_gone, user_manager_gone
 from cpu.game.application.profile import GameProfileSteps
 from cst_core.adapters import files as cst_files
 from cst_core.adapters.files import read_text
@@ -46,6 +47,7 @@ from cpu.game.domain import (
     escapes_in_state,
     expand_cpus,
     has_prop_record,
+    intended_header,
     intended_records,
     newer_intended,
     record_line,
@@ -1584,6 +1586,105 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("TARGET_USER not set", out)
         self.assertFalse(os.path.exists(self.state))
+
+
+class NoAccountNoUserManagerCallTest(GameProfileCase):
+    """No `systemctl --user` runs for a name no account has (TARGET_USER unset, or naming none, and no uid
+    in game.state to act for): `-M @` reaches the caller's own user manager (root's), `-M NAME@` none. A
+    record of the user manager of no user is dropped, said, never undone elsewhere (r26.2)."""
+
+    NOBODY = "cst-test-nobody"
+
+    def nameless(self, target: str) -> tuple[GameProfile, io.StringIO]:
+        """The profile for target, a name no account has; only USER has one (uid UID)."""
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            GameSettings(target_user=target),
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "",
+            name_of=lambda uid: USER if uid == UID else "",
+            out=out,
+        )
+        self.systemd.actions = []
+        return p, out
+
+    def user_calls(self) -> list[str]:
+        return [a for a in self.systemd.actions if a.startswith("systemctl --user")]
+
+    def test_off_drops_an_old_value_of_the_user_manager_with_no_user_to_undo_it_for(self) -> None:
+        # An 'on' whose first record failed: no user@UID.service record, so no uid to act for.
+        for target in ("", self.NOBODY):
+            with self.subTest(target=target):
+                self.write(
+                    self.state,
+                    "prop usr app.slice CPUWeight existed 100\nprop sys machine.slice CPUWeight existed 50\n",
+                )
+                p, out = self.nameless(target)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(p.off(), 0)
+                self.assertEqual(self.user_calls(), [])  # the old 'off' ran `--user -M @ set-property`
+                self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=50", self.systemd.actions)
+                self.assertIn(
+                    "<4>game-profile: off: could not undo app.slice CPUWeight=100: TARGET_USER names no account,"
+                    " no user manager to undo it in: dropped\n",
+                    out.getvalue(),
+                )
+                self.assertEqual(err.getvalue(), f"id: '{target}': no such user\n")  # said once
+                self.assertFalse(os.path.exists(self.state))
+                self.assertFalse(os.path.exists(self.paths.leftovers))  # dropped, not kept
+
+    def test_the_tick_drops_a_kept_old_value_of_no_user(self) -> None:
+        self.no_game()
+        self.write(self.paths.leftovers, "cst-game-leftovers 2\nuser -\nprop usr app.slice CPUWeight existed 100\n")
+        p, out = self.nameless(self.NOBODY)
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.user_calls(), [])  # the old tick ran `--user -M cst-test-nobody@ set-property`
+        self.assertIn(
+            "<4>game-profile: could not undo app.slice CPUWeight=100: TARGET_USER names no account,"
+            " no user manager to undo it in: dropped\n",
+            out.getvalue(),
+        )
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_the_tick_and_state_ask_no_user_manager_for_no_user(self) -> None:
+        # On with no uid in game.state and TARGET_USER unset: the user manager's drift is not compared, set or
+        # shown (the old tick asked `--user -M @` and set user.slice's CPUWeight in root's user manager).
+        self.write(self.state, "prop sys machine.slice CPUWeight existed 50\n")
+        self.write(self.intended, intended_header() + "prop usr user.slice CPUWeight idle idle\n")
+        self.write(self.manual, "")
+        p, out = self.nameless("")
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.user_calls(), [])
+        self.assertNotIn("user.slice CPUWeight", out.getvalue())
+        p, out = self.nameless("")
+        self.assertEqual(p.state(), 0)
+        self.assertEqual(self.user_calls(), [])
+        self.assertNotIn("DRIFT", out.getvalue())
+
+    def test_off_s_no_such_user_line_survives_a_quiet_lookup_before_it(self) -> None:
+        p, _ = self.nameless(self.NOBODY)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.ask("usr", "show", "-P", "CPUWeight", "user.slice").returncode, 1)  # quiet, first
+            self.assertEqual(p.uid(say=True), "")
+            self.assertEqual(p.uid(say=True), "")
+        self.assertEqual(err.getvalue(), f"id: '{self.NOBODY}': no such user\n")  # once
+        self.assertEqual(self.user_calls(), [])
+
+    def test_a_user_manager_of_no_uid_is_never_gone(self) -> None:
+        p, _ = self.nameless("")
+        self.assertFalse(user_manager_gone(p, ""))
+        self.assertFalse(unit_gone(p, "usr", "app.slice"))  # the old one: True, the call counted done
+        self.assertFalse(unit_gone(p, "usr", "run-u7.scope"))
+        self.assertEqual(self.user_calls(), [])
+        # A uid whose runtime folder is gone (a logout): gone, as before.
+        mine, _ = self.profile()
+        self.assertFalse(user_manager_gone(mine, UID))
+        shutil.rmtree(os.path.join(self.paths.run_user, UID))
+        self.assertTrue(user_manager_gone(mine, UID))
+        self.assertTrue(unit_gone(mine, "usr", "app.slice"))
 
 
 class TickForARecordedUidWithoutAccountTest(GameProfileCase):

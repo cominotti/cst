@@ -116,10 +116,12 @@ def undo_entries(
 
 
 def no_user_manager(profile: GameProfileSteps, rec: Record, *, say: bool) -> bool:
-    """The record is a new runtime override of the user manager while TARGET_USER names no account (the entry
-    names no user): no user's runtime folder holds it and no user manager can be reloaded, so it is dropped,
-    never undone (say: see GameProfileSteps.undo_record)."""
-    return _new_override(rec, "usr") and not profile.uid(say=say)
+    """The record sets a property of the user manager while the user acted for has no account (the entry names
+    no user): it is dropped, never undone (say: see GameProfileSteps.undo_record). A new runtime override: no
+    user's runtime folder holds it and no user manager can be reloaded. An old value (mode existed): no name
+    reaches a user manager to set it in (`-M @` would reach root's own). Neither is kept: a kept entry of no
+    user would later be undone for whatever account TARGET_USER names then, which may be another user's."""
+    return of_user_manager(rec) and not profile.uid(say=say)
 
 
 def _new_override(rec: Record, mgr: Manager) -> bool:
@@ -187,8 +189,9 @@ def keep(profile: GameProfileSteps, failed: Sequence[Entry], kept: Sequence[Entr
 
 
 def user_manager_gone(profile: GameProfileSteps, uid: str) -> bool:
-    """The user manager of that uid is gone with its runtime overrides: its runtime folder is (a logout)."""
-    return not profile.ports.units.is_dir(os.path.join(profile.paths.run_user, uid, "systemd"))
+    """The user manager of that uid is gone with its runtime overrides: its runtime folder is (a logout). Never
+    for no uid (""): that names no runtime folder, and no user manager to have gone."""
+    return bool(uid) and not profile.ports.units.is_dir(os.path.join(profile.paths.run_user, uid, "systemd"))
 
 
 def unit_gone(profile: GameProfileSteps, mgr: Manager, unit: str) -> bool:

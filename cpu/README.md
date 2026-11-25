@@ -864,7 +864,16 @@ uid, never in another user's (`TARGET_USER`'s):
   manager is gone. Versions before 2026-11 dropped them as if undone.
 
 With no such record (an `on` that died before its first record), the user
-manager's side is `TARGET_USER`'s, as before. While the profile is on and no
+manager's side is `TARGET_USER`'s, as before. While `TARGET_USER` names no
+account either (unset, or a name of no account), `off`, the tick and
+`cst cpu game state` run no `systemctl --user` at all: each record of the
+user manager is dropped, a new override or an old value alike, with
+`<4>off: could not undo app.slice CPUWeight=100: TARGET_USER names no
+account, no user manager to undo it in: dropped`, and its drift is not
+compared. Until 2026-11 they ran `systemctl --user -M @` (an empty name),
+which systemd sends to the caller's own user manager: as root, root's. So
+`off` set the old value in root's user manager when it ran, and counted the
+record undone when it did not. While the profile is on and no
 account has the recorded uid, the watchdog's `tick` leaves the user
 manager's side alone (no Steam scope, no box next to the game, no drift of
 the user manager set in `TARGET_USER`'s manager, which is another user's)
@@ -984,13 +993,17 @@ be written, the journal says so (`<3>off: could not keep the daemon-reload
 of ... in /run/cpu-setup/game.leftovers: not done`). (Versions before
 2026-11 never read a reload's exit status and kept nothing for it: the
 game's values stayed until a reboot or someone else's `daemon-reload`.)
-A kept new override of the user manager with no `user` line (kept while
-`TARGET_USER` named no account) is undone in the manager of the user the
-pass acts for when it starts: in `off`, the user game.state records when it
-records one, else `TARGET_USER`'s; in the tick, `TARGET_USER`'s. It is
-dropped only while that user has no account: no user's runtime folder holds
-it and no user manager can be reloaded, so nothing is said undone (`<4>... could not undo ...: TARGET_USER names no
-account, no user manager to undo it in: dropped`). An entry of no user is
+A kept record of the user manager with no `user` line (kept while
+`TARGET_USER` named no account: a new override, or an old value) is undone
+in the manager of the user the pass acts for when it starts: in `off`, the
+user game.state records when it records one, else `TARGET_USER`'s; in the
+tick, `TARGET_USER`'s. It is dropped only while that user has no account:
+no name reaches a user manager to undo it in (and for a new override, no
+user's runtime folder holds it), so nothing is said undone (`<4>... could
+not undo ...: TARGET_USER names no account, no user manager to undo it in:
+dropped`). It is not kept: a kept entry of no user would later be undone for
+whatever account `TARGET_USER` names then, which may be another user's.
+An entry of no user is
 judged so whatever entry of another user's the same pass undid before it:
 it is never undone in that user's manager (versions before 2026-11 went on
 acting for the user of the entry undone last).

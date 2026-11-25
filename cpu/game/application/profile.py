@@ -96,6 +96,7 @@ class GameProfileSteps:
         self.problems = tuple(problems)
         self.ports = ports
         self._uids: dict[str, str] = {}
+        self._said_unknown: set[str] = set()  # the names whose "no such user" line was printed
 
     # ---- output ----------------------------------------------------------------------
     def log(self, prio: int, msg: str) -> None:
@@ -117,20 +118,31 @@ class GameProfileSteps:
         return self._lookup_uid(self.s.target_user, say=say)
 
     def _lookup_uid(self, user: str, *, say: bool) -> str:
-        """The uid of user ("" for none), looked up once per run. With say ('off' only), the first lookup
-        of a user with no account prints id's "no such user" line on stderr, once; on, tick and state
+        """The uid of user ("" for none), looked up once per run. With say ('off' only), a user with no
+        account gets id's "no such user" line on stderr, once per run, whatever quiet lookups came before
+        (the calls of the user manager look the name up quietly first: _no_user_manager); on, tick and state
         never print it."""
         if user not in self._uids:
-            found = self.ports.uid_of(user)
-            if say and not found:
-                self.ports.out.error(f"id: '{user}': no such user")
-            self._uids[user] = found
-        return self._uids[user]
+            self._uids[user] = self.ports.uid_of(user)
+        found = self._uids[user]
+        if say and not found and user not in self._said_unknown:
+            self._said_unknown.add(user)
+            self.ports.out.error(f"id: '{user}': no such user")
+        return found
+
+    def _no_user_manager(self, mgr: Manager, name: str) -> bool:
+        """A call of the user manager (usr) for a name no account has: none is run. `systemctl --user -M @`
+        (an empty name) reaches the caller's own user manager (root's, from 'off' or the tick), and a name of
+        no account reaches none, so neither is ever asked."""
+        return mgr == "usr" and not self._lookup_uid(name, say=False)
 
     def ctl(self, mgr: Manager, *args: str, quiet: bool = False, user: str | None = None) -> int:
         """systemctl ARGS for the system manager (sys) or the user's (usr: the user acted for, or user),
-        its output on ours (quiet: its stderr dropped); the exit status."""
+        its output on ours (quiet: its stderr dropped); the exit status, 1 with nothing run for the user
+        manager of a name no account has (_no_user_manager)."""
         name = self.s.target_user if user is None else user
+        if self._no_user_manager(mgr, name):
+            return 1  # refused: no account, no user manager to call (_no_user_manager)
         if not quiet:
             self.ports.out.flush()
             return self.ports.systemd.run(mgr, name, args, output=OutputMode.INHERIT).returncode
@@ -139,7 +151,10 @@ class GameProfileSteps:
         return res.returncode
 
     def ask(self, mgr: Manager, *args: str, keep_stderr: bool = False) -> CommandResult:
-        """systemctl ARGS, its output captured (its stderr dropped, or shown with keep_stderr)."""
+        """systemctl ARGS, its output captured (its stderr dropped, or shown with keep_stderr); exit 1 and no
+        output, with nothing run, for the user manager of a name no account has (_no_user_manager)."""
+        if self._no_user_manager(mgr, self.s.target_user):
+            return CommandResult(1, "", "")
         output = OutputMode.CAPTURE if keep_stderr else OutputMode.STDOUT
         res = self.ports.systemd.run(mgr, self.s.target_user, args, output=output)
         if keep_stderr and res.stderr:
