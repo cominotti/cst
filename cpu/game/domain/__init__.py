@@ -39,7 +39,8 @@ class GameRecordKind(StrEnum):
     CGW = "cgw"  # a cgroup file written directly
     EPP = "epp"  # a CPU's energy/performance preference (game.state only)
     SYSFS = "sysfs"  # a generic sysfs file written directly and restored on off (game.state only)
-    USER = "user"  # the uid the user manager's records after it are for (game.leftovers only)
+    USER = "user"  # the uid the user manager's records after it are for, "-" for none (game.leftovers only)
+    RELOAD = "reload"  # a daemon-reload of a manager is due (game.leftovers only)
 
 
 _MANAGERS: Final[dict[str, Manager]] = {"sys": "sys", "usr": "usr"}
@@ -413,17 +414,21 @@ def intended_records(text: str) -> list[Record]:
     """The drift records of game.intended (its text), read as the profile reads the file (records: a
     last line cut short and a line bash could not read are left out, fields as bash's eval gives them):
     ("prop", MGR, UNIT, PROP, VALUE, SHOWN) with MGR sys or usr, and ("cgw", FILE, VALUE, SHOWN), any
-    further fields dropped. The format line and other kinds are none."""
-    out: list[Record] = []
+    further fields dropped. The format line and other kinds are none. The last record of a setting (MGR UNIT
+    PROP, or FILE) wins, at its own place: 'on' writes a predicted record before its set-property and a
+    second one when systemd then shows another form, and the drift repair one when its set shows another."""
+    out: dict[Record, Record] = {}
     for r in records(text):
         match _kind(r):
             case GameRecordKind.PROP if len(r) >= INTENDED_PROP_FIELDS and manager_of(r[1]) is not None:
-                out.append(r[:INTENDED_PROP_FIELDS])
+                rec, key = r[:INTENDED_PROP_FIELDS], r[:4]
             case GameRecordKind.CGW if len(r) >= INTENDED_CGW_FIELDS:
-                out.append(r[:INTENDED_CGW_FIELDS])
+                rec, key = r[:INTENDED_CGW_FIELDS], r[:2]
             case _:
-                pass
-    return out
+                continue
+        out.pop(key, None)
+        out[key] = rec
+    return list(out.values())
 
 
 def state_uid(recs: Sequence[Record]) -> str | None:
@@ -694,10 +699,16 @@ def again_cmd(*, manual: bool) -> str:
 
 
 def drift_lines(
-    drifts: Sequence[Drift] | None, *, manual: bool, newer: str | None = None, not_held: Sequence[Drift] = ()
+    drifts: Sequence[Drift] | None,
+    *,
+    manual: bool,
+    newer: str | None = None,
+    not_held: Sequence[Drift] = (),
+    unchecked: str | None = None,
 ) -> list[str]:
     """The drift part of 'state' (drifts None: no game.intended, switched on by an older version; newer:
-    why game.intended cannot be compared; not_held: the drifts the watchdog does not set again, unheld)."""
+    why game.intended cannot be compared; not_held: the drifts the watchdog does not set again, unheld;
+    unchecked: why the user manager's settings were not compared, None when they were)."""
     if newer is not None:
         return [f"  drift: not checked ({newer})"]
     if drifts is None:
@@ -718,8 +729,12 @@ def drift_lines(
         lines.append(f"   if they stay: {again_cmd(manual=manual)})")
     elif drifts:
         lines.append(f"  (the watchdog does not set these again; {again_cmd(manual=manual)} records them afresh)")
-    else:
+    elif unchecked is None:
         lines.append("  drift: none (every setting the profile made still holds)")
+    else:
+        lines.append("  drift: none in the system manager's settings and the files")
+    if unchecked is not None:
+        lines.append(f"  drift: the user manager's settings not checked ({unchecked})")
     return lines
 
 

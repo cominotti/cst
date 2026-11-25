@@ -2702,10 +2702,10 @@ class GameProfileTest(Scratch):
     def test_the_user_game_state_names_is_asked_not_a_changed_target_user(self) -> None:
         # 'on' acted for the user whose user@UID.service it recorded first; TARGET_USER names another
         # user now (results() sets tester). The profile's tick and 'state' ask the user game.state
-        # names, and so does the doctor; a uid that names no account leaves TARGET_USER's.
+        # names, and so does the doctor.
         me = pwd.getpwuid(os.getuid()).pw_name
         state = os.path.join(self.run_dir, "game.state")
-        for uid, asked in ((os.getuid(), me), (999999, "tester")):
+        for uid, asked in ((os.getuid(), me),):
             with self.subTest(uid=uid):
                 self.profile_on()
                 with open(state, "w") as f:
@@ -2720,6 +2720,25 @@ class GameProfileTest(Scratch):
                 calls = self.calls()[before:]
                 self.assertIn(f"systemctl --user -M {asked}@ show -p LoadState -p CPUWeight user.slice", calls)
                 self.assertEqual([c for c in calls if " -M " in c and f"-M {asked}@" not in c], [])
+
+    def test_the_user_manager_of_a_recorded_uid_with_no_account_is_not_compared(self) -> None:
+        # No account has the uid game.state records, and TARGET_USER names another user (tester): the tick leaves
+        # that uid's user manager alone and 'state' compares no drift of it, so the doctor compares none either,
+        # and says why. The old doctor compared game.intended's records with tester's manager, and warned of a
+        # drift the tick never repairs.
+        self.profile_on()
+        with open(os.path.join(self.run_dir, "game.state"), "w") as f:
+            f.write("prop sys user@999999.service MemoryLow new -\n")
+        self.show("usr", "user.slice", CPUWeight="30")  # tester's: not the user 'on' acted for
+        before = len(self.calls())
+        res = self.results()
+        self.assertEqual([c for c in self.calls()[before:] if "--user" in c], [])
+        self.assertEqual([r.status for r in res], [doc_domain.OK, doc_domain.INFO], res)
+        self.assertIn("the 7 settings it made still hold", res[0].message)
+        self.assertEqual(
+            res[1].message,
+            "game profile: drift not checked for user.slice (no account has uid 999999, the user 'on' acted for)",
+        )
 
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()
@@ -2780,6 +2799,22 @@ class GameProfileTest(Scratch):
         self.assertEqual(
             self.leftovers_results(),
             [Result(doc_domain.WARN, message + ". The profile is on: the next 'off' retries them")],
+        )
+
+    def test_a_format_2_file_names_its_reloads_due(self) -> None:
+        # game.leftovers format 2 (G2-G5): a user line before every entry, and the daemon-reloads due.
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write(
+                "cst-game-leftovers 2\nuser -\nprop sys machine.slice CPUWeight existed 70\nreload sys\n"
+                "user 1000\nreload usr\n"
+            )
+        res = self.leftovers_results()
+        self.assertEqual([r[0] for r in res], [doc_domain.WARN])
+        self.assertIn(
+            "3 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight, daemon-reload of the"
+            " system manager, daemon-reload of uid 1000's user manager (kept in",
+            res[0].message,
         )
 
     def test_no_settings_off_could_not_undo_say_nothing(self) -> None:
@@ -2878,10 +2913,11 @@ class GameProfileTest(Scratch):
         self.assertEqual(self.results(), [Result(doc_domain.INFO, "game profile: ON, no recorded setting to compare")])
 
     def test_a_cgroup_record_without_a_shown_value_is_not_compared(self) -> None:
-        # The file is there and holds another value, but the record names nothing to compare with.
+        # The file is there and holds another value, but the record names nothing to compare with. It is the
+        # file's last record, which wins (G1): the earlier record of the same file is not counted either.
         self.intended += "cgw /sys/fs/cgroup/inner/cpuset.cpus 1-2 ''\n"
         self.profile_on()
-        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 8 settings it made still hold")])
+        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 7 settings it made still hold")])
 
 
 class UserManagerBoxesTest(Scratch):

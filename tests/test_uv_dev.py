@@ -154,7 +154,12 @@ class UvDevTest(unittest.TestCase):
                 r = self.run_uv_dev("ty", env={"HOME": ""})
                 self.assertEqual(r.returncode, 1, r.stderr)
                 self.assertEqual(r.stdout, "")  # uv never ran
-                self.assertIn(f"uv-dev: {NO_CACHE_BASE}", r.stderr)
+                self.assertIn(f"uv-dev: {NO_CACHE_BASE}", r.stderr)  # the bash copy says what the Python tools say
+                self.assertEqual(
+                    r.stderr,
+                    "uv-dev: no cache folder: XDG_CACHE_HOME is not an absolute path, nor is HOME, "
+                    "and the password database has no absolute home folder for this user\n",
+                )
 
     def test_a_symlinked_path_to_the_checkout_gets_the_same_environment(self) -> None:
         # /home and /var/home name the same folder on Silverblue: one venv, not two.
