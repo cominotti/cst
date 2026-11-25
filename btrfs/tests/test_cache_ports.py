@@ -563,6 +563,8 @@ class _PortsContract(unittest.TestCase):
         self.assertEqual(
             self.side.accounts().resolve("carol")[0], CacheMountUser("carol", 1002, 1002, "/var/home/carol")
         )
+        self.assertTrue(self.side.host().home_exists("/var/home/carol"))
+        self.assertTrue(self.side.host().home_exists("/home/carol"))
 
 
 class FakePortsContractTest(_PortsContract):

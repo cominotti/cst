@@ -1612,9 +1612,21 @@ class CacheWorld(FaultPoints):
         self.users[name] = CacheMountUser(name, uid, uid, home)
         self.mkdirs(home)
 
+    def real_path(self, path: str, *, follow_last: bool = True) -> str:
+        """path with each link among its folders followed, and its last part's too when follow_last, as the
+        kernel walks a path: /home/carol is /var/home/carol where /home is a link to /var/home."""
+        parts = [part for part in posixpath.normpath(path).split("/") if part]
+        out = "/"
+        for i, part in enumerate(parts):
+            out = posixpath.join(out, part)
+            hops = 0
+            while (follow_last or i < len(parts) - 1) and out in self.links and hops <= len(self.links):
+                out, hops = posixpath.normpath(self.links[out]), hops + 1
+        return out
+
     def mkdirs(self, path: str) -> None:
-        """The folder path and its parents."""
-        p = posixpath.normpath(path)
+        """The folder path and its parents, made where its links lead (os.makedirs)."""
+        p = self.real_path(path)
         while p not in self.dirs:
             self.dirs.add(p)
             p = posixpath.dirname(p)
@@ -1642,15 +1654,13 @@ class CacheWorld(FaultPoints):
         return [c for c in self.calls if c.startswith(("mount ", "umount ", "systemctl "))]
 
     def exists(self, path: str) -> bool:
-        """Anything at path, a dangling link too (os.path.lexists)."""
-        return path in self.dirs or path in self.files or path in self.links
+        """Anything at path, a dangling link too (os.path.lexists), through the links among its folders."""
+        p = self.real_path(path, follow_last=False)
+        return p in self.dirs or p in self.files or p in self.links
 
     def is_dir(self, path: str) -> bool:
-        """A folder at path, through a link (os.path.isdir)."""
-        seen = 0
-        while path in self.links and seen < len(self.links) + 1:
-            path, seen = self.links[path], seen + 1
-        return path in self.dirs
+        """A folder at path, through its links (os.path.isdir)."""
+        return self.real_path(path) in self.dirs
 
     def nonempty(self, path: str) -> bool:
         """_dir_is_nonempty's answer: not there or a link is False (asked only for a non-link), a file
