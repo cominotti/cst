@@ -563,6 +563,14 @@ def duration_s(text: str, *, exact: bool = False) -> int | None:
 _NAS_DAY_KEYS: Final = ("NAS_PRUNE_EVERY_DAYS", "NAS_CHECK_EVERY_DAYS")
 
 
+def _nas_expression(settings: Mapping[str, str], key: str) -> str | None:
+    """The arithmetic the run puts KEY into: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS and
+    NAS_CHECK_EVERY_DAYS as "VALUE * 86400" (as due() puts them in); None for any other key."""
+    if key == "NAS_STALE_DAYS":
+        return settings[key]
+    return f"{settings[key]} * {DAY}" if key in _NAS_DAY_KEYS else None
+
+
 def nas_out_of_range(settings: Mapping[str, str], now: int) -> tuple[str, ...]:
     """The NAS settings whose number the run computes only by wrapping past 64 bits, in DEFAULTS'
     order: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS and NAS_CHECK_EVERY_DAYS as "VALUE * 86400"
@@ -570,8 +578,7 @@ def nas_out_of_range(settings: Mapping[str, str], now: int) -> tuple[str, ...]:
     bash cannot compute is not among them (its error stays where the run meets it)."""
     bad: list[str] = []
     for key in DEFAULTS:
-        if key == "NAS_STALE_DAYS" or key in _NAS_DAY_KEYS:
-            expr = settings[key] if key == "NAS_STALE_DAYS" else f"{settings[key]} * {DAY}"
+        if (expr := _nas_expression(settings, key)) is not None:
             if guard_number(expr, exact=True) == GuardError.OUT_OF_RANGE:
                 bad.append(key)
         elif key == "NAS_TIMEOUT" and duration_s(settings[key]) is not None:
@@ -586,13 +593,11 @@ def nas_unreadable(settings: Mapping[str, str]) -> tuple[str, ...]:
     BAD_NUMBER: abc, 1 x, 08, a no-break space, or an operator _Arith does not read although bash
     would compute it: 1<<8, ~5), in DEFAULTS' order: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS
     and NAS_CHECK_EVERY_DAYS as "VALUE * 86400" (as due() puts them in)."""
-    bad: list[str] = []
-    for key in DEFAULTS:
-        if key == "NAS_STALE_DAYS" or key in _NAS_DAY_KEYS:
-            expr = settings[key] if key == "NAS_STALE_DAYS" else f"{settings[key]} * {DAY}"
-            if not isinstance(guard_number(expr), int):
-                bad.append(key)
-    return tuple(bad)
+    return tuple(
+        key
+        for key in DEFAULTS
+        if (expr := _nas_expression(settings, key)) is not None and not isinstance(guard_number(expr), int)
+    )
 
 
 def restic_line(line: str) -> str:
