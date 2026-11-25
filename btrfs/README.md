@@ -1594,7 +1594,8 @@ remounted.
 
 **How an fstab line is read:** here, in `commit-interval` and in
 `cache`, the fields of an `/etc/fstab` line split at spaces and tabs
-only, as `mount` (libmount) splits them. A no-break space, a form feed, a
+only, as `mount` (libmount) splits them, and a line ends at a newline
+only (`/proc/mounts` is read the same way). A no-break space, a form feed, a
 vertical tab or U+3000 is part of a field, so an option written
 `commit=30<NBSP>` is one malformed option (the kernel refuses it), not
 `commit=30`, and an option is trimmed of spaces and tabs only. A line

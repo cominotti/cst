@@ -10,6 +10,7 @@ import re
 from typing import Final
 
 from cst_core.domain.text import (
+    file_lines,
     is_mount_comment,
     mount_field_spans,
     mount_fields,
@@ -275,10 +276,11 @@ def _is_root_btrfs_entry(source: str, target: str, root_uuid: str, root_sources:
 
 
 def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
-    """Parse btrfs entries from `/proc/mounts` (or `/etc/fstab`), decoding standard octal escapes; the fields
-    split at spaces and tabs only, as libmount splits them (mount_fields)."""
+    """Parse btrfs entries from `/proc/mounts` (or `/etc/fstab`), decoding standard octal escapes; only a
+    newline ends a line (file_lines), and the fields split at spaces and tabs only, as libmount splits them
+    (mount_fields)."""
     entries: list[MountEntry] = []
-    for line in text.splitlines():
+    for line in file_lines(text):
         if is_mount_comment(line):
             continue
         match mount_fields(line):
@@ -326,10 +328,11 @@ def parse_fstab_root_entries(fstab_text: str, root_uuid: str = "") -> tuple[Moun
 
 
 def rewrite_fstab_options(fstab_text: str, option_rewriter: Callable[[str], str], root_uuid: str = "") -> str:
-    """Rewrite options on root btrfs `/etc/fstab` lines using `option_rewriter`, keeping formatting."""
+    """Rewrite options on root btrfs `/etc/fstab` lines using `option_rewriter`, keeping formatting. Only a
+    newline ends a line, as libmount reads one: a form feed or a vertical tab is part of a field."""
     sources = _root_fstab_sources(parse_proc_mounts(fstab_text), root_uuid)
     out_lines: list[str] = []
-    for raw_line in fstab_text.splitlines(keepends=True):
+    for raw_line in fstab_text.split("\n"):
         if is_mount_comment(raw_line):
             out_lines.append(raw_line)
             continue
@@ -342,7 +345,7 @@ def rewrite_fstab_options(fstab_text: str, option_rewriter: Callable[[str], str]
                 out_lines.append(raw_line[:start] + option_rewriter(opts) + raw_line[end:])
             case _:
                 out_lines.append(raw_line)
-    return "".join(out_lines)
+    return "\n".join(out_lines)
 
 
 def rewrite_fstab(fstab_text: str, target_option: str, root_uuid: str = "") -> str:

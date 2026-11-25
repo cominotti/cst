@@ -11675,6 +11675,88 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_226_compress_and_commit_read_and_rewrite_an_fstab_as_libmount_reads_it(self) -> None:
+        """The real libmount (findmnt --tab-file) as the oracle of btrfs compress-force's and commit-interval's
+        fstab reader and writer: a scratch fstab (not /etc/fstab) whose root lines hold a vertical tab inside
+        the options field (noatime<VT>x, commit=30<VT>) and a btrfs line whose target holds a form feed.
+        compress's parse_proc_mounts (the system python, -I -B) gives the btrfs rows findmnt lists,
+        parse_fstab_root_entries the two root lines, has_malformed_commit takes commit=30<VT> for a malformed
+        option, and the file rewrite_fstab writes reads back in findmnt with compress=zstd:1 added to the
+        options field libmount reads. Before, str.splitlines() also ended a line at the vertical tab and the
+        form feed: the reader lost the rest of those lines, and the rewrite put the option inside the field
+        (noatime<VT>,compress=zstd:1x). A fake cannot show where libmount ends a line."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-compress-fstab-lines"
+        self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_226 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w}
+            rm -rf "$w" && mkdir -p "$w"
+            # The bytes: \013 a vertical tab, \014 a form feed.
+            printf 'UUID=u1 / btrfs noatime\013x,subvol=root 0 0\n' >"$w/fstab"
+            printf 'UUID=u1 /var btrfs subvol=v,commit=30\013,noatime 0 0\n' >>"$w/fstab"
+            printf '/dev/b /mnt/x\014y btrfs rw,compress=zstd:3 0 0\n' >>"$w/fstab"
+            printf '# the end\n' >>"$w/fstab"
+            findmnt --tab-file "$w/fstab" -J -o SOURCE,TARGET,FSTYPE,OPTIONS >"$w/findmnt.json"
+            cat "$w/findmnt.json" >&2
+            cd /opt/cst-rw
+            /usr/bin/python3 -I -B - "$w" <<'PY'
+import json
+import subprocess
+import sys
+
+sys.path.insert(0, ".")
+from btrfs.commit.domain import has_malformed_commit
+from btrfs.compress.domain import parse_fstab_root_entries, parse_proc_mounts, rewrite_fstab, rewrite_mount_options
+from cst_core.domain.text import is_mount_comment, mount_fields, unescape_mount_field
+
+w = sys.argv[1]
+
+
+def listed(path):
+    out = subprocess.run(
+        ["findmnt", "--tab-file", path, "-J", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"],
+        capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL,
+    ).stdout
+    return [[fs["source"], fs["target"], fs["fstype"], fs["options"]] for fs in json.loads(out)["filesystems"]]
+
+
+with open(w + "/fstab", encoding="utf-8", newline="") as f:
+    tab = f.read()
+want = listed(w + "/fstab")
+ours = [[e.source, e.target, e.fstype, e.options] for e in parse_proc_mounts(tab)]
+old = [
+    [unescape_mount_field(x) for x in mount_fields(line)[:2]] + mount_fields(line)[2:4]
+    for line in tab.splitlines()
+    if not is_mount_comment(line) and mount_fields(line)[2:3] == ["btrfs"]
+]
+roots = parse_fstab_root_entries(tab, "u1")
+new = rewrite_fstab(tab, "compress=zstd:1", "u1")
+with open(w + "/fstab.new", "w", encoding="utf-8", newline="") as f:
+    f.write(new)
+got = listed(w + "/fstab.new")
+expect = [row[:3] + [rewrite_mount_options(row[3], "compress=zstd:1") if row[0] == "UUID=u1" else row[3]] for row in want]
+print("findmnt", ascii(want), file=sys.stderr)
+print("parse_proc_mounts", ascii(ours), file=sys.stderr)
+print("str.splitlines", ascii(old), file=sys.stderr)
+print("rewritten, findmnt", ascii(got), file=sys.stderr)
+assert len(want) == 3, want
+assert ours == want, "parse_proc_mounts differs from findmnt"
+assert [e.target for e in roots] == ["/", "/var"], roots
+assert has_malformed_commit(roots[1].options), roots[1].options
+assert got == expect, "the rewritten fstab reads back differently in findmnt"
+assert "compress=zstd:1" in got[0][3] and got[2] == want[2], got
+assert old != want, "str.splitlines agrees with findmnt: the file does not bite"
+print("E2E-OK")
+PY
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:
         """`cst btrfs scrub-limit set` and `off` after an earlier run that wrote both files and died before

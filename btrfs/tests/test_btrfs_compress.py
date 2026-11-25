@@ -358,6 +358,29 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(spec.raw if spec else None, f"compress=zstd:1{nbsp}")
         self.assertEqual(effective_compress_spec(" compress=zstd:1"), parse_compress_spec("compress=zstd:1"))
 
+    def test_fstab_lines_end_at_a_newline_only(self) -> None:
+        # libmount ends a line at a newline only: a vertical tab, a form feed, \x1c, NEL or U+2028 is part of
+        # a field. str.splitlines() ended the line there: it lost the rest of the options (compress=zstd:1),
+        # found no entry for such a target, and the rewrite put the option inside the field libmount reads.
+        for sep in ("\x0b", "\x0c", "\x1c", "\N{NEXT LINE}", "\N{LINE SEPARATOR}"):
+            with self.subTest(sep=ascii(sep)):
+                line = f"UUID={SAMPLE_UUID} / btrfs rw,subvol=/a{sep}b,compress=zstd:1 0 0\n"
+                self.assertEqual([e.options for e in parse_proc_mounts(line)], [f"rw,subvol=/a{sep}b,compress=zstd:1"])
+                target = f"UUID={SAMPLE_UUID} /mnt/t{sep}x btrfs rw 0 0\n"
+                self.assertEqual([e.target for e in parse_proc_mounts(target)], [f"/mnt/t{sep}x"])
+                fstab = f"UUID={SAMPLE_UUID} / btrfs noatime{sep}x 0 0\n# end\n"
+                self.assertEqual(
+                    rewrite_fstab(fstab, "compress=zstd:1", SAMPLE_UUID),
+                    f"UUID={SAMPLE_UUID} / btrfs noatime{sep}x,compress=zstd:1 0 0\n# end\n",
+                )
+        # The carriage return before a newline and a last line without a newline stay as they were.
+        for end in ("\r\n", ""):
+            with self.subTest(end=ascii(end)):
+                self.assertEqual(
+                    rewrite_fstab(f"UUID={SAMPLE_UUID} / btrfs noatime 0 0{end}", "compress=zstd:1", SAMPLE_UUID),
+                    f"UUID={SAMPLE_UUID} / btrfs noatime,compress=zstd:1 0 0{end}",
+                )
+
     def test_rewrite_kargs_and_top_mount_options(self) -> None:
         edits = rewrite_kargs_rootflags(SAMPLE_KARGS, "compress-force=zstd:1")
         self.assertEqual(
