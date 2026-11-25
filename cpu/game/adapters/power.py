@@ -31,11 +31,7 @@ class GameSysfsFiles(GameSysValues):
         cards: list[str] = []
         if not os.path.isdir(sys_drm):
             return dev_to_card, cards
-        try:
-            entries = os.listdir(sys_drm)
-        except OSError:  # gone since isdir saw it
-            return dev_to_card, cards
-        for entry in entries:
+        for entry in self.list_dir(sys_drm):  # none when gone since isdir saw it
             if not is_card(entry):
                 continue
             cards.append(entry)
@@ -52,11 +48,7 @@ class GameSysfsFiles(GameSysValues):
         for card in cards:
             card_dir = os.path.join(sys_drm, card)
             prefix = f"{card}-"
-            try:
-                children = os.listdir(card_dir)
-            except OSError:
-                continue
-            for child in children:
+            for child in self.list_dir(card_dir):
                 if not child.startswith(prefix):
                     continue
                 if read_stripped(os.path.join(card_dir, child, "status")) == _CONNECTED_STATE:
