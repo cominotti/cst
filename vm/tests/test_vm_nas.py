@@ -4184,7 +4184,9 @@ class ResticOutputDescriptorTest(unittest.TestCase):
         """A pipe whose read end has a descriptor at or above SELECT_FD_LIMIT: (read end, write end)."""
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft <= SELECT_FD_LIMIT:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (SELECT_FD_LIMIT * 2, hard))
+            # Up to the hard limit only: an unprivileged process cannot raise it (a hard limit at or below
+            # SELECT_FD_LIMIT leaves no such descriptor, and the test fails).
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, SELECT_FD_LIMIT * 2), hard))
             self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
         r, w = os.pipe()
         self.addCleanup(os.close, w)
@@ -4205,6 +4207,35 @@ class ResticOutputDescriptorTest(unittest.TestCase):
     def test_a_high_descriptor_with_nothing_to_read_times_out(self) -> None:
         stream, _ = self._high_pipe()
         self.assertFalse(vm_adapters_restic._Output(stream).fill(0.01))
+
+
+# A child that lowers its own limit of open files to a hard limit between SELECT_FD_LIMIT and twice it (as
+# some containers and CI runners set it), then runs a test of ResticOutputDescriptorTest.
+LOW_HARD_LIMIT_CHILD = r"""
+import resource, sys, unittest
+sys.path.insert(0, sys.argv[1])
+hard = min(resource.getrlimit(resource.RLIMIT_NOFILE)[1], 1536)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 1024), hard))
+suite = unittest.defaultTestLoader.loadTestsFromName(sys.argv[2])
+result = unittest.TextTestRunner(stream=sys.stdout, verbosity=0).run(suite)
+sys.exit(0 if result.wasSuccessful() and result.testsRun == 1 else 1)
+"""
+
+
+class ResticOutputDescriptorLimitTest(unittest.TestCase):
+    """ResticOutputDescriptorTest raises the soft limit of open files only up to the hard limit."""
+
+    def test_it_runs_under_a_hard_limit_below_twice_select_fd_limit(self) -> None:
+        name = f"{__name__}.ResticOutputDescriptorTest.test_a_line_from_a_high_descriptor_is_read"
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", LOW_HARD_LIMIT_CHILD, _CHECKOUT, name],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 class ResticBackupStartStopTest(unittest.TestCase):
