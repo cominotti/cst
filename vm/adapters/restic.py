@@ -221,8 +221,9 @@ class Restic:
             )
         except FileNotFoundError:
             return ExitStatus.NOT_FOUND, {}
-        # From restic's start on, every stop ends restic and the timer: also one that waited while the timer
-        # started and is raised when the stops are let in again.
+        # Once Popen has returned, every stop ends restic and the timer: also one that waited while the timer
+        # started and is raised when the stops are let in again. A stop inside Popen itself (between fork and
+        # exec) is not covered: see the out-of-scope notes of fv-r22.
         try:
             assert p.stdout is not None
             output = _Output(p.stdout)
