@@ -35,9 +35,12 @@ def start_scrub_process() -> None:
     undo_python_start()
 
 
-def build_scrub_limit(paths: ScrubPaths, runner: CommandRunnerPort, *, read_only: bool) -> ScrubLimit:
-    """The use cases over the real files, installer and systemctl at paths; read_only (status and plan):
-    systemd's answer comes from the host's systemd from a toolbox too."""
+def build_scrub_limit(paths: ScrubPaths, runner: CommandRunnerPort | None, *, read_only: bool) -> ScrubLimit:
+    """The use cases over the real files, installer and systemctl at paths, through runner (None: a
+    SubprocessCommandRunner); read_only (status and plan): systemd's answer comes from the host's systemd
+    from a toolbox too."""
+    if runner is None:
+        runner = SubprocessCommandRunner()
     return ScrubLimit(
         settings=ScrubSettingsFile(paths.conf_path),
         dropin=ScrubDropinInstaller(paths.dropin_path, paths.installer_script, runner),
@@ -48,8 +51,7 @@ def build_scrub_limit(paths: ScrubPaths, runner: CommandRunnerPort, *, read_only
 
 def scrub_limit_status(paths: ScrubPaths, *, runner: CommandRunnerPort | None = None) -> tuple[int, list[str]]:
     """Read-only status of `SCRUB_LIMIT`, drop-in, sysfs, and whether systemd loaded the drop-in."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    return build_scrub_limit(paths, cmd_runner, read_only=True).status()
+    return build_scrub_limit(paths, runner, read_only=True).status()
 
 
 def scrub_limit_plan(
@@ -57,8 +59,7 @@ def scrub_limit_plan(
 ) -> tuple[int, list[str]]:
     """Read-only dry run of `cst btrfs scrub-limit set|off`, the daemon-reload included that apply runs
     when systemd has not loaded the drop-in as it is on disk."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    return build_scrub_limit(paths, cmd_runner, read_only=True).plan(target_limit)
+    return build_scrub_limit(paths, runner, read_only=True).plan(target_limit)
 
 
 def scrub_limit_apply(
@@ -70,8 +71,7 @@ def scrub_limit_apply(
     """Update `SCRUB_LIMIT` in `snapshots.conf`, update/remove `10-cst-limit.conf`, and reload systemd if needed.
 
     When the installer or daemon-reload fails, snapshots.conf and the drop-in go back to what they were."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    return build_scrub_limit(paths, cmd_runner, read_only=False).apply(target_limit)
+    return build_scrub_limit(paths, runner, read_only=False).apply(target_limit)
 
 
 def _run_action(service: ScrubLimit, parsed: ScrubParsedArgs) -> tuple[int, list[str]]:
@@ -94,8 +94,7 @@ class ScrubCliExecutor:
         if self.build is not None:
             return _run_action(self.build(read_only), parsed)
         paths = scrub_paths_for(env.entry_file, ctx=env.ctx, read_only=read_only, fallback_root=env.fallback_root)
-        runner = SubprocessCommandRunner() if env.runner is None else env.runner
-        return _run_action(build_scrub_limit(paths, runner, read_only=read_only), parsed)
+        return _run_action(build_scrub_limit(paths, env.runner, read_only=read_only), parsed)
 
 
 _SCRUB_SPEC = ManagedCliSpec(
