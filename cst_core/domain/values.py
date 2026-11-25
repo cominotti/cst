@@ -245,9 +245,10 @@ class CpuSet:
             if "-" in token:
                 selected.update(_parse_range(token, spec))
             else:
-                if not _is_index(token):
+                index = parse_whole_number(token)
+                if index is None:
                     raise DomainValidationError(f"invalid CPU index {token!r} in {spec!r}")
-                selected.add(int(token))
+                selected.add(index)
         return cls(frozenset(selected))
 
     def sorted_cpus(self) -> tuple[int, ...]:
@@ -255,18 +256,15 @@ class CpuSet:
         return tuple(sorted(self.cpus))
 
 
-def _is_index(text: str) -> bool:
-    """A CPU index as the kernel writes one: ASCII digits only (str.isdigit also takes "²", which int() refuses)."""
-    return text.isascii() and text.isdigit()
-
-
 def _parse_range(token: str, spec: str) -> range:
     """The CPUs of one "a-b" element (token) of the list spec; DomainValidationError when token is
-    not two indices around one dash, or when the range descends."""
+    not two indices around one dash, or when the range descends. An index is what parse_whole_number
+    reads: ASCII digits (str.isdigit also takes "²", which int() refuses) within int()'s digit limit."""
     start_s, sep, end_s = token.partition("-")
-    if not sep or "-" in end_s or not _is_index(start_s) or not _is_index(end_s):
+    start = parse_whole_number(start_s) if sep and "-" not in end_s else None
+    end = parse_whole_number(end_s) if start is not None else None
+    if start is None or end is None:
         raise DomainValidationError(f"invalid CPU range {token!r} in {spec!r}")
-    start, end = int(start_s), int(end_s)
     if start > end:
         raise DomainValidationError(f"descending CPU range {token!r} in {spec!r}")
     return range(start, end + 1)

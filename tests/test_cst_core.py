@@ -237,6 +237,13 @@ class ValueObjectsTest(unittest.TestCase):
         for bad in ("", " , ", "3-1", "a-b", "0-1-2", "cpu0", "²", "0-²", "٣"):
             with self.subTest(bad=bad), self.assertRaises(DomainValidationError):
                 CpuSet.parse(bad)
+        # An index past int()'s digit limit (4300 digits) is an invalid index or range too, not the
+        # plain ValueError int() raises: callers that catch only DomainValidationError (cpu irq's
+        # BUILD_CPUS, cpu power's topology) would see a traceback.
+        for huge in ("1" * 5000, "0-" + "1" * 5000, "1" * 5000 + "-1"):
+            with self.subTest(huge=huge[:12]), self.assertRaises(DomainValidationError) as cm:
+                CpuSet.parse(huge)
+            self.assertIs(type(cm.exception), DomainValidationError)
         with self.assertRaises(DomainValidationError):
             CpuSet(frozenset())
         with self.assertRaises(DomainValidationError):

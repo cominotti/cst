@@ -332,6 +332,8 @@ class CpuIrqLifecycleTest(unittest.TestCase):
         self.runner.load_state, self.runner.active_state, self.runner.enabled_state = "loaded", "active", "enabled"
         for bad_conf, why in (
             ("BUILD_CPUS='12-abc'\n", "invalid BUILD_CPUS"),
+            # An index past int()'s digit limit: the same refusal, not a traceback.
+            ("BUILD_CPUS='" + "1" * 5000 + "'\n", "invalid BUILD_CPUS"),
             ("BUILD_CPUS=''\n", "BUILD_CPUS is empty"),
             ("BUILD_CPUS='12-23'\nP_CORES = '0-7'\n", "syntax errors"),
         ):
