@@ -15007,3 +15007,50 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP, E2ETag.INSTALL)
+    def test_275_swap_apply_and_the_installer_refuse_an_install_record_that_cannot_be_read(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap set
+        before swap_setup, which saves root's install record and puts it back) with /etc/cst/swap.conf in
+        place and a folder where root's install record goes. apply exits 1 with "REC: cannot be read (Is a
+        directory): nothing was changed" on stderr, and every file, link, mode and owner under /etc and the
+        scratch tree is as before (no crypttab line, no .pre-swap-config.bak). The installer's text command
+        (as cpu-setup calls it) refuses the same record and does not write its destination. Before, apply
+        wrote crypttab and fstab and started swap0 first and failed at the record, and the text command
+        wrote its file and then failed. The test's trap removes the folder before swap_cleanup puts the
+        saved record back."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+unplant() { if [[ -d "$REC" && ! -L "$REC" ]]; then rmdir "$REC"; fi; rm -f /etc/e2e275.conf; }
+trap 'unplant; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+
+mkdir -p /etc/cst "$(dirname "$REC")"
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+rm -f "$REC"
+mkdir "$REC"
+s0="$(snap)"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a folder at the record exited $rc"
+grep -qF "ERROR: $REC: cannot be read (Is a directory): nothing was changed" <<<"$err" || fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
+[[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+
+rc=0
+out="$(printf 'x\n' | /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py text /etc/e2e275.conf 0644 \
+    --component btrfs:core 2>&1)" || rc=$?
+err="$out"
+[[ $rc == 1 ]] || fail "the installer's text command exited $rc"
+grep -qF "$REC: cannot be read (Is a directory): /etc/e2e275.conf was not written" <<<"$out" || fail "text's message"
+[[ ! -e /etc/e2e275.conf ]] || fail "the text command wrote its file"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

@@ -14,6 +14,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -54,6 +55,7 @@ from cst_core.domain.record import (
     without_files,
 )
 from cst_core.ports import CommandResult, UnitVerdict, WriteFailed
+from tests.probes import time_bound
 from tests.test_install import INSTALLER, SYSTEM_PYTHON, MemoryTarget, entry
 
 
@@ -239,6 +241,18 @@ class RecordDomainTest(unittest.TestCase):
         self.assertEqual(with_state(rec, "m:none", ComponentState.DONE), rec, "a component with no file is not added")
         left = without_files(rec, ["/etc/a"])
         self.assertEqual((sorted(left.files), left.components), (["/etc/b"], {"m:u": "pending"}))
+
+
+class _RecordThatCannotBeRead(MemoryRecord):
+    """A record that is there and cannot be read: each read raises OSError(code)."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__()
+        self.code = code
+
+    @override
+    def read(self, path: str) -> InstallRecord | None:
+        raise OSError(self.code, os.strerror(self.code), path)
 
 
 class InstallServiceRecordTest(unittest.TestCase):
@@ -541,6 +555,34 @@ class InstallServiceRecordTest(unittest.TestCase):
         )
         self.assertEqual(self.record.texts, {self.ROOT: '{"format": 9, "files": {}}'})
         self.assertEqual((self.record.writes, self.target.writes), (0, []))
+
+    def test_a_record_that_cannot_be_read_stops_every_write_before_anything_changes(self) -> None:
+        # As for a record of a newer CST. Before, install, put and remove went on (the record was left out)
+        # and failed only at the record's update, after their files; check_record passed.
+        req = InstallRequest()
+        self.target.files["/usr/local/sbin/a"] = (b"old\n", 0o755)
+        place = self.svc.placement(self.a, req)
+        for code in (errno.EACCES, errno.EIO, errno.EISDIR, errno.EINVAL):
+            svc = InstallService(self.target, lambda e: self.payloads[e.src], record=_RecordThatCannotBeRead(code))
+            why = f"{self.ROOT}: cannot be read ({os.strerror(code)}): "
+            calls: tuple[tuple[str, Callable[[], object], str], ...] = (
+                ("install", lambda svc=svc: list(svc.install([self.a], req)), "nothing was changed"),
+                ("put", lambda svc=svc: svc.put(place, b"A\n", as_root=True), "/usr/local/sbin/a was not written"),
+                ("check_record", lambda svc=svc: svc.check_record(self.ROOT), "nothing was changed"),
+                ("remove", lambda svc=svc: list(svc.remove([place])), "nothing was changed"),
+                ("forget_places", lambda svc=svc: svc.forget_places([place]), "nothing was changed"),
+            )
+            for name, call, outcome in calls:
+                with self.subTest(errno=errno.errorcode[code], call=name):
+                    with self.assertRaises(InstallRefused) as cm:
+                        call()
+                    self.assertEqual(str(cm.exception), why + outcome)
+                    self.assertEqual(self.target.writes, [])
+                    self.assertEqual(self.target.files["/usr/local/sbin/a"], (b"old\n", 0o755))
+            with self.subTest(errno=errno.errorcode[code], call="plan"):
+                # A plan cannot tell: it judges the files alone, as before.
+                self.assertEqual(svc.plan([self.a], req), (["would write: /usr/local/sbin/a"], 1))
+                self.assertEqual(svc.plan_put(place, b"A\n", as_root=True), "would write: /usr/local/sbin/a")
 
     def test_check_record_passes_no_record_a_current_one_a_broken_one_and_none(self) -> None:
         self.svc.check_record(self.ROOT)  # no record yet
@@ -1009,6 +1051,33 @@ class InstallerRecordCliTest(unittest.TestCase):
         again = self.cli("plan", *sel)
         self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
         self.assertEqual(self.cli("check", *sel).returncode, 0)
+
+    def test_a_record_that_cannot_be_read_refuses_install_and_text_and_nothing_is_written(self) -> None:
+        # Before, both wrote their files and failed at the record after them; a FIFO made both wait in
+        # its open for ever (bounded here: CallBlocked).
+        cases = (
+            ("folder", os.mkdir, os.rmdir, b"Is a directory"),
+            ("fifo", os.mkfifo, os.remove, b"not a regular file"),
+        )
+        # text records in the caller's own record (root's as root, else the home's).
+        caller = Owner.ROOT if os.geteuid() == 0 else Owner.USER
+        text_record = record_file(caller, pwd.getpwuid(os.getuid()).pw_dir, self.stage)
+        commands: tuple[tuple[str, tuple[str, ...], bytes, str, str], ...] = (
+            ("install", ("install", "--component", "btrfs:docker-gc"), b"", "/usr/local/sbin/docker-gc", self.record),
+            ("text", ("text", "/etc/y.conf", "0644", "--component", "btrfs:core"), b"y\n", "/etc/y.conf", text_record),
+        )
+        for kind, make, unmake, why in cases:
+            for name, args, stdin, dest, record in commands:
+                os.makedirs(os.path.dirname(record), exist_ok=True)
+                with self.subTest(kind=kind, command=name), time_bound(30):
+                    make(record)
+                    try:
+                        r = self.cli(*args, stdin=stdin)
+                    finally:
+                        unmake(record)
+                    self.assertEqual(r.returncode, 1, r.stderr)
+                    self.assertIn(b"installed.json: cannot be read (" + why + b"): ", r.stderr)
+                    self.assertFalse(os.path.lexists(self.stage + dest))
 
     def test_check_judges_the_files_alone_when_the_record_cannot_be_read(self) -> None:
         # A record that cannot be read (here a folder in its place): plan cannot tell what it lists, so

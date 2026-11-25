@@ -2,6 +2,7 @@
 """Local files for the install use case: atomic writes, modes, root ownership, SELinux labels."""
 
 from collections.abc import Callable, Mapping, Sequence
+import errno
 import hashlib
 import os
 import shutil
@@ -9,7 +10,7 @@ import stat
 import tempfile
 
 from cst_core.adapters.runner import SubprocessCommandRunner
-from cst_core.adapters.files import ensure_dir, write_bytes_atomic
+from cst_core.adapters.files import ensure_dir, open_regular_text, write_bytes_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runtime import checkout_commit, checkout_root, install_payload
 from cst_core.application.install import InstallService
@@ -73,14 +74,21 @@ class JsonInstallRecord:
     next to the record (RECORD.lock), so two installs never lose each other's lines."""
 
     def read(self, path: str) -> InstallRecord | None:
-        """parse_record of the file; None when there is no file."""
+        """parse_record of the file; None when there is no file. Only a regular file is read (after links):
+        anything else is an OSError at once, never a wait (a FIFO); a folder keeps open()'s own error
+        (EISDIR, "Is a directory"), as cst doctor names it."""
+        path = checked_path(path)
         try:
-            with open(checked_path(path), encoding="utf-8") as fh:
+            with open_regular_text(path, errors="strict", newline=None) as fh:
                 text = fh.read()
         except FileNotFoundError:
             return None
         except UnicodeDecodeError as e:
             raise RecordFormatError(f"not UTF-8 ({e.reason})") from None
+        except OSError as e:
+            if e.errno == errno.EINVAL and os.path.isdir(path):
+                raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path) from None
+            raise
         return parse_record(text)
 
     def update(self, path: str, change: Callable[[InstallRecord], InstallRecord]) -> bool:

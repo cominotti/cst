@@ -724,8 +724,9 @@ and what this CST folder would install now.
 
 A record that is there and cannot be read (a folder in its place, a file
 where its folder belongs, a read error) is a `WARN` naming its path: every
-CST install and removal reads it, stops at it and fails at its update after
-it has changed its files. Move it aside; there is no fix line, since no one
+CST install and removal reads it and stops at it before it changes anything
+(versions before 2026-11 changed their files first and failed at the
+record's update). Move it aside; there is no fix line, since no one
 command fixes it safely. A record you may not read (its folder's mode) is
 `info` "not readable as your user", as below.
 
