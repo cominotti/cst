@@ -31,11 +31,11 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
-from cpu.game.domain.boxes import shown_form
 from cpu.game.adapters.drift import repair_drift, settings_drift
 from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_pass, unit_gone, user_side
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
+from cpu.game.domain.boxes import shown_form
 from cpu.game.domain.leftovers import (
     LEFTOVER_DROPINS_TEXT,
     UserSide,
@@ -87,7 +87,7 @@ from cpu.game.domain import (
 )
 
 
-# How the watchdog's words on the settings end: it says them once per boot (GameProfile._say_once).
+# How the watchdog's words on the settings end: it says them once per boot (GameProfile.say_once).
 _ONCE: Final = " (fix it; said once per boot)"
 
 
