@@ -1102,13 +1102,14 @@ else:
 
 
 def cache_reload_cleanup(w: str) -> str:
-    """The cleanup of cache_reload_scaffold(w): the bases stopped, /etc/fstab put back and loaded, the base
-    folders this test made and the work folder removed. exec_bash runs bash -e: every step must run, also
-    after one that fails."""
+    """The cleanup of cache_reload_scaffold(w): the bases stopped, /etc/fstab put back (removed only where
+    the scaffold found none, w/no-fstab; left alone where the scaffold stopped before it looked) and loaded,
+    the base folders this test made and the work folder removed. exec_bash runs bash -e: every step must
+    run, also after one that fails."""
     return f"""
             set +e
             systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
             systemctl daemon-reload
             if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
             if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
@@ -1128,7 +1129,7 @@ def cache_reload_scaffold(w: str) -> str:
             set -euo pipefail
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
             [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
             [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
             printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\n' >{w}/etc/passwd
