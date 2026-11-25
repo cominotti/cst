@@ -47,6 +47,7 @@ from btrfs.stall_report.domain import categories as rp_categories
 from btrfs.stall_report.domain import records as rp_records
 from btrfs.stall_report.domain import verdict as rp_verdict
 from btrfs.stall_report.domain import window as rp_window
+from cst_core.domain.contracts import StateFormatKey, state_format
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -1639,6 +1640,72 @@ class ClosedPipeTest(unittest.TestCase):
 
 
 DAMAGED = "INCOMPLETE DATA: {} damaged record(s) in this window were left out (re-running does not help)"
+
+
+class NewerFormatTest(unittest.TestCase):
+    """A meta record of a newer format than the report reads: one line on stderr that names it, exit 1,
+    no report (its other records may hold what this report cannot read)."""
+
+    tool = os.path.join(_CHECKOUT, "btrfs", "btrfs-stall-report")
+
+    def run_report(self, records: Sequence[object], *args: str) -> tuple[int, str, str, str]:
+        """(exit status, stdout, stderr, the log folder) of the report of the last minute over records."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as logs:
+            path = os.path.join(logs, time.strftime("stall-%Y-%m-%d.jsonl", time.localtime(now)))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("".join(json.dumps(r) + "\n" for r in records))
+            p = subprocess.run(
+                [
+                    "/usr/bin/python3",
+                    "-I",
+                    self.tool,
+                    "--log-dir",
+                    logs,
+                    "--since",
+                    f"@{now - 60:.0f}",
+                    "--until",
+                    f"@{now:.0f}",
+                    "--no-below",
+                    *args,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin"},
+                timeout=60,
+            )
+        return p.returncode, p.stdout, p.stderr, logs
+
+    def test_a_newer_format_stops_the_report_with_its_line(self) -> None:
+        v = state_format(StateFormatKey.STALL_RECORDS).version
+        now = time.time()
+        samples = [sample(now - 25 + 5 * i, 1000, 0) for i in range(3)]
+        odd = {**sample(now - 5, 1000, 0), "vm": None}  # a sample of a shape this report does not read
+        for what, newer in (
+            ("a meta record", meta(now - 30, v + 1)),
+            ("a damaged one", {**meta(now - 30, v + 1), "kernel": 5}),
+        ):
+            for args in ((), ("--json",)):
+                with self.subTest(what, args=args):
+                    rc, out, err, logs = self.run_report([newer, *samples, odd], *args)
+                    self.assertEqual((rc, out), (1, ""))
+                    self.assertEqual(
+                        err,
+                        f"{logs} is format {v + 1} of the stall-records (this CST reads format {v} and older): "
+                        "written by a newer CST: use the btrfs-stall-report of that CST\n",
+                    )
+
+    def test_this_format_and_older_ones_are_reported(self) -> None:
+        v = state_format(StateFormatKey.STALL_RECORDS).version
+        now = time.time()
+        samples = [sample(now - 25 + 5 * i, 1000, 0) for i in range(3)]
+        for found in (v, v - 1):
+            with self.subTest(v=found):
+                rc, out, err, _ = self.run_report([meta(now - 30, found), *samples])
+                self.assertEqual((rc, err), (0, ""))
+                self.assertIn("verdict", out)
 
 
 class MalformedLineTest(unittest.TestCase):

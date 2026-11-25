@@ -1186,6 +1186,12 @@ btrfs-stall-report --since '20 min ago'
 `btrfs-stall-report` uses the installed copy. Your user must be in the `wheel`
 group to read the data (check with `id -nG`).
 
+Records written by a newer CST (a newer record format, named by the
+monitor's `meta` records) stop the report with one line on stderr instead
+("... is format N of the stall-records (this CST reads format M and older):
+written by a newer CST: use the btrfs-stall-report of that CST", exit 1,
+also with `--json`): a newer format may change what the other records hold.
+
 ### 7.2 Options
 
 | Option | Meaning |

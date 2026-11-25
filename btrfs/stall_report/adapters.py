@@ -27,6 +27,7 @@ from btrfs.stall_report.domain.records import (
     is_meta_record,
     is_notice,
     is_sample_record,
+    newer_format_text,
     record_ts,
 )
 from btrfs.stall_report.domain.window import summarise
@@ -83,14 +84,18 @@ def log_dir_exists(log_dir: str) -> bool:
 
 class Loaded(NamedTuple):
     """What load() read: each line that parses to a JSON object, in file order, and the time each
-    damaged line belongs to."""
+    damaged line belongs to; and every meta record read, the damaged ones too (for their format)."""
 
     records: list[object]
     damaged: list[float]
+    metas: list[object]
 
 
-def _file_lines(path: str, opener: Callable[..., IO[str]]) -> tuple[list[object], list[float], BaseException | None]:
-    """The objects of one log file, and the times of its damaged lines: a line that is not a JSON
+def _file_lines(
+    path: str, opener: Callable[..., IO[str]]
+) -> tuple[list[object], list[float], BaseException | None, list[object]]:
+    """The objects of one log file, the times of its damaged lines, the error, and its meta records
+    (the damaged ones too). A damaged line: a line that is not a JSON
     object, or a record of a known kind without what the report reads. A damaged line belongs to
     its own "ts" when it has one, else to the record before it in the file (the one after it when
     there is none before; the file's day when it has none). A last line without its newline is
@@ -104,6 +109,7 @@ def _file_lines(path: str, opener: Callable[..., IO[str]]) -> tuple[list[object]
     except (OSError, EOFError, zlib.error) as e:
         error = e
     objects: list[object] = []
+    metas: list[object] = []
     seen: list[float | None] = []  # per line: its record's time, None for a damaged line without one
     bad: list[int] = []
     for i, line in enumerate(lines):
@@ -113,12 +119,14 @@ def _file_lines(path: str, opener: Callable[..., IO[str]]) -> tuple[list[object]
             rec = None
         ts = record_ts(rec)
         seen.append(ts)
+        if json_object(rec) and rec.get("t") == StallRecordTag.META:
+            metas.append(rec)
         if json_object(rec) and not damaged_record(rec):
             objects.append(rec)
         elif i < len(lines) - 1 or line.endswith("\n"):
             bad.append(i)
     day = os.path.basename(path)[6:16]
-    return objects, _damaged_times(seen, bad, time.mktime(time.strptime(day, "%Y-%m-%d"))), error
+    return objects, _damaged_times(seen, bad, time.mktime(time.strptime(day, "%Y-%m-%d"))), error, metas
 
 
 def _damaged_times(seen: Sequence[float | None], bad: Sequence[int], file_day: float) -> list[float]:
@@ -148,7 +156,7 @@ def _last_seen(times: Iterable[float | None]) -> list[float | None]:
 
 def load(log_dir: str, since: float, until: float) -> Loaded:
     """The records of the log files around the window; analyse() picks them by their "t"."""
-    loaded = Loaded([], [])
+    loaded = Loaded([], [], [])
     first_day = time.strftime("%Y-%m-%d", time.localtime(since - DAY))
     # Records buffered across midnight can land in the next day's file.
     last_day = time.strftime("%Y-%m-%d", time.localtime(until + DAY))
@@ -163,12 +171,24 @@ def load(log_dir: str, since: float, until: float) -> Loaded:
         if path.endswith(".gz") and path[:-3] in plain:
             continue
         opener = gzip.open if path.endswith(".gz") else open
-        records, damaged, error = _file_lines(path, opener)
+        records, damaged, error, metas = _file_lines(path, opener)
         if error is not None:
             print(f"warning: cannot fully read {path}: {error}", file=sys.stderr)
         loaded.records.extend(records)
         loaded.damaged.extend(damaged)
+        loaded.metas.extend(metas)
     return loaded
+
+
+def report_refusal(log_dir: str, loaded: Loaded) -> str | None:
+    """Why there is no report of what load() read from log_dir (the line to exit with), or None: no such
+    folder, or a record of a newer format than this report reads (newer_format_text)."""
+    if not log_dir_exists(log_dir):
+        return (
+            f"{log_dir} not found: btrfs-stall-monitor is not installed on this host. "
+            f"Installer: cst btrfs install (run on the host, not in toolbox)"
+        )
+    return newer_format_text(log_dir, loaded.metas)
 
 
 def damaged_record(r: object) -> bool:
@@ -216,7 +236,7 @@ def analyse(
     """The analysis of the window (summarise(), with the clock) of the records load() read (or
     records given as they are), and below's per-process section when asked (a window with 2+
     samples only, the last key of the result)."""
-    loaded = recs if isinstance(recs, Loaded) else Loaded(list(recs), [])
+    loaded = recs if isinstance(recs, Loaded) else Loaded(list(recs), [], [])
     recorded = records_of(loaded.records, loaded.damaged)
     res, meta = summarise(recorded, since, until, verbose=verbose, now=time.time())
     if with_below and res["samples"] >= 2:

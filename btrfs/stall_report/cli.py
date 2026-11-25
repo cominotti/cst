@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 
-from btrfs.stall_report.adapters import LOG_DIR, analyse, container_names, load, log_dir_exists, report_window
+from btrfs.stall_report.adapters import LOG_DIR, analyse, container_names, load, report_refusal, report_window
 from btrfs.stall_report.domain.records import UNITS, AnalyseResult, MetaRecord
 from btrfs.stall_report.domain.report import report_lines
 from btrfs.stall_report.domain.verdict import verdict
@@ -35,12 +35,10 @@ def main() -> None:
     ap.add_argument("--log-dir", default=LOG_DIR)
     args = ap.parse_args()
     since, until = report_window(args.since, args.until)
-    if not log_dir_exists(args.log_dir):
-        sys.exit(
-            f"{args.log_dir} not found: btrfs-stall-monitor is not installed on this host. "
-            f"Installer: cst btrfs install (run on the host, not in toolbox)"
-        )
-    res, meta = analyse(load(args.log_dir, since, until), since, until, not args.no_below, args.verbose)
+    loaded = load(args.log_dir, since, until)
+    if (refusal := report_refusal(args.log_dir, loaded)) is not None:
+        sys.exit(refusal)
+    res, meta = analyse(loaded, since, until, not args.no_below, args.verbose)
     if args.json:
         out: dict[str, object] = {"verdict": verdict(res, meta), "coverage": res.pop("coverage"), "units": UNITS}
         out.update(res)
