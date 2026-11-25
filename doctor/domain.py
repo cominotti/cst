@@ -21,6 +21,7 @@ from cst_core.domain.contracts import CPU_SETTINGS, SNAPSHOTS_CONF, StateFormatK
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import SettingsProblem, ShellAssignments, group
+from cst_core.domain.units import GLOBAL_USER_UNIT_DIR, SYSTEM_UNIT_DIR, USER_UNIT_DIR_REL
 from cst_core.domain.values import HOUR, Json, parse_whole_number
 from swap.domain import SETTINGS_REL
 
@@ -695,18 +696,11 @@ def is_unit_file(dest: str) -> bool:
     return dest.endswith(_UNIT_SUFFIXES) and not os.path.dirname(dest).endswith(".d")
 
 
-# The folders a manager loads the unit files and drop-ins CST installs from (recorded_unit): the system
-# manager's, the user managers' that root installs, and the user's own under the home.
-_SYSTEM_UNIT_FOLDER = "/etc/systemd/system"
-_USER_UNIT_FOLDER = "/etc/systemd/user"
-_USER_UNIT_REL = ".config/systemd/user"
-
-
 def _unit_folder_scope(folder: str, home: str) -> UnitScope | None:
     """Whose manager loads units from folder (home: the user's, "" for root's record), or None."""
-    if folder == _SYSTEM_UNIT_FOLDER:
+    if folder == SYSTEM_UNIT_DIR:
         return UnitScope.SYSTEM
-    if folder == _USER_UNIT_FOLDER or (home and folder == os.path.join(home.rstrip("/"), _USER_UNIT_REL)):
+    if folder == GLOBAL_USER_UNIT_DIR or (home and folder == os.path.join(home.rstrip("/"), USER_UNIT_DIR_REL)):
         return UnitScope.USER
     return None
 

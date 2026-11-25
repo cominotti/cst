@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
+from cst_core.domain.units import USER_UNIT_DIR_REL
 from cst_core.domain.shapes import json_object, parse_toml
 from cst_core.domain.text import HELP_WORDS, NO_WORDS, YES_WORDS, enum_member, parse_shell_assignments
 from cst_core.domain.values import (
@@ -43,7 +44,7 @@ PROG_REL = manifest_by_src()["toolchains/cst-toolchains"].dest.removeprefix("~/"
 LIB_REL = os.path.dirname(PROG_REL)
 DEFAULTS_NAME = "toolchains.conf"
 DEFAULTS_REL = manifest_by_src()["toolchains/toolchains.conf"].dest.removeprefix("~/")
-UNIT_DIR_REL = ".config/systemd/user"
+UNIT_DIR_REL = USER_UNIT_DIR_REL
 STATE_DIR_REL = ".local/state/cst"
 SERVICE = "cst-toolchains-prune.service"
 TIMER = "cst-toolchains-prune.timer"

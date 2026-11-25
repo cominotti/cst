@@ -11,9 +11,16 @@ allowed), sections separated by one blank line, ending in a newline.
 from collections.abc import Sequence
 from enum import StrEnum
 import posixpath
+from typing import Final
 
 # `systemctl mask NAME` leaves a link to this file where the unit file goes.
 MASK_TARGET = "/dev/null"
+
+# The folders systemd loads the unit files and drop-ins CST writes from: the system manager's, the one
+# every user manager reads (root writes it), and a user's own, relative to the home.
+SYSTEM_UNIT_DIR: Final = "/etc/systemd/system"
+GLOBAL_USER_UNIT_DIR: Final = "/etc/systemd/user"
+USER_UNIT_DIR_REL: Final = ".config/systemd/user"
 
 
 def parse_show_props(text: str) -> dict[str, str]:
