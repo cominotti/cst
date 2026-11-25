@@ -2539,18 +2539,8 @@ class SwapApplyBranchesTest(_SwapScratch):
         self, *, mapper_present: bool, unreadable: set[str] | None = None, fail_unit: str | None = None
     ) -> tuple[int, str, str, SwapFakeSystemd]:
         fs = self._fs(mapper_present=mapper_present, unreadable=unreadable)
-        systemd = SwapFakeSystemd(
-            os.path.join(self.env.proc_dir, "swaps"),
-            "/dev/dm-0",
-            fs=fs,
-            fail_unit=fail_unit,
-            fail_result=CommandResult(3, "", "Job failed.\n"),
-        )
-        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(self.env, fs, systemd, system, installer=swap_installer())
-        out, err = io.StringIO(), io.StringIO()
-        rc = run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err)
-        return rc, out.getvalue(), err.getvalue(), systemd
+        rc, out, err, systemd, _system = self._apply_on(fs, fail_unit=fail_unit)
+        return rc, out, err, systemd
 
     def test_an_unreadable_crypttab_stops_apply_before_any_change(self) -> None:
         with open(self.env.crypttab, "w", encoding="utf-8") as f:
@@ -2687,9 +2677,18 @@ class SwapApplyBranchesTest(_SwapScratch):
             f.write("other /dev/sdz none\n")
         return tmp
 
-    def _apply_on(self, fs: SwapTempFileSystem) -> tuple[int, str, str, SwapFakeSystemd, FakeSwapSystem]:
-        """apply through the command line's run_command on fs, with its systemd and system fakes."""
-        systemd = SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+    def _apply_on(
+        self, fs: SwapTempFileSystem, *, fail_unit: str | None = None
+    ) -> tuple[int, str, str, SwapFakeSystemd, FakeSwapSystem]:
+        """apply through the command line's run_command on fs, with its systemd and system fakes (fail_unit:
+        a unit whose start fails with "Job failed.")."""
+        systemd = SwapFakeSystemd(
+            os.path.join(self.env.proc_dir, "swaps"),
+            "/dev/dm-0",
+            fs=fs,
+            fail_unit=fail_unit,
+            fail_result=CommandResult(3, "", "Job failed.\n"),
+        )
         system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
         service = SwapApplicationService(self.env, fs, systemd, system, installer=swap_installer())
         out, err = io.StringIO(), io.StringIO()
