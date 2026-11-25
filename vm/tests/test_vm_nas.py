@@ -633,9 +633,10 @@ class LiveBackupTest(Nas):
         self.assertIn(
             f"cst vm: the restic snapshot {SNAP_ID[:8]} of win is complete but not in the index: {self.index} is "
             "format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST, so the index was "
-            "left as it is and cst vm does not list this backup; the snapshot stays in the repository, where the "
-            'retention sees it as any VM backup of its tags (restore it by its ID: vm/README.md, section "Restore '
-            'from the NAS"). Then: use the cst vm of that CST',
+            "left as it is and cst vm does not list this backup; the snapshot stays in the repository: the next NAS "
+            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept as "
+            f"a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore it by "
+            'its ID: vm/README.md, section "Restore from the NAS"). Then: use the cst vm of that CST',
             r.stderr,
         )
         self.assertNotIn("nothing is backed up", r.stderr)
@@ -3416,6 +3417,11 @@ class NasStopAfterSnapshotTest(unittest.TestCase):
             msg,
         )
         self.assertIn("the snapshot stays in the repository", msg)
+        # It is no backup the retention counts: the next runs name it, and their retention waits for it.
+        self.assertIn(
+            f"their retention waits for it until it is kept as a backup (restic tag --add cst-adopted {SNAP_ID})", msg
+        )
+        self.assertNotIn("any VM backup of its tags", msg)
 
     def test_a_shut_off_vm_started_during_the_read_has_its_snapshot_recorded(self) -> None:
         msg, store, restic, _cmds = self._run(0, live=False, started=True)

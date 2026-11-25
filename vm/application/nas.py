@@ -23,6 +23,7 @@ from vm.application.backup import (
 )
 from vm.application.nas_torn import forget_torn, nas_snapshot_ids, retention_after_torn
 from vm.domain import (
+    ADOPTED_TAG,
     LIVE_STATES,
     NAS_DEFAULTS,
     OVERLAY_MARK,
@@ -610,8 +611,9 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
 def _not_indexed(snap: str, vm: str, e: IndexRefused) -> str:
     """What a NAS backup the index could not take says of its snapshot."""
     kept = (
-        "the snapshot stays in the repository, where the retention sees it as any VM backup of its tags "
-        '(restore it by its ID: vm/README.md, section "Restore from the NAS")'
+        "the snapshot stays in the repository: the next NAS backups may name it as a snapshot no record names, "
+        f"and their retention waits for it until it is kept as a backup (restic tag --add {ADOPTED_TAG} {snap}) or "
+        f'forgotten (restic forget {snap}) (restore it by its ID: vm/README.md, section "Restore from the NAS")'
     )
     return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e)
 

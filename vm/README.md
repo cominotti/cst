@@ -149,7 +149,10 @@ rewrote it, or it was damaged), the backup is finished and kept (the folder,
 or the restic snapshot), but it is not added to the index: the backup ends with
 exit 1 and a message that names it and says how to restore it by hand, after
 its notes (a TPM state not found, ...) and its restore lines, as a backup that
-is indexed prints them. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+is indexed prints them. For a NAS backup the message also says that the next
+NAS backups may name the snapshot as one no record names (section 10.6), and
+wait with their retention until it is kept as a backup (`restic tag --add
+cst-adopted ID`) or forgotten. An entry this `cst vm` does not understand (no `vm`, a NAS entry
 without its snapshot, a local one without its folder, a known key of another
 type) is not listed or pruned, and is written back as it is after the others.
 
