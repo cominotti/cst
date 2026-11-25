@@ -41,16 +41,17 @@ their lines.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import errno
 import functools
 import os
-from typing import ClassVar, override
 import unittest
+from dataclasses import dataclass, replace
+from typing import ClassVar, override
 
 from btrfs.scrub_limit.domain import render_scrub_dropin, update_snapshots_conf_scrub_limit
 from btrfs.tests.fakes import FakeScrubDropin, FakeScrubSystemd, ScrubWorld
 from cst_core.domain.record import ComponentState
+from cst_core.domain.values import ExitAndLines
 from tests.fault_injection import Fault, FaultMode, FaultPlan, Killed, cut_points, every_fault, no_space
 
 DROPIN_500M = render_scrub_dropin("500M")
@@ -125,7 +126,7 @@ class ScrubFaultBase(unittest.TestCase):
         if state is not None:
             self.assertTrue(world.core_has_a_file(), f"{when}: {world.records.texts}")
 
-    def run_once(self, world: ScrubWorld, *faults: Fault) -> tuple[int, list[str]] | None:
+    def run_once(self, world: ScrubWorld, *faults: Fault) -> ExitAndLines | None:
         """One run of the start's command with these faults; None when it was killed."""
         world.plan.arm(*faults)
         try:

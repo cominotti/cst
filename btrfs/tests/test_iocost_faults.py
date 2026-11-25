@@ -34,10 +34,11 @@ from __future__ import annotations
 import dataclasses
 import errno
 import os
-from typing import override
 import unittest
+from typing import override
 
 from btrfs.tests.fakes import FakeManagedDevices, IocostWorld
+from cst_core.domain.values import ExitAndLines
 from tests.fault_injection import Fault, FaultMode, Killed, cut_points, every_fault
 
 QOS_LINE = "259:1 enable=1 ctrl=auto"  # what apply writes for the fixture's NVMe disk
@@ -55,7 +56,7 @@ class IocostApplyFaultTest(unittest.TestCase):
         self.world = IocostWorld()
         self.world.put_disk("nvme0n1", "259:1", model="Samsung SSD 990 PRO 2TB")
 
-    def run_once(self, *faults: Fault) -> tuple[int, list[str]] | None:
+    def run_once(self, *faults: Fault) -> ExitAndLines | None:
         """One apply with these faults; None when it was killed."""
         self.world.plan.arm(*faults)
         try:

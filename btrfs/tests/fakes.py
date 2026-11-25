@@ -37,20 +37,20 @@ Not collected as a test module (unittest finds test*.py).
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
-from dataclasses import dataclass
 import errno
 import json
 import os
-from pathlib import Path
 import posixpath
 import shutil
 import stat
 import struct
 import subprocess
 import sys
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Final, override
 
 from btrfs.cache.application import CacheMounts
@@ -94,6 +94,7 @@ from cst_core.domain.install import (
 )
 from cst_core.domain.record import ComponentState
 from cst_core.domain.units import parse_show_units
+from cst_core.domain.values import ExitAndLines
 from cst_core.installer import NAME as INSTALLER_NAME
 from cst_core.ports import CommandFault, CommandResult, WriteFailed
 from tests.fault_injection import FaultPlan
@@ -984,7 +985,7 @@ def _command_failed(argv: tuple[str, ...]) -> Callable[[OSError], CommandResult]
     return failed
 
 
-def _installer_failed_lines(err: OSError) -> tuple[int, list[str]]:
+def _installer_failed_lines(err: OSError) -> ExitAndLines:
     return 1, [err.strerror or str(err)]
 
 
@@ -1158,11 +1159,11 @@ class FakeIocostInstaller:
     def available(self) -> bool:
         return self.world.installer_available
 
-    def install(self) -> tuple[int, list[str]]:
+    def install(self) -> ExitAndLines:
         w = self.world
         w.holds("component", "the installer's install")
 
-        def install() -> tuple[int, list[str]]:
+        def install() -> ExitAndLines:
             lines: list[str] = []
             try:
                 lines.extend(w.svc.install(IOCOST_ENTRIES, w.req))
@@ -1176,11 +1177,11 @@ class FakeIocostInstaller:
 
         return w.step("installer install", install, _installer_failed_lines)
 
-    def mark_done(self) -> tuple[int, list[str]]:
+    def mark_done(self) -> ExitAndLines:
         w = self.world
         w.holds("component", "the installer's mark done")
 
-        def mark() -> tuple[int, list[str]]:
+        def mark() -> ExitAndLines:
             if w.before_mark is not None:
                 w.before_mark()
             w.svc.mark(w.record, Component.BTRFS_IOCOST.value)

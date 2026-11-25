@@ -37,11 +37,11 @@ counts pinned. ProtocolFaultTest stages single faults that once needed a patch o
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import errno
 import os
-from typing import ClassVar, override
 import unittest
+from dataclasses import dataclass
+from typing import ClassVar, override
 
 from btrfs.cache.domain import (
     CACHE_BASE,
@@ -55,6 +55,7 @@ from btrfs.cache.domain import (
     plan_detach_fstab,
 )
 from btrfs.tests.fakes import MOUNT_DENIED, RELOAD_FAILED, UMOUNT_BUSY, CacheWorld
+from cst_core.domain.values import ExitAndLines
 from tests.fault_injection import Fault, FaultMode, Killed, cut_points, every_fault, no_space
 
 USER = CacheMountUser("tester", 1000, 1000, "/var/home/tester")
@@ -105,7 +106,7 @@ def cache_world(fstab: str | None, mounted: tuple[str, ...] = ()) -> CacheWorld:
     return w
 
 
-def run_cache(world: CacheWorld, argv: list[str]) -> tuple[int, list[str]]:
+def run_cache(world: CacheWorld, argv: list[str]) -> ExitAndLines:
     """One command over the world's ports: (exit, its lines)."""
     return world.service().run(parse_cache_mount_args(argv), "cst btrfs cache")
 
@@ -136,7 +137,7 @@ class CacheFaultBase(unittest.TestCase):
         self.world = cache_world(self.start.fstab, self.start.mounted)
         return self.world
 
-    def run_once(self, *faults: Fault) -> tuple[int, list[str]] | None:
+    def run_once(self, *faults: Fault) -> ExitAndLines | None:
         """One run of the start's command with these faults: (exit, its lines); None when killed."""
         self.world.plan.arm(*faults)
         try:
@@ -337,7 +338,7 @@ class ProtocolFaultTest(unittest.TestCase):
     def setUp(self) -> None:
         self.world = cache_world(BASE_FSTAB)
 
-    def _run(self, argv: list[str]) -> tuple[int, list[str]]:
+    def _run(self, argv: list[str]) -> ExitAndLines:
         return run_cache(self.world, argv)
 
     def _mounted(self) -> list[str]:
