@@ -368,6 +368,8 @@ class CpuIrqLifecycleTest(unittest.TestCase):
             ("BUILD_CPUS='12-abc'\n", "invalid BUILD_CPUS"),
             # An index past int()'s digit limit: the same refusal, not a traceback.
             ("BUILD_CPUS='" + "1" * 5000 + "'\n", "invalid BUILD_CPUS"),
+            # An index past systemd's CPU limit (8191 is the last): the same refusal.
+            ("BUILD_CPUS='12-8192'\n", "invalid BUILD_CPUS"),
             # A no-break space beside the list (bash keeps it in the value): a problem line, which refuses.
             ("BUILD_CPUS='12-23\N{NO-BREAK SPACE}'\n", "syntax errors"),
             ("BUILD_CPUS='\N{NO-BREAK SPACE}'\n", "syntax errors"),

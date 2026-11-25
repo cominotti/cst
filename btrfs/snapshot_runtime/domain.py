@@ -90,7 +90,7 @@ def _based(base: int, digits: str, *, exact: bool = False) -> int:
 # The operators bash's arithmetic reads: after a name, one of these (or another name) is read later, as
 # the expression goes on; any other token after a name is an error bash meets before the name's value.
 _ARITH_OPERATORS: Final = frozenset("+-*/%<>=!&|^~?:,()[]") | {"**"}
-_ARITH_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ARITH_NAME: Final = re.compile(r"[A-Za-z_]\w*", re.ASCII)
 # A token after bash's blanks (space, tab and newline only: a no-break space, \r, \f, \v or another
 # blank is a token of its own, which no rule takes).
 _ARITH_TOKEN: Final = re.compile(r"[ \t\n]*(\*\*|[0-9A-Za-z_#@]+|[^ \t\n])")
@@ -511,6 +511,13 @@ CHECK_FAILURES_ALERTED: Final = 3
 SUMMARY_CHARS: Final = 300
 
 
+def next_check_failures(before: int | None) -> int:
+    """nas-check-failures after one more failed check: the old $(( $(cat nas-check-failures || echo 0) + 1 )),
+    64-bit, wrapping (2**63 - 1 gives -2**63); BEFORE None where bash's arithmetic failed on the file (08:
+    it counted from 0)."""
+    return bash_wrap((0 if before is None else before) + 1)
+
+
 # Messages of restic check (0.19) that name damaged data, not a transport problem.
 RESTIC_DAMAGE_RE: Final = re.compile(
     r"error for tree|not found in index|ciphertext verification failed|does not match|index is damaged|"
@@ -538,6 +545,14 @@ def duration_s(text: str, *, exact: bool = False) -> int | None:
 _NAS_DAY_KEYS: Final = ("NAS_PRUNE_EVERY_DAYS", "NAS_CHECK_EVERY_DAYS")
 
 
+def _nas_expression(settings: Mapping[str, str], key: str) -> str | None:
+    """The arithmetic the run puts KEY into: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS and
+    NAS_CHECK_EVERY_DAYS as "VALUE * 86400" (as due() puts them in); None for any other key."""
+    if key == "NAS_STALE_DAYS":
+        return settings[key]
+    return f"{settings[key]} * {DAY}" if key in _NAS_DAY_KEYS else None
+
+
 def nas_out_of_range(settings: Mapping[str, str], now: int) -> tuple[str, ...]:
     """The NAS settings whose number the run computes only by wrapping past 64 bits, in DEFAULTS'
     order: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS and NAS_CHECK_EVERY_DAYS as "VALUE * 86400"
@@ -545,8 +560,7 @@ def nas_out_of_range(settings: Mapping[str, str], now: int) -> tuple[str, ...]:
     bash cannot compute is not among them (its error stays where the run meets it)."""
     bad: list[str] = []
     for key in DEFAULTS:
-        if key == "NAS_STALE_DAYS" or key in _NAS_DAY_KEYS:
-            expr = settings[key] if key == "NAS_STALE_DAYS" else f"{settings[key]} * {DAY}"
+        if (expr := _nas_expression(settings, key)) is not None:
             if guard_number(expr, exact=True) == GuardError.OUT_OF_RANGE:
                 bad.append(key)
         elif key == "NAS_TIMEOUT" and duration_s(settings[key]) is not None:
@@ -554,6 +568,18 @@ def nas_out_of_range(settings: Mapping[str, str], now: int) -> tuple[str, ...]:
             if seconds is None or seconds > BASH_INT_MAX - now:
                 bad.append(key)
     return tuple(bad)
+
+
+def nas_unreadable(settings: Mapping[str, str]) -> tuple[str, ...]:
+    """The NAS settings whose number the run cannot compute (guard_number's NOT_A_NUMBER or
+    BAD_NUMBER: abc, 1 x, 08, a no-break space, or an operator _Arith does not read although bash
+    would compute it: 1<<8, ~5), in DEFAULTS' order: NAS_STALE_DAYS as it is, NAS_PRUNE_EVERY_DAYS
+    and NAS_CHECK_EVERY_DAYS as "VALUE * 86400" (as due() puts them in)."""
+    return tuple(
+        key
+        for key in DEFAULTS
+        if (expr := _nas_expression(settings, key)) is not None and not isinstance(guard_number(expr), int)
+    )
 
 
 def restic_line(line: str) -> str:

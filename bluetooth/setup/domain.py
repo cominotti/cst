@@ -441,7 +441,7 @@ def resolve(
 
 # A backup of main.conf: main.conf.bak-YYYYmmdd-HHMMSS (the old script's names too), and -1, -2, ...
 # after it when a backup of that second has the name already (two runs in one second).
-BACKUP_SUFFIX: Final = re.compile(r"(.*\.bak-[0-9]{8}-[0-9]{6})-([0-9]+)")
+BACKUP_SUFFIX: Final = re.compile(r"(.*\.bak-\d{8}-\d{6})-(\d+)", re.ASCII)
 BACKUP_NAME_TRIES: Final = 100  # the names apply and revert try for one backup before they give up
 
 

@@ -32,7 +32,13 @@ from btrfs.commit.domain import (
     parse_commit_args,
     rewrite_commit_options,
 )
-from btrfs.compress.domain import CompressSnapshot, LayerStatus, TopMountInfo, parse_top_mount_unit
+from btrfs.compress.domain import (
+    CompressSnapshot,
+    LayerStatus,
+    TopMountInfo,
+    parse_fstab_root_entries,
+    parse_top_mount_unit,
+)
 from cst_core.domain.errors import Refused
 from tests.repo_files import REPO
 
@@ -258,6 +264,31 @@ class CommitDomainTests(unittest.TestCase):
         self.assertEqual(effective_commit_seconds(both), 60)
         self.assertTrue(has_malformed_commit(both))
         self.assertEqual(rewrite_commit_options(both, 60), "commit=60")
+
+    def test_a_commit_with_a_no_break_space_is_malformed(self) -> None:
+        # The options field is split at spaces and tabs only (libmount): a no-break space stays in the token,
+        # and the kernel refuses "commit=30<NBSP>"; str.strip() read 30. A space or tab around it is trimmed.
+        nbsp = "\N{NO-BREAK SPACE}"
+        for opts in (f"commit=30{nbsp},noatime", f"noatime,commit=30{nbsp}"):
+            with self.subTest(opts=opts):
+                self.assertEqual(extract_commit_seconds(opts), ())
+                self.assertTrue(has_malformed_commit(opts))
+                self.assertEqual(effective_commit_seconds(opts), 30)
+        for opts in ("noatime, commit=60", "noatime,\tcommit=60 "):
+            with self.subTest(opts=opts):
+                self.assertEqual(extract_commit_seconds(opts), (60,))
+                self.assertFalse(has_malformed_commit(opts))
+
+    def test_a_commit_before_a_vertical_tab_in_fstab_is_malformed(self) -> None:
+        # The fstab line ends at its newline only (libmount): "commit=30<VT>" is one option, which the kernel
+        # refuses. str.splitlines() ended the line at the vertical tab, and the options read "commit=30".
+        for sep in ("\x0b", "\x0c"):
+            with self.subTest(sep=ascii(sep)):
+                fstab = f"UUID=u /var btrfs subvol=v,commit=30{sep},noatime 0 0\n"
+                self.assertEqual(
+                    [e.options for e in parse_fstab_root_entries(fstab, "u")], [f"subvol=v,commit=30{sep},noatime"]
+                )
+                self.assertTrue(has_malformed_commit(f"subvol=v,commit=30{sep},noatime"))
 
     def test_a_commit_is_read_as_the_kernel_reads_it(self) -> None:
         # btrfs reads commit= with kstrtouint(value, 0): C's number forms, ASCII only, at most 2**32 - 1.

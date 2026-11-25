@@ -6,7 +6,7 @@ number of seconds, an exit status) is named once and used by name. ty then
 catches a typing mistake (`state == "okk"` passes ty; `OwnedState.OKK` does
 not) and a `match` that forgets a case. See .agents/rules/magic-values.md.
 
-Five rules, on the tracked production Python files (tests are left out: they
+Six rules, on the tracked production Python files (tests are left out: they
 keep the raw words on purpose, they are what pins the values):
 
 1. leak: a comparison (`==`, `!=`, `in` a tuple, list or set) or a match
@@ -27,6 +27,21 @@ keep the raw words on purpose, they are what pins the values):
 5. literal-vocabulary: a `Literal[...]` with 3 or more strings. A vocabulary
    the code compares or matches is a StrEnum; a Literal stays only for a
    fixed external format (an exemption with its reason).
+6. int-of-text: a call of the builtin int() whose first argument is not a
+   number by its syntax (a numeric constant; a unary or comparison
+   expression; an arithmetic one with an operator text does not have (-, /,
+   //, **, a shift or a bit operator); one with +, * or %, or a boolean one,
+   whose operands are all numbers by their syntax (text + "", text * 2 and
+   "%s" % x are text, and x or 0 is x); a call of NUMERIC_FUNCTIONS (float,
+   len, ...) or of a method in NUMERIC_METHODS (time, now, ...); an
+   ExitStatus member), or that has a base: int(text), int(m.group(1)),
+   int(m.group(1) or 0), int(x, 16).
+   int() raises ValueError on text past its digit limit and reads Unicode
+   digits and blanks; text becomes a number in cst_core's parsers
+   (parse_whole_number, parse_integer) or bash's (bash_int), exempt here.
+   A float that must become an int uses math.trunc(x), which this rule does
+   not count. The ceilings are the count of the sites that were there when
+   the rule came: it only stops new ones.
 
 Each rule is counted per package (tests/budgets.py: `package_of`) in
 MAGIC_CEILINGS, keys "<package> <rule>": a count above its entry fails, a
@@ -73,9 +88,54 @@ LITERAL_WORDS: Final = 3
 _MAPPINGS: Final = frozenset({"dict", "Dict", "Mapping", "MutableMapping"})
 _MAPPING_ARGS: Final = 2  # Mapping[key, value]
 _LOOSE_VALUES: Final = frozenset({"Any", "object", "Json"})
+# Rule 6: the calls whose result int() takes as a number, by their name: a builtin function or a method.
+NUMERIC_FUNCTIONS: Final = frozenset({"float", "round", "len", "abs", "min", "max", "sum"})
+NUMERIC_METHODS: Final = frozenset({"time", "monotonic", "now", "timestamp", "total_seconds"})
+# Rule 6: the class whose members are numbers (an IntEnum).
+NUMERIC_ENUMS: Final = frozenset({"ExitStatus"})
+# Rule 6: the binary operators text does not have: their result is a number (or an error), whatever the operands.
+NUMERIC_OPERATORS: Final = (
+    ast.Sub,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Pow,
+    ast.LShift,
+    ast.RShift,
+    ast.BitOr,
+    ast.BitXor,
+    ast.BitAnd,
+    ast.MatMult,
+)
+_INT_OF_TEXT_HINT: Final = (
+    "use parse_whole_number or parse_integer (cst_core.domain.values) for text, math.trunc for a float"
+)
 
 # The highest count per "<package> <rule>" (tests/budgets.py; a missing key is 0).
-MAGIC_CEILINGS: Final[dict[str, int]] = {}
+MAGIC_CEILINGS: Final[dict[str, int]] = {
+    "bluetooth int-of-text": 5,
+    "bluetooth/setup int-of-text": 6,
+    "btrfs/bulk int-of-text": 11,
+    "btrfs/cache int-of-text": 2,
+    "btrfs/commit int-of-text": 2,
+    "btrfs/compress int-of-text": 2,
+    "btrfs/docker_gc int-of-text": 6,
+    "btrfs/docker_volumes_nocow int-of-text": 3,
+    "btrfs/health_check int-of-text": 3,
+    "btrfs/pending_alerts int-of-text": 7,
+    "btrfs/snapshot int-of-text": 6,
+    "btrfs/snapshot_runtime int-of-text": 1,
+    "btrfs/stall_monitord int-of-text": 2,
+    "btrfs/stall_report int-of-text": 4,
+    "cpu int-of-text": 12,
+    "cpu/game int-of-text": 2,
+    "cpu/power int-of-text": 1,
+    "cst_core int-of-text": 7,
+    "doctor int-of-text": 7,
+    "perf int-of-text": 1,
+    "swap int-of-text": 1,
+    "toolchains int-of-text": 10,
+    "vm int-of-text": 10,
+}
 # "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
     "cst_core/domain/shapes.py:json_object": (
@@ -114,6 +174,19 @@ MAGIC_EXEMPT: Final[dict[str, str]] = {
     ),
     "toolchains/domain/common.py:plain": "any TOML document (the user's cargo or uv config) as json.loads would give it",
     "toolchains/domain/common.py:parses_as": "compares a re-parsed TOML document with plain's: any document, no format",
+    # Rule 6: the parsers themselves, where text becomes a number once.
+    "cst_core/domain/values.py:_whole_number": "parse_whole_number's and parse_integer's int(): the one reader of digits",
+    "cst_core/domain/values.py:OctalMode.parse": "the octal file mode parser",
+    "cst_core/domain/values.py:ByteSize.parse_iec": "the IEC size parser (its count after the digits match)",
+    "cst_core/domain/text.py:unescape_mount_field": "the mount tables' octal escapes (\\040), three octal digits",
+    "cst_core/domain/text.py:count_text": "CounterFile's count as int() reads it (blanks around it), 0 for none",
+    "cst_core/domain/text.py:_ansi_c_value": "bash's $'...' escapes (octal, hex) in printf %q text",
+    "cst_core/adapters/files.py:read_int": "the reader of a file that holds one number",
+    "cst_core/domain/contracts.py:first_line_version": "the reader of a state file's format line (MAGIC N)",
+    "btrfs/health_check/domain.py:bash_int": "bash arithmetic's reader of digits (octal, wrapping): it is the parser",
+    "btrfs/health_check/domain.py:bash_decimal": "bash's 10#DIGITS reader (chunked, wrapping): it is the parser",
+    "btrfs/snapshot_runtime/domain.py:_based": "bash arithmetic's BASE#DIGITS reader: it is the parser",
+    "btrfs/snapshot_runtime/domain.py:_Arith": "bash arithmetic's reader of constants (hex, octal, decimal): the parser",
 }
 
 
@@ -351,6 +424,47 @@ def _literal_vocabularies(tree: ast.Module) -> Iterator[tuple[ast.expr, str]]:
                 yield node, f"Literal of {len(words)} strings ({', '.join(map(repr, words))}): declare a StrEnum"
 
 
+def _is_number_by_syntax(node: ast.expr) -> bool:
+    """True for an expression whose value is a number by its form: never text that int() would parse."""
+    if isinstance(node, ast.BinOp | ast.BoolOp):
+        return _operation_is_number(node)
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, int | float) and not isinstance(node.value, bool)
+    if isinstance(node, ast.UnaryOp | ast.Compare):
+        return True
+    if isinstance(node, ast.Attribute):
+        return isinstance(node.value, ast.Name) and node.value.id in NUMERIC_ENUMS
+    if isinstance(node, ast.Call):
+        f = node.func
+        return (isinstance(f, ast.Name) and f.id in NUMERIC_FUNCTIONS) or (
+            isinstance(f, ast.Attribute) and f.attr in NUMERIC_METHODS
+        )
+    return False
+
+
+def _operation_is_number(node: ast.BinOp | ast.BoolOp) -> bool:
+    """A boolean operation is a number when all its operands are (its value is one of them); an arithmetic
+    one when text does not have its operator, or when both operands are numbers by their syntax."""
+    if isinstance(node, ast.BoolOp):
+        return all(_is_number_by_syntax(v) for v in node.values)
+    return isinstance(node.op, NUMERIC_OPERATORS) or (
+        _is_number_by_syntax(node.left) and _is_number_by_syntax(node.right)
+    )
+
+
+def _ints_of_text(tree: ast.Module) -> Iterator[tuple[ast.expr, str]]:
+    """(node, message) for each int() of rule 6: its argument is not a number by its syntax, or it has a base."""
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "int"):
+            continue
+        if not node.args and not node.keywords:
+            continue
+        with_base = len(node.args) > 1 or any(k.arg == "base" for k in node.keywords)
+        star = any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords)
+        if with_base or star or not node.args or not _is_number_by_syntax(node.args[0]):
+            yield node, f"{ast.unparse(node)} reads text: {_INT_OF_TEXT_HINT}"
+
+
 def file_hits(tree: ast.Module, rel: str, vocabulary: Mapping[str, str]) -> list[Hit]:
     """The hits of every rule in one production module; vocabulary: its package's and cst_core's enum values."""
     scopes = {id(node): scope or "<module>" for node, scope in scoped(tree)}
@@ -362,6 +476,7 @@ def file_hits(tree: ast.Module, rel: str, vocabulary: Mapping[str, str]) -> list
         found += [("unit-number", n, n.lineno, t) for n, t in _unit_numbers(tree)]
     found += [("loose-record", n, n.lineno, t) for n, t in _loose_records(tree)]
     found += [("literal-vocabulary", n, n.lineno, t) for n, t in _literal_vocabularies(tree)]
+    found += [("int-of-text", n, n.lineno, t) for n, t in _ints_of_text(tree)]
     return sorted(Hit(rel, line, rule, scopes.get(id(n), "<module>"), text) for rule, n, line, text in found)
 
 
@@ -569,6 +684,67 @@ class PlantedTest(unittest.TestCase):
         src = "from typing import Literal\n\ntype Mode = Literal['a', 'b', 'c']\ntype Two = Literal['a', 'b']\nN: Literal[1, 2, 3] = 1\n"
         hits = self.plant({"pkg/domain.py": src})
         self.assertEqual([(h.line, h.rule, h.scope) for h in hits], [(3, "literal-vocabulary", "Mode")])
+
+    def test_int_of_text(self) -> None:
+        src = (
+            "import math\nimport re\nimport time\n\nfrom cst_core.domain.errors import ExitStatus\n\n\n"
+            "def f(text: str, v: float, x: list[str], a: int, b: int) -> list[int]:\n"
+            "    m = re.match('(.)', text)\n"
+            "    return [\n"
+            "        int(text),\n"
+            "        int(m.group(1)) if m else 0,\n"
+            "        int(text.strip(), 16),\n"
+            "        int(x[2]),\n"
+            "        int(v, base=8),\n"
+            "        int(*x),\n"
+            "        int(float(v)),\n"
+            "        int(time.time()),\n"
+            "        int(m.group(1) or 0) if m else 0,\n"
+            "        int(text + ''),\n"
+            "        int(a * b),\n"
+            "        int(a or 0),\n"
+            "        int(a - b),\n"
+            "        int((a - b) // 3 + 1),\n"
+            "        int(len(x) or 0),\n"
+            "        int(len(x) * 2 % 7),\n"
+            "        int(-a),\n"
+            "        int(len(x)),\n"
+            "        int(ExitStatus.KILLED),\n"
+            "        int(5),\n"
+            "        int(),\n"
+            "        math.trunc(v),\n"
+            "    ]\n"
+        )
+        hits = self.plant({"pkg/domain.py": src})
+        self.assertEqual(
+            [(h.line, h.rule, h.text.split(" reads text")[0]) for h in hits],
+            [
+                (11, "int-of-text", "int(text)"),
+                (12, "int-of-text", "int(m.group(1))"),
+                (13, "int-of-text", "int(text.strip(), 16)"),
+                (14, "int-of-text", "int(x[2])"),
+                (15, "int-of-text", "int(v, base=8)"),
+                (16, "int-of-text", "int(*x)"),
+                (19, "int-of-text", "int(m.group(1) or 0)"),
+                (20, "int-of-text", "int(text + '')"),
+                (21, "int-of-text", "int(a * b)"),
+                (22, "int-of-text", "int(a or 0)"),
+            ],
+        )
+        self.assertIn("parse_whole_number", hits[0].text)
+        self.assertIn("math.trunc", hits[0].text)
+        self.assertEqual(counts(hits, {}), {"pkg int-of-text": 10})
+        self.assertEqual(
+            budget_problems(counts(hits, {}), {}, "magic values"),
+            ["pkg int-of-text: 10 magic values, budget 0: the change added 10"],
+        )
+
+    def test_int_of_text_in_an_exempt_parser_is_not_counted(self) -> None:
+        src = "def reader(t: str) -> int:\n    return int(t)\n\n\ndef other(t: str) -> int:\n    return int(t)\n"
+        hits = self.plant({"pkg/parse.py": src})
+        exempt = {"pkg/parse.py:reader": "the parser"}
+        self.assertEqual(counts(hits, exempt), {"pkg int-of-text": 1})
+        self.assertEqual(stale_exemptions(hits, exempt), [])
 
     def test_a_clean_file_passes(self) -> None:
         clean = (

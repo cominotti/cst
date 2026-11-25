@@ -18,8 +18,11 @@ from cst_core.domain.text import (
     enum_member,
     file_lines,
     group,
+    is_mount_comment,
+    mount_fields,
     parse_subcommand_head,
     strip_ascii_blanks,
+    strip_mount_blanks,
     unescape_mount_field,
 )
 
@@ -250,13 +253,13 @@ def escape_mount_field(field: str) -> str:
 
 def parse_all_mounts(text: str) -> tuple[MountEntry, ...]:
     """Parse `/proc/mounts` or `/etc/fstab` lines across all filesystem types (only a newline ends
-    a line, as the kernel and systemd-fstab-generator read them)."""
+    a line, as the kernel and systemd-fstab-generator read them; the fields split at spaces and tabs only, as
+    libmount splits them)."""
     entries: list[MountEntry] = []
     for line in file_lines(text):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if is_mount_comment(line):
             continue
-        fields = stripped.split()
+        fields = mount_fields(line)
         if len(fields) >= _MOUNTS_MIN_FIELDS:
             entries.append(
                 MountEntry(
@@ -459,11 +462,10 @@ def render_bind_fstab_line(binding: CacheMountBinding) -> str:
 
 
 def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
-    stripped = raw.strip()
-    if not stripped or stripped.startswith("#") or CACHE_MOUNT_MARKER not in raw:
+    if is_mount_comment(raw) or CACHE_MOUNT_MARKER not in raw:
         return None
     body, _, meta = raw.partition(CACHE_MOUNT_MARKER)
-    fields = body.split()
+    fields = mount_fields(body)
     if len(fields) < _FSTAB_MIN_FIELDS:
         return None
     tags = {key: value for key, sep, value in (tok.partition("=") for tok in meta.split()) if sep}
@@ -484,10 +486,9 @@ def unmanaged_fstab_targets(fstab_text: str) -> frozenset[str]:
     """The targets (unescaped) of the /etc/fstab lines CST does not manage."""
     targets: set[str] = set()
     for raw in file_lines(fstab_text):
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#") or _parse_one_managed_line(raw) is not None:
+        if is_mount_comment(raw) or _parse_one_managed_line(raw) is not None:
             continue
-        fields = stripped.split()
+        fields = mount_fields(raw)
         if len(fields) >= _FSTAB_TARGET_FIELDS:
             targets.add(unescape_mount_field(fields[1]))
     return frozenset(targets)
@@ -617,7 +618,7 @@ def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool =
 
 
 def has_mount_option(options: str, needle: str) -> bool:
-    return needle in (tok.strip() for tok in options.split(",") if tok.strip())
+    return needle in (tok for tok in (strip_mount_blanks(t) for t in options.split(",")) if tok)
 
 
 def format_cache_mount_usage(prog: str) -> str:

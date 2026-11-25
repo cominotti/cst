@@ -176,6 +176,9 @@ class _PairTotals(TypedDict):
     sample_d: int  # most storage waits in one v8+ sample
     maint_samples: int  # v5+ samples with a btrfs maintenance task in D state
     pswpout_v7: int  # pswpout of the v7+ sample pairs (compared with zswpwb)
+    # per vmstat key, the value of the last sample that read it, while the samples after it hold null, and
+    # whether every pair it was held across is a v7+ pair (only then does its growth count in pswpout_v7)
+    vm_held: dict[str, tuple[int, bool]]
     zswap_ok: bool  # some sample pair came from a v7+ daemon (zswap counters usable)
 
 
@@ -214,12 +217,14 @@ def _pair_totals(samples: list[SampleRecord], vm_keys: list[str], v7_since: floa
         "sample_d": 0,
         "maint_samples": 0,
         "pswpout_v7": 0,
+        "vm_held": {},
         "zswap_ok": False,
     }
     for a, b in itertools.pairwise(samples):
         dt = (b["mono"] - a["mono"]) if "mono" in a and "mono" in b else (b["ts"] - a["ts"])
         if dt <= 0 or dt > GAP_MAX or b["ts"] - a["ts"] > GAP_MAX:
             t["gaps"] += 1
+            t["vm_held"].clear()  # a counter may start again after a gap (a reboot)
             continue
         t["covered"] += dt
         _add_psi(t["psi"], a, b)
@@ -236,10 +241,12 @@ def _pair_totals(samples: list[SampleRecord], vm_keys: list[str], v7_since: floa
     return t
 
 
-def _vm_value(rec: SampleRecord, vm_idx: dict[str, int], key: str) -> int:
-    """A vmstat counter of a sample (0 when its daemon did not record it)."""
+def _vm_value(rec: SampleRecord, vm_idx: dict[str, int], key: str) -> int | None:
+    """A vmstat counter of a sample: 0 when its daemon did not record it (an older daemon's list), None
+    where the daemon could not read it (null)."""
     i = vm_idx.get(key, -1)
-    return rec["vm"][i] if 0 <= i < len(rec.get("vm", [])) else 0
+    vm = rec.get("vm", [])
+    return vm[i] if 0 <= i < len(vm) else 0
 
 
 def _add_psi(psi: dict[str, float], a: SampleRecord, b: SampleRecord) -> None:
@@ -274,20 +281,38 @@ def _add_peaks(t: _PairTotals, b: SampleRecord, vm_idx: dict[str, int]) -> None:
             peak["mem_tasks"] = max(peak["mem_tasks"], b["d_mem"])
         else:
             t["old_d"].append((b["ts"], b.get("d", 0), "d_maint" in b))
-    peak["dirty_bytes"] = max(peak["dirty_bytes"], _vm_value(b, vm_idx, "nr_dirty") * PAGE)
-    peak["writeback_bytes"] = max(peak["writeback_bytes"], _vm_value(b, vm_idx, "nr_writeback") * PAGE)
+    for name, key in (("dirty_bytes", "nr_dirty"), ("writeback_bytes", "nr_writeback")):
+        pages = _vm_value(b, vm_idx, key)
+        if pages is not None:  # a value the daemon could not read gives no peak
+            peak[name] = max(peak[name], pages * PAGE)
 
 
 def _add_vm(t: _PairTotals, a: SampleRecord, b: SampleRecord, vm_idx: dict[str, int], *, full_vm: bool) -> None:
-    """The vmstat counters' growth from a to b (the zswap ones only when full_vm: a v7+ pair)."""
-    vmd = t["vmd"]
+    """The vmstat counters' growth from a to b (the zswap ones only when full_vm: a v7+ pair). A value the
+    daemon could not read (null) is bridged: the growth is counted from the last sample that read the key
+    (t["vm_held"]) to the next one that does. Such growth counts in pswpout_v7 only when every pair it spans
+    is a v7+ pair."""
+    vmd, held = t["vmd"], t["vm_held"]
     for k in vmd:
         if k in ZSWAP_KEYS and not full_vm:
+            held.pop(k, None)
             continue
-        d = _vm_value(b, vm_idx, k) - _vm_value(a, vm_idx, k)
+        va, v7_span = _vm_value(a, vm_idx, k), full_vm
+        if va is None and k in held:
+            va, held_v7 = held[k]
+            v7_span = held_v7 and full_vm
+        vb = _vm_value(b, vm_idx, k)
+        if vb is None:
+            if va is not None:
+                held[k] = (va, v7_span)
+            continue
+        held.pop(k, None)
+        if va is None:  # no sample before b read it
+            continue
+        d = vb - va
         if d > 0:
             vmd[k] += d
-            if k == "pswpout" and full_vm:
+            if k == "pswpout" and v7_span:
                 t["pswpout_v7"] += d
 
 

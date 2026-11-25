@@ -337,6 +337,50 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(lines[5], "UUID=dead-beef        /mnt/backup     btrfs   defaults,compress=zstd:3,noauto 0 0")
         self.assertTrue(out.endswith("\n"))
 
+    def test_fstab_fields_split_at_spaces_and_tabs_only(self) -> None:
+        # libmount splits a line at spaces and tabs only: a no-break space is part of a field. str.split()
+        # took "/var/my<NBSP>data" for two fields, "btrfs" for the options and "/var/my" for the target.
+        nbsp = "\N{NO-BREAK SPACE}"
+        line = f"UUID={SAMPLE_UUID} \t/var/my{nbsp}data  btrfs\tsubvol=d,compress=zstd:1 0 0\n"
+        entries = parse_proc_mounts(line)
+        self.assertEqual([(e.target, e.options) for e in entries], [(f"/var/my{nbsp}data", "subvol=d,compress=zstd:1")])
+        self.assertEqual([e.target for e in parse_fstab_root_entries(line, SAMPLE_UUID)], [f"/var/my{nbsp}data"])
+        # The rewrite finds the options field and keeps the line's spacing and the field with the no-break space.
+        self.assertEqual(
+            rewrite_fstab(line, "compress-force=zstd:1", SAMPLE_UUID),
+            f"UUID={SAMPLE_UUID} \t/var/my{nbsp}data  btrfs\tsubvol=d,compress-force=zstd:1 0 0\n",
+        )
+        # A line that starts with a form feed or a no-break space before "#" is no comment to libmount.
+        self.assertEqual(len(parse_proc_mounts(f"\x0c# /dev/x /y btrfs ro 0 0\n{nbsp}# /dev/x /y btrfs ro 0 0\n")), 0)
+        self.assertEqual(parse_proc_mounts("\t# /dev/x /y btrfs ro 0 0\n"), ())
+        # An option token is trimmed of spaces and tabs only: a no-break space stays in it.
+        spec = effective_compress_spec(f"compress=zstd:1{nbsp}")
+        self.assertEqual(spec.raw if spec else None, f"compress=zstd:1{nbsp}")
+        self.assertEqual(effective_compress_spec(" compress=zstd:1"), parse_compress_spec("compress=zstd:1"))
+
+    def test_fstab_lines_end_at_a_newline_only(self) -> None:
+        # libmount ends a line at a newline only: a vertical tab, a form feed, \x1c, NEL or U+2028 is part of
+        # a field. str.splitlines() ended the line there: it lost the rest of the options (compress=zstd:1),
+        # found no entry for such a target, and the rewrite put the option inside the field libmount reads.
+        for sep in ("\x0b", "\x0c", "\x1c", "\N{NEXT LINE}", "\N{LINE SEPARATOR}"):
+            with self.subTest(sep=ascii(sep)):
+                line = f"UUID={SAMPLE_UUID} / btrfs rw,subvol=/a{sep}b,compress=zstd:1 0 0\n"
+                self.assertEqual([e.options for e in parse_proc_mounts(line)], [f"rw,subvol=/a{sep}b,compress=zstd:1"])
+                target = f"UUID={SAMPLE_UUID} /mnt/t{sep}x btrfs rw 0 0\n"
+                self.assertEqual([e.target for e in parse_proc_mounts(target)], [f"/mnt/t{sep}x"])
+                fstab = f"UUID={SAMPLE_UUID} / btrfs noatime{sep}x 0 0\n# end\n"
+                self.assertEqual(
+                    rewrite_fstab(fstab, "compress=zstd:1", SAMPLE_UUID),
+                    f"UUID={SAMPLE_UUID} / btrfs noatime{sep}x,compress=zstd:1 0 0\n# end\n",
+                )
+        # The carriage return before a newline and a last line without a newline stay as they were.
+        for end in ("\r\n", ""):
+            with self.subTest(end=ascii(end)):
+                self.assertEqual(
+                    rewrite_fstab(f"UUID={SAMPLE_UUID} / btrfs noatime 0 0{end}", "compress=zstd:1", SAMPLE_UUID),
+                    f"UUID={SAMPLE_UUID} / btrfs noatime,compress=zstd:1 0 0{end}",
+                )
+
     def test_rewrite_kargs_and_top_mount_options(self) -> None:
         edits = rewrite_kargs_rootflags(SAMPLE_KARGS, "compress-force=zstd:1")
         self.assertEqual(

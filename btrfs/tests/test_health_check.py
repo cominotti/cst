@@ -1068,6 +1068,9 @@ class HealthCheckTest(unittest.TestCase):
             ("08", "critical_warning=8"),
             ("0", None),
             ("bad", "cannot read critical_warning (bad)"),
+            # bash's 64-bit arithmetic: 2**64 wraps to 0, 2**64 - 1 to -1 (main: a problem with 2**64).
+            ("0x10000000000000000", None),
+            ("0xFFFFFFFFFFFFFFFF", "critical_warning=-1"),
         ):
             with self.subTest(raw):
                 self.machine["nvme"] = {"nvme1": HEALTHY_SMART.replace(field, f"critical_warning : {raw}")}
@@ -1181,6 +1184,115 @@ class BashArithmeticTest(unittest.TestCase):
             with self.subTest(value=value[:24], digits=len(value)):
                 n = bash_int(value)
                 self.assertEqual("error" if n is None else str(n), bash)
+
+    BASH_DECIMAL = """while IFS= read -r -d '' v; do ( echo "$(( 10#$v ))" ) 2>/dev/null || echo error; done < "$1"\n"""
+    DECIMAL_VALUES: Final = (
+        "0",
+        "000123",
+        "08",
+        "0" * 5000 + "9",
+        "12345678901234567890",
+        "99999999999999999999",
+        "1" * 5000,
+        "9" * 4301,
+        "abc",
+        "\N{ARABIC-INDIC DIGIT THREE}",
+    )
+
+    def test_bash_decimal_reads_digits_as_bash_base_10(self) -> None:
+        from btrfs.health_check.domain import bash_decimal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            got = run_bash(self.BASH_DECIMAL, nul_file(tmp, list(self.DECIMAL_VALUES)))
+        self.assertEqual(len(got), len(self.DECIMAL_VALUES))
+        for value, bash in zip(self.DECIMAL_VALUES, got, strict=True):
+            with self.subTest(value=value[:24], digits=len(value)):
+                n = bash_decimal(value)
+                self.assertEqual("error" if n is None else str(n), bash)
+
+    # The old btrfs-health-check's critical_warning read and test (git show b819032f^:btrfs/btrfs-health-check,
+    # lines 41-48 and 53), nvme-cli's printed value replaced by the case: what problem() got, ";"-joined.
+    CRITICAL = """while IFS= read -r -d '' crit; do
+    (
+        r=""
+        if [[ "${crit}" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+            crit=$(( crit ))
+        elif [[ "${crit}" =~ ^[0-9]+$ ]]; then
+            crit=$(( 10#${crit} ))
+        elif [[ -n "${crit}" ]]; then
+            r="cannot read critical_warning (${crit});"
+            crit=0
+        fi
+        (( ${crit:-0} != 0 )) && r="${r}critical_warning=${crit};"
+        echo "${r:-none}"
+    ) 2>/dev/null || echo error
+done < "$1"
+"""
+    CRITICAL_VALUES: Final = (
+        "",
+        "0",
+        "0x0",
+        "0x8",
+        "0XA",
+        "0x10000000000000000",
+        "0xFFFFFFFFFFFFFFFF",
+        "0x8000000000000000",
+        "0x" + "f" * 5000,
+        "08",
+        "000123",
+        "12345678901234567890",
+        "1" * 5000,
+        "abc",
+        "0x",
+    )
+
+    def test_critical_warning_matches_the_old_bash(self) -> None:
+        from btrfs.health_check.domain import smart_problems
+
+        field = "critical_warning                        : 0"
+        with tempfile.TemporaryDirectory() as tmp:
+            got = run_bash(self.CRITICAL, nul_file(tmp, list(self.CRITICAL_VALUES)))
+        self.assertEqual(len(got), len(self.CRITICAL_VALUES))
+        for value, bash in zip(self.CRITICAL_VALUES, got, strict=True):
+            with self.subTest(value=value[:24], digits=len(value)):
+                log = HEALTHY_SMART.replace(field, f"critical_warning : {value}")
+                found = [p.removeprefix("NVMe nvme0n1: ") + ";" for p in smart_problems("nvme0n1", "", log)]
+                self.assertEqual("".join(found) or "none", bash)
+
+    # The old btrfs-health-check's date arithmetic (git show b819032f^:btrfs/btrfs-health-check): line 201 (the
+    # scrub's age), 314 (boot_since), 318-319 (the snapshots' two tests), 333 (the NAS's), with $(date +%s) and
+    # the values read put in as text. One line per case: each expression's result, space-separated.
+    DATES = """while IFS= read -r -d '' now && IFS= read -r -d '' a && IFS= read -r -d '' b; do
+    (
+        age=$(( ( ${now} - a ) / 86400 ))
+        boot=$(( ${now} - a ))
+        if (( ${now} - a > 3 * 3600 )) && (( ${now} - b > 20 * 60 )); then snap=1; else snap=0; fi
+        if (( a > 0 && ${now} - a > 8 * 86400 )); then nas=1; else nas=0; fi
+        echo "${age} ${boot} ${snap} ${nas}"
+    ) 2>/dev/null || echo error
+done < "$1"
+"""
+    DATE_CASES: Final = (
+        (1_700_000_000, 1_699_000_000, 1_699_990_000),
+        (1_700_000_000, -(2**63) + 5, 0),  # the scrub started at -2**63 + 5: bash wraps to a negative age
+        (1_700_000_000, -(2**63), -(2**63)),  # uptime and awake at -2**63: boot_since and the grace wrap
+        (-(2**63), 1, 1),
+        (2**63 - 1, -1, -1),
+        (1_700_000_000, 2**63 - 1, 2**63 - 1),
+        (0, 0, 0),
+    )
+
+    def test_date_arithmetic_wraps_as_the_old_bash(self) -> None:
+        from btrfs.health_check.domain import boot_since, days_between, nas_overdue, snapshots_overdue
+
+        values = [str(v) for case in self.DATE_CASES for v in case]
+        with tempfile.TemporaryDirectory() as tmp:
+            got = run_bash(self.DATES, nul_file(tmp, values))
+        self.assertEqual(len(got), len(self.DATE_CASES))
+        for (now, a, b), bash in zip(self.DATE_CASES, got, strict=True):
+            with self.subTest(now=now, a=a, b=b):
+                ours = (days_between(now, a), boot_since(now, a), snapshots_overdue(now, a, b), nas_overdue(now, a))
+                self.assertEqual(f"{ours[0]} {ours[1]} {int(ours[2])} {int(ours[3])}", bash)
 
     # The old btrfs-health-check's reclaim count (git show b819032f^:btrfs/btrfs-health-check, lines
     # 169-179), its state file's read replaced by the value: skip, no problem, or the problem's count.

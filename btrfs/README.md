@@ -243,7 +243,11 @@ health check makes sure you hear about it.
 **How:** `btrfs-health-check` reads the state of the filesystem and the disks.
 It **never changes the filesystem**. It only writes its own small state files in
 `/var/lib/btrfs-health-check` (and markers of the degraded-boot part, see
-section 8). It alerts about:
+section 8). Every number it reads and computes (counters, sizes, the
+scrub's age, the times since the last snapshot and the last NAS backup)
+follows the old bash version's 64-bit arithmetic: a result past 2**63 - 1
+wraps around to a negative number, as bash's did, so a damaged date or
+state file gives the same answer as before the port. It alerts about:
 
 | Problem | Example message (start) |
 |---|---|
@@ -257,7 +261,7 @@ section 8). It alerts about:
 | Little unallocated space (below 50 GiB on a disk; critical below 5 GiB) | `only N GiB unallocated on ...` / `CRITICAL: only N MiB unallocated` |
 | Metadata almost full | `CRITICAL: metadata almost full` |
 | Automatic reclaim is configured but switched off, or it failed | `automatic reclaim is configured but data/... is off` / `automatic ... reclaim failed` |
-| The NVMe disk's own health log (SMART, read with `nvme smart-log`): a critical warning, media errors, spare blocks below the disk's own threshold, or wear (`percentage_used`) of 80% or more. **Spare blocks** are reserve blocks the disk uses to replace worn-out ones. It is read for the btrfs disks and for the disks under every swap device in `/proc/swaps` (see below). | `NVMe nvme0n1: ...` / `NVMe nvme1n1 (swap): ...` |
+| The NVMe disk's own health log (SMART, read with `nvme smart-log`): a critical warning, media errors, spare blocks below the disk's own threshold, or wear (`percentage_used`) of 80% or more. `critical_warning` is read as the old bash read it: hex (`0x8`) or decimal (`08` is 8), as 64-bit arithmetic that wraps around (`0x10000000000000000` is 0: no warning; `0xFFFFFFFFFFFFFFFF` is `-1`). **Spare blocks** are reserve blocks the disk uses to replace worn-out ones. It is read for the btrfs disks and for the disks under every swap device in `/proc/swaps` (see below). | `NVMe nvme0n1: ...` / `NVMe nvme1n1 (swap): ...` |
 | A software RAID (md) is degraded | `md RAID degraded` |
 | This boot or a past boot was degraded (only with the degraded-boot part) | `this boot is DEGRADED` / `booted DEGRADED on ...` |
 | The degraded-boot rule was made for another filesystem (only with the degraded-boot part) | `btrfs-last-resort: /etc/udev/rules.d/65-btrfs-last-resort.rules is for ... but the root fs is ...; re-run 'cst btrfs degraded-boot'` |
@@ -571,6 +575,16 @@ kernel shows its own state as files) and in the cgroup tree.
   The report ignores those counters in old logs: it prints `n/a (daemon < v7)`,
   or counts zswap only from the first version 7 record. The new daemon
   reaches the machine with `cst btrfs install`.
+- A `/proc/vmstat` value the daemon cannot read (a key the kernel does not
+  have, or text that is no number) is `null` in that sample's `vm` list,
+  not 0, as a cgroup's unreadable pressure or `io.stat` is left out. The
+  report counts the growth across a `null` from the last sample that read
+  the key to the next one that does (a gap in the samples, such as a
+  reboot, ends that), and takes no peak from it; a 0 would be a counter
+  gone back, and the pair after it would count every page since boot as a
+  burst. Growth counted across a `null` enters the "not through zswap"
+  figure only when every sample it spans came from a daemon version 7 or
+  later, as the zswap counters it is compared with.
 - It is strongly sandboxed (no network, no writes outside its own folders, limited
   to 192 MiB of memory and 25% of one CPU) and runs with a higher priority, so it
   keeps sampling while everything else is stuck.
@@ -1581,6 +1595,16 @@ root's when it is on the device of `/sysroot` (else `/`, else `/var`). So
 Fedora's default `/home` (a subvolume of the root filesystem) follows the
 setting, and a separate btrfs `/home` or `/var/home` is never changed or
 remounted.
+
+**How an fstab line is read:** here, in `commit-interval` and in
+`cache`, the fields of an `/etc/fstab` line split at spaces and tabs
+only, as `mount` (libmount) splits them, and a line ends at a newline
+only (`/proc/mounts` is read the same way). A no-break space, a form feed, a
+vertical tab or U+3000 is part of a field, so an option written
+`commit=30<NBSP>` is one malformed option (the kernel refuses it), not
+`commit=30`, and an option is trimmed of spaces and tabs only. A line
+whose first character after spaces and tabs is `#` is a comment, and one
+carriage return before its newline is dropped.
 
 **After an upgrade, on a host with a separate btrfs `/var`:** an older CST
 asked for `/var` first and took that filesystem for the root, so its

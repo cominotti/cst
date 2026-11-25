@@ -360,6 +360,20 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 core.parse_policy(bad)
 
+    def test_tokens_split_at_space_tab_newline_and_comma_only(self) -> None:
+        # bash's word splitting (and the comma): a no-break space or another blank is part of a token.
+        for text in ("24h\t7d", "24h,7d", " 24h \n7d ", "\t24h ,\n 7d\n"):
+            with self.subTest(text=text):
+                self.assertEqual(core.parse_policy(text), {"h": 24, "d": 7})
+        for blank in ("\xa0", "\N{IDEOGRAPHIC SPACE}", "\f", "\v", "\N{THIN SPACE}", "\r"):
+            with self.subTest(blank=blank):
+                with self.assertRaises(ValueError) as cm:
+                    core.parse_policy(f"24h{blank}7d")
+                self.assertIn(f"bad retention token {f'24h{blank}7d'!r}", str(cm.exception))
+                with self.assertRaises(ValueError) as cm:
+                    core.parse_policy(f"24h 7d{blank}")
+                self.assertIn(f"bad retention token {f'7d{blank}'!r}", str(cm.exception))
+
     def test_max_kept(self) -> None:
         self.assertEqual(core.policy_max_kept(core.parse_policy("72h 7d 4w 3m")), 73 + 8 + 5 + 4 + 1)
         self.assertIsNone(core.policy_max_kept(core.parse_policy("*h 1d")))
@@ -1252,6 +1266,10 @@ class ChangeDetectionTests(CliTestCase):
         self.assertEqual(self.cli(h, "snapshot", sources=["a=/top/home:1d", "b=/top/home:1d"]), 2)
         self.assertEqual(self.cli(h, "snapshot", sources=["a=/top/home:1d", "a=/top/x:1d"]), 2)
         self.assertEqual(self.cli(h, "frobnicate"), 2)
+        # A no-break space in the policy is part of a token (bash never split there): a usage error naming it.
+        self.assertEqual(self.cli(h, "snapshot", source="home=/top/home:72h\xa07d"), 2)
+        self.assertIn("bad retention token '72h\\xa07d'", self.err)
+        self.assertEqual(h.mutating_calls(), [])
         # The lock is a plain absolute path (it is opened as root): a usage error, not a traceback.
         for bad in ("rel.lock", "/run/../tmp/x.lock"):
             with self.subTest(lock=bad):

@@ -18,13 +18,14 @@ from cpu.game.domain import (
 )
 from cpu.game.domain.sysfs import card_number, suffix_number
 from cpu.power.domain import GpuPmMode, parse_gpu_pm_mode
+from cst_core.domain.values import parse_whole_number
 
 if TYPE_CHECKING:
     from cpu.game.application.profile import GameProfileSteps
 
 _DEFAULT_GAME_CSTATE_US: Final = 50
 _MAX_CGROUP_WALK_DEPTH: Final = 3
-_STATE_NAME_RE: Final = re.compile(r"^state([0-9]+)$")
+_STATE_NAME_RE: Final = re.compile(r"^state(\d+)$", re.ASCII)
 _GPU_PM_ON: Final = "on"
 _DPM_MANUAL: Final = "manual"
 _CSTATE_ENABLE: Final = "0"
@@ -39,9 +40,7 @@ _STEAM_CLIENT_COMMS: Final = frozenset(
 
 def _parse_int_stripped(profile: GameProfileSteps, path: str) -> int | None:
     raw = profile.ports.power.read_stripped(path)
-    if raw is None or not re.fullmatch(r"[0-9]+", raw):
-        return None
-    return int(raw)
+    return None if raw is None else parse_whole_number(raw)
 
 
 def _record_and_write_sys(profile: GameProfileSteps, path: str, old: str, new: str) -> bool:

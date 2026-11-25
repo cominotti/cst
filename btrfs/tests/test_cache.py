@@ -33,6 +33,8 @@ from btrfs.cache.domain import (
     parse_cache_mount_args,
     plan_attach_fstab,
     plan_detach_fstab,
+    has_mount_option,
+    parse_all_mounts,
     unmanaged_fstab_targets,
 )
 from btrfs.cache.domain.health import (
@@ -143,6 +145,24 @@ class CacheMountDomainTests(unittest.TestCase):
         )
         entries = parse_managed_fstab_entries(text)
         self.assertEqual([(e.source, e.target) for e in entries], [("/var/mnt/cache/u", f"{home}/.cache")])
+
+    def test_fstab_fields_split_at_spaces_and_tabs_only(self) -> None:
+        # libmount splits a line at spaces and tabs only: a no-break space is part of a field. str.split()
+        # read "/var/home/u/.cache<NBSP>old" as the target "/var/home/u/.cache", which blocked the bind.
+        nbsp = "\N{NO-BREAK SPACE}"
+        fstab = f"/dev/sdb1\t/var/home/u/.cache{nbsp}old  ext4 defaults,x{nbsp}y 0 0\n\t# /dev/sdc1 /c ext4 rw 0 0\n"
+        self.assertEqual(
+            [(e.source, e.target, e.fstype, e.options) for e in parse_all_mounts(fstab)],
+            [("/dev/sdb1", f"/var/home/u/.cache{nbsp}old", "ext4", f"defaults,x{nbsp}y")],
+        )
+        self.assertEqual(unmanaged_fstab_targets(fstab), frozenset({f"/var/home/u/.cache{nbsp}old"}))
+        # A managed line's fields split the same way.
+        u = CacheMountUser("u", 1000, 1000, f"/var/home/u{nbsp}x")
+        text = plan_attach_fstab("", build_user_bindings(u, include_scratchpad=False))
+        self.assertEqual([e.target for e in parse_managed_fstab_entries(text)], [f"/var/home/u{nbsp}x/.cache"])
+        # An option is trimmed of spaces and tabs only: "flushoncommit<NBSP>" is another option.
+        self.assertTrue(has_mount_option("rw, flushoncommit\t", "flushoncommit"))
+        self.assertFalse(has_mount_option(f"rw,flushoncommit{nbsp}", "flushoncommit"))
 
     def test_only_a_newline_ends_an_fstab_line(self) -> None:
         # str.splitlines() also split at a carriage return, a form feed and other separators: a CRLF

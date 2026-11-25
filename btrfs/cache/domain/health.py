@@ -32,7 +32,7 @@ _DEFAULT_MAPPER: Final = "cache"
 _DEFAULT_MAPPER_PREFIXES: Final = ("cache-", "luks-cache")
 _CRYPTTAB_MIN_FIELDS: Final = 2
 _CRYPTTAB_OPT_IDX: Final = 3
-_DM_DEVICE_RE: Final = re.compile(r"/dev/dm-[0-9]+")
+_DM_DEVICE_RE: Final = re.compile(r"/dev/dm-\d+", re.ASCII)
 _MAPPER_PREFIX: Final = "/dev/mapper/"
 
 

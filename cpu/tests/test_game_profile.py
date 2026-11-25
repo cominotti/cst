@@ -53,6 +53,7 @@ from cpu.game.domain import (
     game_settings,
     unheld,
     unit_name_valid,
+    vm_io_weight,
 )
 from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
 from cpu.game.domain.leftovers import (
@@ -210,6 +211,18 @@ class PureRulesTest(unittest.TestCase):
         self.assertEqual(expand_cpus("0-3,6,12-14"), ["0", "1", "2", "3", "6", "12", "13", "14"])
         self.assertEqual(expand_cpus("0-1,,5,"), ["0", "1", "5"])
         self.assertEqual(expand_cpus("x-2,7"), ["7"])  # what seq cannot count gives nothing
+        self.assertEqual(expand_cpus(" +3- 5"), ["3", "4", "5"])
+        # A range end of more digits than int() reads is no number either (main: ValueError).
+        self.assertEqual(expand_cpus("1" * 5000 + "-1,7"), ["7"])
+        self.assertEqual(expand_cpus("0-" + "1" * 5000 + ",7"), ["7"])
+
+    def test_vm_io_weight(self) -> None:
+        for value, weight in (("25", "25"), ("1", "1"), ("10000", "10000"), ("0", "10"), ("10001", "10")):
+            with self.subTest(value):
+                self.assertEqual(vm_io_weight(value), weight)
+        for value in ("idle", "", "+5", " 5", "\N{ARABIC-INDIC DIGIT THREE}", "1" * 5000):
+            with self.subTest(value=value[:24]):
+                self.assertEqual(vm_io_weight(value), "10")  # main: ValueError for 5000 digits
 
     def test_override_files_of_fixed_and_transient_units(self) -> None:
         # systemd writes `set-property --runtime` of a transient unit (scopes,
@@ -3748,6 +3761,20 @@ class GameProfilePowerTest(GameProfileCase):
         self.assertEqual(self.read(self.state), recs_after_first)
         self.run_profile("off")
         self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+
+    def test_a_cstate_latency_that_does_not_read_is_skipped(self) -> None:
+        # More digits than int() reads (main: ValueError) or no number: that state is left alone.
+        for lat in ("1" * 5000, "abc", ""):
+            with self.subTest(lat=lat[:24]):
+                for st, st_lat in (("state1", "127"), ("state2", lat)):
+                    self.write(os.path.join(self.paths.sys_cpu, "cpu0", "cpuidle", st, "latency"), f"{st_lat}\n")
+                    self.write(os.path.join(self.paths.sys_cpu, "cpu0", "cpuidle", st, "disable"), "0\n")
+                s = GameSettings(target_user=USER, p_cores="0", game_cstate_max_latency_us="50")
+                self.run_profile("on", s)
+                self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, "cpu0/cpuidle/state1/disable")), "1\n")
+                self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, "cpu0/cpuidle/state2/disable")), "0\n")
+                self.run_profile("off", s)
+                self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, "cpu0/cpuidle/state1/disable")), "0\n")
 
     def test_game_cstates_on_p_cores_compose_with_baseline_disabled_states(self) -> None:
         for cpu in ("0", "1", "12"):

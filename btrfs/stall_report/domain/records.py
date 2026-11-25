@@ -112,7 +112,7 @@ class SampleRecord(TypedDict):
     mono: NotRequired[float]  # monotonic clock
     psi: dict[str, list[float] | None]  # io/memory/cpu: some avg10, some total us, full avg10, full total us
     procs: list[int]  # running, blocked (iowait)
-    vm: NotRequired[list[int]]  # values of the meta record's vm_keys
+    vm: NotRequired[list[int | None]]  # values of the meta record's vm_keys; null: the daemon could not read it
     # v3+: tasks waiting on storage (before v8 memory waits too, before v5
     # maintenance). Older daemons counted something else in "d"; the report
     # reads it only when "d_all" (v3+) is there.

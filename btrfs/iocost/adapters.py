@@ -41,7 +41,7 @@ from btrfs.iocost.domain import (
     UdevProperties,
 )
 
-_DEVNO_RE: Final = re.compile(r"^[0-9]+:[0-9]+$")
+_DEVNO_RE: Final = re.compile(r"^\d+:\d+$", re.ASCII)
 _ACTIVE_SCHED_RE: Final = re.compile(r"\[([^\]]+)\]")
 
 

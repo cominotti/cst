@@ -23,7 +23,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from typing import override
+from typing import Final, override
 import unittest
 from unittest import mock
 
@@ -38,6 +38,12 @@ REPO_ID = "ab" * 32
 SNAP = "home.20261118T0905"
 DAY = 86400
 PAST_64_BITS = "a number past 2**63 - 1 (bash would wrap it): not wrapped; ignored"
+NOT_CHECKED_60_DAYS: Final = [
+    [
+        "NAS backup: repository not checked for 60 days",
+        "restic check did not complete at the last attempts; see journalctl -u btrfs-snapshot-nas.",
+    ]
+]
 
 
 class Base(RuntimeTest):
@@ -155,8 +161,10 @@ class GateTest(Base):
         self.nas()
         self.assertEqual(self.notified(), [self.stale("The NAS backup is not configured completely.", 9)])
 
-    def test_a_last_success_past_int_s_digit_limit_is_skipped(self) -> None:
+    def test_a_last_success_past_int_s_digit_limit_wraps_as_bash(self) -> None:
         # isascii() and isdigit() took 5000 digits, and int() raised ValueError out of the staleness check.
+        # bash's (( v > best )) reads them wrapped at 64 bits: 8198552921648689607, a date long after
+        # now, so the backup is never stale (before this, the value was skipped and the enabling counted).
         self.conf(NAS_ENABLED="1", NAS_PATH="")
         self.days_ago("nas-enabled-at", 3)
         self.write(self.state_file("nas-last-ok"), "1" * 5000 + "\n")
@@ -166,9 +174,43 @@ class GateTest(Base):
         self.assertEqual(self.notified(), [])
         self.days_ago("nas-enabled-at", 9)
         self.nas()
-        self.assertEqual(self.notified(), [self.stale("The NAS backup is not configured completely.", 9)])
+        self.assertEqual(self.notified(), [])
+
+    def test_the_staleness_files_are_read_as_bash_arithmetic(self) -> None:
+        # The old nas_since compared them in (( v > best )): a leading 0 is octal, 08 an error (skipped),
+        # a value past 2**63 - 1 wraps around to a negative one (skipped). Main read them as decimal.
+        body = "The NAS backup is not configured completely."
+        self.conf(NAS_ENABLED="1", NAS_PATH="")
+        with self.subTest("octal"):
+            # 9 days ago, written in octal: bash's 9 days (main: the octal digits as a decimal, a date
+            # after now, no alert).
+            self.write(self.state_file("nas-last-ok"), "0" + format(int(time.time() - 9 * DAY), "o") + "\n")
+            rc, _lines, err = self.nas()
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(self.notified(), [self.stale(body, 9)])
+        for text in ("08", "9223372036854775808"):
+            with self.subTest(text):
+                # Skipped: the staleness clock starts now (main: 8, a stale alert from 1970; 2**63, no
+                # alert and no start).
+                self.forget_calls()
+                self.write(self.state_file("nas-last-ok"), text + "\n")
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(self.state_file("nas-enabled-at"))
+                rc, _lines, err = self.nas()
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(self.notified(), [])
+                self.assertLess(abs(int(self.read_state("nas-enabled-at")) - time.time()), 120)
 
     def test_another_nas_run_holds_its_lock(self) -> None:
+        with self.hold_lock("run/btrfs-snapshot-nas.lock"):
+            self.assertEqual(self.nas(), (0, [log(5, "another NAS run is active; skipped")], ""))
+        self.assertEqual(self.calls("restic"), [])
+
+    def test_a_run_skipped_for_the_lock_names_no_unreadable_number(self) -> None:
+        # A run that does nothing ends as a skip, with exit 0: the run that holds the lock names the setting
+        # and ends with the error. Before, the skip logged the setting's line, which said the run would end
+        # with an error after its backup and forget, and exited 1.
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="1 x")
         with self.hold_lock("run/btrfs-snapshot-nas.lock"):
             self.assertEqual(self.nas(), (0, [log(5, "another NAS run is active; skipped")], ""))
         self.assertEqual(self.calls("restic"), [])
@@ -815,16 +857,106 @@ class MaintenanceTest(Base):
             ],
         )
 
+    def stale_check_alert(self, last_check: str) -> list[list[object]]:
+        """The alerts of a run whose check does not complete (rc 11), with LAST_CHECK in nas-last-check."""
+        self.known_repository()
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic")
+        self.write(self.state_file("nas-last-check"), f"{last_check}\n")
+        self.restic(check={"rc": 11})
+        self.nas()
+        return [a[4:] for a in self.notified()]
+
+    def test_a_last_check_is_read_as_bash_arithmetic_for_the_stale_alert(self) -> None:
+        # The old nas_check_stale computed $(( NOW - last )) as due() reads the file: a leading 0 is octal.
+        # Read as a decimal number, the octal text of the epoch 60 days back was in the future: no alert.
+        self.assertEqual(self.stale_check_alert(f"0{int(time.time() - 60 * DAY):o}"), NOT_CHECKED_60_DAYS)
+
     def test_a_last_prune_bash_cannot_read_is_not_due_before_its_interval_is_read(self) -> None:
         # bash failed on NOW - 08 first, so a name in NAS_PRUNE_EVERY_DAYS was never read: no prune, and
-        # the run goes on (the runtime read the interval first and stopped).
+        # the run goes on (the runtime read the interval first and stopped). The name is a number the
+        # run cannot compute: its line at the start, and exit 1 at the end.
         self.known_repository()
         self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="x")
         self.write(self.state_file("nas-last-prune"), "08\n")
-        rc, _, err = self.nas()
-        self.assertEqual(rc, 0, err)
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(lines[0], self.unreadable_line("NAS_PRUNE_EVERY_DAYS", "x"))
         self.assertEqual(self.restic_commands()[3:], ["backup", "forget", "check", "snapshots"])
         self.assertNotIn("--prune", self.restic_calls()[4])
+
+    def unreadable_line(self, key: str, value: str) -> str:
+        left_out = {
+            "NAS_STALE_DAYS": "no alert for a stale NAS backup",
+            "NAS_PRUNE_EVERY_DAYS": "no prune (forget runs without --prune)",
+            "NAS_CHECK_EVERY_DAYS": "no repository check",
+        }[key]
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        return log(
+            3,
+            f"{key}={value!r} in {conf}: not a number CST's arithmetic reads: {left_out} until it is fixed; "
+            "this NAS run ends with an error",
+        )
+
+    def test_a_nas_number_the_arithmetic_cannot_compute_ends_the_run_after_its_backup_and_forget(self) -> None:
+        # bash stopped at a name (set -u: abc, 1 x) and the old runtime where it read the number; at an
+        # error (~5, 1<<8: operators _Arith does not read, a no-break space) the comparison was false and
+        # the run went on with exit 0: no prune, no check or no stale alert ever, without a word naming
+        # the setting. Now each gets a line at the start, the run does what does not depend on it (the
+        # backup, forget), leaves out what it governs, and ends with exit 1.
+        self.known_repository()
+        for key in ("NAS_STALE_DAYS", "NAS_PRUNE_EVERY_DAYS", "NAS_CHECK_EVERY_DAYS"):
+            for value in ("1 x", "~5", "1<<8", "abc", "7\xa0"):
+                with self.subTest(key=key, value=value):
+                    self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", **{key: value})
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(self.state_file("nas-done-home"))
+                    self.days_ago("nas-last-prune", 7)
+                    self.days_ago("nas-last-check", 30)
+                    rc, lines, err = self.nas()
+                    self.assertEqual(rc, 1, err)
+                    self.assertEqual(lines[0], self.unreadable_line(key, value))
+                    self.assertNotIn("not a number", err)
+                    commands = self.restic_commands()
+                    want = ["backup", "forget", "check", "snapshots"]
+                    if key == "NAS_CHECK_EVERY_DAYS":
+                        want.remove("check")
+                    self.assertEqual(commands[3:], want)
+                    forget = self.restic_calls()[4]
+                    self.assertEqual("--prune" in forget, key != "NAS_PRUNE_EVERY_DAYS", forget)
+                    self.assertGreater(int(self.read_state("nas-last-ok")), time.time() - 120)
+        # With the values fixed, the same run prunes and checks and ends with exit 0 (cannot bite otherwise).
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_PRUNE_EVERY_DAYS="7", NAS_CHECK_EVERY_DAYS="30")
+        os.remove(self.state_file("nas-done-home"))
+        self.days_ago("nas-last-prune", 7)
+        self.days_ago("nas-last-check", 30)
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertFalse([ln for ln in lines if "CST's arithmetic" in ln], lines)
+        self.assertEqual(self.restic_commands()[3:], ["backup", "forget", "check", "snapshots"])
+        self.assertIn("--prune", self.restic_calls()[4])
+
+    def stale_days_unreadable(self, nas_path: str, body: str) -> None:
+        """A stale backup and NAS_STALE_DAYS="1 x": the line, no alert (the run cannot say when the
+        backup is stale), exit 1. With NAS_STALE_DAYS=7 the alert comes (cannot bite otherwise)."""
+        self.days_ago("nas-last-ok", 8)
+        self.conf(NAS_ENABLED="1", NAS_PATH=nas_path, NAS_STALE_DAYS="1 x")
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(lines[0], self.unreadable_line("NAS_STALE_DAYS", "1 x"))
+        self.assertEqual(self.notified(), [])
+        self.assertEqual(self.calls("restic"), [])
+        self.conf(NAS_ENABLED="1", NAS_PATH=nas_path, NAS_STALE_DAYS="7")
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertFalse([ln for ln in lines if "CST's arithmetic" in ln], lines)
+        self.assertEqual(self.notified(), [self.stale(body)])
+
+    def test_an_unreadable_stale_days_on_an_unreachable_nas(self) -> None:
+        self.machine(sftp_rc=255)
+        self.stale_days_unreadable("/volume1/restic", "The NAS was unreachable at the last attempts.")
+
+    def test_an_unreadable_stale_days_when_not_configured(self) -> None:
+        self.stale_days_unreadable("", "The NAS backup is not configured completely.")
 
     def test_settings_of_the_maintenance(self) -> None:
         self.conf(
@@ -952,6 +1084,16 @@ class MaintenanceTest(Base):
         self.restic()
         self.nas()
         self.assertFalse(os.path.exists(self.state_file("nas-check-failures")))
+
+    def test_the_failure_count_wraps_at_64_bits_as_bash(self) -> None:
+        # bash's $(( 9223372036854775807 + 1 )) is -2**63: below 3, no alert (main: 2**63 and the alert).
+        self.known_repository()
+        self.write(self.state_file("nas-check-failures"), "9223372036854775807\n")
+        self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})
+        rc, _lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.read_state("nas-check-failures"), "-9223372036854775808\n")
+        self.assertNotIn("NAS backup: repository check keeps failing", [a[4] for a in self.notified()])
 
     def test_a_check_overdue_by_another_interval_alerts(self) -> None:
         self.known_repository()

@@ -1060,6 +1060,10 @@ You can change the retention by adding `HOME_PRESERVE='...'`,
 `WS_PRESERVE='...'` or `EMERGENCY_PRESERVE='...'` (default `24h 3d`, used by
 the emergency purge of [section 16](#16-the-space-guard)) to
 `/etc/btrfs-setup/snapshots.conf`. The hourly run reads this file.
+Separate the rules with spaces, tabs or commas (`'72h 7d'`, `'72h,7d'`).
+Any other blank, such as a no-break space, is part of a rule:
+`btrfs-snapshot-core` then stops with an error that names the rule, and
+takes no snapshot.
 
 - `snapshots status` always shows the default text (`keep /home 72h 7d 4w 3m,
   ~/Workspace 48h 7d`), even after you change it. To see the retention that
@@ -1333,6 +1337,15 @@ Rules the script follows about the password:
 
 1. Checks the NAS is reachable. If not, it skips the run. You get an alert
    only when the last good backup is `NAS_STALE_DAYS` (7) days old or more.
+   The last good backup is the later of `nas-last-ok` and `nas-enabled-at`
+   in `/var/lib/btrfs-snapshot`, each read as the old bash's arithmetic
+   read it (and as `btrfs-health-check` reads them): a leading `0` is
+   octal (`08` is no number and is skipped), a value past 2**63 - 1 wraps
+   around (a negative one is skipped), and the age in days and the count of
+   failed checks (`nas-check-failures`) are 64-bit and wrap the same way.
+   `nas-last-check` (the last completed repository check) is read the same
+   way, for when the check is due and for the alert about a check that
+   keeps not completing.
 2. Opens the repository with the password. What
    `/var/lib/btrfs-snapshot` records about it (which snapshots it has, the
    last prune and check) belongs to that repository's id
@@ -1392,6 +1405,24 @@ plus those seconds). The run warns (`snapshots.conf line N: NAS_TIMEOUT=...:
 a number past 2**63 - 1 (bash would wrap it): not wrapped; ignored`) and uses
 the default of that setting. Before, `NAS_CHECK_EVERY_DAYS=4611686018427387904`
 wrapped to 0 days, a check at every run.
+
+A NAS number the run cannot compute at all (`abc`, `1 x`, `08`, a
+no-break space, or an operator CST's arithmetic does not read although bash
+would: `1<<8`, `~5`) in `NAS_STALE_DAYS`, `NAS_PRUNE_EVERY_DAYS` or
+`NAS_CHECK_EVERY_DAYS` gets a line at the start of the run that names the
+setting and its value (`NAS_PRUNE_EVERY_DAYS='1 x' in ...snapshots.conf: not
+a number CST's arithmetic reads: no prune (forget runs without --prune)
+until it is fixed; ...`), whether this run would read it or not. The run
+still does what does not depend on it: the backup, and `forget` with the
+retention. It leaves out what the setting governs (the prune, the
+repository check, or the alert for a stale backup), and it ends with exit 1,
+so the `btrfs-snapshot-nas` service shows as failed until the line is
+fixed. A run that only stops at "not configured completely" or at an
+unreachable NAS names it too and ends with exit 1; a run skipped because
+another one holds the NAS lock names nothing and ends with exit 0, as
+before. Before, a name stopped the run where it read the number, and any
+other such value made that comparison false without a word: no prune, no
+check or no stale alert, ever.
 
 ### The VM backups share this repository
 
@@ -2692,6 +2723,12 @@ sudo btrfs filesystem usage /var
 ```
 
 Look at the line `Free (estimated):`.
+
+The number is read as the old bash's arithmetic read it: 64-bit, wrapping
+around (a value past 2**63 - 1 becomes negative, so at or below every
+limit: the emergency purge), a leading `0` octal (`08` is no number: the
+run fails with `cannot read free space`). btrfs-progs prints neither; only
+a damaged reading does.
 
 How it works, as a sequence:
 

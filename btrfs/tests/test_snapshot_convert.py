@@ -17,6 +17,7 @@ clone differing (cp copies all).
 Run with: invowk cmd test module btrfs.tests.test_snapshot_convert
 """
 
+import errno
 import fcntl
 import os
 import re
@@ -548,12 +549,15 @@ class EngineStepTest(Base):
     trees) for the Python runtime, which holds the lock and hands it on as fd FD. Refused unless FD
     is that lock and it is held; no hostname call and no settings warnings (the caller gave them)."""
 
-    def step(self, fd: int | None, *, locked: bool = True, other: bool = False) -> subprocess.CompletedProcess[str]:
+    def step(
+        self, *, locked: bool = True, other: bool = False, closed: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        """Run convert-planned with --lock-held naming the lock file's fd, or with closed=True an fd that is not open."""
         path = os.path.join(self.tmp, "other-lock") if other else self.path("run/btrfs-snapshot.lock")
         with open(path, "a", encoding="utf-8") as f:
             if locked:
                 fcntl.flock(f, fcntl.LOCK_EX)
-            n = f.fileno() if fd is None else fd
+            n = self.closed_fd() if closed else f.fileno()
             return subprocess.run(
                 ["bash", SCRIPT, "convert-planned", "--lock-held", str(n)],
                 check=False,
@@ -566,6 +570,15 @@ class EngineStepTest(Base):
                 timeout=120,
             )
 
+    def closed_fd(self) -> int:
+        """An fd number this process shows closed: opened, then closed (the lowest free one)."""
+        n = os.open(os.devnull, os.O_RDONLY)
+        os.close(n)
+        with self.assertRaises(OSError) as raised:
+            os.fstat(n)
+        self.assertEqual(raised.exception.errno, errno.EBADF)
+        return n
+
     @override
     def setUp(self) -> None:
         super().setUp()
@@ -576,7 +589,7 @@ class EngineStepTest(Base):
         self.conf("touch ./ran\n")
 
     def test_runs_with_the_lock_handed_on(self) -> None:
-        r = self.step(None)
+        r = self.step()
         self.assertEqual(
             (r.returncode, self.lines(r.stdout), r.stderr),
             (
@@ -595,9 +608,9 @@ class EngineStepTest(Base):
     def test_refused_when_nobody_holds_the_lock(self) -> None:
         lock = self.path("run/btrfs-snapshot.lock")
         for name, run in (
-            ("open, not locked", lambda: self.step(None, locked=False)),
-            ("another file, locked", lambda: self.step(None, other=True)),
-            ("an fd that is not open", lambda: self.step(63)),
+            ("open, not locked", lambda: self.step(locked=False)),
+            ("another file, locked", lambda: self.step(other=True)),
+            ("an fd that is not open", lambda: self.step(closed=True)),
         ):
             with self.subTest(name):
                 r = run()

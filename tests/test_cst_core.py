@@ -296,6 +296,25 @@ class ValueObjectsTest(unittest.TestCase):
         with self.assertRaises(DomainValidationError):
             CpuSet(frozenset({-1}))
 
+    def test_cpu_set_refuses_an_index_past_the_cpu_limit(self) -> None:
+        # systemd's CPU_SET_MAX_NCPU: 8191 is the last index a CPU list may hold.
+        self.assertEqual(CpuSet.parse("8191").cpus, frozenset({8191}))
+        self.assertEqual(len(CpuSet.parse("0-8191").cpus), 8192)
+        for bad, why in (
+            ("8192", "invalid CPU index '8192'"),
+            ("0-8192", "beyond the CPU limit 8191"),
+            ("8192-8193", "beyond the CPU limit 8191"),
+            ("1,9999", "invalid CPU index '9999'"),
+        ):
+            with self.subTest(bad), self.assertRaises(DomainValidationError) as cm:
+                CpuSet.parse(bad)
+            self.assertIn(why, str(cm.exception))
+        # Refused before the range is built (main allocated a set of 10**11 CPUs until memory ran out).
+        started = time.monotonic()
+        with self.assertRaises(DomainValidationError):
+            CpuSet.parse("0-99999999999")
+        self.assertLess(time.monotonic() - started, 1.0)
+
     def test_format_cpulist(self) -> None:
         self.assertEqual(format_cpulist([0, 1, 2, 5, 8, 9, 10]), "0-2,5,8-10")
         # Any order, a CPU named twice, none at all (cpu setup's split can be empty).

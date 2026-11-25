@@ -391,7 +391,7 @@ def parse_meminfo(text: str) -> dict[str, int]:
     name out."""
     out: dict[str, int] = {}
     for line in text.splitlines():
-        m = re.match(r"^(\S+):\s+([0-9]+)(?:\s+kB)?", line)
+        m = re.match(r"^(\S+):\s+((?a:\d+))(?:\s+kB)?", line)
         if m and (value := parse_whole_number(group(m, 2))) is not None:
             out[group(m, 1)] = value * (1024 if line.rstrip().endswith("kB") else 1)
     return out

@@ -186,7 +186,7 @@ _SETTING_KEYS: Final = {
 
 
 _CSTATE_OFF_WORDS: Final = frozenset({"0", "off", "none"})
-_AMD_PROFILE_ROW_RE: Final = re.compile(r"^\s*([0-9]+)\s+([A-Z0-9_]+)\s*(\*?)\s*(?::|$)")
+_AMD_PROFILE_ROW_RE: Final = re.compile(r"^\s*((?a:\d+))\s+([A-Z0-9_]+)\s*(\*?)\s*(?::|$)")
 _AMD_FULLSCREEN_PROFILE: Final = "3D_FULL_SCREEN"
 
 
@@ -229,14 +229,24 @@ def game_settings(values: Mapping[str, str]) -> GameSettings:
 def vm_io_weight(vm_weight: str) -> str:
     """machine.slice's IOWeight while the game runs: VM_WEIGHT when it is 1..10000 (systemd's
     IOWeight does not accept 'idle'), else 10."""
-    if re.fullmatch(r"[0-9]+", vm_weight) and 1 <= int(vm_weight) <= 10000:
+    n = parse_whole_number(vm_weight)
+    if n is not None and 1 <= n <= 10000:
         return vm_weight
     return "10"
 
 
+_RANGE_END_RE: Final = re.compile(r"\s*\+?((?a:\d+))\s*")
+
+
+def _range_end(text: str) -> int | None:
+    """A P_CORES range end as seq read it (blanks around, an optional "+", ASCII digits), or None."""
+    m = _RANGE_END_RE.fullmatch(text)
+    return None if m is None else parse_whole_number(group(m, 1))
+
+
 def expand_cpus(spec: str) -> list[str]:
-    """ "0-3,6" -> ["0", "1", "2", "3", "6"]. A range whose ends are not whole numbers gives
-    nothing, as `seq` did."""
+    """ "0-3,6" -> ["0", "1", "2", "3", "6"]. A range whose ends are not whole numbers (or have more
+    digits than int() reads) gives nothing, as `seq` did."""
     out: list[str] = []
     parts = spec.split(",")
     if parts and parts[-1] == "":
@@ -244,8 +254,9 @@ def expand_cpus(spec: str) -> list[str]:
     for part in parts:
         if "-" in part:
             lo, hi = part[: part.rfind("-")], part[part.find("-") + 1 :]
-            if re.fullmatch(r"\s*\+?[0-9]+\s*", lo) and re.fullmatch(r"\s*\+?[0-9]+\s*", hi):
-                out.extend(str(n) for n in range(int(lo), int(hi) + 1))
+            first, last = _range_end(lo), _range_end(hi)
+            if first is not None and last is not None:
+                out.extend(str(n) for n in range(first, last + 1))
         else:
             out.append(part)
     return " ".join(out).split()

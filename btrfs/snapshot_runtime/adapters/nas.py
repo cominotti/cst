@@ -16,14 +16,14 @@ import os
 import shutil
 import signal
 import sys
-from typing import TextIO
+from typing import Final, TextIO
 
-from btrfs.health_check.domain import bash_div, bash_wrap
+from btrfs.health_check.domain import bash_int, bash_wrap, days_between, latest_epoch
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
 from cst_core.domain.contracts import NAS_SSH_ALIAS, Urgency
-from cst_core.domain.values import DAY, parse_whole_number
+from cst_core.domain.values import DAY
 from btrfs.snapshot_runtime.domain import (
     CHECK_FAILURES_ALERTED,
     EXIT_STOPPED,
@@ -41,6 +41,8 @@ from btrfs.snapshot_runtime.domain import (
     duration_s,
     features_type,
     guard_number,
+    nas_unreadable,
+    next_check_failures,
     repo_id,
     restic_line,
     summary_text,
@@ -49,6 +51,12 @@ from cst_core.ports import OutputMode
 from cst_core.domain.errors import ResticExit
 
 UMOUNT_TRIES = 5
+# What the run leaves out while the NAS number it needs cannot be computed (Nas.name_unreadable).
+_LEFT_OUT: Final = {
+    "NAS_STALE_DAYS": "no alert for a stale NAS backup",
+    "NAS_PRUNE_EVERY_DAYS": "no prune (forget runs without --prune)",
+    "NAS_CHECK_EVERY_DAYS": "no repository check",
+}
 
 
 class _Capture:
@@ -97,6 +105,10 @@ class Nas:
         self.names: list[str] = []
         self.snaps: list[str] = []
         self.features: list[str] = []
+        # The NAS numbers the run cannot compute (nas_unreadable): what each governs is left out. A run that
+        # goes past the lock, or stops at "not configured completely", names them and ends with exit 1.
+        self.unreadable: tuple[str, ...] = ()
+        self.unreadable_named = False
         self.repository = f"sftp:{NAS_SSH_ALIAS}:{m.settings['NAS_PATH']}"
 
     # ---- numbers, as bash arithmetic read them -----------------------------------------------
@@ -122,7 +134,7 @@ class Nas:
         return self.deadline - self.m.now()
 
     def days_since(self, last: int) -> int:
-        return bash_div(self.m.now() - last, DAY)
+        return days_between(self.m.now(), last)
 
     def due(self, path: str, key: str) -> bool:
         """The epoch in PATH is missing, no number, or KEY days old, as the old bash's due() decided:
@@ -140,14 +152,9 @@ class Nas:
 
     # ---- staleness -------------------------------------------------------------------------
     def since(self) -> int:
-        """The last good backup, or when the backup was enabled if that is later; started now if
-        neither is recorded."""
-        best = 0
-        for name in ("nas-last-ok", "nas-enabled-at"):
-            v = self.m.read(f"{self.m.state}/{name}")
-            n = None if v is None else parse_whole_number(v)  # ASCII digits within int()'s limit, else skipped
-            if n is not None and n > best:
-                best = n
+        """The last good backup, or when the backup was enabled if that is later (each read as bash
+        arithmetic, latest_epoch); started now if neither is recorded."""
+        best = latest_epoch([self.m.read(f"{self.m.state}/{name}") for name in ("nas-last-ok", "nas-enabled-at")])
         if best == 0:
             best = self.m.now()
             self.m.write(f"{self.m.state}/nas-enabled-at", f"{best}\n")
@@ -155,6 +162,8 @@ class Nas:
 
     def stale_alert(self, msg: str) -> None:
         age_d = self.days_since(self.since())
+        if "NAS_STALE_DAYS" in self.unreadable:
+            return
         stale = self.number("NAS_STALE_DAYS")
         if stale is not None and age_d >= stale:
             send_alert(
@@ -382,7 +391,9 @@ class Nas:
         if left <= MIN_LEFT_S:
             m.log(5, "NAS: no time left for forget/prune/check; next run")
             return
-        prune = self.due(f"{m.state}/nas-last-prune", "NAS_PRUNE_EVERY_DAYS")
+        prune = "NAS_PRUNE_EVERY_DAYS" not in self.unreadable and self.due(
+            f"{m.state}/nas-last-prune", "NAS_PRUNE_EVERY_DAYS"
+        )
         if prune:
             args.append("--prune")
         rc = self.restic(left, args)
@@ -391,7 +402,9 @@ class Nas:
                 m.write(f"{m.state}/nas-last-prune", f"{m.now()}\n")
         else:
             m.log(4, f"NAS: restic forget{' --prune' if prune else ''} failed (rc={rc}); retried next run")
-        if not self.due(f"{m.state}/nas-last-check", "NAS_CHECK_EVERY_DAYS"):
+        if "NAS_CHECK_EVERY_DAYS" in self.unreadable or not self.due(
+            f"{m.state}/nas-last-check", "NAS_CHECK_EVERY_DAYS"
+        ):
             return
         left = self.time_left()
         if left <= MIN_LEFT_S:
@@ -445,7 +458,7 @@ class Nas:
             # bash stopped here too ("abc: unbound variable"): say why, as the settings do.
             print(f"{m.front}: {path} holds {before!r}: not a number", file=sys.stderr, flush=True)
             raise RunStopped
-        fails = (0 if n is GuardError.BAD_NUMBER else n) + 1
+        fails = next_check_failures(n if isinstance(n, int) else None)
         m.write(path, f"{fails}\n")
         m.log(4, f"NAS: restic check failed (rc={rc}) without naming damaged data (connection lost?); retried next run")
         if fails >= CHECK_FAILURES_ALERTED:
@@ -467,8 +480,11 @@ class Nas:
         if last_text is None:
             made = m.mtime(f"{m.state}/nas-repo-id")
             last_text = str(made) if made is not None else str(m.now())
-        parsed = parse_whole_number(last_text)  # ASCII digits within int()'s limit, else now
-        last = m.now() if parsed is None else parsed
+        # The old [[ last =~ ^[0-9]+$ ]] || last=now, then bash arithmetic (bash_int: a leading 0 octal, a value
+        # past 2**63 - 1 wrapping), as due() reads the same file. Digits bash cannot read (08) do not get here:
+        # due() found such a file not due, so no check ran.
+        n = bash_int(last_text) if last_text.isascii() and last_text.isdigit() else None
+        last = m.now() if n is None else n
         age_d = self.days_since(last)
         every = self.number("NAS_CHECK_EVERY_DAYS")
         if every is not None and age_d >= 2 * every:
@@ -496,6 +512,19 @@ class Nas:
             write_atomic(f"{m.state}/nas-summary", text, mode="umask", durable=False, relabel=False)
 
     # ---- the run -------------------------------------------------------------------------------
+    def name_unreadable(self) -> None:
+        """A line for each NAS number the run cannot compute (self.unreadable), naming it and its value,
+        whether this run would read it or not; nas() then ends with exit 1. What does not depend on them
+        still runs (the backup, nas-last-ok, forget). A run skipped for another one's lock names none."""
+        m = self.m
+        for key in self.unreadable:
+            m.log(
+                3,
+                f"{key}={m.settings[key]!r} in {m.conf}: not a number CST's arithmetic reads: {_LEFT_OUT[key]} "
+                "until it is fixed; this NAS run ends with an error",
+            )
+        self.unreadable_named = bool(self.unreadable)
+
     def run(self) -> None:
         m, s = self.m, self.m.settings
         if s["NAS_ENABLED"] != "1":
@@ -504,7 +533,9 @@ class Nas:
         if shutil.which("restic") is None:
             m.log(5, "NAS: restic is not installed yet (rpm-ostree: active after the next reboot); skipped")
             return
+        self.unreadable = nas_unreadable(s)
         if not s["NAS_PATH"] or not m.non_empty(m.restic_password):
+            self.name_unreadable()
             m.log(
                 4,
                 f"NAS: not configured completely (NAS_PATH, {m.restic_password}); re-run 'cst btrfs snapshots nas setup'",
@@ -514,6 +545,7 @@ class Nas:
         if m.lock(m.nas_lock, wait=False) is None:
             m.log(5, "another NAS run is active; skipped")
             return
+        self.name_unreadable()
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, m.trap_stop)
         # Always unmount and unpin at the end, also when the run is stopped (bash's EXIT trap),
@@ -580,10 +612,11 @@ class Nas:
 def nas(m: SnapshotRun, args: Sequence[str]) -> int:
     """The daily NAS backup (btrfs-snapshot-nas.service)."""
     del args
+    run = Nas(m)
     try:
-        Nas(m).run()
+        run.run()
     except Stopped:
         return EXIT_STOPPED
     except RunStopped:
         return 1
-    return 0
+    return 1 if run.unreadable_named else 0

@@ -188,6 +188,26 @@ class ZswapAcrossUpgradeTest(unittest.TestCase):
         self.assertRegex(text, r"zswap in/out 0 MiB / 0 MiB \(from \d\d:\d\d:\d\d\)   disk swap in/out")
         self.assertNotIn("GiB", text)
 
+    def test_a_pswpout_held_from_a_v6_sample_counts_no_bypass(self) -> None:
+        # v6 pswpout 100; the first v7 sample's pswpout is null; then v7 130 and 150, zswpwb +5 per v7 pair.
+        # Disk swap-out bridges the null (100 -> 130 -> 150: 50 pages), but the bypass counts only growth
+        # inside v7 pairs: 130 -> 150, 20 pages, minus 10 written back by zswap. Before, the bridged 30 pages,
+        # which began in the v6 sample, counted too (50 - 10 = 40 pages).
+        first = sample(T0 + 4, 0, BOOT_ZSWPWB)
+        first["vm"][3] = None
+        recs = [
+            meta(T0, 6),
+            sample(T0, 100, 0),
+            meta(T0 + 3, 7),
+            first,
+            sample(T0 + 9, 130, BOOT_ZSWPWB + 5),
+            sample(T0 + 14, 150, BOOT_ZSWPWB + 10),
+        ]
+        res, _ = self.analyse(recs)
+        self.assertEqual(res["vm"]["swap_out_bytes"], 50 * self.m.PAGE)
+        self.assertEqual(res["vm"]["zswap_writeback_bytes"], 10 * self.m.PAGE)
+        self.assertEqual(res["vm"]["swap_out_bypass_bytes"], 10 * self.m.PAGE)
+
     def test_only_new_daemon_counts_normally(self) -> None:
         recs = new_run(T0)
         res, text = self.analyse(recs)
@@ -1274,6 +1294,45 @@ class SummariseBranchesTest(unittest.TestCase):
     def window(records: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
         """The records of a window [T0, T0 + 60] after a v8 meta record, for analyse()."""
         return [meta(T0 - 100, 8), *records]
+
+    def test_a_vmstat_value_the_daemon_could_not_read_is_bridged(self) -> None:
+        # pswpout 100, 120, null, 130: the growth across the null is counted from the last sample that read
+        # it, 20 + 10 (main recorded null as 0: the last pair added all 130 pages, every page since boot as
+        # a burst; before this, the two pairs next to the null added nothing, 20). A null nr_dirty gives no
+        # peak.
+        def vm(nr_dirty: int | None, pswpout: int | None) -> list[int | None]:
+            return [nr_dirty, 0, 0, pswpout, 0, 0, 0]
+
+        samples = [
+            self.rec(T0 + 1, vm=vm(1, 100)),
+            self.rec(T0 + 6, vm=vm(3, 120)),
+            self.rec(T0 + 11, vm=vm(None, None)),
+            self.rec(T0 + 16, vm=vm(2, 130)),
+        ]
+        res, _ = load().analyse(self.window(samples), T0, T0 + 20, with_below=False, verbose=False)
+        self.assertEqual(res["vm"]["swap_out_bytes"], 30 * rp_records.PAGE)
+        self.assertEqual(res["peak"]["dirty_bytes"], 3 * rp_records.PAGE)
+
+    def test_a_vmstat_value_held_across_nulls_is_dropped_at_a_gap(self) -> None:
+        # Two nulls in a row are bridged too (100 -> 150: 50). A gap ends the bridge: the counter may have
+        # started again (a reboot), so 400 after the gap is no growth from 150, and nothing is counted
+        # until a pair of two samples that read it (400 -> 405: 5).
+        def vm(pswpout: int | None) -> list[int | None]:
+            return [0, 0, 0, pswpout, 0, 0, 0]
+
+        gap = 100  # s, more than GAP_MAX
+        samples = [
+            self.rec(T0 + 1, vm=vm(100)),
+            self.rec(T0 + 6, vm=vm(None)),
+            self.rec(T0 + 11, vm=vm(None)),
+            self.rec(T0 + 16, vm=vm(150)),
+            self.rec(T0 + 21, vm=vm(None)),
+            self.rec(T0 + 21 + gap, vm=vm(None)),
+            self.rec(T0 + 26 + gap, vm=vm(400)),
+            self.rec(T0 + 31 + gap, vm=vm(405)),
+        ]
+        res, _ = load().analyse(self.window(samples), T0, T0 + 40 + gap, with_below=False, verbose=False)
+        self.assertEqual(res["vm"]["swap_out_bytes"], 55 * rp_records.PAGE)
 
     def test_totals_of_the_sample_pairs(self) -> None:
         fs_a = {"u": {"c": [10, 100, 0, 0, 0, 50], "err": {"1": 1, "2": 0}, "space": {"metadata": [1, 2, 0, 0, 0]}}}

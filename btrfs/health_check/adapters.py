@@ -21,8 +21,6 @@ from btrfs.health_check.domain import (
     NAS_MAX_AGE_DAYS,
     RECLAIM_KINDS,
     SCRUB_MAX_AGE_DAYS,
-    SNAPSHOT_GRACE,
-    SNAPSHOT_MAX_AGE,
     SUSPEND_UNITS,
     TAG,
     UPSTREAM_RULE_LINE,
@@ -30,17 +28,20 @@ from btrfs.health_check.domain import (
     alert_body,
     awake_since,
     awk_int,
-    bash_div,
     bash_int,
     bash_wrap,
+    boot_since,
     controller,
+    days_between,
     disks_of,
     has_missing,
     kernel_problem,
+    latest_epoch,
     marker_problem,
     md_problem,
     member_paths,
     metadata_problem,
+    nas_overdue,
     missing_bytes,
     mixed_profiles,
     mount_of,
@@ -50,6 +51,7 @@ from btrfs.health_check.domain import (
     rule_uuid,
     sed_values,
     smart_problems,
+    snapshots_overdue,
     stats_lines,
     swap_partitions,
     unallocated,
@@ -61,7 +63,6 @@ from cst_core.domain.contracts import NOTIFY_PROGRAM, SNAPSHOTS_CONF, Urgency
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
-from cst_core.domain.values import DAY
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 
 NOTIFY = NOTIFY_PROGRAM
@@ -294,7 +295,7 @@ def scrub_problems(m: Probe, mnt: str) -> list[str]:
             f"btrfs {mnt}: last scrub (started {scrub.started}) did not finish: status {scrub.status or 'unknown'}"
         )
     elif (started := m.epoch(scrub.started)) is not None:
-        age_days = bash_div(now() - started, DAY)
+        age_days = days_between(now(), started)
         if age_days > SCRUB_MAX_AGE_DAYS:
             problems.append(f"btrfs {mnt}: last scrub is {age_days} days old")
     return problems
@@ -494,8 +495,7 @@ def snapshot_problems(m: Probe) -> list[str]:
         StderrRoute.DROP,
     ).stdout
     uptime = m.text(m.path("/proc/uptime")) or ""
-    boot_since = now() - awk_int(uptime.split("\n")[0])
-    awake = awake_since(journal, boot_since)
+    awake = awake_since(journal, boot_since(now(), awk_int(uptime.split("\n")[0])))
     # A pause by the space guard, old trees still being deleted after a conversion, or a conversion
     # or a move into ~/Bulk waiting for the next boot are announced by btrfs-snapshot itself.
     quiet = (
@@ -505,13 +505,7 @@ def snapshot_problems(m: Probe) -> list[str]:
         or os.path.exists(m.path("/etc/btrfs-setup/bulk-at-boot"))
     )
     last_n = bash_int(last)
-    # bash's (( $(date +%s) - last > 3 * 3600 )): 64-bit, wrapping (a last of 2**63 is -2**63 there).
-    if (
-        not quiet
-        and last_n is not None
-        and bash_wrap(now() - last_n) > SNAPSHOT_MAX_AGE
-        and now() - awake > SNAPSHOT_GRACE
-    ):
+    if not quiet and last_n is not None and snapshots_overdue(now(), last_n, awake):
         problems.append("snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'")
     _log_stale_nas(m, snap)
     return problems
@@ -525,12 +519,8 @@ def _log_stale_nas(m: Probe, snap: str) -> None:
     if settings.get("NAS_ENABLED", "0") != "1":
         return
     # The last success, or when the backup was turned on if later (as btrfs-snapshot).
-    nas_last = 0
-    for name in ("nas-last-ok", "nas-enabled-at"):
-        v = bash_int(m.cat(f"{snap}/{name}") or "")
-        if v is not None and v > nas_last:
-            nas_last = v
-    if nas_last > 0 and now() - nas_last > NAS_MAX_AGE_DAYS * DAY:
+    nas_last = latest_epoch([m.cat(f"{snap}/{name}") for name in ("nas-last-ok", "nas-enabled-at")])
+    if nas_overdue(now(), nas_last):
         log(
             4,
             f"no successful NAS backup (restic) for over {NAS_MAX_AGE_DAYS} days (journalctl -u btrfs-snapshot-nas)",

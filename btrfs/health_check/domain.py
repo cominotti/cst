@@ -13,7 +13,7 @@ import re
 from typing import Final
 
 from cst_core.domain.text import file_lines, read_fields, split
-from cst_core.domain.values import GIB, HOUR, MIB, MINUTE
+from cst_core.domain.values import DAY, GIB, HOUR, MIB, MINUTE
 
 TAG: Final = "btrfs-health-check"
 ALERT_TITLE: Final = "Disk health: problems detected"
@@ -94,6 +94,15 @@ def bash_int(text: str) -> int | None:
     if len(text) > 1 and text.startswith("0"):
         # A power-of-two base has no digit limit in int().
         return bash_wrap(int(text, 8)) if all(c in "01234567" for c in text) else None
+    return bash_decimal(text)
+
+
+def bash_decimal(text: str) -> int | None:
+    """A string of ASCII digits as bash's $(( 10#TEXT )) reads it: decimal even with a leading 0
+    (000123 is 123, 08 is 8), 64-bit, wrapping around at any length; None where bash fails (not
+    ASCII digits)."""
+    if not _DIGITS.fullmatch(text):
+        return None
     n = 0
     for i in range(0, len(text), _DECIMAL_CHUNK):
         chunk = text[i : i + _DECIMAL_CHUNK]
@@ -355,18 +364,23 @@ def controller(disk: str) -> str:
     return "/dev/" + cut_at_last(disk, "n")
 
 
+def critical_warning_value(raw: str) -> int | None:
+    """nvme-cli's critical_warning as the old bash read it: crit=$(( crit )) for hex, $(( 10#crit ))
+    for decimal (64-bit, wrapping around); 0 when it printed none; None when it is no number."""
+    if _HEX.fullmatch(raw):
+        return bash_wrap(int(raw, 16))  # a power-of-two base has no digit limit in int()
+    return bash_decimal(raw) if raw else 0
+
+
 def smart_problems(disk: str, role: str, log: str) -> list[str]:
     """The problems in one disk's health log; role "swap" for a disk under a swap device."""
     who = f"NVMe {disk}{f' ({role})' if role else ''}"
     problems: list[str] = []
-    crit = smart_raw(log, "critical_warning")
-    if _HEX.fullmatch(crit):
-        crit = str(int(crit, 16))
-    elif _DIGITS.fullmatch(crit):
-        crit = str(int(crit, 10))
-    elif crit:
-        problems.append(f"{who}: cannot read critical_warning ({crit})")
-        crit = "0"
+    raw = smart_raw(log, "critical_warning")
+    crit = critical_warning_value(raw)
+    if crit is None:
+        problems.append(f"{who}: cannot read critical_warning ({raw})")
+        crit = 0
     media = smart_field(log, "media_errors")
     spare = smart_field(log, "available_spare")
     spare_thr = smart_field(log, "available_spare_threshold")
@@ -375,8 +389,8 @@ def smart_problems(disk: str, role: str, log: str) -> list[str]:
     def num(text: str, default: int) -> int | None:
         return default if not text else bash_int(text)
 
-    c, m, s, t, u = num(crit, 0), num(media, 0), num(spare, 100), num(spare_thr, 0), num(used, 0)
-    if c is not None and c != 0:
+    m, s, t, u = num(media, 0), num(spare, 100), num(spare_thr, 0), num(used, 0)
+    if crit != 0:
         problems.append(f"{who}: critical_warning={crit}")
     if m is not None and m > 0:
         problems.append(f"{who}: media_errors={media}")
@@ -411,6 +425,43 @@ def marker_problem(uuid: str, since_human: str, state: str) -> str:
         "needed), then 'btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft /var' and 'btrfs scrub start "
         "/var'. Clears after a clean scrub started once all devices are back."
     )
+
+
+def days_between(now: int, last: int) -> int:
+    """Whole days from LAST to NOW, as the old bash computed them ($(( ($(date +%s) - last) / 86400 ))), 64-bit,
+    wrapping: the last scrub's age, and the NAS run's days since its last backup or check."""
+    return bash_div(bash_wrap(now - last), DAY)
+
+
+def latest_epoch(texts: Sequence[str | None]) -> int:
+    """The latest of the epochs in TEXTS (None: a file that is not there), as the old nas_since chose it:
+    [[ v =~ ^[0-9]+$ ]] && (( v > best )) && best=v. Each is read as bash arithmetic (bash_int: a leading 0
+    octal, 08 an error and skipped; a value past 2**63 - 1 wraps around, and a negative one is skipped);
+    0 when none is. The NAS run's last good backup, and the health check's."""
+    best = 0
+    for text in texts:
+        n = None if text is None else bash_int(text)
+        if n is not None and n > best:
+            best = n
+    return best
+
+
+def boot_since(now: int, uptime_s: int) -> int:
+    """When the machine booted: the old $(date +%s) - $(awk int(uptime)), 64-bit, wrapping."""
+    return bash_wrap(now - uptime_s)
+
+
+def snapshots_overdue(now: int, last: int, awake: int) -> bool:
+    """No successful hourly snapshot for SNAPSHOT_MAX_AGE, and awake for SNAPSHOT_GRACE: the old
+    (( $(date +%s) - last > 3 * 3600 )) && (( $(date +%s) - awake_since > 20 * 60 )), 64-bit, wrapping
+    (a last of 2**63 is -2**63 there)."""
+    return bash_wrap(now - last) > SNAPSHOT_MAX_AGE and bash_wrap(now - awake) > SNAPSHOT_GRACE
+
+
+def nas_overdue(now: int, nas_last: int) -> bool:
+    """No successful NAS backup for NAS_MAX_AGE_DAYS: the old (( v > 0 )) && (( $(date +%s) - nas_last
+    > 8 * 86400 )), 64-bit, wrapping."""
+    return nas_last > 0 and bash_wrap(now - nas_last) > NAS_MAX_AGE_DAYS * DAY
 
 
 def awake_since(suspend_journal: str, boot_since: int) -> int:

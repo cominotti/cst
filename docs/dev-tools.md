@@ -433,7 +433,11 @@ repository:
   (of the package or of cst_core), an if/elif chain or match with 3 or more
   string arms on one subject, a unit number (3600, 86400, 604800, the exit
   statuses 124, 126, 127, 137), a signature with a loose
-  `dict[str, Any | object | Json]` and a `Literal` of 3 or more strings are
+  `dict[str, Any | object | Json]`, a `Literal` of 3 or more strings and an
+  `int()` of text (its argument not a number by its form, or with a base;
+  cst_core's parsers and bash arithmetic's readers are exempt: text goes
+  through `parse_whole_number` or `parse_integer`, a float through
+  `math.trunc`) are
   counted per package and kind in `MAGIC_CEILINGS`, which they may not go
   above. A package and kind with no entry may have no hit, so a new hit
   there fails.
@@ -782,6 +786,17 @@ not derive from it.
   field that is not UTF-8 reads back decoded with U+FFFD. No writer is left
   for one: the game profile leaves a cgroup folder whose name is no unit
   name alone, and systemd names the scopes.
+- `mbt_bash_arith.py`: the health check's and the NAS run's numbers
+  against the real bash: each property calls one domain function
+  (`days_between` and `latest_epoch`, which the NAS run shares,
+  `boot_since`, `snapshots_overdue`, `nas_overdue`; the NAS run's
+  `next_check_failures`;
+  the reads `bash_int`, `bash_decimal` and `critical_warning_value`)
+  with values around 0, +-2**63 and +-2**64 (digit strings of up to 5000
+  digits, with leading zeros, and hex for the reads) and has bash evaluate
+  the old program's line with the same values, one `bash -c` per example:
+  the results agree, wrapped at 64 bits as bash's. About 2 s at 100
+  examples.
 - `mbt_game_profile.py`: a state machine over the game profile's `on`,
   `tick` and `off` (through `locked`), with the unit tests' scratch and fake
   systemctl, whose daemon-reload sets each value from the override files and

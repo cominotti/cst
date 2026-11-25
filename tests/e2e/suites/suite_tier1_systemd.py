@@ -9843,6 +9843,98 @@ echo test_217-ok
         self.assertIn("test_217-ok", out)
 
     @e2e_tags(E2ETag.BTRFS)
+    def test_227_a_nas_run_skipped_for_the_lock_ends_in_success_naming_no_unreadable_number(self) -> None:
+        """btrfs-snapshot, its runtime and btrfs-snapshot-nas.service as install writes them, the unit run
+        by the real systemd (systemctl start; a runtime drop-in only puts a fake sftp, which answers as an
+        unreachable NAS, first on PATH), with NAS_PRUNE_EVERY_DAYS='1 x' in a complete NAS configuration.
+        While this shell holds /run/btrfs-snapshot-nas.lock, the run is skipped: Result success, the skip
+        line in its journal and no line naming the setting. Before, the skip named it and the unit failed.
+        Without the lock holder, the same unit goes on: its journal names the setting and its value with
+        "this NAS run ends with an error", and the unit fails (Result exit-code; cannot bite otherwise).
+        A fake cannot show the unit's result, which is what systemctl, the health check and cst doctor see."""
+        d = "/var/tmp/e2e-nas-lock"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        pw = "/etc/btrfs-setup/restic-password"
+        unit = "btrfs-snapshot-nas.service"
+        dropin = f"/run/systemd/system/{unit}.d"
+        inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        files = f"btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot btrfs/units/{unit}"
+        notify = "/usr/local/sbin/btrfs-notify"
+        pending = "/var/lib/cst-alerts/pending"
+        found = exec_bash(self.SYSTEMD_CONTAINER, f"[ ! -e /etc/systemd/system/{unit} ]", check=False)
+        self.assertEqual(found.returncode, 0, f"a {unit} is already installed {found.stderr}")
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"{inst} remove {files} >/dev/null 2>&1; rm -rf {dropin}; systemctl daemon-reload; "
+            f"systemctl reset-failed {unit}; "
+            f"if [ -e {d}/notify.bak ]; then mv -f {d}/notify.bak {notify}; fi; "
+            f"if [ -e {d}/pending.bak ]; then rm -rf {pending}; mv {d}/pending.bak {pending}; "
+            f"elif [ -e {d}/made-pending ]; then rm -rf {pending}; fi; "
+            f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot /run/btrfs-snapshot-nas.lock; "
+            f"if [ -e {d}/pw.bak ]; then mv -f {d}/pw.bak {pw}; else rm -f {pw}; fi; "
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_227 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf} pw={pw} unit={unit} dropin={dropin} notify={notify} pending={pending}
+lock=/run/btrfs-snapshot-nas.lock
+rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot "$lock"
+install -d -m 0755 "$d" "$d/bin" /etc/btrfs-setup "$dropin"
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+if [ -e "$pw" ]; then cp -a "$pw" "$d/pw.bak"; fi
+if [ -e "$notify" ]; then mv "$notify" "$d/notify.bak"; fi
+if [ -e "$pending" ]; then mv "$pending" "$d/pending.bak"; else touch "$d/made-pending"; fi
+{inst} install {files} >/dev/null
+# The NAS is never reached: a fake sftp answers as an unreachable one (ssh's 255).
+printf '%s
+' '#!/bin/bash' 'exit 255' >"$d/bin/sftp"
+chmod 0755 "$d/bin/sftp"
+printf '%s
+' '[Service]' "Environment=PATH=$d/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"     >"$dropin/50-e2e-path.conf"
+systemctl daemon-reload
+printf '%s
+' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" "NAS_ENABLED=1"     "NAS_PATH=/volume1/restic" "NAS_PRUNE_EVERY_DAYS='1 x'" >"$conf"
+printf 'e2e-secret-pass' >"$pw"
+chmod 0600 "$pw"
+# journal_of: the unit's journal (both runs once the second ran; the first named nothing).
+journal_of() {{
+    journalctl --sync
+    journalctl -q --no-pager -o cat -u "$unit" || true
+}}
+
+# 1. Another run holds the NAS lock (this shell, fd 7): the run is skipped, names nothing, succeeds.
+exec 7>"$lock"
+flock -n 7
+rc=0; systemctl start "$unit" || rc=$?
+journal_of >"$d/held.log"
+cat "$d/held.log"
+[ "$(systemctl show -p Result --value "$unit")" = success ]
+[ "$rc" = 0 ]
+grep -qF "another NAS run is active; skipped" "$d/held.log"
+if grep -qF "NAS_PRUNE_EVERY_DAYS='1 x'" "$d/held.log"; then exit 1; fi
+flock -u 7
+exec 7>&-
+
+# 2. No lock holder: the run goes on, names the setting and its value, and the unit fails.
+rc=0; systemctl start "$unit" || rc=$?
+journal_of >"$d/free.log"
+cat "$d/free.log"
+[ "$rc" != 0 ]
+[ "$(systemctl show -p Result --value "$unit")" = exit-code ]
+systemctl reset-failed "$unit"
+grep -qF "NAS_PRUNE_EVERY_DAYS='1 x' in $conf: not a number CST's arithmetic reads: no prune (forget runs without --prune) until it is fixed; this NAS run ends with an error" "$d/free.log"
+grep -qF "unreachable (ssh btrfs-setup-nas); skipping this run" "$d/free.log"
+echo test_227-ok
+""",
+        ).stdout
+        self.assertIn("test_227-ok", out)
+
+    @e2e_tags(E2ETag.BTRFS)
     def test_111_snapshots_status_reads_snapshots_conf_through_settings_lines(self) -> None:
         """cst btrfs snapshots status as root on the container's root, with a snapshots.conf that has
         a command line and a $(...) value next to plain settings: it reads the file through
@@ -11606,6 +11698,153 @@ EOF
             if grep -vqxF "LC_ALL=C" "$shim/log"; then echo "a backup copy ran without LC_ALL=C" >&2; exit 1; fi
             rm -f /etc/sudoers.d/zz-e2e180
             echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_218_mount_fields_split_as_libmount_splits_an_fstab(self) -> None:
+        """The real libmount (findmnt --tab-file) as the oracle of cst_core's mount table splitter: an fstab
+        file (a scratch file, not /etc/fstab) whose fields hold a no-break space, U+3000, a form feed and a
+        vertical tab, between tabs and runs of spaces, with a trailing carriage return, an escaped blank (backslash
+        040), and comment lines after blanks.
+        The checkout's mount_fields (the system python, -I -B) gives the four fields findmnt lists for each
+        line, and btrfs cache's readers (parse_all_mounts, unmanaged_fstab_targets) the same sources, targets,
+        types and options. Before, str.split() also cut a field at the no-break space, U+3000, the form feed and
+        the vertical tab (cannot bite otherwise: that split differs from findmnt on the same file). A fake cannot show how
+        libmount splits a line."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-mount-fields"
+        self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_218 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w}
+            rm -rf "$w" && mkdir -p "$w"
+            # The bytes: \302\240 a no-break space, \343\200\200 U+3000, \014 a form feed, \013 a vertical tab.
+            printf '/dev/a\302\240b /mnt/x\014y btrfs compress=zstd:1\343\200\200,noatime 0 0\n' >"$w/fstab"
+            printf '\t/dev/b \t  /mnt/t\tbtrfs   rw,compress=zstd:3\013\t0\t0\r\n' >>"$w/fstab"
+            printf '  \t# a comment\n \t \n' >>"$w/fstab"
+            printf '/dev/c /mnt/c\\040d ext4 defaults 0 0\n' >>"$w/fstab"
+            printf 'UUID=1234\302\240 /mnt/\343\200\200e  btrfs\tsubvol=@home\302\240,compress=zstd:1 0 0\n' >>"$w/fstab"
+            findmnt --tab-file "$w/fstab" -J -o SOURCE,TARGET,FSTYPE,OPTIONS >"$w/findmnt.json"
+            cat "$w/findmnt.json" >&2
+            cd /opt/cst-rw
+            /usr/bin/python3 -I -B - "$w/fstab" "$w/findmnt.json" <<'PY'
+import json
+import sys
+
+sys.path.insert(0, ".")
+from btrfs.cache.domain import parse_all_mounts, unmanaged_fstab_targets
+from cst_core.domain.text import is_mount_comment, mount_fields, unescape_mount_field
+
+with open(sys.argv[1], encoding="utf-8", errors="surrogateescape", newline="") as f:
+    tab = f.read()
+with open(sys.argv[2], encoding="utf-8") as f:
+    listed = json.load(f)["filesystems"]
+want = [[fs["source"], fs["target"], fs["fstype"], fs["options"]] for fs in listed]
+lines = [line for line in tab.split("\n") if not is_mount_comment(line)]
+ours = []
+for line in lines:
+    src, tgt, fstype, opts = mount_fields(line)[:4]
+    ours.append([unescape_mount_field(src), unescape_mount_field(tgt), fstype, opts])
+cache = [[m.source, m.target, m.fstype, m.options] for m in parse_all_mounts(tab)]
+old = [[unescape_mount_field(x) for x in line.split()[:2]] + line.split()[2:4] for line in lines]
+print("findmnt", ascii(want), file=sys.stderr)
+print("mount_fields", ascii(ours), file=sys.stderr)
+print("cache", ascii(cache), file=sys.stderr)
+print("str.split", ascii(old), file=sys.stderr)
+assert len(want) == 4, want
+assert ours == want, "mount_fields differs from findmnt"
+assert cache == want, "parse_all_mounts differs from findmnt"
+assert unmanaged_fstab_targets(tab) == frozenset(row[1] for row in want), "unmanaged_fstab_targets differs"
+assert old != want, "str.split agrees with findmnt: the file does not bite"
+print("E2E-OK")
+PY
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_226_compress_and_commit_read_and_rewrite_an_fstab_as_libmount_reads_it(self) -> None:
+        """The real libmount (findmnt --tab-file) as the oracle of btrfs compress-force's and commit-interval's
+        fstab reader and writer: a scratch fstab (not /etc/fstab) whose root lines hold a vertical tab inside
+        the options field (noatime<VT>x, commit=30<VT>) and a btrfs line whose target holds a form feed.
+        compress's parse_proc_mounts (the system python, -I -B) gives the btrfs rows findmnt lists,
+        parse_fstab_root_entries the two root lines, has_malformed_commit takes commit=30<VT> for a malformed
+        option, and the file rewrite_fstab writes reads back in findmnt with compress=zstd:1 added to the
+        options field libmount reads. Before, str.splitlines() also ended a line at the vertical tab and the
+        form feed: the reader lost the rest of those lines, and the rewrite put the option inside the field
+        (noatime<VT>,compress=zstd:1x). A fake cannot show where libmount ends a line."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-compress-fstab-lines"
+        self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_226 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w}
+            rm -rf "$w" && mkdir -p "$w"
+            # The bytes: \013 a vertical tab, \014 a form feed.
+            printf 'UUID=u1 / btrfs noatime\013x,subvol=root 0 0\n' >"$w/fstab"
+            printf 'UUID=u1 /var btrfs subvol=v,commit=30\013,noatime 0 0\n' >>"$w/fstab"
+            printf '/dev/b /mnt/x\014y btrfs rw,compress=zstd:3 0 0\n' >>"$w/fstab"
+            printf '# the end\n' >>"$w/fstab"
+            findmnt --tab-file "$w/fstab" -J -o SOURCE,TARGET,FSTYPE,OPTIONS >"$w/findmnt.json"
+            cat "$w/findmnt.json" >&2
+            cd /opt/cst-rw
+            /usr/bin/python3 -I -B - "$w" <<'PY'
+import json
+import subprocess
+import sys
+
+sys.path.insert(0, ".")
+from btrfs.commit.domain import has_malformed_commit
+from btrfs.compress.domain import parse_fstab_root_entries, parse_proc_mounts, rewrite_fstab, rewrite_mount_options
+from cst_core.domain.text import is_mount_comment, mount_fields, unescape_mount_field
+
+w = sys.argv[1]
+
+
+def listed(path):
+    out = subprocess.run(
+        ["findmnt", "--tab-file", path, "-J", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"],
+        capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL,
+    ).stdout
+    return [[fs["source"], fs["target"], fs["fstype"], fs["options"]] for fs in json.loads(out)["filesystems"]]
+
+
+with open(w + "/fstab", encoding="utf-8", newline="") as f:
+    tab = f.read()
+want = listed(w + "/fstab")
+ours = [[e.source, e.target, e.fstype, e.options] for e in parse_proc_mounts(tab)]
+old = [
+    [unescape_mount_field(x) for x in mount_fields(line)[:2]] + mount_fields(line)[2:4]
+    for line in tab.splitlines()
+    if not is_mount_comment(line) and mount_fields(line)[2:3] == ["btrfs"]
+]
+roots = parse_fstab_root_entries(tab, "u1")
+new = rewrite_fstab(tab, "compress=zstd:1", "u1")
+with open(w + "/fstab.new", "w", encoding="utf-8", newline="") as f:
+    f.write(new)
+got = listed(w + "/fstab.new")
+expect = [row[:3] + [rewrite_mount_options(row[3], "compress=zstd:1") if row[0] == "UUID=u1" else row[3]] for row in want]
+print("findmnt", ascii(want), file=sys.stderr)
+print("parse_proc_mounts", ascii(ours), file=sys.stderr)
+print("str.splitlines", ascii(old), file=sys.stderr)
+print("rewritten, findmnt", ascii(got), file=sys.stderr)
+assert len(want) == 3, want
+assert ours == want, "parse_proc_mounts differs from findmnt"
+assert [e.target for e in roots] == ["/", "/var"], roots
+assert has_malformed_commit(roots[1].options), roots[1].options
+assert got == expect, "the rewritten fstab reads back differently in findmnt"
+assert "compress=zstd:1" in got[0][3] and got[2] == want[2], got
+assert old != want, "str.splitlines agrees with findmnt: the file does not bite"
+print("E2E-OK")
+PY
             """,
         ).stdout
         self.assertIn("E2E-OK", out)

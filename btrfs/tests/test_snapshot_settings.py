@@ -23,7 +23,15 @@ import subprocess
 import tempfile
 import unittest
 
-from btrfs.snapshot_runtime.domain import BASH_INT_MAX, GuardError, duration_s, guard_number, nas_out_of_range
+from btrfs.snapshot_runtime.domain import (
+    BASH_INT_MAX,
+    DEFAULTS,
+    GuardError,
+    duration_s,
+    guard_number,
+    nas_out_of_range,
+    nas_unreadable,
+)
 from btrfs.tests.snapshot_fakes import SCRIPT
 from cst_core.domain.text import file_lines, parse_snapshots_conf
 from tests.shell_source import shell_function
@@ -199,7 +207,7 @@ class GuardNumberTest(unittest.TestCase):
             ({"NAS_CHECK_EVERY_DAYS": "4611686018427387904"}, ("NAS_CHECK_EVERY_DAYS",)),
             ({"NAS_CHECK_EVERY_DAYS": "7+106751991167300"}, ()),  # put in as text: 7 + N * 86400 fits
             ({"NAS_CHECK_EVERY_DAYS": "(7+106751991167300)"}, ("NAS_CHECK_EVERY_DAYS",)),
-            ({"NAS_CHECK_EVERY_DAYS": "abc"}, ()),  # an error, not a wrap: the run meets it where it did
+            ({"NAS_CHECK_EVERY_DAYS": "abc"}, ()),  # an error, not a wrap: nas_unreadable's
             ({"NAS_TIMEOUT": "2562047788015216h"}, ("NAS_TIMEOUT",)),
             ({"NAS_TIMEOUT": str(BASH_INT_MAX - now)}, ()),
             ({"NAS_TIMEOUT": str(BASH_INT_MAX - now + 1)}, ("NAS_TIMEOUT",)),  # the deadline does not fit
@@ -211,6 +219,33 @@ class GuardNumberTest(unittest.TestCase):
         ):
             with self.subTest(change=change):
                 self.assertEqual(nas_out_of_range({**defaults, **change}, now), want)
+
+    def test_nas_unreadable_names_the_numbers_the_run_cannot_compute(self) -> None:
+        # NAS_STALE_DAYS as it is, the two intervals as "VALUE * 86400" (as due() puts them in), in
+        # DEFAULTS' order; a value past 64 bits is nas_out_of_range's, NAS_TIMEOUT and the guard not this.
+        for change, want in (
+            ({}, ()),
+            ({"NAS_STALE_DAYS": "1 x"}, ("NAS_STALE_DAYS",)),
+            ({"NAS_STALE_DAYS": "abc"}, ("NAS_STALE_DAYS",)),
+            ({"NAS_STALE_DAYS": "~5"}, ("NAS_STALE_DAYS",)),
+            ({"NAS_STALE_DAYS": "08"}, ("NAS_STALE_DAYS",)),
+            ({"NAS_STALE_DAYS": "7\xa0"}, ("NAS_STALE_DAYS",)),
+            ({"NAS_STALE_DAYS": ""}, ()),  # empty is 0
+            ({"NAS_STALE_DAYS": "1+1"}, ()),
+            ({"NAS_STALE_DAYS": "9223372036854775808"}, ()),
+            ({"NAS_PRUNE_EVERY_DAYS": "1<<8"}, ("NAS_PRUNE_EVERY_DAYS",)),
+            ({"NAS_PRUNE_EVERY_DAYS": ""}, ("NAS_PRUNE_EVERY_DAYS",)),  # " * 86400": bash's syntax error
+            ({"NAS_PRUNE_EVERY_DAYS": "1+1"}, ()),
+            ({"NAS_CHECK_EVERY_DAYS": "x"}, ("NAS_CHECK_EVERY_DAYS",)),
+            ({"NAS_CHECK_EVERY_DAYS": "4611686018427387904"}, ()),
+            ({"NAS_TIMEOUT": "abc", "SKIP_AT_OR_BELOW_GIB": "abc", "NAS_KEEP_DAILY": "abc"}, ()),
+            (
+                {"NAS_CHECK_EVERY_DAYS": "x", "NAS_STALE_DAYS": "x", "NAS_PRUNE_EVERY_DAYS": "x"},
+                ("NAS_STALE_DAYS", "NAS_PRUNE_EVERY_DAYS", "NAS_CHECK_EVERY_DAYS"),
+            ),
+        ):
+            with self.subTest(change=change):
+                self.assertEqual(nas_unreadable({**DEFAULTS, **change}), want)
 
     def want(self, value: str, free: int) -> str:
         """What bash prints for VALUE and FREE, by guard_number's answer."""

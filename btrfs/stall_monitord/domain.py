@@ -381,7 +381,7 @@ class SampleOut(TypedDict):
     ts: float
     mono: float
     psi: dict[str, list[float | int] | None]
-    vm: list[int]
+    vm: list[int | None]  # None (null): a key whose value /proc/vmstat did not give
     procs: list[int]
     d: int
     d_all: int
