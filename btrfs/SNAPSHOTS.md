@@ -797,7 +797,11 @@ the folder `/run/user/<your user id>/.flatpak/com.google.Chrome/tmp`. `setup`
 tells Chrome to put its HTTP cache there. Chrome's Flatpak reads extra
 command-line options ("flags") from
 `~/.var/app/com.google.Chrome/config/chrome-flags.conf`: one flag per line,
-and lines starting with `#` are comments. `setup` adds three lines at the end
+and lines starting with `#` are comments. CST reads it as Chrome's
+launcher (cobalt) does: a line ends at a newline only, the ASCII blanks
+around it are dropped (a no-break space stays), each line is split into
+shell words (a `#` starts a comment only at the start of a word), and a
+line that cannot be split (an unclosed quote) is skipped. `setup` adds three lines at the end
 of that file, as your user. Your other lines are not changed or moved.
 
 ```
