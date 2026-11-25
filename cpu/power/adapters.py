@@ -15,7 +15,7 @@ from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import host_view_path, undo_python_start
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
 from cst_core.domain.text import describe_problem_lines, strip_ascii_blanks
-from cst_core.domain.values import CpuSet, DomainValidationError
+from cst_core.domain.values import CpuSet, DomainValidationError, parse_whole_number
 from cst_core.ports import ExecutionContextPort
 from cpu.game.adapters.host import read_settings, read_stripped, write_sysfs_line
 from cpu.game.domain import RUN_LOCK_WAIT_S, held_sys_paths, parse_cstate_limit_us, run_lock
@@ -146,15 +146,15 @@ def _scan_cpuidle(sys_cpu: str) -> tuple[CpuIdleEntry, ...]:
         idle_dir = os.path.join(sys_cpu, cpu_dir, "cpuidle")
         for state in _sorted_entries(idle_dir, _STATE_RE):
             sdir = os.path.join(idle_dir, state)
-            lat_raw = read_stripped(os.path.join(sdir, "latency")) or ""
-            if re.fullmatch(r"[0-9]+", lat_raw) is None:
+            latency = parse_whole_number(read_stripped(os.path.join(sdir, "latency")) or "")
+            if latency is None:
                 continue
             dis_path = os.path.join(sdir, "disable")
             dis_raw = read_stripped(dis_path)
             if dis_raw is None:
                 continue
             name = read_stripped(os.path.join(sdir, "name")) or state
-            out.append(CpuIdleEntry(cpu, state, name, int(lat_raw), dis_raw != "0", dis_path))
+            out.append(CpuIdleEntry(cpu, state, name, latency, dis_raw != "0", dis_path))
     return tuple(out)
 
 

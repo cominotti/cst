@@ -2693,6 +2693,12 @@ sudo btrfs filesystem usage /var
 
 Look at the line `Free (estimated):`.
 
+The number is read as the old bash's arithmetic read it: 64-bit, wrapping
+around (a value past 2**63 - 1 becomes negative, so at or below every
+limit: the emergency purge), a leading `0` octal (`08` is no number: the
+run fails with `cannot read free space`). btrfs-progs prints neither; only
+a damaged reading does.
+
 How it works, as a sequence:
 
 1. Free space falls to **250 GiB or less**: snapshots **pause**. No new

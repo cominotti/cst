@@ -151,6 +151,23 @@ class CpuPowerLifecycleTest(unittest.TestCase):
         self._write(os.path.join(sdir, "latency"), f"{latency}\n")
         self._write(os.path.join(sdir, "disable"), disable + "\n")
 
+    def test_a_cpuidle_latency_that_does_not_read_skips_the_state(self) -> None:
+        # More digits than int() reads (main: ValueError) or no number: the state is not listed.
+        for lat in ("1" * 5000, "abc", "\N{ARABIC-INDIC DIGIT THREE}"):
+            with self.subTest(lat=lat[:24]):
+                self._write(os.path.join(self.paths.sys_cpu, "cpu1", "cpuidle", "state2", "latency"), lat + "\n")
+                entries = collect_power_snapshot(self.paths).idle_entries
+                self.assertEqual(
+                    sorted((e.cpu, e.state, e.latency_us) for e in entries),
+                    [
+                        ("0", "state0", 0),
+                        ("0", "state1", 127),
+                        ("0", "state2", 1048),
+                        ("1", "state0", 0),
+                        ("1", "state1", 127),
+                    ],
+                )
+
     def test_plan_apply_idempotent_hotplug_move_and_revert_cycle(self) -> None:
         self._write(self.paths.conf, "GPU_PM_MODE='always'\nCPU_CSTATE_MAX_LATENCY_US='200'\n")
         snap0 = collect_power_snapshot(self.paths)

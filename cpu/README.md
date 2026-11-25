@@ -407,8 +407,8 @@ can be slow).
 |-----|---------|---------|
 | `TARGET_USER` | Your user. Needed for everything in your session. | `cst cpu` (`cpu/setup`), game profile |
 | `BUILD_CPUS` | Where the VM and Docker go during games; the VM always, after `vm-pin`. | game profile, `vm-pin` |
-| `P_CORES` | Cores that get EPP `performance` during games. | game profile |
-| `VM_WEIGHT` | VM CPU (and I/O, when numeric `1..10000`) weight during games. | game profile |
+| `P_CORES` | Cores that get EPP `performance` during games. A range whose end is no number (or has more digits than Python reads, 4300) gives no CPU, as `seq` did. | game profile |
+| `VM_WEIGHT` | VM CPU (and I/O, when numeric `1..10000`) weight during games. A value of more digits than Python reads is no number: `IOWeight=10`. | game profile |
 | `GAME_MEMORY_LOW` | Memory protection for the game (Dota 2 uses about 10 GB, plus Steam). | game profile |
 | `GAME_ZSWAP_WRITEBACK` | `no`: during games, swapped pages of desktop apps stay in zswap, never on the swap disk (7.1). `yes`: leave it alone. Missing (files written before this key existed) means `no`. | game profile |
 | `VM_NAME` | The libvirt VM name. | `vm-pin` |

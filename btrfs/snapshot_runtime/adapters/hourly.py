@@ -6,10 +6,9 @@ from collections.abc import Sequence
 import contextlib
 import glob
 import os
-import re
 import sys
 
-from btrfs.health_check.domain import awk_field
+from btrfs.health_check.domain import awk_field, bash_div, bash_int
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
 from btrfs.snapshot_runtime.domain import (
     EXIT_USAGE,
@@ -128,12 +127,13 @@ def prune_only(m: SnapshotRun) -> None:
 
 # ---- what hourly reads -------------------------------------------------------------------------
 def free_bytes(m: SnapshotRun) -> int | None:
-    """btrfs' "Free (estimated)" in bytes (it accounts for RAID1); None when it is no number."""
+    """btrfs' "Free (estimated)" in bytes (it accounts for RAID1), as bash arithmetic read it (64-bit,
+    wrapping; a leading 0 octal); None when it is no number bash reads."""
     out = m.capture(["btrfs", "filesystem", "usage", "-b", "/var"])
     for line in out.split("\n"):
         if "Free (estimated)" in line:
             n = awk_field(line, 3)
-            return int(n) if re.fullmatch(r"[0-9]+", n) else None
+            return bash_int(n)
     return None
 
 
@@ -277,7 +277,7 @@ def after_conversions(m: SnapshotRun) -> int:
             AlertKind.PAUSED,
             Urgency.NORMAL,
             "Snapshots paused: low space",
-            f"{free // GIB} GiB free; hourly snapshots resume above {above} GiB. "
+            f"{bash_div(free, GIB)} GiB free; hourly snapshots resume above {above} GiB. "
             "Older snapshots still expire normally.",
         )
         prune_only(m)
@@ -306,7 +306,7 @@ def emergency(m: SnapshotRun, free: int) -> int:
         AlertKind.EMERGENCY,
         Urgency.CRITICAL,
         "Snapshots: emergency purge",
-        f"Only {free // GIB} GiB free (limit {s['EMERGENCY_AT_OR_BELOW_GIB']}): keeping only the last day and "
+        f"Only {bash_div(free, GIB)} GiB free (limit {s['EMERGENCY_AT_OR_BELOW_GIB']}): keeping only the last day and "
         "3 dailies. Free space on /home or /var.",
     )
     policy = s["EMERGENCY_PRESERVE"]
@@ -325,7 +325,7 @@ def emergency(m: SnapshotRun, free: int) -> int:
     if now is None:
         m.log(4, f"emergency purge done (rc={run.rc}); free space cannot be read now")
     else:
-        m.log(4, f"emergency purge done (rc={run.rc}); free now {now // GIB} GiB")
+        m.log(4, f"emergency purge done (rc={run.rc}); free now {bash_div(now, GIB)} GiB")
     return 0
 
 

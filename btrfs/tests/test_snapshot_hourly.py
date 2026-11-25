@@ -476,6 +476,30 @@ class HourlyTest(Base):
         self.assertEqual((r.returncode, r.stdout), (1, log(3, "cannot read free space") + "\n"))
         self.assertEqual(self.core_calls(), [])
 
+    def test_free_space_is_read_as_bash_arithmetic(self) -> None:
+        # The old bash read btrfs' number in (( free <= X * GIB )): a leading 0 is octal (08 an error:
+        # no number), a value past 2**63 wraps around (to a negative: at or below every limit).
+        with self.subTest("08"):
+            self.machine(free="08")  # main read 8 bytes: an emergency purge
+            r = self.run_prog("hourly")
+            self.assertEqual((r.returncode, r.stdout), (1, log(3, "cannot read free space") + "\n"))
+            self.assertEqual(self.core_calls(), [])
+        with self.subTest("2**64 - 1"):
+            self.forget_calls()
+            self.machine(free=["18446744073709551615", 160 * GIB])  # bash: -1; main: a huge free space
+            r = self.run_prog("hourly")
+            body = "Only 0 GiB free (limit 150): keeping only the last day and 3 dailies. Free space on /home or /var."
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.notified(), [self.alert("critical", "Snapshots: emergency purge", body)])
+            self.assertEqual(self.core_calls(), [self.prune_call("--allow-mass-delete", policy="24h 3d")])
+        with self.subTest("5000 digits"):
+            shutil.rmtree(self.state, ignore_errors=True)
+            self.forget_calls()
+            self.machine(free="1" * 5000)  # main: ValueError; bash: 8198552921648689607 bytes
+            r = self.run_prog("hourly")
+            self.assertEqual((r.returncode, r.stderr), (0, ""))
+            self.assertEqual(self.core_calls(), [self.snapshot_call()])
+
     def test_core_exit_statuses(self) -> None:
         for rc, status, line in (
             (3, 0, log(5, f"snapshot: another run holds {self.path('run/btrfs-snapshot.lock')}; skipped")),

@@ -94,6 +94,15 @@ def bash_int(text: str) -> int | None:
     if len(text) > 1 and text.startswith("0"):
         # A power-of-two base has no digit limit in int().
         return bash_wrap(int(text, 8)) if all(c in "01234567" for c in text) else None
+    return bash_decimal(text)
+
+
+def bash_decimal(text: str) -> int | None:
+    """A string of ASCII digits as bash's $(( 10#TEXT )) reads it: decimal even with a leading 0
+    (000123 is 123, 08 is 8), 64-bit, wrapping around at any length; None where bash fails (not
+    ASCII digits)."""
+    if not _DIGITS.fullmatch(text):
+        return None
     n = 0
     for i in range(0, len(text), _DECIMAL_CHUNK):
         chunk = text[i : i + _DECIMAL_CHUNK]
@@ -359,14 +368,15 @@ def smart_problems(disk: str, role: str, log: str) -> list[str]:
     """The problems in one disk's health log; role "swap" for a disk under a swap device."""
     who = f"NVMe {disk}{f' ({role})' if role else ''}"
     problems: list[str] = []
-    crit = smart_raw(log, "critical_warning")
-    if _HEX.fullmatch(crit):
-        crit = str(int(crit, 16))
-    elif _DIGITS.fullmatch(crit):
-        crit = str(int(crit, 10))
-    elif crit:
-        problems.append(f"{who}: cannot read critical_warning ({crit})")
-        crit = "0"
+    # bash's crit=$(( crit )) for hex, $(( 10#crit )) for decimal: 64-bit, wrapping around.
+    raw = smart_raw(log, "critical_warning")
+    crit: int | None = 0
+    if _HEX.fullmatch(raw):
+        crit = bash_wrap(int(raw, 16))  # a power-of-two base has no digit limit in int()
+    elif _DIGITS.fullmatch(raw):
+        crit = bash_decimal(raw)
+    elif raw:
+        problems.append(f"{who}: cannot read critical_warning ({raw})")
     media = smart_field(log, "media_errors")
     spare = smart_field(log, "available_spare")
     spare_thr = smart_field(log, "available_spare_threshold")
@@ -375,8 +385,8 @@ def smart_problems(disk: str, role: str, log: str) -> list[str]:
     def num(text: str, default: int) -> int | None:
         return default if not text else bash_int(text)
 
-    c, m, s, t, u = num(crit, 0), num(media, 0), num(spare, 100), num(spare_thr, 0), num(used, 0)
-    if c is not None and c != 0:
+    m, s, t, u = num(media, 0), num(spare, 100), num(spare_thr, 0), num(used, 0)
+    if crit is not None and crit != 0:
         problems.append(f"{who}: critical_warning={crit}")
     if m is not None and m > 0:
         problems.append(f"{who}: media_errors={media}")
