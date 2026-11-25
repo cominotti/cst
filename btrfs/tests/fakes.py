@@ -1586,7 +1586,8 @@ class CacheWorld(FaultPoints):
         self.seen: dict[str, int] = {}
 
     def fail_at(self, point: str, n: int, err: OSError) -> None:
-        """The n-th call of point from now fails with err (once), the ones before it work."""
+        """The n-th call of point from now fails with err (once); a failure fail() armed there answers the
+        other calls, before and after it, as it would have without this one."""
         self.failing_at[point] = (n, err)
         self.seen[point] = 0
 
@@ -1597,7 +1598,15 @@ class CacheWorld(FaultPoints):
             self.seen[point] += 1
             if self.seen[point] == at[0]:
                 del self.failing_at[point]
+                kept = self.failing.get(point)
                 self.fail(point, at[1], times=1)
+                try:
+                    return super().step(point, effect, failed)
+                finally:
+                    if kept is None:
+                        del self.failing[point]
+                    else:
+                        self.failing[point] = kept
         return super().step(point, effect, failed)
 
     # ---- the start state ---------------------------------------------------------------------------

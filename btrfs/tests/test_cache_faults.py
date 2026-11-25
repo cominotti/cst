@@ -414,3 +414,20 @@ class ProtocolFaultTest(unittest.TestCase):
             lines,
         )
         self.assertEqual(self.world.fstab, attached)
+
+
+class CacheWorldStagingTest(unittest.TestCase):
+    """How the world's staged faults combine at one point."""
+
+    def test_a_one_shot_fault_keeps_the_failure_armed_before_it(self) -> None:
+        world = CacheWorld()
+        world.fail("umount /var/home/danilo/.cache", BUSY)  # every call
+        world.fail_at("umount /var/home/danilo/.cache", 2, RELOAD_FAILED)
+        answers = [
+            world.step("umount /var/home/danilo/.cache", lambda: "unmounted", lambda err: str(err.strerror))
+            for _ in range(4)
+        ]
+        self.assertEqual(
+            answers,
+            ["umount: target is busy", "Failed to reload daemon", "umount: target is busy", "umount: target is busy"],
+        )
