@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import os
 from typing import Final
 
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
 from btrfs.compress.domain import (
     KARGS_SETTLE_POLL_S,
     KARGS_SETTLE_TIMEOUT_S,
@@ -21,7 +22,6 @@ from btrfs.compress.domain import (
     parse_top_mount_unit,
     transaction_running,
 )
-from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
 from btrfs.compress.ports import TOP_MOUNT_ERRORS
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
