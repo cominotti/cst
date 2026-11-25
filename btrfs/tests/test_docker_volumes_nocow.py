@@ -1670,10 +1670,13 @@ class DaemonJsonProblemTest(PostponeBase):
         self.assertEqual(err, "")
         self.assertEqual(
             out,
-            f"<3>{TAG}: {self.PROBLEM}: the migration is requested, and the volumes folder is not marked "
-            "(no +C): fix the file, and the first boot after that runs it\n",
+            f"<3>{TAG}: {self.PROBLEM}: the migration is requested, and mark sets no +C on the volumes "
+            "folder: fix the file, and the first boot after that runs it\n",
         )
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        # The folder has +C from an earlier install (PostponeBase): the line says what mark did, never
+        # that the folder has no +C.
+        self.assertTrue(self.fs.nocow(self.vols))
         self.assertTrue(os.path.exists(self.flag))
         self.assertEqual(read_attempts(self), "0")
 
@@ -1690,9 +1693,10 @@ class DaemonJsonProblemTest(PostponeBase):
         self.assertRegex(
             out,
             rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); [^\n]*\n"
-            rf"<3>{TAG}: {re.escape(self.PROBLEM)}: the volumes folder is not marked \(no \+C\)\n$",
+            rf"<3>{TAG}: {re.escape(self.PROBLEM)}: mark sets no \+C on the volumes folder\n$",
         )
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        self.assertTrue(self.fs.nocow(self.vols))  # +C from an earlier install, as the line allows
         self.assertFalse(os.path.exists(self.flag))
 
 

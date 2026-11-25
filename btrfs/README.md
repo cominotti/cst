@@ -928,10 +928,11 @@ docker volume rm <name>         # or one volume by name
   (what `install` runs) sets no `+C` then and exits 2, but writes the request
   (an old count reset, then the flag, each flushed to disk), so that boot runs
   the migration. Its journal line says so: `/etc/docker/daemon.json: not
-  JSON: the migration is requested, and the volumes folder is not marked (no
-  +C): fix the file, and the first boot after that runs it`. When the request
+  JSON: the migration is requested, and mark sets no +C on the volumes
+  folder: fix the file, and the first boot after that runs it` (the folder
+  keeps the `+C` an earlier install may have set). When the request
   cannot be written, the line before it says why, and mark's own line is
-  `... the volumes folder is not marked (no +C)`. Another dockerd whose config file cannot be read that way
+  `... mark sets no +C on the volumes folder`. Another dockerd whose config file cannot be read that way
   counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
