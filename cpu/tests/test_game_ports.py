@@ -239,9 +239,11 @@ class ReadTest(Case):
         a, b = s.read_text(f), s.read_text(f)
         self.assertEqual(a, b)
         self.assertIsNot(a, b)
-        self.assertIsNot(s.read_bytes(f), s.read_bytes(f))
+        first_bytes, second_bytes = s.read_bytes(f), s.read_bytes(f)
+        self.assertIsNot(first_bytes, second_bytes)
         left = GameLeftoversFile(f)
-        self.assertIsNot(left.read(), left.read())
+        first_left, second_left = left.read(), left.read()
+        self.assertIsNot(first_left, second_left)
 
     def test_a_leftovers_file_is_read_byte_for_byte(self) -> None:
         f = self.path("run", "game.leftovers")
