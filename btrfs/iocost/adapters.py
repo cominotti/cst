@@ -130,32 +130,6 @@ def _scan_sys_block(sys_block: str) -> tuple[BlockDisk, ...]:
     return tuple(disks)
 
 
-def _read_managed_devnos(path: str) -> frozenset[str]:
-    text = read_text(path)
-    if text is None:
-        return frozenset()
-    return frozenset(line.strip() for line in text.splitlines() if _DEVNO_RE.fullmatch(line.strip()))
-
-
-def _save_managed_devnos(path: str, devnos: frozenset[str]) -> None:
-    ordered = sorted(devnos)
-    if not ordered:
-        if os.path.lexists(path):
-            os.remove(path)
-        return
-    ensure_dir(os.path.dirname(path), 0o755)
-    write_atomic(path, "".join(f"{d}\n" for d in ordered), mode=0o644, durable=False, relabel=False)
-
-
-def _write_qos_line(qos_path: str, payload: str) -> OSError | None:
-    try:
-        with open(qos_path, "w", encoding="utf-8") as fh:
-            fh.write(payload + "\n")
-    except OSError as exc:
-        return exc
-    return None
-
-
 def udev_properties(runner: CommandRunnerPort, name: str) -> UdevProperties:
     """`udevadm info -q property -n /dev/NAME` on the host, in the C locale, at most UDEVADM_TIMEOUT_S: its
     KEY=VALUE lines, or why it could not say (its first stderr line stripped, or "exit N")."""
@@ -190,9 +164,8 @@ class QosControlFile:
 
     def write(self, line: str) -> None:
         """line and a newline, in one write; the kernel's refusal raised."""
-        err = _write_qos_line(self.path, line)
-        if err is not None:
-            raise err
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,11 +177,20 @@ class ManagedDevicesFile:
 
     def read(self) -> frozenset[str]:
         """The MAJ:MIN lines it holds."""
-        return _read_managed_devnos(self.path)
+        text = read_text(self.path)
+        if text is None:
+            return frozenset()
+        return frozenset(line.strip() for line in text.splitlines() if _DEVNO_RE.fullmatch(line.strip()))
 
     def save(self, devnos: frozenset[str]) -> None:
         """The file holding devnos, one per line in order; removed for an empty set."""
-        _save_managed_devnos(self.path, devnos)
+        ordered = sorted(devnos)
+        if not ordered:
+            if os.path.lexists(self.path):
+                os.remove(self.path)
+            return
+        ensure_dir(os.path.dirname(self.path), 0o755)
+        write_atomic(self.path, "".join(f"{d}\n" for d in ordered), mode=0o644, durable=False, relabel=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,17 +251,21 @@ class IocostSystemd:
         """probe_systemd_unit of the service."""
         return probe_systemd_unit(self.runner, IOCOST_SERVICE)
 
+    def _systemctl(self) -> SystemctlAdapter:
+        """systemctl through runner, here (no flatpak-spawn): every change of the unit."""
+        return SystemctlAdapter(self.runner, on_host=SystemctlHost.LOCAL)
+
     def daemon_reload(self) -> CommandResult:
         """`systemctl daemon-reload`."""
-        return SystemctlAdapter(self.runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+        return self._systemctl().daemon_reload_result()
 
     def enable_now(self) -> CommandResult:
         """`systemctl enable --now cst-btrfs-iocost.service`."""
-        return SystemctlAdapter(self.runner, on_host=SystemctlHost.LOCAL).enable(IOCOST_SERVICE, now=True)
+        return self._systemctl().enable(IOCOST_SERVICE, now=True)
 
     def disable_now(self) -> CommandResult:
         """`systemctl disable --now cst-btrfs-iocost.service`."""
-        return SystemctlAdapter(self.runner, on_host=SystemctlHost.LOCAL).disable(IOCOST_SERVICE, now=True)
+        return self._systemctl().disable(IOCOST_SERVICE, now=True)
 
 
 @dataclass(frozen=True, slots=True)
