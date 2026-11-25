@@ -3485,6 +3485,29 @@ class LeftoversTest(GameProfileCase):
                     self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
                 self.assertEqual(err.getvalue(), said)
 
+    def test_the_tick_s_retry_looks_a_user_up_quietly_the_first_time_too(self) -> None:
+        # A kept new override of uid 1234, whose user manager runs; no account has that uid by TARGET_USER,
+        # but the uid has a name ("ghost") that id does not find (a passwd and an NSS that disagree). The
+        # tick acts for ghost, and the undo's ctl_file is the run's first lookup of that name: it must stay
+        # quiet (say=False), as the whole tick is. The test before this one never reached that lookup.
+        self.no_game()
+        self.write(self.paths.leftovers, "cst-game-leftovers 1\nuser 1234\nprop usr app.slice CPUWeight new -\n")
+        os.makedirs(os.path.join(self.paths.run_user, "1234", "systemd"), exist_ok=True)
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            dataclasses.replace(self.settings, target_user="nobody-here"),
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "",
+            name_of=lambda uid: "ghost" if uid == "1234" else "",
+            out=out,
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.tick(), 0)
+        self.assertNotIn("no such user", err.getvalue())
+        self.assertNotIn("no such user", out.getvalue())
+
     def test_a_kept_new_override_of_no_user_s_manager_is_dropped(self) -> None:
         # Kept while TARGET_USER named no account (no "user" line), and it still names none: no user manager
         # holds the override, so nothing is reloaded and nothing said undone; it is dropped, in one warning.
