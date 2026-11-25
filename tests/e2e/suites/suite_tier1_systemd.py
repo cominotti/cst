@@ -9390,87 +9390,21 @@ EOF
         only unmounted (detach), and systemd kept the old /etc/fstab until some later reload."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-177"
-        self.addCleanup(
-            exec_bash,
-            c,
-            # exec_bash runs bash -e: every step must run, also after one that fails.
-            f"""
-            set +e
-            systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
-            systemctl daemon-reload
-            if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
-            if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
-            rm -rf {w}
-            """,
-            check=False,
-        )
-        out = exec_bash(
-            c,
-            f"""
-            set -euo pipefail
-            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
-            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
-            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
-            [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
-            [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
-            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\nu2:x:1001:1001::/var/home/u2:/bin/bash\n' >{w}/etc/passwd
+        self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)
+        script = (
+            cache_reload_scaffold(w)
+            + f"""
+            printf 'u2:x:1001:1001::/var/home/u2:/bin/bash\n' >>{w}/etc/passwd
             mkdir -p {w}/var/home/u2
-            cat >{w}/etc/fstab <<'EOF'
-tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
-tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
-EOF
-            row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }}
-            {{
-                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
-                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
-                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime uuid-cache-2222 /cache
-                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime uuid-cache-2222 /scratchpad
-            }} >{w}/mounts
-            cat >{w}/bin/mnt-stub <<'STUB'
-{CACHE_MOUNT_STUB}
-STUB
-            for p in findmnt mount umount; do
-                printf '#!/bin/bash\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\n' "$p" >{w}/bin/$p
-                chmod +x {w}/bin/$p
-            done
-            # Both shims hand systemd the test root's fstab at each daemon-reload; kill/ then kills the
-            # command (the pid this script recorded) before the reload runs, sync/ logs it and runs it.
-            cat >{w}/kill/systemctl <<'EOF'
-#!/bin/bash
-if [[ "$1" == daemon-reload ]]; then
-    cp {w}/etc/fstab /etc/fstab || exit 1
-    for _ in $(seq 100); do [[ -s {w}/pid ]] && break; sleep 0.1; done
-    touch {w}/killed
-    kill -KILL "$(cat {w}/pid)"
-    sleep 5
-    exit 1
-fi
-exec /usr/bin/systemctl "$@"
-EOF
-            cat >{w}/sync/systemctl <<'EOF'
-#!/bin/bash
-if [[ "$1" == daemon-reload ]]; then
-    cp {w}/etc/fstab /etc/fstab || exit 1
-    echo reload >>{w}/reloads
-fi
-exec /usr/bin/systemctl "$@"
-EOF
             # fail/: a daemon-reload that fails (nothing copied, systemd keeps what it loaded).
             mkdir -p {w}/fail
             printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then echo "Failed to reload daemon" >&2; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/fail/systemctl
             # nobus/: no systemd that answers (a rescue shell): every systemctl call fails.
             mkdir -p {w}/nobus
             printf '#!/bin/bash\necho "Failed to connect to bus: No such file or directory" >&2\nexit 1\n' >{w}/nobus/systemctl
-            chmod +x {w}/kill/systemctl {w}/sync/systemctl {w}/fail/systemctl {w}/nobus/systemctl
-            touch {w}/reloads
-            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
-            cst=/opt/cst-rw/cst
+            chmod +x {w}/fail/systemctl {w}/nobus/systemctl
             behind() {{ systemctl show -P NeedDaemonReload var-mnt-cache.mount; }}
-            reloads() {{ wc -l <{w}/reloads; }}
-            # The bases in the real /etc/fstab, loaded and started: their units come from /etc/fstab.
-            cp {w}/etc/fstab /etc/fstab
-            systemctl daemon-reload
+            # The bases in the real /etc/fstab (the scaffold loaded them), started: their units come from /etc/fstab.
             systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
             [[ "$(systemctl show -P SourcePath var-mnt-cache.mount)" == /etc/fstab ]]
             [[ "$(behind)" == no ]]
@@ -9573,8 +9507,9 @@ EOF
             [[ "$(behind)" == yes ]]
             again detach
             echo E2E-CACHE-177-OK
-            """,
-        ).stdout
+            """
+        )
+        out = exec_bash(c, script).stdout
         self.assertIn("E2E-CACHE-177-OK", out)
 
     @e2e_tags(E2ETag.BTRFS)
