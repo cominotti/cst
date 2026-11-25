@@ -3206,6 +3206,10 @@ class SwapApplyBranchesTest(_SwapScratch):
         # before its first write with "<path>: cannot be read: nothing was changed". Before, plan blocked in
         # the FIFO's open (bounded here, each path on its own: CallBlocked).
         note = "cannot be read, even as root: apply refuses before it writes anything"
+        # crypttab and fstab name what is in the way (since 2026-11; before, the root note).
+        line_note = (
+            "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there"
+        )
         lines = {"crypttab": "crypttab: swap0 line", "fstab": "fstab: /dev/mapper/swap0 line"}
         written_whole = [os.path.relpath(dest, self.env.etc_dir) for _src, dest in self.env.managed_files]
         for which in [*written_whole, "crypttab", "fstab"]:
@@ -3219,7 +3223,8 @@ class SwapApplyBranchesTest(_SwapScratch):
                 os.mkfifo(path)
                 for verb, rows in self._file_rows().items():
                     target = lines.get(which) or next(t for t in rows if t.endswith(os.path.basename(path)))
-                    self.assertEqual({t: r for t, r in rows.items() if r[0] == "?"}, {target: ("?", note)}, verb)
+                    want = line_note if which in lines else note
+                    self.assertEqual({t: r for t, r in rows.items() if r[0] == "?"}, {target: ("?", want)}, verb)
                 before = file_tree(tmp)
                 self._assert_refused_before_any_write(
                     self._apply_on(self._fs()), f"cst swap: ERROR: {path}: cannot be read: nothing was changed"
@@ -3250,7 +3255,11 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.env = dataclasses.replace(self.env, as_root=True)
         rows = self._file_rows()["plan"]
         self.assertEqual(
-            rows["crypttab: swap0 line"], ("?", "cannot be read, even as root: apply refuses before it writes anything")
+            rows["crypttab: swap0 line"],
+            (
+                "?",
+                "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there",
+            ),
         )
         before = file_tree(tmp)
         self._assert_refused_before_any_write(
@@ -3258,6 +3267,50 @@ class SwapApplyBranchesTest(_SwapScratch):
         )
         self.assertEqual(file_tree(tmp), before)
         self.assertEqual(os.readlink(self.env.crypttab), os.devnull)
+
+    def test_crypttab_or_fstab_that_is_not_a_regular_file_has_a_note_of_its_own(self) -> None:
+        # As a user too: root cannot help, so no --root advice. Before, "needs root to read: ... --root".
+        note = (
+            "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there"
+        )
+        kinds: tuple[tuple[str, Callable[[str], None]], ...] = (
+            ("fifo", os.mkfifo),
+            ("folder", os.mkdir),
+            ("link to /dev/null", lambda p: os.symlink(os.devnull, p)),
+        )
+        lines = {"crypttab": "crypttab: swap0 line", "fstab": "fstab: /dev/mapper/swap0 line"}
+        for which, row in lines.items():
+            for kind, make in kinds:
+                self._fresh_scratch()
+                path = getattr(self.env, which)
+                with self.subTest(which=which, kind=kind), time_bound(5):
+                    if os.path.lexists(path):
+                        os.remove(path)
+                    make(path)
+                    self.assertEqual(self._file_rows()["plan"][row], ("?", note))
+
+    def test_on_an_older_cst_s_machine_a_crypttab_that_is_not_a_regular_file_is_no_missing_setting(self) -> None:
+        # No swap.conf: apply would write it from crypttab's marked line, which no one can read. Before,
+        # "no swap partition configured" (as if there were no line).
+        kinds: tuple[tuple[str, Callable[[str], None]], ...] = (
+            ("fifo", os.mkfifo),
+            ("folder", os.mkdir),
+            ("link to /dev/null", lambda p: os.symlink(os.devnull, p)),
+            ("link that leads nowhere", lambda p: os.symlink("nowhere", p)),
+        )
+        note = (
+            "not written yet, and /etc/crypttab is not a regular file (a FIFO, a device, a folder, or a link to"
+            " one): apply stops"
+        )
+        for kind, make in kinds:
+            self._fresh_scratch()
+            with self.subTest(kind), time_bound(5):
+                os.remove(self.env.settings_path)
+                os.remove(self.env.crypttab)
+                make(self.env.crypttab)
+                self.assertIn(
+                    PlanItem("REFUSE", "cst/swap.conf", note).format_line(), self._plan_text(self.env).splitlines()
+                )
 
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the

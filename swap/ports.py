@@ -62,6 +62,11 @@ class SwapSettingsFacts(Protocol):
         """/etc/crypttab is there and this user may not read it."""
         ...
 
+    def crypttab_not_regular(self) -> bool:
+        """/etc/crypttab is there (a link that leads nowhere too) and is not a regular file after links (a FIFO,
+        a device, a folder): no reader can take its lines."""
+        ...
+
     def crypttab_text(self) -> str:
         """/etc/crypttab's text; "" when it is not there or cannot be read."""
         ...

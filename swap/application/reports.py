@@ -28,6 +28,7 @@ from swap.application.memory_tuning import (
     uresourced_settings_row,
 )
 from swap.domain import (
+    NOT_REGULAR_NOTE,
     MACHINE_SLICE,
     WSF_EXPERIMENT,
     CgroupSwapRow,
@@ -277,6 +278,9 @@ class _FileSettingsFacts:
     def crypttab_closed(self) -> bool:
         return self._fs.exists(self._env.crypttab) and not self._fs.is_readable(self._env.crypttab)
 
+    def crypttab_not_regular(self) -> bool:
+        return self._fs.lexists(self._env.crypttab) and not self._fs.is_file(self._env.crypttab)
+
     def crypttab_text(self) -> str:
         return self._fs.read_text(self._env.crypttab, "", regular_only=True) or ""
 
@@ -461,8 +465,16 @@ class SwapReports:
         file_items: list[PlanItem] = []
         c_state = self._inspect_marked(env.crypttab, spec.crypttab_spec())
         f_state = self._inspect_marked(env.fstab, spec.fstab_spec())
-        for state, row in ((c_state, f"crypttab: {spec.name} line"), (f_state, f"fstab: {spec.mapper_path} line")):
-            note = _root_note(env, state, spec.name, verb, cannot_read=_ROOT_CANNOT_READ)
+        rows = (
+            (c_state, env.crypttab, f"crypttab: {spec.name} line"),
+            (f_state, env.fstab, f"fstab: {spec.mapper_path} line"),
+        )
+        for state, path, row in rows:
+            if state == OwnedState.UNREADABLE and self._fs.lexists(path) and not self._fs.is_file(path):
+                # Root cannot help: no --root advice.
+                note = f"{NOT_REGULAR_NOTE}: apply refuses; put a regular file there"
+            else:
+                note = _root_note(env, state, spec.name, verb, cannot_read=_ROOT_CANNOT_READ)
             file_items.append(PlanItem(describe_state(state), row, note))
         tier_change = any(st in (OwnedState.MISSING, OwnedState.CHANGE) for st in (c_state, f_state))
         return file_items, tier_change

@@ -2235,7 +2235,14 @@ class SwapSettingsDoctorTest(Scratch):
             " refuses (swap/README.md, section 2.3)",
         )
         zswap = os.path.join(self.root, "etc", "tmpfiles.d", "zswap.conf")
-        for name, set_up, want in (("crypttab", True, [not_configured]), ("fstab", False, [])):
+        # crypttab is not a regular file: its lines cannot be read, so not "not configured" (since 2026-11).
+        not_regular = Result(
+            "WARN",
+            "swap partition: /etc/cst/swap.conf not written yet, and /etc/crypttab is not a regular file (a FIFO,"
+            " a device, a folder, or a link to one): cst swap apply refuses until it is fixed",
+        )
+        del not_configured
+        for name, set_up, want in (("crypttab", True, [not_regular]), ("fstab", False, [])):
             path = os.path.join(self.root, "etc", name)
             with self.subTest(name=name), time_bound(5):
                 if set_up:

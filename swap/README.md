@@ -126,7 +126,11 @@ compressor later creates a second pool that lives until the old one drains).
   `apply` stops before it changes anything. A FIFO there is never opened in
   a way that waits: `plan` and `apply` answer at once. Root inside a
   toolbox counts as a user here: the host's root-only files may be closed
-  to it, and `--root` on the host reads them.
+  to it, and `--root` on the host reads them. On a machine an older CST set
+  up (no `/etc/cst/swap.conf`), a `/etc/crypttab` that is there and is not
+  a regular file (or a link that leads nowhere) is `REFUSE` "not written yet,
+  and /etc/crypttab is not a regular file ...", never "not configured": no
+  one can read the line `apply` would write the file from.
   On sophia it reads:
 
   ```
@@ -318,7 +322,7 @@ The words in the first column of `plan` and `status`:
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
-| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole, also when a folder, a FIFO or a device is in place of one): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. Also, for any user: a folder in place of `/etc/systemd/zram-generator.conf` or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, or a name above a file `apply` writes whole that is not a folder (step 1 below): the row says that `apply` refuses it before it writes anything. |
+| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole, also when a folder, a FIFO or a device is in place of one): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. Also, for any user: a folder in place of `/etc/systemd/zram-generator.conf` or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, or a name above a file `apply` writes whole that is not a folder (step 1 below): the row says that `apply` refuses it before it writes anything. `/etc/crypttab` or `/etc/fstab` that is not a regular file (a FIFO, a device, a folder, or a link to one) has a note of its own for any user, with no `--root` advice (root cannot help): "not a regular file ...: apply refuses; put a regular file there". |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:

@@ -221,6 +221,10 @@ def marked_fstab_name(text: str) -> str | None:
     return None
 
 
+# What a row says of a file that is there and is not a regular file after links (no one can read it; root cannot help).
+NOT_REGULAR_NOTE: Final = "not a regular file (a FIFO, a device, a folder, or a link to one)"
+
+
 class SwapSpecState(StrEnum):
     """Where the partition plan, status and apply work with comes from (SpecResolution.state)."""
 
@@ -316,6 +320,9 @@ def _spec_from_older_install(facts: SwapSettingsFacts) -> SpecResolution:
             if name is None
             else SpecResolution(None, SwapSpecState.UNKNOWN, name)
         )
+    if facts.crypttab_not_regular():
+        # Its lines cannot be read by anyone: never "not configured" (an older CST's line may be what it hides).
+        return SpecResolution(None, SwapSpecState.BAD, f"not written yet, and /etc/crypttab is {NOT_REGULAR_NOTE}")
     entry = marked_crypttab_entry(facts.crypttab_text())
     if entry is None:
         return SpecResolution(None, SwapSpecState.UNSET)

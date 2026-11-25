@@ -165,6 +165,14 @@ class _HostSettingsFacts:
     def crypttab_closed(self) -> bool:
         return isinstance(self._read(CRYPTTAB), PermissionError)
 
+    def crypttab_not_regular(self) -> bool:
+        view = self._host.path(CRYPTTAB)
+        try:
+            self._host.lstat(view)
+        except OSError:
+            return False
+        return not self._host.isfile(view)
+
     def crypttab_text(self) -> str:
         return self._text(CRYPTTAB)
 
