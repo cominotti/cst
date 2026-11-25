@@ -1355,7 +1355,11 @@ Rules the script follows about the password:
    frees space on the NAS). Every 30 days, `restic check
    --read-data-subset=5%` reads a random 5 % of the data to find damage.
    The two intervals (`NAS_PRUNE_EVERY_DAYS`, `NAS_CHECK_EVERY_DAYS`) are
-   read as bash arithmetic, as the rest of `snapshots.conf`.
+   whole days: write a plain number. Each one goes into the old bash's
+   `NOW - last >= DAYS * 86400` as text, so an expression is not read as
+   one number there: `7+7` is 7 days and 7 seconds, not 14 days. The alert
+   about an unchecked repository (after `2 * NAS_CHECK_EVERY_DAYS` days)
+   reads the value as one number, 28 days for `7+7`.
 
 Step 6 runs **only if all backups of this run succeeded**. Steps 4 to 6 share
 one time budget of 6 hours (`NAS_TIMEOUT=6h`): forget, prune and check use
