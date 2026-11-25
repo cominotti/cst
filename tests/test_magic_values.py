@@ -28,10 +28,14 @@ keep the raw words on purpose, they are what pins the values):
    the code compares or matches is a StrEnum; a Literal stays only for a
    fixed external format (an exemption with its reason).
 6. int-of-text: a call of the builtin int() whose first argument is not a
-   number by its syntax (a numeric constant; an arithmetic, unary, boolean
-   or comparison expression; a call of NUMERIC_FUNCTIONS (float, len, ...)
-   or of a method in NUMERIC_METHODS (time, now, ...); an ExitStatus
-   member), or that has a base: int(text), int(m.group(1)), int(x, 16).
+   number by its syntax (a numeric constant; a unary or comparison
+   expression; an arithmetic one with an operator text does not have (-, /,
+   //, **, a shift or a bit operator); one with +, * or %, or a boolean one,
+   whose operands are all numbers by their syntax (text + "", text * 2 and
+   "%s" % x are text, and x or 0 is x); a call of NUMERIC_FUNCTIONS (float,
+   len, ...) or of a method in NUMERIC_METHODS (time, now, ...); an
+   ExitStatus member), or that has a base: int(text), int(m.group(1)),
+   int(m.group(1) or 0), int(x, 16).
    int() raises ValueError on text past its digit limit and reads Unicode
    digits and blanks; text becomes a number in cst_core's parsers
    (parse_whole_number, parse_integer) or bash's (bash_int), exempt here.
@@ -89,6 +93,19 @@ NUMERIC_FUNCTIONS: Final = frozenset({"float", "round", "len", "abs", "min", "ma
 NUMERIC_METHODS: Final = frozenset({"time", "monotonic", "now", "timestamp", "total_seconds"})
 # Rule 6: the class whose members are numbers (an IntEnum).
 NUMERIC_ENUMS: Final = frozenset({"ExitStatus"})
+# Rule 6: the binary operators text does not have: their result is a number (or an error), whatever the operands.
+NUMERIC_OPERATORS: Final = (
+    ast.Sub,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Pow,
+    ast.LShift,
+    ast.RShift,
+    ast.BitOr,
+    ast.BitXor,
+    ast.BitAnd,
+    ast.MatMult,
+)
 _INT_OF_TEXT_HINT: Final = (
     "use parse_whole_number or parse_integer (cst_core.domain.values) for text, math.trunc for a float"
 )
@@ -97,7 +114,7 @@ _INT_OF_TEXT_HINT: Final = (
 MAGIC_CEILINGS: Final[dict[str, int]] = {
     "bluetooth int-of-text": 5,
     "bluetooth/setup int-of-text": 6,
-    "btrfs/bulk int-of-text": 10,
+    "btrfs/bulk int-of-text": 11,
     "btrfs/cache int-of-text": 2,
     "btrfs/commit int-of-text": 2,
     "btrfs/compress int-of-text": 2,
@@ -105,19 +122,19 @@ MAGIC_CEILINGS: Final[dict[str, int]] = {
     "btrfs/docker_volumes_nocow int-of-text": 3,
     "btrfs/health_check int-of-text": 3,
     "btrfs/pending_alerts int-of-text": 7,
-    "btrfs/snapshot int-of-text": 4,
+    "btrfs/snapshot int-of-text": 6,
     "btrfs/snapshot_runtime int-of-text": 1,
     "btrfs/stall_monitord int-of-text": 2,
-    "btrfs/stall_report int-of-text": 3,
-    "cpu int-of-text": 10,
+    "btrfs/stall_report int-of-text": 4,
+    "cpu int-of-text": 12,
     "cpu/game int-of-text": 2,
     "cpu/power int-of-text": 1,
     "cst_core int-of-text": 7,
     "doctor int-of-text": 7,
     "perf int-of-text": 1,
     "swap int-of-text": 1,
-    "toolchains int-of-text": 9,
-    "vm int-of-text": 6,
+    "toolchains int-of-text": 10,
+    "vm int-of-text": 10,
 }
 # "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
@@ -409,9 +426,11 @@ def _literal_vocabularies(tree: ast.Module) -> Iterator[tuple[ast.expr, str]]:
 
 def _is_number_by_syntax(node: ast.expr) -> bool:
     """True for an expression whose value is a number by its form: never text that int() would parse."""
+    if isinstance(node, ast.BinOp | ast.BoolOp):
+        return _operation_is_number(node)
     if isinstance(node, ast.Constant):
         return isinstance(node.value, int | float) and not isinstance(node.value, bool)
-    if isinstance(node, ast.BinOp | ast.UnaryOp | ast.BoolOp | ast.Compare):
+    if isinstance(node, ast.UnaryOp | ast.Compare):
         return True
     if isinstance(node, ast.Attribute):
         return isinstance(node.value, ast.Name) and node.value.id in NUMERIC_ENUMS
@@ -421,6 +440,16 @@ def _is_number_by_syntax(node: ast.expr) -> bool:
             isinstance(f, ast.Attribute) and f.attr in NUMERIC_METHODS
         )
     return False
+
+
+def _operation_is_number(node: ast.BinOp | ast.BoolOp) -> bool:
+    """A boolean operation is a number when all its operands are (its value is one of them); an arithmetic
+    one when text does not have its operator, or when both operands are numbers by their syntax."""
+    if isinstance(node, ast.BoolOp):
+        return all(_is_number_by_syntax(v) for v in node.values)
+    return isinstance(node.op, NUMERIC_OPERATORS) or (
+        _is_number_by_syntax(node.left) and _is_number_by_syntax(node.right)
+    )
 
 
 def _ints_of_text(tree: ast.Module) -> Iterator[tuple[ast.expr, str]]:
@@ -670,7 +699,14 @@ class PlantedTest(unittest.TestCase):
             "        int(*x),\n"
             "        int(float(v)),\n"
             "        int(time.time()),\n"
+            "        int(m.group(1) or 0) if m else 0,\n"
+            "        int(text + ''),\n"
             "        int(a * b),\n"
+            "        int(a or 0),\n"
+            "        int(a - b),\n"
+            "        int((a - b) // 3 + 1),\n"
+            "        int(len(x) or 0),\n"
+            "        int(len(x) * 2 % 7),\n"
             "        int(-a),\n"
             "        int(len(x)),\n"
             "        int(ExitStatus.KILLED),\n"
@@ -689,14 +725,18 @@ class PlantedTest(unittest.TestCase):
                 (14, "int-of-text", "int(x[2])"),
                 (15, "int-of-text", "int(v, base=8)"),
                 (16, "int-of-text", "int(*x)"),
+                (19, "int-of-text", "int(m.group(1) or 0)"),
+                (20, "int-of-text", "int(text + '')"),
+                (21, "int-of-text", "int(a * b)"),
+                (22, "int-of-text", "int(a or 0)"),
             ],
         )
         self.assertIn("parse_whole_number", hits[0].text)
         self.assertIn("math.trunc", hits[0].text)
-        self.assertEqual(counts(hits, {}), {"pkg int-of-text": 6})
+        self.assertEqual(counts(hits, {}), {"pkg int-of-text": 10})
         self.assertEqual(
             budget_problems(counts(hits, {}), {}, "magic values"),
-            ["pkg int-of-text: 6 magic values, budget 0: the change added 6"],
+            ["pkg int-of-text: 10 magic values, budget 0: the change added 10"],
         )
 
     def test_int_of_text_in_an_exempt_parser_is_not_counted(self) -> None:
