@@ -2899,6 +2899,25 @@ class LeftoversTest(GameProfileCase):
                     self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
                 self.assertEqual(err.getvalue(), said)
 
+    def test_a_kept_new_override_of_no_user_s_manager_is_dropped(self) -> None:
+        # Kept while TARGET_USER named no account (no "user" line), and it still names none: no user manager
+        # holds the override, so nothing is reloaded and nothing said undone; it is dropped, in one warning.
+        self.no_game()
+        for action, who in (("tick", ""), ("off", "off: ")):
+            with self.subTest(action=action):
+                self.write(self.paths.leftovers, "cst-game-leftovers 1\nprop usr app.slice CPUWeight new -\n")
+                p, out = self.accounts_profile("nobody-here")
+                self.systemd.actions = []
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
+                self.assertEqual(self.systemd.actions, [])
+                self.assertEqual(
+                    out.getvalue(),
+                    f"<4>game-profile: {who}could not undo app.slice CPUWeight (its runtime override): TARGET_USER"
+                    " names no account, no user manager to undo it in: dropped\n",
+                )
+                self.assertFalse(os.path.exists(self.paths.leftovers))
+
     def test_a_newer_file_and_a_failed_undo_end_with_not_undone(self) -> None:
         newer = "cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n"
         self.write(self.paths.leftovers, newer)

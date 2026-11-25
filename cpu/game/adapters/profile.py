@@ -535,7 +535,7 @@ class GameProfile:
         if not self.user_from_state(recs):
             recs = drop_unowned(self, recs)
         kept = read_kept(self, say=True)
-        failed = undo_entries(self, merged_entries(kept or [], recs), reload, say=True)
+        failed, _dropped = undo_entries(self, merged_entries(kept or [], recs), reload, say=True)
         self.reload_managers(reload)
         held = keep(self, failed, kept)
         for f in (p.state, p.intended, p.manual, p.drift_warned):

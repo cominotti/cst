@@ -923,6 +923,11 @@ manager is there (`/run/user/UID/systemd`) and is done once it is gone.
 Each manager an undo removed an override in gets its own `daemon-reload`:
 an `off` or a tick that undoes records of several users (its own and an
 earlier `off`'s for another user) reloads each of those users' managers.
+A kept new override of the user manager with no `user` line (kept while
+`TARGET_USER` named no account) is dropped while `TARGET_USER` still names
+none: no user's runtime folder holds it and no user manager can be reloaded,
+so nothing is said undone (`<4>... could not undo ...: TARGET_USER names no
+account, no user manager to undo it in: dropped`).
 What the tick then decides (switching the profile on for a running game) is
 still judged for `TARGET_USER` as the settings file has it, so a kept
 record never makes the tick start a `cpu-game.service` whose `on`

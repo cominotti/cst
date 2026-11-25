@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.domain.units import LoadState
-from cpu.game.domain import Manager, Record, show_values, state_uid, transient_unit
+from cpu.game.domain import Manager, PropUndo, Record, show_values, state_uid, state_undo, transient_unit
 from cpu.game.domain.leftovers import (
     Entry,
     leftover_entries,
@@ -68,25 +68,44 @@ def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
     return None
 
 
-def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: Reloads, *, say: bool) -> list[Entry]:
+def undo_entries(
+    profile: GameProfile, entries: Sequence[Entry], reload: Reloads, *, say: bool
+) -> tuple[list[Entry], set[Record]]:
     """Undo the entries, the last first (a property touched twice ends at its oldest value), each record of
     the user manager for the user its entry names; the ones whose undo failed, in their order, each with the
-    uid it was for (keep says them). An entry whose uid no account has now is never undone in another
-    user's manager: it is done when that uid's user manager is gone, else kept. say: see
-    GameProfile.undo_record."""
+    uid it was for (keep says them), and the records dropped undone (no_user_manager). An entry whose uid no
+    account has now is never undone in another user's manager: it is done when that uid's user manager is
+    gone, else kept. say: see GameProfile.undo_record ('off' says it; the tick does not)."""
     failed: list[Entry] = []
+    dropped: set[Record] = set()
     for uid, rec in reversed(entries):
         if uid is not None and not profile.act_for(uid, say=False):
             if user_manager_gone(profile, uid):
                 continue
             user: str | None = uid
+        elif uid is None and no_user_manager(profile, rec, say=say):
+            who = "off: " if say else ""
+            what = undo_text(rec, profile.paths.epp)
+            profile.log(
+                4, f"{who}could not undo {what}: TARGET_USER names no account, no user manager to undo it in: dropped"
+            )
+            dropped.add(rec)
+            continue
         elif profile.undo_record(rec, reload, say=say):
             continue
         else:
             user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
         failed.append((user, rec))
     failed.reverse()
-    return failed
+    return failed, dropped
+
+
+def no_user_manager(profile: GameProfile, rec: Record, *, say: bool) -> bool:
+    """The record is a new runtime override of the user manager while TARGET_USER names no account (the entry
+    names no user): no user's runtime folder holds it and no user manager can be reloaded, so it is dropped,
+    never undone (say: see GameProfile.undo_record)."""
+    undo = state_undo(rec)
+    return isinstance(undo, PropUndo) and undo.mgr == "usr" and undo.mode == "new" and not profile.uid(say=say)
 
 
 def drop_unowned(profile: GameProfile, recs: Sequence[Record]) -> list[Record]:
@@ -169,8 +188,8 @@ def retry_kept(profile: GameProfile, *, say: bool) -> None:
     settings = profile.s
     try:
         reload = Reloads()
-        failed = undo_entries(profile, kept, reload, say=say)
-        still = {rec for _uid, rec in failed}
+        failed, dropped = undo_entries(profile, kept, reload, say=say)
+        still = {rec for _uid, rec in failed} | dropped
         for _uid, rec in kept:
             if rec not in still:
                 what = undo_text(rec, profile.paths.epp)
