@@ -230,7 +230,10 @@ class StateFiles:
         return known, unknown
 
     def edit_keep(self, add: Sequence[str], remove: Collection[str]) -> None:
-        """Add/remove ids in the keep file; other lines (comments) stay as they are."""
+        """Add/remove ids in the keep file; other lines (comments) stay as they are. Each line's id is
+        read as read_keep reads it (ASCII blanks trimmed); a line whose id has another blank beside it
+        (a no-break space) raises KeepLineError before anything is written: it may mean an id, so
+        neither keep nor unkeep can tell whether it is there."""
         keep = self.paths.keep
         # surrogateescape: lines this tool cannot read are written back unchanged.
         try:
@@ -239,8 +242,12 @@ class StateFiles:
         except FileNotFoundError:
             lines = [KEEP_HEADER]
         lines = [ln if ln.endswith("\n") else ln + "\n" for ln in lines]
-        lines = [ln for ln in lines if ln.split("#", 1)[0].strip() not in remove]
-        have = {ln.split("#", 1)[0].strip() for ln in lines}
+        ids = [strip_ascii_blanks(ln.split("#", 1)[0]) for ln in lines]
+        for number, (ln, ident) in enumerate(zip(lines, ids, strict=True), 1):
+            if (why := blank_edge_problem(ident)) is not None:
+                raise KeepLineError(SettingsProblem(number, ln, why))
+        lines = [ln for ln, ident in zip(lines, ids, strict=True) if ident not in remove]
+        have = {strip_ascii_blanks(ln.split("#", 1)[0]) for ln in lines}
         lines += [i + "\n" for i in add if i not in have]
         os.makedirs(self.paths.etc, mode=0o755, exist_ok=True)
         # UTF-8, surrogateescape; durable (file and folder): apply and the boot step act on it.

@@ -9054,6 +9054,55 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS)
+    def test_223_bulk_keep_unkeep_and_plan_refuse_a_keep_line_with_a_no_break_space(self) -> None:
+        """This checkout's btrfs-bulk, as root, with /etc/btrfs-setup/bulk-keep holding the line
+        apps<NBSP> (the real bytes C2 A0) and BULK_USER in bulk.conf: `keep apps`, `unkeep apps` and
+        `keep iso` each exit 1 with "cannot update /etc/btrfs-setup/bulk-keep: line 3: ..." naming the
+        no-break space, under LC_ALL=C, C.UTF-8 and the default, and the file keeps its bytes; `plan` says
+        NEEDS A LOOK with "has a line it cannot read". Before, keep read the line as apps (said it was kept, left the line
+        apply cannot read) and unkeep deleted it. With the line fixed, keep apps exits 0 (cannot bite
+        otherwise). A fake cannot show the installed reader on the real bytes under a root shell's locale."""
+        keep = "/etc/btrfs-setup/bulk-keep"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"rm -f {keep}; if [ -e /var/tmp/e2e-bulk-keep.bak ]; then mv /var/tmp/e2e-bulk-keep.bak {keep}; fi",
+            check=False,
+        )
+        out = self.bulk_boot(
+            rf"""
+set -E
+trap 'echo "test_223 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+keep={keep}
+if [ -e "$keep" ]; then mv "$keep" /var/tmp/e2e-bulk-keep.bak; fi
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+printf '# kept\nm2\napps\302\240\n' >"$keep"
+cp "$keep" "$s/keep.before"
+bulk() {{ /usr/bin/python3 -I /opt/cst-rw/btrfs/btrfs-bulk "$@"; }}
+for locale in C C.UTF-8 ""; do
+    for args in "keep apps" "unkeep apps" "keep iso"; do
+        rc=0; err="$(LC_ALL=$locale bulk $args 2>&1 >"$s/out")" || rc=$?
+        echo "test_223 LC_ALL=$locale $args: rc=$rc $err" >&2
+        [ "$rc" = 1 ]
+        grep -qF "btrfs-bulk: cannot update $keep: line 3: apps" <<<"$err"
+        grep -qF ": a no-break space (U+00A0) at the end of the value" <<<"$err"
+        if grep -qF "by choice" "$s/out"; then exit 1; fi
+        cmp "$s/keep.before" "$keep"
+    done
+done
+bulk plan >"$s/plan" 2>&1
+grep -qF "NEEDS A LOOK: $keep has a line it cannot read: line 3: apps" "$s/plan"
+cmp "$s/keep.before" "$keep"
+# The line fixed: keep goes through.
+printf '# kept\nm2\napps\n' >"$keep"
+bulk keep apps >"$s/out"
+grep -qF "apps: kept in /home by choice" "$s/out"
+echo E2E-OK
+""",
+        )
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
         """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
         checkout's docker-gc, under a name of its own; a stub docker.service when the container has

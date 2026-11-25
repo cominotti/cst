@@ -1585,6 +1585,33 @@ class BulkTest(BulkBase):
             f.write(" m2\t # c\r\n")
         self.assertEqual(self.state.read_keep(), ({"m2"}, []))
 
+    def test_keep_and_unkeep_refuse_a_keep_line_with_a_blank_beside_its_id(self) -> None:
+        # str.strip() read "apps<NBSP>" as apps: keep said apps was kept and left the line apply cannot read,
+        # unkeep deleted it. Both now refuse, naming the line, and the file keeps its bytes.
+        data = "# kept\nm2\napps\N{NO-BREAK SPACE}  # c\n".encode()
+        for cmd, ident in (("keep", "apps"), ("unkeep", "apps"), ("keep", "iso"), ("unkeep", "m2")):
+            with self.subTest(cmd=cmd, ident=ident):
+                with open(self.paths.keep, "wb") as f:
+                    f.write(data)
+                r = self.keep_cli(cmd, ident)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(
+                    f"btrfs-bulk: cannot update {self.paths.keep}: line 3: apps\N{NO-BREAK SPACE}  # c: a no-break "
+                    "space (U+00A0) at the end of the value",
+                    r.stderr,
+                )
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertNotIn("by choice", r.stdout)
+                with open(self.paths.keep, "rb") as f:
+                    self.assertEqual(f.read(), data)
+        # ASCII blanks around an id are trimmed, as read_keep trims them.
+        with open(self.paths.keep, "w", encoding="utf-8") as f:
+            f.write(" m2\t # c\napps \n")
+        self.assertEqual(self.keep_cli("unkeep", "apps").returncode, 0)
+        self.assertEqual(self.keep_cli("keep", "m2").returncode, 0)
+        with open(self.paths.keep, encoding="utf-8") as f:
+            self.assertEqual(f.read(), " m2\t # c\n")
+
     def test_npm_cache_clean_removes_link_and_apply_repairs(self) -> None:
         self.write(".npm/_cacache/content-v2/a", "a")
         self.write(".npm/_logs/debug.log", "log")

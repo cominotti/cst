@@ -1606,7 +1606,9 @@ are fine: such a line shows up as an `unknown item` and is ignored.) An id with
 a no-break space or another Unicode blank beside it (`apps<no-break space>`)
 says `has a line it cannot read` instead, with the line: it may mean `apps`,
 so `bulk apply`, the boot step and the Steam commands move nothing until you
-fix that line by hand (`bulk keep` and `bulk unkeep` do not repair it).
+fix that line by hand: `bulk keep` and `bulk unkeep` refuse while it is
+there (exit 1, `btrfs-bulk: cannot update /etc/btrfs-setup/bulk-keep: line N: ...`)
+and leave the file as it is.
 
 **`bulk status` says `waits for the next boot (busy)`.**
 Reboot normally: the item is moved before the login screen. Or close the
