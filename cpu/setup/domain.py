@@ -17,6 +17,7 @@ from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.install import Component
 from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
+from cst_core.domain.units import SYSTEM_UNIT_DIR, USER_UNIT_DIR_REL
 from cst_core.domain.values import CpuSet, DomainValidationError, Json, format_cpulist
 from cpu.game.domain import BUILDS_SLICE
 from cpu.irq.domain import IrqAction
@@ -119,7 +120,7 @@ class SetupPaths:
     """Where `cst cpu` reads and writes on the host (tests point them into a folder of their own)."""
 
     conf: str = CPU_SETTINGS
-    unit_dir: str = "/etc/systemd/system"
+    unit_dir: str = SYSTEM_UNIT_DIR
     daemon_json: str = "/etc/docker/daemon.json"
     # intel_pstate: raise the frequency at once when a task wakes up after an I/O wait (builds with
     # many fsyncs, a game loading assets). Applied at boot by systemd-tmpfiles, and at once by install.
@@ -163,12 +164,12 @@ class SetupPaths:
 
 def toolbox_dropin(home: str, name: str = DROPIN_NAME) -> str:
     """The toolboxes' drop-in (the inner user.slice of the user manager)."""
-    return f"{home}/.config/systemd/user/user.slice.d/{name}"
+    return f"{home}/{USER_UNIT_DIR_REL}/user.slice.d/{name}"
 
 
 def helper_dropin(home: str, name: str = DROPIN_NAME) -> str:
     """The drop-in of flatpak-session-helper (what toolboxes run on the host)."""
-    return f"{home}/.config/systemd/user/flatpak-session-helper.service.d/{name}"
+    return f"{home}/{USER_UNIT_DIR_REL}/flatpak-session-helper.service.d/{name}"
 
 
 def gamemode_ini(home: str) -> str:

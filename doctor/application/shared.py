@@ -6,8 +6,9 @@ command that installs a component again, and the decorator that registers a chec
 from collections.abc import Callable, Container, Iterator
 from dataclasses import dataclass, field
 
-from cst_core.domain.install import COMPONENTS, Component
+from cst_core.domain.install import COMPONENTS, Component, Owner
 from cst_core.domain.ostree import OstreeStatus, query_status
+from cst_core.domain.record import InstallRecord, RecordFormatError
 from cst_core.domain.text import (
     SettingsProblem,
     ShellAssignments,
@@ -53,6 +54,9 @@ class DoctorFacts:
     snap_conf: tuple[str | None] | None = None
     # cst vm's backup index as read_vm_index reads it, boxed the same way.
     vm_index: tuple[tuple[object, str | None] | None] | None = None
+    # Root's install record and the user's as the install check last read them (None: it has not run):
+    # (owner, path, the record, None for none, or the error its read raised).
+    records: list[tuple[Owner, HostPath, InstallRecord | RecordFormatError | OSError | None]] | None = None
 
 
 # host -> its facts. A host hashes by identity, so a new Host starts with none.

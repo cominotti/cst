@@ -308,7 +308,7 @@ The words in the first column of `plan` and `status`:
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
-| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host, for `/etc/crypttab` or `/etc/fstab`: `apply` refuses before it writes anything, and the row says so; for another file, the row says it cannot be read even as root, with no `--root` advice. |
+| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. Also, for any user: a folder in place of `/etc/systemd/zram-generator.conf` or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, or a name above a file `apply` writes whole that is not a folder (step 1 below): the row says that `apply` refuses it before it writes anything. |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:
@@ -317,10 +317,35 @@ What `apply` does, in order:
    section 2.3), that zswap exists, that the `zstd` compressor loads, and the
    partition (exists, exact size, no filesystem signature), that no `swap0`
    line was written by hand, that `/etc/crypttab` and `/etc/fstab` can
-   be read (a folder in place of one is refused), and that root's install
-   record (`/var/lib/cst/installed.json`) was not written by a newer CST (a
-   downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
-   `/etc/cst/swap.conf` (section 5).
+   be read (a folder in place of one is refused), that the files it writes
+   whole (`/etc/tmpfiles.d/zswap.conf`,
+   `/etc/tmpfiles.d/cst-mm-responsiveness.conf`,
+   `/etc/sysctl.d/99-swap-tuning.conf`, `/etc/uresourced.conf`, which
+   step 7 copies aside first, and the `machine.slice` drop-in) can be read
+   (a folder in place of one is refused with
+   `<file>: cannot be read: nothing was changed`; so is a link at
+   `/etc/uresourced.conf` to anything but a file or a character device it
+   can read, such as a folder or a FIFO, while step 7 has still to copy it
+   aside: while no `/etc/uresourced.conf.pre-swap-config.bak` is there;
+   nothing is read through the link. A link to `/dev/null`, a masked
+   vendor file, counts as an empty file: step 7 copies it aside as an
+   empty `.bak`) and that no name above one of them is a file, where
+   the installer could not create its folder (refused with
+   `<file>: <name> is not a folder: nothing was changed`), that no folder
+   is in place of `/etc/systemd/zram-generator.conf`, where step 4 puts a
+   link, or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, which step 5
+   removes (refused with `<file>: a folder is in its place: nothing was
+   changed`), and that
+   root's install record (`/var/lib/cst/installed.json`) was not written by
+   a newer CST (a downgrade): a refusal stops it before it writes anything.
+   To get past a refusal of one of the files it writes whole, or of the
+   paths of steps 4 and 5, move what is in the way aside (keep it if it
+   holds settings of yours), or remove it, then run `apply` again: it
+   writes CST's file in place of a file it writes whole, puts its link to
+   `/dev/null` at `/etc/systemd/zram-generator.conf` (step 4) and leaves
+   the legacy `/etc/sysctl.d/99-zram-tuning.conf` absent (step 5). On a
+   machine an older CST set up, it then writes `/etc/cst/swap.conf`
+   (section 5).
 2. **swap0**: the marked lines in `/etc/crypttab` (mode 0600) and
    `/etc/fstab`. A marked line is replaced **in place**; a second marked line
    is removed; with none, the line is appended. The file is replaced
@@ -349,7 +374,9 @@ What `apply` does, in order:
    MGLRU `min_ttl_ms` live (a knob this kernel lacks is skipped; THP `defrag`
    is kept while the `cpu` experiment `thp-defer` is on).
 7. **session memory floor (uresourced)**: backs up a pre-existing
-   `/etc/uresourced.conf` that is not CST's, writes CST's, and restarts
+   `/etc/uresourced.conf` that is not CST's (a link to a character device
+   such as `/dev/null` as an empty file, without reading the device),
+   writes CST's, and restarts
    `uresourced.service` when active if the file changed or the live
    `user.slice memory.min` differs (section 2.6).
 8. **machine.slice**: writes the drop-in, removes the one under its old name
@@ -583,7 +610,7 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | `units/machine.slice.d-10-swap-memory-low.conf` | `/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf` |
 | `domain.py` | pure swap domain model, the partition (`SwapHardwareSpec`, read from `/etc/cst/swap.conf`), parsing, and metrics |
 | `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
-| `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, memory reclaim and `uresourced` helpers in `application/memory_tuning.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens), the command line's words and where it stops (help, a wrong argument) in `application/command_line.py`; the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
+| `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, memory reclaim and `uresourced` helpers in `application/memory_tuning.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens), the checks of a path in apply's way (a folder in place of a file, a file in place of a folder) in `application/in_the_way.py`, the command line's words and where it stops (help, a wrong argument) in `application/command_line.py`; the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
 | `wiring.py` | the composition root: the environment, the sudo re-run of `cli.py` (with `CST_PROG` and the caller's `LC_CTYPE`), and the use cases built over the real adapters. `CST_SWAP_PROC` and `CST_SWAP_SYS` move where `/proc` and `/sys` are read and written (the cgroup tree stays `/sys/fs/cgroup`): for the tier 1 E2E test only, whose container has a read-only `/proc/sys` and `/sys` of the host's kernel. When either is set, `plan`, `status` and `apply` say so on their first line (`test seam (...)`), so a stale export in a root shell cannot pass for the kernel's state; the line also says that `/etc` is the real one and that `apply`'s `sysctl`, `modprobe` and `zramctl` are the ones on `PATH` (the tier 1 test puts stand-ins there) |
 | `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)) |
 

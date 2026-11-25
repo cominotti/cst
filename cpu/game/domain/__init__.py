@@ -39,6 +39,7 @@ class GameRecordKind(StrEnum):
     CGW = "cgw"  # a cgroup file written directly
     EPP = "epp"  # a CPU's energy/performance preference (game.state only)
     SYSFS = "sysfs"  # a generic sysfs file written directly and restored on off (game.state only)
+    USER = "user"  # the uid the user manager's records after it are for (game.leftovers only)
 
 
 _MANAGERS: Final[dict[str, Manager]] = {"sys": "sys", "usr": "usr"}
@@ -115,6 +116,11 @@ class GamePaths:
     def intended(self) -> str:
         """game.intended: what 'on' set, for the drift repair."""
         return posixpath.join(self.run, posixpath.basename(state_format(StateFormatKey.GAME_INTENDED).path))
+
+    @property
+    def leftovers(self) -> str:
+        """game.leftovers: the records 'off' could not undo, for the next 'off' and tick."""
+        return _in(self.run, posixpath.basename(state_format(StateFormatKey.GAME_LEFTOVERS).path))
 
     @property
     def manual(self) -> str:
@@ -429,12 +435,49 @@ def state_uid(recs: Sequence[Record]) -> str | None:
     return None
 
 
+class UnitType(StrEnum):
+    """The unit types of systemd (systemd.unit(5)): the part of a unit name after its last dot."""
+
+    SERVICE = "service"
+    SOCKET = "socket"
+    DEVICE = "device"
+    MOUNT = "mount"
+    AUTOMOUNT = "automount"
+    SWAP = "swap"
+    TARGET = "target"
+    PATH = "path"
+    TIMER = "timer"
+    SLICE = "slice"
+    SCOPE = "scope"
+
+
+UNIT_NAME_MAX: Final = 255  # systemd's UNIT_NAME_MAX (256) less the string's NUL
+_UNIT_NAME_CHARS: Final = re.compile(r"[A-Za-z0-9:_.\\@-]+")
+
+
+def unit_name_valid(name: str) -> bool:
+    """A name systemd could give a unit, by the rules of its unit_name_is_valid (any form: plain,
+    instance, template): at most 255 characters, all ASCII letters, digits, ':-_.@' or a backslash
+    (systemd's escapes, such as x2d for a dash), a prefix that is not empty and does not start with
+    '@', and a known type after the last dot. Permissive on purpose: a name it refused would leave a real box unhandled."""
+    prefix, dot, suffix = name.rpartition(".")
+    return (
+        dot == "."
+        and prefix != ""
+        and not prefix.startswith("@")
+        and len(name) <= UNIT_NAME_MAX
+        and _UNIT_NAME_CHARS.fullmatch(prefix) is not None
+        and enum_member(UnitType, suffix) is not None
+    )
+
+
 def escaped_unit(name: str) -> str | None:
     """The unit of a cgroup folder of the user manager next to the game, or None for one with a
-    rule of its own. systemd puts a '_' before a cgroup name that could clash with a controller
-    file (cpu.slice -> _cpu.slice)."""
+    rule of its own, and for a folder whose name is no unit name (a blank, bytes that are not UTF-8:
+    a folder someone made by hand; set-property could never act on it). systemd puts a '_' before a
+    cgroup name that could clash with a controller file (cpu.slice -> _cpu.slice)."""
     unit = name.removeprefix("_")
-    return None if unit in KNOWN_SLICES else unit
+    return None if unit in KNOWN_SLICES or not unit_name_valid(unit) else unit
 
 
 @dataclass(frozen=True, slots=True)
@@ -678,12 +721,25 @@ def drift_lines(
     return lines
 
 
+class BoxProp(StrEnum):
+    """The properties the tick sets on the boxes it handles (Docker and Steam scopes, the boxes next to the
+    game), which it reads back to judge whether they still hold (setting_holds)."""
+
+    MEMORY_LOW = "MemoryLow"
+    ALLOWED_CPUS = "AllowedCPUs"
+    CPU_WEIGHT = "CPUWeight"
+
+
 def escapes_in_state(recs: Sequence[Record]) -> str:
     """The boxes of the user manager the profile made idle, from game.state ("none" if none)."""
     out = [
         r[2]
         for r in recs
-        if len(r) >= 4 and r[0] == GameRecordKind.PROP and r[1] == "usr" and r[3] == "CPUWeight" and r[2] != USER_SLICE
+        if len(r) >= 4
+        and r[0] == GameRecordKind.PROP
+        and r[1] == "usr"
+        and r[3] == BoxProp.CPU_WEIGHT
+        and r[2] != USER_SLICE
     ]
     return " ".join(out) if out else "none"
 

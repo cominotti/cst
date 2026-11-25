@@ -658,12 +658,18 @@ setting even if it goes away (stopped, or unloaded once nothing uses it) and
 a later job makes it again: the runtime override stays in
 `/run/user/<uid>/systemd/user.control/<slice>.d/` until `off`. A box that
 holds a GameMode client (the game itself, started in such a box) is left
-alone. That check runs once, when the box is first picked up: a game started
-later in a box that is already idle stays idle until `off`, and so does a
+alone. That check runs when the box is first picked up, and again when the
+watchdog sets a box again (7.2): a game started later in a box that is
+already idle (its settings holding) stays idle until `off`, and so does a
 game that does not use GameMode (with `game on` by hand). Start such a game
 from the desktop or Steam, or with `--slice=app-NAME.slice`. Apps that GNOME
 or Flatpak start (`app-*.scope`) and `flatpak-session-helper.service` are
-not touched.
+not touched. Nor is a folder whose name is no unit name (a blank, a byte that
+is not UTF-8, a character systemd never puts in a unit name): systemd never
+makes one, but a process of yours can `mkdir` one in your user manager's
+cgroup tree, and `set-property` could never act on it. (Versions before
+2026-11 wrote a record for it and ran a `set-property` that fails; for a
+name that is not UTF-8, one more of each at every watchdog run.)
 
 To keep a job out of this, give it a slice under one of the boxes CST
 already handles. `systemd-run --user --slice=user-NAME.slice` nests under the
@@ -746,13 +752,28 @@ that has GameMode's library (`libgamemode`) loaded.
 - Profile on: Docker containers started in the meantime get `AllowedCPUs=12-23`,
   Steam scopes started in the meantime (the game's own) get `MemoryLow`, and
   other boxes next to the game that appeared in the meantime get the idle
-  class (7.1). A box it already handled is skipped, so `game.state` does not
-  grow at each run. Handled means that `game.state` holds a record of that
-  box and setting which `off` can read, compared field by field (manager,
-  unit, property): a line `off` cannot read (an unclosed quote) does not
-  count, and a unit name that `printf %q` writes quoted (systemd's `\x2d`)
-  still does. A setting of the profile that something undid in the
-  meantime is set again (section 7.5). When the user the profile acts for has
+  class (7.1). A box it already handled gets no new record, so `game.state`
+  does not grow at each run. Handled means that `game.state` holds a record
+  of that box and setting which `off` can read, compared field by field
+  (manager, unit, property): a line `off` cannot read (an unclosed quote)
+  does not count, and a unit name that `printf %q` writes quoted (systemd's
+  `\x2d`) still does. Each run reads the recorded settings of each handled
+  box back from systemd (one `systemctl show` per box) and sets again, with
+  `set-property` and no new record, each one whose value is not the
+  profile's: its `set-property` failed, or an `off` that was killed undid it
+  while the profile stayed on. The first record still says how `off` undoes
+  it. The journal says it at level notice (`UNIT: PROP is 'NOW', not 'WANT'
+  (its set failed, or something undid it): set PROP=VALUE again`), or at
+  level warning when that `set-property` fails too (tried again at the next
+  run). The value is the one the settings give now, so a `BUILD_CPUS` edited
+  while the profile is on reaches these boxes at the next run (the fixed
+  units keep what `on` set). When every value holds, the run changes
+  nothing and writes nothing. Left alone: a setting `game.intended` covers
+  (the drift repair sets it, section 7.5), every setting of a slice when
+  `game.intended` is of a newer format, a unit systemd has not loaded, a box
+  that holds a GameMode client by then, and a value the profile cannot
+  compare (a `GAME_MEMORY_LOW` given as a percentage). A setting of the
+  profile that something undid in the meantime is set again (section 7.5). When the user the profile acts for has
   no account (6.2: `TARGET_USER` names none, or the account was deleted
   while the profile was on), the Steam scopes and the boxes of its user
   manager are left alone (there is no such user manager); the journal says
@@ -815,7 +836,11 @@ so if `on` stops halfway, `off` can still undo what was done. `on` sets the
 memory chain (7.1) first, `user@<uid>.service` before its parents, so the
 first line of `game.state` names the user it acts for, whatever step `on`
 stopped at (`off` acts for that user, 6.2, and so do the watchdog's `tick`
-and `state`, also when `TARGET_USER` names another user now). When the line
+and `state`, also when `TARGET_USER` names another user now). When no
+account has that uid any more, `off` never undoes the user manager's records
+of `game.state` in another user's manager, nor keeps them for one: it drops
+them, said in one line (`<4>off: no account has uid UID, the user 'on' acted
+for, now: N setting(s) of its user manager dropped, ...`). When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to
 /run/cpu-setup/game.state`; it carries on with the rest and still exits 0,
@@ -874,6 +899,67 @@ memory protection until the next reboot. Then `off` reloads systemd.
 Then it logs `off: previous CPU, weight, memory, zswap writeback and EPP settings restored`
 and deletes `game.state` and `game.intended` (section 7.5).
 
+**An undo that fails is kept and retried.** When one step of `off` fails (a
+`set-property` that systemd refuses, a sysfs or EPP file that cannot be
+written, a runtime override that cannot be removed), `off` still undoes
+every other record and removes `game.state`, so the profile is off. An
+override that is still there gets no `daemon-reload` of its own, neither
+from `off` nor from the ticks that retry it. It writes its record
+to `/run/cpu-setup/game.leftovers`, then names the failed step in the journal
+(`<4>off: could not undo machine.slice CPUWeight=70: kept in
+/run/cpu-setup/game.leftovers for the next off and tick`), and ends with `..., except N setting(s)
+kept in /run/cpu-setup/game.leftovers`. The next `off` and every watchdog
+`tick` while the profile is off undo the kept records again and keep only
+those that fail again; the file is removed when none is left. An `off` with
+no `game.state` and the tick log `<5>undid ..., kept in
+/run/cpu-setup/game.leftovers by an earlier off` for each one done now: one
+that works now, and also one whose unit or folder is gone (below), which had
+nothing left to set. An `off` with a `game.state` undoes the kept records
+with its own and names only those that fail again. A user manager's record keeps the user it was for (a `user
+UID` line before it), so it is undone for that user whatever
+`TARGET_USER` says later, and never in another user's manager: when no
+account has that uid any more, the record stays kept while that uid's user
+manager is there (`/run/user/UID/systemd`) and is done once it is gone.
+Each manager an undo removed an override in gets its own `daemon-reload`:
+an `off` or a tick that undoes records of several users (its own and an
+earlier `off`'s for another user) reloads each of those users' managers.
+A kept new override of the user manager with no `user` line (kept while
+`TARGET_USER` named no account) is dropped while `TARGET_USER` still names
+none: no user's runtime folder holds it and no user manager can be reloaded,
+so nothing is said undone (`<4>... could not undo ...: TARGET_USER names no
+account, no user manager to undo it in: dropped`).
+What the tick then decides (switching the profile on for a running game) is
+still judged for `TARGET_USER` as the settings file has it, so a kept
+record never makes the tick start a `cpu-game.service` whose `on`
+refuses. A record whose unit is gone is done, not kept: a
+transient unit that is no longer loaded, or a user manager whose runtime
+folder is gone (a logout), took its runtime override with it; so is a
+cgroup, sysfs or EPP file whose folder is gone (a cgroup that ended, a CPU
+taken offline), so a folder made again later (the next login's cgroup) never
+gets the old session's value. A fixed unit's override outlives the unit, so
+it stays kept. `cst cpu game state` lists the
+kept settings (`leftovers: N setting(s) 'off' could not undo, ...`), and
+`cst doctor` warns about them, by name
+([doctor/README.md, section 8.4](../doctor/README.md#84-settings-off-could-not-undo)). When
+`game.leftovers` cannot be written (`/run` full), the old file is left as
+it is while none of its records was undone since (a tick that undid
+nothing, an `off` whose own records failed too): its records stay kept and
+are retried once `/run` has room. Otherwise it is removed, so a record
+undone now is neither undone nor said again at every tick. The journal says
+each failed setting the file does not hold is not undone, once, instead of
+kept (`<3>off: could not keep ... in /run/cpu-setup/game.leftovers: not
+undone`, without `off:` from the tick); `off` then ends with `..., except N
+setting(s) not undone` (`..., except N setting(s): K kept in
+/run/cpu-setup/game.leftovers, M not undone` when the old file still holds
+some of them). A file in a newer format is left alone, neither undone nor removed
+(a failed setting is said not undone in the same words), and so is one that
+cannot be read (a folder in its place, a read error: `<4>... cannot be read
+(...): left alone, neither undone nor removed`), which is never taken for a
+missing one. The file is read byte for byte, as it is written back.
+(Versions before 2026-11 removed
+`game.state` with the failed record in it, and the setting kept the game's
+value until a reboot.)
+
 ### 7.5 When something undoes a setting (drift)
 
 "Drift" means: the profile is on, but a setting it made is no longer in
@@ -922,7 +1008,8 @@ What else the profile does about it:
   `prop sys user.slice MemoryLow 16G 17179869184`. A `cpuset.cpus` file it
   wrote directly (7.1) gets a `cgw` line. The transient units (the scopes
   of Docker containers and Steam, the `run-*.service` of `systemd-run`) are
-  not recorded: no drop-in can win over theirs. The slices made idle in the
+  not recorded: no drop-in can win over theirs; the watchdog's check of the
+  boxes it handled (7.2) sets them again instead. The slices made idle in the
   user manager (7.1) are recorded, so the repair covers them too.
 - Every watchdog run (`tick`, every 30 s) asks systemd once per unit and
   compares. Each setting that differs is set again with
@@ -988,7 +1075,9 @@ older version, is format 0 and is read as before). A copy that finds a newer
 format there leaves the drift alone: `tick` says so in the journal once
 per boot (again when the text changes; its mark is
 `/run/cpu-setup/drift-warned`, removed by `on` and `off`), `state` and
-`cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
+`cst doctor` show "drift: not checked". `game.leftovers` (7.4) is internal too
+(format `cst-game-leftovers 1` on its first line); it may exist while the
+profile is off, so it says nothing about a game. To be covered all the time, not only during games, run such work in
 a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
 (7.1).
 
@@ -1490,6 +1579,9 @@ cst cpu uninstall
 `uninstall`:
 
 - stops `cpu-game.service` (this runs the exact revert), disables the timer;
+  a setting an earlier `off` could not undo and the watchdog could not
+  either (still listed by `cst cpu game state` as `leftovers`, 7.4) is then
+  retried no more, and keeps its value until the next reboot clears `/run`;
 - disables and stops `cst-cpu-power.service`, runs `cpu-power revert` to restore CST-managed GPU runtime PM and CPU C-states, runs `cpu-irq revert` (as `cst cpu irq revert`: removes CST's `irqbalance` ban-list files and restarts `irqbalance.service` if it is active), and reloads udev rules;
 - removes the units, the `machine.slice` and `user@.service` drop-ins (also
   `machine.slice.d/50-cpu-setup.conf`, the name before 2026-11), the udev rule,
@@ -1681,8 +1773,13 @@ this is harmless.
 | `setup/wiring.py` | What the shim hands over (`CST_SELF`, `CST_ARG0`), the environment, the command lines it execs (cpu-watch, flatpak-spawn from a toolbox, sudo) and `CpuSetup` over the real adapters |
 | `setup/cli.py` | Help, cpu-watch's commands, the toolbox refusal, the sudo re-run and the root commands |
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
-| `game/domain.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
+| `game/domain/__init__.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
 | `game/adapters/profile.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/domain/boxes.py` | The watchdog's check of the boxes it handled, no I/O: whether a recorded setting still holds as systemd shows it (`MemoryLow` by its bytes, `AllowedCPUs` as a set of CPUs, `CPUWeight`), and the journal's words when it sets one again |
+| `game/adapters/boxes.py` | `set_again`: a handled box's recorded settings read back (one `systemctl show`) and each one that does not hold set again, with no new record |
+| `game/domain/leftovers.py` | The format of `game.leftovers` (7.4), no I/O: the records `off` could not undo with the user each is for, how `off` merges them with `game.state`'s, and the journal's and `state`'s words for them |
+| `game/adapters/leftovers.py` | `game.leftovers` on the machine: read, undo again (the next `off`, the tick while off), write back what still fails, and whether a failed unit is gone |
+| `game/adapters/report.py` | `state`'s report (`show_state`): what is applied now and which settings drifted, read from one snapshot of the state files, with no lock |
 | `game/adapters/power.py` | Dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`), AMD `3D_FULL_SCREEN` activation, P-core EPP, and per-game C-state caps |
 | `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, sysfs writes, the locale's collation |
 | `game/cli.py` | The command line of `cpu-game-profile` |

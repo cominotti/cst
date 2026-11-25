@@ -221,6 +221,13 @@ class LocalFileSystemAdapter:
         except OSError:
             return False
 
+    def is_char_device(self, path: str) -> bool:
+        """Return True if path resolves to a character special device (such as /dev/null)."""
+        try:
+            return stat.S_ISCHR(os.stat(path).st_mode)
+        except OSError:
+            return False
+
     def is_readable(self, path: str) -> bool:
         """Return True if the current process has read access to path."""
         return os.access(path, os.R_OK)

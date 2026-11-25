@@ -40,6 +40,7 @@ class StateFormatKey(StrEnum):
     INSTALL_RECORD = "install-record"
     GAME_STATE = "game-state"
     GAME_INTENDED = "game-intended"
+    GAME_LEFTOVERS = "game-leftovers"
     DOCKER_NOCOW_OUTCOME = "docker-nocow-outcome"
 
 
@@ -132,6 +133,11 @@ def version_of(data: object, field: str) -> int | None:
 #   change, and it has no version. game.intended (what 'on' set, for the
 #   drift repair) names its format on its first line; an installed bash copy
 #   of an older CST skips that line (it is no record it knows).
+# game-leftovers: the records 'off' could not undo (a failed set-property, a
+#   sysfs file that refused the write), kept for the next 'off' and the
+#   watchdog's tick while the profile is off. game.state alone keeps meaning
+#   "on": 'off' removes it whatever it could undo. An older CST never reads
+#   or writes this file.
 # docker-nocow-outcome: why docker-volumes-nocow left no migration scheduled
 #   (it gave up, or an install could not schedule it), for its status and cst
 #   doctor; written and removed best effort, read by no decision of the helper.
@@ -147,6 +153,7 @@ vm-nas-torn        | /var/lib/cst/vm-nas-torn.json              | 1 | vm/adapter
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py cpu/cli.py cpu/power/adapters.py doctor/application/cpu.py | none (its existence is the contract)
 game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py doctor/application/cpu.py | first line "cst-game-intended 1" (none: 0)
+game-leftovers     | /run/cpu-setup/game.leftovers              | 1 | cpu/game/adapters/leftovers.py   | cpu/game/adapters/leftovers.py cpu/game/adapters/report.py doctor/application/cpu.py | first line "cst-game-leftovers 1" (none: 0)
 docker-nocow-outcome | /var/lib/docker-volumes-nocow/outcome    | 1 | btrfs/docker_volumes_nocow/adapters.py | btrfs/docker_volumes_nocow/adapters.py doctor/application/docker_nocow.py | "v" (none: 0)
 """
 
