@@ -3686,11 +3686,67 @@ class _PendingStops(FakeNasSignals):
         self.depth += 1
         try:
             yield
-        finally:
+        except BaseException:
+            # As signals_held: the stop that waited is raised at the unmask also when the block raised; it
+            # replaces the failure, which stays its __context__.
             self.depth -= 1
+            self._raise_pending()
+            raise
+        self.depth -= 1
+        self._raise_pending()
+
+    def _raise_pending(self) -> None:
         if self.depth == 0 and self.pending:
             self.pending = False
             raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+
+# A child that blocks a stop in the real signals_held (StopSignals), sends itself SIGTERM in the block and
+# then raises: what ends the block, and the exception that stays its __context__.
+SIGNALS_HELD_CHILD = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from vm.adapters.backup import StopSignals
+signals = StopSignals()
+signals.catch_stops()
+try:
+    with signals.held():
+        with signals.held():
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise RuntimeError("the block failed")
+except BaseException as e:
+    print(type(e).__name__, type(e.__context__).__name__)
+"""
+
+
+class PendingStopsMatchSignalsHeldTest(unittest.TestCase):
+    """_PendingStops, the fake of the stops held, does what the real signals_held does when its block
+    raises with a stop pending: the stop ends the outermost block, the failure its __context__."""
+
+    def test_the_real_signals_held_raises_the_stop_over_the_blocks_failure(self) -> None:
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", SIGNALS_HELD_CHILD, _CHECKOUT],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual((r.returncode, r.stdout), (0, "Stop RuntimeError\n"), r.stderr)
+
+    def test_the_fake_does_the_same(self) -> None:
+        signals = _PendingStops()
+        with self.assertRaises(vm_domain_backup.Stop) as ctx, signals.held(), signals.held():
+            signals.stop_now()
+            raise RuntimeError("the block failed")
+        self.assertIsInstance(ctx.exception.__context__, RuntimeError)
+        self.assertEqual((signals.depth, signals.pending), (0, False))
+
+    def test_a_failure_with_no_stop_pending_goes_on(self) -> None:
+        signals = _PendingStops()
+        with self.assertRaisesRegex(RuntimeError, "the block failed"), signals.held():
+            raise RuntimeError("the block failed")
+        self.assertEqual(signals.depth, 0)
 
 
 class NasStopHeldFromAnswerTest(unittest.TestCase):
