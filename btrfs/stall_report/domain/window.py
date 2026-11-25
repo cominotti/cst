@@ -176,8 +176,9 @@ class _PairTotals(TypedDict):
     sample_d: int  # most storage waits in one v8+ sample
     maint_samples: int  # v5+ samples with a btrfs maintenance task in D state
     pswpout_v7: int  # pswpout of the v7+ sample pairs (compared with zswpwb)
-    # per vmstat key, the value of the last sample that read it, while the samples after it hold null
-    vm_held: dict[str, int]
+    # per vmstat key, the value of the last sample that read it, while the samples after it hold null, and
+    # whether every pair it was held across is a v7+ pair (only then does its growth count in pswpout_v7)
+    vm_held: dict[str, tuple[int, bool]]
     zswap_ok: bool  # some sample pair came from a v7+ daemon (zswap counters usable)
 
 
@@ -289,19 +290,21 @@ def _add_peaks(t: _PairTotals, b: SampleRecord, vm_idx: dict[str, int]) -> None:
 def _add_vm(t: _PairTotals, a: SampleRecord, b: SampleRecord, vm_idx: dict[str, int], *, full_vm: bool) -> None:
     """The vmstat counters' growth from a to b (the zswap ones only when full_vm: a v7+ pair). A value the
     daemon could not read (null) is bridged: the growth is counted from the last sample that read the key
-    (t["vm_held"]) to the next one that does."""
+    (t["vm_held"]) to the next one that does. Such growth counts in pswpout_v7 only when every pair it spans
+    is a v7+ pair."""
     vmd, held = t["vmd"], t["vm_held"]
     for k in vmd:
         if k in ZSWAP_KEYS and not full_vm:
             held.pop(k, None)
             continue
-        va = _vm_value(a, vm_idx, k)
-        if va is None:
-            va = held.get(k)
+        va, v7_span = _vm_value(a, vm_idx, k), full_vm
+        if va is None and k in held:
+            va, held_v7 = held[k]
+            v7_span = held_v7 and full_vm
         vb = _vm_value(b, vm_idx, k)
         if vb is None:
             if va is not None:
-                held[k] = va
+                held[k] = (va, v7_span)
             continue
         held.pop(k, None)
         if va is None:  # no sample before b read it
@@ -309,7 +312,7 @@ def _add_vm(t: _PairTotals, a: SampleRecord, b: SampleRecord, vm_idx: dict[str, 
         d = vb - va
         if d > 0:
             vmd[k] += d
-            if k == "pswpout" and full_vm:
+            if k == "pswpout" and v7_span:
                 t["pswpout_v7"] += d
 
 

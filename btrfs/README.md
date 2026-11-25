@@ -582,7 +582,9 @@ kernel shows its own state as files) and in the cgroup tree.
   the key to the next one that does (a gap in the samples, such as a
   reboot, ends that), and takes no peak from it; a 0 would be a counter
   gone back, and the pair after it would count every page since boot as a
-  burst.
+  burst. Growth counted across a `null` enters the "not through zswap"
+  figure only when every sample it spans came from a daemon version 7 or
+  later, as the zswap counters it is compared with.
 - It is strongly sandboxed (no network, no writes outside its own folders, limited
   to 192 MiB of memory and 25% of one CPU) and runs with a higher priority, so it
   keeps sampling while everything else is stuck.

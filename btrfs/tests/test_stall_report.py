@@ -188,6 +188,26 @@ class ZswapAcrossUpgradeTest(unittest.TestCase):
         self.assertRegex(text, r"zswap in/out 0 MiB / 0 MiB \(from \d\d:\d\d:\d\d\)   disk swap in/out")
         self.assertNotIn("GiB", text)
 
+    def test_a_pswpout_held_from_a_v6_sample_counts_no_bypass(self) -> None:
+        # v6 pswpout 100; the first v7 sample's pswpout is null; then v7 130 and 150, zswpwb +5 per v7 pair.
+        # Disk swap-out bridges the null (100 -> 130 -> 150: 50 pages), but the bypass counts only growth
+        # inside v7 pairs: 130 -> 150, 20 pages, minus 10 written back by zswap. Before, the bridged 30 pages,
+        # which began in the v6 sample, counted too (50 - 10 = 40 pages).
+        first = sample(T0 + 4, 0, BOOT_ZSWPWB)
+        first["vm"][3] = None
+        recs = [
+            meta(T0, 6),
+            sample(T0, 100, 0),
+            meta(T0 + 3, 7),
+            first,
+            sample(T0 + 9, 130, BOOT_ZSWPWB + 5),
+            sample(T0 + 14, 150, BOOT_ZSWPWB + 10),
+        ]
+        res, _ = self.analyse(recs)
+        self.assertEqual(res["vm"]["swap_out_bytes"], 50 * self.m.PAGE)
+        self.assertEqual(res["vm"]["zswap_writeback_bytes"], 10 * self.m.PAGE)
+        self.assertEqual(res["vm"]["swap_out_bypass_bytes"], 10 * self.m.PAGE)
+
     def test_only_new_daemon_counts_normally(self) -> None:
         recs = new_run(T0)
         res, text = self.analyse(recs)
