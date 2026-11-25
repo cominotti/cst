@@ -89,6 +89,15 @@ class BlockDisk:
 
 
 @dataclass(frozen=True, slots=True)
+class UdevProperties:
+    """What `udevadm info -q property` says of a disk: its KEY=VALUE lines (props), or why it could not
+    say (props None: error, its first line stripped or "exit N")."""
+
+    props: Mapping[str, str] | None
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class IocostSnapshot:
     """Collected kernel blk-iocost state, block devices, and installed units."""
 

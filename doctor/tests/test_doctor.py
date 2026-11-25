@@ -81,7 +81,7 @@ from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
-from tests.probes import bytes_program
+from tests.probes import bytes_program, time_bound
 from vm.adapters import images as vm_images
 from vm.wiring import vm_settings
 
@@ -2158,14 +2158,14 @@ class SwapSettingsDoctorTest(Scratch):
         self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
         host = doc_adapters.Host(dict(self.env))
         conf = os.path.join(self.root, "etc/cst/swap.conf")
-        opened = host.open_text
+        opened = host.open_regular_text
 
-        def open_text(path: str) -> TextIO:
+        def open_regular_text(path: str) -> TextIO:
             if path == conf:
                 raise OSError(errno.EIO, "Input/output error", path)
             return opened(doc_domain.ViewPath(path))
 
-        with mock.patch.object(host, "open_text", open_text):
+        with mock.patch.object(host, "open_regular_text", open_regular_text):
             rows = list(doc_swap.check_swap_settings(host))
         self.assertEqual(
             rows,
@@ -2198,6 +2198,49 @@ class SwapSettingsDoctorTest(Scratch):
         os.symlink("nowhere", folder)
         self.write("etc/fstab", SWAP_FSTAB)
         self.assertEqual(self.lines(self.run_tool().stdout), [not_a_file])
+
+    def test_a_fifo_or_a_link_to_a_device_at_swap_conf_is_not_a_regular_file(self) -> None:
+        # As cst swap takes it (REFUSE "not a regular file"). Before, a link to /dev/null read as an empty
+        # file ("not configured": add SWAP_PARTUUID to it), and a FIFO's open waited for a writer for ever
+        # (bounded here: CallBlocked).
+        conf = os.path.join(self.root, "etc/cst/swap.conf")
+        os.makedirs(os.path.dirname(conf))
+        not_a_file = Result(
+            "WARN", "swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed"
+        )
+        for kind, make in (("fifo", os.mkfifo), ("link to /dev/null", lambda p: os.symlink(os.devnull, p))):
+            with self.subTest(kind=kind), time_bound(5):
+                make(conf)
+                try:
+                    rows = list(doc_swap.check_swap_settings(doc_adapters.Host(dict(self.env))))
+                finally:
+                    os.remove(conf)
+                self.assertEqual(rows, [not_a_file])
+
+    def test_a_fifo_at_crypttab_or_fstab_is_one_it_cannot_read_and_nothing_blocks(self) -> None:
+        # No swap.conf: the migration path reads crypttab and fstab, as cst swap reads them (regular_only:
+        # an empty text). Before, the FIFO's open waited for a writer for ever (bounded here: CallBlocked).
+        # crypttab: resolve_settings reads it, and zswap.conf says swap is set up, so "not configured".
+        # fstab: without zswap.conf doctor reads it for an older CST's marked line; an empty text has none.
+        not_configured = Result(
+            "WARN",
+            "swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
+            " refuses (swap/README.md, section 2.3)",
+        )
+        zswap = os.path.join(self.root, "etc", "tmpfiles.d", "zswap.conf")
+        for name, set_up, want in (("crypttab", True, [not_configured]), ("fstab", False, [])):
+            path = os.path.join(self.root, "etc", name)
+            with self.subTest(name=name), time_bound(5):
+                if set_up:
+                    self.write("etc/tmpfiles.d/zswap.conf", "")
+                os.mkfifo(path)
+                try:
+                    rows = list(doc_swap.check_swap_settings(doc_adapters.Host(dict(self.env))))
+                finally:
+                    os.remove(path)
+                    if set_up:
+                        os.remove(zswap)
+                self.assertEqual(rows, want)
 
     def test_installed_but_not_configured(self) -> None:
         self.write("etc/tmpfiles.d/zswap.conf", "")

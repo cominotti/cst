@@ -180,10 +180,11 @@ run (recovery), and at the end (the same command again converges).
 - Wrap each mutating call: subclass the real adapter and send each method
   through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
   send each mutating method of an in-memory fake of a use case's ports
-  through it (`ScrubWorld` in `btrfs/tests/fakes.py`, which
-  `btrfs/tests/test_scrub_limit_faults.py` drives; a contract test runs
-  the same body on the fake and on the real adapter, so the fake cannot
-  drift: `btrfs/tests/test_scrub_limit_ports.py`),
+  through it (`ScrubWorld` and `IocostWorld` in `btrfs/tests/fakes.py`,
+  which `btrfs/tests/test_scrub_limit_faults.py` and
+  `btrfs/tests/test_iocost_faults.py` drive; a contract test runs the same
+  body on the fake and on the real adapter, so the fake cannot drift:
+  `btrfs/tests/test_scrub_limit_ports.py`, `btrfs/tests/test_iocost_ports.py`),
   patch the names an adapter module calls (`ensure_dir`, `write_atomic`:
   `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
@@ -191,7 +192,7 @@ run (recovery), and at the end (the same command again converges).
   whose errors the code does not handle: a failure armed there does not
   fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
-  `reads` naming the commands that only read (`btrfs/tests/test_iocost_faults.py`).
+  `reads` naming the commands that only read (`btrfs/tests/test_cache_faults.py`).
 - Model the outside state the invariants need in the fake under it: what
   systemd has loaded and whether it needs a reload, the install record,
   the service, what a daemon read at its last start. When the usual fake
@@ -229,16 +230,18 @@ tests, such as tier 1's `test_161` for scrub-limit's reload).
 **btrfs-bulk.** `btrfs/tests/test_btrfs_bulk_faults.py` runs the
 program over the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`
 `BulkHome`: the real moves, cp included, with fakes only for subvolumes,
-+C, the busy check, flatpak and btrfs-snapshot's convert), from nine start
++C, the busy check, flatpak and btrfs-snapshot's convert), from ten start
 states (a plain move, the in-place +C rewrite, a +C copy out of /home, an
 old subvolume, a stale cache, an empty folder, a late write into the old
-tree, a write into the source during its copy, and writes on both sides). `arm_points` makes the user adapter's
+tree, a write into the source during its copy, writes on both sides, and
+the undo of a Steam game's move: `bulk steam apply` over a minimal Flatpak
+Steam library, a late write into the old game folder, from the switch on). `arm_points` makes the user adapter's
 `os` calls (`FaultyOs`), the state files' writes and removals, cp
 (`FaultyRunner`), +C on a folder, the creation of `~/Bulk` and each
 tree's deletion (torn in two) points of the plan, which is dead after a kill. After a kill every mode is tried again
 inside the repair; after a failure or a full disk, only a kill. No gap is
 let through: a fault that cuts the deletion of a checked copy (a rollback's,
-or the switch's when the source changed) must converge too, because the
+a Steam undo's, or the switch's when the source changed) must converge too, because the
 copy is renamed to `<target>.bulk-new.bulk-drop` before it is deleted and a
 repair deletes a marked copy without the "written to" check.
 
@@ -247,12 +250,16 @@ repair deletes a marked copy without the "written to" check.
 `btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
 `btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
 `bluetooth.tests.test_setup_faults`, `btrfs.tests.test_btrfs_bulk_faults`)
-together: 4.3 to 4.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
+together: 10.5 to 10.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
 -I -B tests/run_unit.py --jobs 4` on the eight, 3 runs, on a workstation
-whose load average was 20 on 16 CPUs; the seven before bulk's took 2.7 s
-there, and 2.3 to 2.4 s unloaded). btrfs-bulk's alone is about 10 s of CPU
-in 27 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
-the times are about the same on tmpfs and on a btrfs home.
+whose load average was 3 to 4 on 16 CPUs; 6.5 to 10.1 s there without the
+Steam undo's classes, and 4.3 to 4.8 s at an earlier measurement under a
+load average of 20). btrfs-bulk's alone is about 20 s of CPU in 30
+classes: the Steam undo's three take about 9.5 s of it (SteamUndoKillTest,
+the longest, 5.7 s: each case runs `bulk steam apply` and its survey of the
+library again; the library already holds only a game folder and its
+manifest), LateWriteKillTest 1.7 s. fsync is stubbed, so the times are about
+the same on tmpfs and on a btrfs home.
 
 ## Where the virtual environment lives
 
@@ -757,13 +764,12 @@ not derive from it.
 - `mbt_iocost_apply.py`: `cst btrfs iocost` apply (after an upgrade of
   CST or not) and revert, live or not, with any one step failing (a file's write or removal, the
   io.cost.qos write, daemon-reload, enable, disable, the udev rules' reload,
-  the installer's mark), through a model of the installer (the real
-  `InstallService` in memory), systemd, udev and io.cost.qos: the component
-  is marked done only after every step it stands for (a7c5e92), exit 0
-  leaves the whole target, a vendor's io.cost.qos line stays, and apply or
-  revert again converges. One known gap is let through by name: a full
-  revert whose removal fails after its disable leaves btrfs:iocost done
-  with the service disabled, until the next full apply or revert.
+  the installer's mark), over the in-memory fakes of iocost's ports
+  (`IocostWorld` in `btrfs/tests/fakes.py`: the installer and the removal
+  through the real `InstallService` in memory, what systemd and udev have
+  loaded, and io.cost.qos): the component is marked done only after every
+  step it stands for (a7c5e92), exit 0 leaves the whole target, a vendor's
+  io.cost.qos line stays, and apply or revert again converges.
 - `mbt_game_state.py`: the game profile's `game.state` and
   `game.intended`, whose fields are written as bash's `printf %q` writes
   them, over fields generated as bytes (any but NUL, as a bash variable
@@ -830,11 +836,11 @@ depend on `TMPDIR`. A machine over adapters that write through
 than on tmpfs (the pilot measured about 20 times; see
 [Test performance on a workstation](#test-performance-on-a-workstation)).
 The cache machine writes real files under a temporary
-folder (the scrub-limit machine runs over in-memory port fakes); the bulk machine too, and it runs `cp` there. The iocost machine writes only io.cost.qos, its sysfs tree and
-the managed-devices file there: btrfs:iocost's installed files and the
-install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
-does not cover how `LocalInstallTarget` writes them (modes, fsync,
-relabel). Each machine's TestCase stubs fsync
+folder; the bulk machine too, and it runs `cp` there. The scrub-limit and
+iocost machines run over in-memory port fakes, so they cover neither how
+the adapters write their files (modes, fsync, relabel) nor the commands
+they run: the ports' contract tests (`btrfs/tests/test_scrub_limit_ports.py`,
+`btrfs/tests/test_iocost_ports.py`) do. Each machine over real files stubs fsync
 (`tests.fault_injection.stub_fsync` in its `setUp`), so they do not
 depend on `TMPDIR` either.
 

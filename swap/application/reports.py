@@ -251,8 +251,9 @@ class _FileSettingsFacts:
         self._env = env
         self._partition = partition
 
+    # /etc's readers take regular_only: a FIFO or a device there is a file it cannot read, at once, never a wait.
     def settings_text(self) -> str | None:
-        return self._fs.read_text(self._env.settings_path)
+        return self._fs.read_text(self._env.settings_path, regular_only=True)
 
     def settings_seen(self) -> bool:
         return self._fs.lexists(self._env.settings_path)
@@ -274,10 +275,10 @@ class _FileSettingsFacts:
         return self._fs.exists(self._env.crypttab) and not self._fs.is_readable(self._env.crypttab)
 
     def crypttab_text(self) -> str:
-        return self._fs.read_text(self._env.crypttab, "") or ""
+        return self._fs.read_text(self._env.crypttab, "", regular_only=True) or ""
 
     def fstab_text(self) -> str:
-        return self._fs.read_text(self._env.fstab, "") or ""
+        return self._fs.read_text(self._env.fstab, "", regular_only=True) or ""
 
     def partition_size(self, device_path: str) -> int | None:
         part = self._partition(device_path)
@@ -334,7 +335,7 @@ class SwapReports:
         exists = self._fs.exists(path)
         if exists and not self._fs.is_readable(path):
             return OwnedState.UNREADABLE
-        content = self._fs.read_text(path) if exists else None
+        content = self._fs.read_text(path, regular_only=True) if exists else None  # a FIFO, a device: None
         readable = (not exists) or (content is not None)
         return spec.inspect(content, exists=exists, readable=readable)
 
@@ -348,7 +349,7 @@ class SwapReports:
             return inspect_managed_file(desired, None, exists=False, is_symlink=False, readable=True)
         if not self._fs.is_readable(dest):
             return inspect_managed_file(desired, None, exists=True, is_symlink=False, readable=False)
-        actual = self._fs.read_text(dest)
+        actual = self._fs.read_text(dest, regular_only=True)  # a FIFO, a device: None, as a file it cannot read
         return inspect_managed_file(desired, actual, exists=True, is_symlink=False, readable=actual is not None)
 
     def _uresourced_copy_due(self, dest: str, st: ManagedState) -> bool:
@@ -374,9 +375,8 @@ class SwapReports:
         return OwnedState.UNREADABLE if copy_fails else st
 
     def old_dropin_is_ours(self) -> bool:
-        """The drop-in under its old name is there and CST (or the script before it) wrote it."""
-        text = self._fs.read_text(self._env.old_slice_dropin)
-        return text is not None and is_cst_dropin(text)
+        """The drop-in under its old name is a regular file there (not opened in a way that waits) CST wrote."""
+        return is_cst_dropin(self._fs.read_text(self._env.old_slice_dropin, "", regular_only=True) or "")
 
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
@@ -649,7 +649,8 @@ class SwapReports:
         memory controller for it); else the cgroup's memory.low against CST's value (DIFF when it differs)."""
         shown = self._systemd.show(UnitName(MACHINE_SLICE), ("MemoryLow", "DropInPaths", "ActiveState"))
         effective = shown.get("MemoryLow", "")
-        dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
+        listed = shown.get("DropInPaths", "").split()  # one not a regular file: None, as one it cannot read
+        dropins = [(p, self._fs.read_text(self._env.host_view(p), regular_only=True)) for p in listed]
         source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
         if source is not None:
             return SettingCheckRow(

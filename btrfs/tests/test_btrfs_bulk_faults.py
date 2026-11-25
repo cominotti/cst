@@ -37,13 +37,21 @@ Checked after the fault, after the recovery and at the end:
 The Conflict start state ends as documented instead: both sides kept, the journal names the old
 tree, status says "written to on both sides", and a further apply changes nothing.
 
-A rollback's deletion of the copy, and the switch's when the source changed during the copy
+A rollback's deletion of the copy (a Steam undo's too), and the switch's when the source changed during the copy
 (Changed), is cut like any other point: the copy is renamed to
 `<target>.bulk-new.bulk-drop` first (UserFiles.u_drop), so what a cut deletion leaves is known by
 its name, and the next repair goes on deleting it: those cases converge too.
 
-Not modelled: Steam's journals, the child process of as_user (no user to drop to), real btrfs and
-+C, and writes during a call other than the late writes of LateWrite, Changed and Conflict.
+SteamUndo is `bulk steam apply` over a minimal Flatpak Steam library (a game folder and its
+manifest; Steam's process check faked to none and the reflink clone to cp --reflink=auto, a point
+"cp DEST"), with a late write into the old game folder after the switch: the undo deletes each
+copy through the same mark, and its own invariants check the game's files in both libraries, the
+libraryfolders.vdf pair and the journal-steam file. Its first fault is at the switch's first
+rename: before it the apply is a plain Steam move's.
+
+Not modelled: a plain Steam move's prepare and VDF writes as a start state of its own, the child
+process of as_user (no user to drop to), real btrfs and +C, a real copy (--copy, copy_bytes), and
+writes during a call other than the late writes of LateWrite, Changed, Conflict and SteamUndo.
 """
 
 from __future__ import annotations
@@ -55,8 +63,9 @@ import os
 from typing import ClassVar, Final, override
 import unittest
 
-from btrfs.bulk.application import items as bulk_items
+from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
 from btrfs.bulk.domain import BY_ID, ITEMS, ItemJournal
+from btrfs.bulk.domain.steam import STEAM_APP, STEAM_ROOT, SteamJournal, lf_files, vdf_load
 from btrfs.tests.bulk_fakes import (
     OLD_MARK,
     BulkHome,
@@ -108,6 +117,13 @@ CASES_CHANGED_FAIL_FROM = 24
 CASES_CONFLICT_KILL = 50
 CASES_CONFLICT_FAIL = 24
 CASES_CONFLICT_FAIL_FROM = 27
+CASES_STEAM_UNDO_KILL = 374
+CASES_STEAM_UNDO_FAIL = 106
+CASES_STEAM_UNDO_FAIL_FROM = 144
+
+STEAM_FIXTURES: Final = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "steam")
+GAME: Final = "common/dota 2 beta"  # appmanifest_570.acf's installdir, below steamapps
+STEAM_IDENT: Final = "steam-570"
 
 
 def quiet(fn: Callable[[], object]) -> str:
@@ -130,6 +146,12 @@ def files_under(top: str) -> dict[str, str] | None:
             with open(p) as f:
                 found[os.path.relpath(p, top)] = f.read()
     return found
+
+
+def steam_fixture(name: str) -> str:
+    """A fixture of the Steam tests (btrfs/tests/fixtures/steam), as text."""
+    with open(os.path.join(STEAM_FIXTURES, name)) as f:
+        return f.read()
 
 
 def put_layout(fx: BulkHome) -> None:
@@ -204,6 +226,14 @@ class BulkFaultBase(unittest.TestCase):
             fx.close()
 
     # ---- runs ---------------------------------------------------------------------------------
+    def run_apply(self, fx: BulkHome) -> object:
+        """The apply a start state runs: `bulk apply` (fx.apply), its output in fx.out."""
+        return fx.apply()
+
+    def first_fault(self, points: list[str]) -> int:
+        """The points before the first one a first fault is put at (FIRST_FAULT_AT)."""
+        return 0 if self.FIRST_FAULT_AT is None else points.index(self.FIRST_FAULT_AT)
+
     def expected(self) -> dict[str, str]:
         return dict(self.FILES) | self.extra
 
@@ -241,13 +271,13 @@ class BulkFaultBase(unittest.TestCase):
         plan.arm()
         quiet(lambda: bulk_items.recover(fx.bulk))
         for _ in range(self.SETTLE_APPLIES):
-            fx.apply()
+            self.run_apply(fx)
         if self.ENDS_IN_CONFLICT:
             self.assert_conflict(fx, when)
         else:
             self.assert_converged(fx, when)
         before = fx.tree()
-        fx.apply()
+        self.run_apply(fx)
         self.assertEqual(fx.tree(), before, f"{when}: a further apply changed files")
         self.assertNotIn("done:", fx.out, when)
 
@@ -255,9 +285,9 @@ class BulkFaultBase(unittest.TestCase):
         """Each point of one apply failing in mode, then recover() (alone, and with a second fault
         of every mode at each of its points), then the end; the number of cases run."""
         with self.home() as (fx, plan):
-            points = cut_points(plan, fx.apply)
+            points = cut_points(plan, lambda fx=fx: self.run_apply(fx))
             self.settle(fx, plan, "no fault")
-        after = 0 if self.FIRST_FAULT_AT is None else points.index(self.FIRST_FAULT_AT)
+        after = self.first_fault(points)
         cases = 0
         recover = bulk_items.recover
         for _mode, k in every_fault(len(points), (mode,), after=after):
@@ -265,7 +295,7 @@ class BulkFaultBase(unittest.TestCase):
             when = f"{mode} at {k}"
             with self.subTest(k=k), self.home() as (fx, plan):
                 cases += 1
-                run_armed(plan, fx.apply, (mode, k))
+                run_armed(plan, lambda fx=fx: self.run_apply(fx), (mode, k))
                 self.assert_safe(fx, when)
                 steps = run_armed(plan, lambda fx=fx: recover(fx.bulk))
                 self.assert_safe(fx, f"{when}, recovered")
@@ -274,7 +304,7 @@ class BulkFaultBase(unittest.TestCase):
                 when2 = f"{when}, then {mode2} at recover step {j} ({steps[j - 1]})"
                 with self.subTest(k=k, then=mode2.value, j=j), self.home() as (fx, plan):
                     cases += 1
-                    run_armed(plan, fx.apply, (mode, k))
+                    run_armed(plan, lambda fx=fx: self.run_apply(fx), (mode, k))
                     run_armed(plan, lambda fx=fx: recover(fx.bulk), (mode2, j))
                     self.assert_safe(fx, when2)
                     self.settle(fx, plan, when2)
@@ -415,6 +445,135 @@ class ConflictBase(LateWriteBase):
         with open(os.path.join(j["target"], "linked"), "w") as f:
             f.write("linked")
         self.extra["linked"] = "linked"
+
+
+class SteamUndoBase(BulkFaultBase):
+    """A minimal Flatpak Steam library (both libraryfolders.vdf, libraryfolder.vdf, app 570's
+    manifest, its game folder with two files in subfolders, its workshop file) and `bulk steam
+    apply`, with a write into the old game folder right after the switch (once): the undo of the
+    move (the journal's undo, the copies deleted through u_drop, the journal dropped); the next
+    apply moves it. The first fault is put at the switch's first rename: before it the apply is a
+    plain move's, whose prepare and copies the unit tests cover."""
+
+    ITEM = "steam"
+    # Below steamapps: in the main library, and in ~/Bulk/steam once moved.
+    FILES: ClassVar[Mapping[str, str]] = {
+        f"{GAME}/game/bin/dota2": "elf",
+        f"{GAME}/game/dota/pak01_dir.vpk": "vpk",
+        "appmanifest_570.acf": steam_fixture("appmanifest_570.acf"),
+    }
+    SETTLE_APPLIES = 2
+
+    @staticmethod
+    def library(fx: BulkHome) -> str:
+        return fx.home_path(STEAM_ROOT)
+
+    def main(self, fx: BulkHome, rel: str = "") -> str:
+        """rel below the main library's steamapps."""
+        return os.path.join(self.library(fx), "steamapps", rel)
+
+    @staticmethod
+    def moved(fx: BulkHome, rel: str = "") -> str:
+        """rel below ~/Bulk/steam's steamapps."""
+        return os.path.join(fx.bulk_path("steam"), "steamapps", rel)
+
+    @override
+    def build(self, fx: BulkHome) -> None:
+        root = self.library(fx)
+        lf = steam_fixture("libraryfolders.vdf").replace('\t\t\t"1628350"\t\t"810335462"\n', "")
+        old_root = lf.split('"path"\t\t"', 1)[1].split('"', 1)[0]
+        for path in lf_files(root):
+            fx.write(os.path.relpath(path, fx.home), lf.replace(old_root, root))
+        fx.write(os.path.relpath(os.path.join(root, "libraryfolder.vdf"), fx.home), steam_fixture("libraryfolder.vdf"))
+        self.put_files(fx, self.main(fx))
+        fx.flatpaks[STEAM_APP] = {fx.bulk_path("steam")}  # what an apply over the layout grants
+        fx.fake(fx.host, "steam_running", lambda ctx: [])
+
+        def copy_reflink(src: str, dst: str) -> None:
+            """cp --reflink=auto (the scratch home may be tmpfs), through the runner: a point."""
+            r = fx.machine.run(["cp", "-a", "--reflink=auto", "--no-target-directory", "--", src, dst])
+            if r.returncode != 0:
+                raise RuntimeError(f"reflink copy failed: {r.stderr.strip()}")
+
+        fx.fake(fx.machine, "copy_reflink", copy_reflink)
+
+    @override
+    def hook(self, fx: BulkHome) -> None:
+        real = fx.user.u_steam_late
+
+        def late(j: SteamJournal) -> bool:
+            game = j["parts"][0]
+            if not self.extra and os.path.isdir(game["old"]):
+                with open(os.path.join(game["old"], "late"), "w") as f:
+                    f.write("late")
+                self.extra[f"{GAME}/late"] = "late"
+            return real(j)
+
+        fx.fake(fx.user, "u_steam_late", late)
+
+    @override
+    def run_apply(self, fx: BulkHome) -> object:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = bulk_commands.steam_apply(fx.bulk, [])
+        fx.out = out.getvalue()
+        return rc
+
+    @override
+    def first_fault(self, points: list[str]) -> int:
+        """The switch's first rename: the one right after the journal's write of phase switching."""
+        write = f"write journal-{STEAM_IDENT}.json"
+        return next(i for i in range(1, len(points)) if points[i] == "os.rename" and points[i - 1] == write)
+
+    def steam_journal(self, fx: BulkHome) -> SteamJournal | None:
+        if not fx.state.jexists(STEAM_IDENT):
+            return None
+        j = fx.state.jread_steam(STEAM_IDENT)
+        if j is None:
+            raise AssertionError(f"{STEAM_IDENT}: a journal btrfs-bulk cannot read")
+        return j
+
+    @override
+    def assert_safe(self, fx: BulkHome, when: str) -> None:
+        """Every file at its path in either library, or while the journal exists at its part's old or new path."""
+        j = self.steam_journal(fx)
+        for rel, data in self.expected().items():
+            places = [self.main(fx, rel), self.moved(fx, rel)]
+            for p in j["parts"] if j is not None else []:
+                part = os.path.relpath(p["src"], self.main(fx))
+                if rel == part or rel.startswith(part + "/"):
+                    inner = os.path.relpath(rel, part)
+                    places += [os.path.normpath(os.path.join(at, inner)) for at in (p["old"], p["new"])]
+            if not any(read_or_none(p) == data for p in places):
+                self.fail(f"{when}: {rel} lost (looked in {places})")
+        if j is None:
+            parked = [r for r, d, f in os.walk(fx.home) for n in d + f if OLD_MARK in n]
+            self.assertEqual(parked, [], f"{when}: data parked without a journal")
+
+    @override
+    def assert_converged(self, fx: BulkHome, when: str) -> None:
+        self.assertEqual(files_under(self.moved(fx)), self.expected(), f"{when}: {fx.out}")
+        # Nothing of the game in the main library: only the pair's second copy and its backups.
+        left_main = [r for r in files_under(self.main(fx)) or {} if not r.startswith("libraryfolders.vdf")]
+        self.assertEqual(left_main, [], when)
+        pair = []
+        for path in lf_files(self.library(fx)):
+            with open(path, "rb") as f:
+                pair.append(f.read())
+        self.assertEqual(pair[0], pair[1], when)
+        libraries = vdf_load(pair[0])["libraryfolders"]
+        assert isinstance(libraries, dict), when
+        listed = {
+            entry.get("path"): set(apps)
+            for entry in libraries.values()
+            if isinstance(entry, dict) and isinstance(apps := entry.get("apps"), dict)
+        }
+        self.assertEqual(listed, {self.library(fx): set(), fx.bulk_path("steam"): {"570"}}, when)
+        self.assertEqual(fx.journals(), [], f"{when}: {fx.out}")
+        left = [n for _r, d, f in os.walk(fx.home) for n in d + f if ".bulk-" in n or ".cst-tmp" in n]
+        self.assertEqual(left, [], f"{when}: leftovers")
+        self.assertFalse(os.path.exists(fx.paths.flag), f"{when}: boot flag left")
+        self.assertNotIn("NEEDS A LOOK", fx.report()[1], when)
 
 
 # ---- the classes: one per start state and mode --------------------------------------------------
@@ -635,3 +794,18 @@ class ConflictFailTest(ConflictBase):
 class ConflictFailFromTest(ConflictBase):
     def test_every_fault_then_recover(self) -> None:
         self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_CONFLICT_FAIL_FROM)
+
+
+class SteamUndoKillTest(SteamUndoBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.KILL), CASES_STEAM_UNDO_KILL)
+
+
+class SteamUndoFailTest(SteamUndoBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL), CASES_STEAM_UNDO_FAIL)
+
+
+class SteamUndoFailFromTest(SteamUndoBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_STEAM_UNDO_FAIL_FROM)
