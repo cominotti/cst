@@ -2,6 +2,7 @@
 """Application use cases and shared collector for `cst perf`."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 import posixpath
 from typing import Final
 
@@ -294,14 +295,14 @@ def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
     weights = _collect_slice_weights(reader)
     btrfs_commits = _collect_btrfs_commits(reader)
     scrub_limit, problems = _scrub_limit_setting(files.get(PerfPathKey.BTRFS_CONF))
-    return assemble_io_probe(
+    probe = assemble_io_probe(
         files,
         block_devices=blocks,
         nonzero_slice_io_weights=weights,
         btrfs_commits=btrfs_commits,
         btrfs_scrub_limit=scrub_limit,
-        settings_problems=problems,
     )
+    return replace(probe, settings_problems=problems)
 
 
 def collect_gpu_from_reader(reader: PerfFsReader) -> GpuProbeSnapshot:
