@@ -596,7 +596,8 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(
             self.svc._apply_marked_line(p, self.line_spec(), 0o644, events, name="swap0"), (False, False, False)
         )
-        self.assertIn("unreadable", events[-1].text)
+        # Found so late (after _check_before_writing), a file may have been written: no "nothing was changed".
+        self.assertEqual(events[-1].text, f"cst swap: ERROR: {p}: cannot be read")
 
     def test_other_lines_come_back_byte_for_byte(self) -> None:
         # main read and rewrote fstab/crypttab with bash `read -r`: bytes that are not UTF-8, a CR, a form
@@ -2583,7 +2584,7 @@ class SwapApplyBranchesTest(_SwapScratch):
         before = file_tree(self.tmp)
         rc, out, err, systemd = self._run(mapper_present=False, unreadable={self.env.crypttab})
         self.assertEqual(rc, 1)
-        self.assertEqual(err, f"cst swap: ERROR: {self.env.crypttab}: unreadable\n")
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.crypttab}: cannot be read: nothing was changed\n")
         self.assertNotIn("== swap0: crypttab and fstab", out)
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
@@ -2594,14 +2595,14 @@ class SwapApplyBranchesTest(_SwapScratch):
         before = file_tree(self.tmp)
         rc, out, err, systemd = self._run(mapper_present=False, unreadable={self.env.fstab})
         self.assertEqual(rc, 1)
-        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: unreadable\n")
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: cannot be read: nothing was changed\n")
         self.assertNotIn("written:", out)
         self.assertFalse(os.path.exists(self.env.crypttab))
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
 
     def test_a_folder_in_place_of_fstab_stops_apply_before_any_write(self) -> None:
-        # As root a folder is "unreadable" (read_text gives None): before, apply wrote crypttab and its
+        # As root a folder is one apply cannot read (read_text gives None): before, apply wrote crypttab and its
         # .pre-swap-config.bak first, then stopped at fstab.
         with open(self.env.crypttab, "w", encoding="utf-8") as f:
             f.write("other /dev/sdz none\n")
@@ -2609,7 +2610,7 @@ class SwapApplyBranchesTest(_SwapScratch):
         before = file_tree(self.tmp)
         rc, out, err, systemd = self._run(mapper_present=False)
         self.assertEqual(rc, 1)
-        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: unreadable\n")
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: cannot be read: nothing was changed\n")
         self.assertNotIn("written:", out)
         self.assertEqual(file_tree(self.tmp), before)
         self.assertFalse(os.path.exists(f"{self.env.crypttab}.pre-swap-config.bak"))
@@ -2625,11 +2626,34 @@ class SwapApplyBranchesTest(_SwapScratch):
         before = file_tree(self.tmp)
         rc, out, err, systemd = self._run(mapper_present=False)
         self.assertEqual(rc, 1)
-        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: unreadable\n")
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: cannot be read: nothing was changed\n")
         self.assertNotIn("== settings", out)
         self.assertFalse(os.path.exists(self.env.settings_path))
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_a_crypttab_that_becomes_unreadable_after_the_check_names_no_nothing_changed(self) -> None:
+        # The late check of _apply_marked_line: by then the settings file (and, for fstab, crypttab) may
+        # have been written, so its line claims nothing about what was changed.
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        fs = self._fs(mapper_present=False)
+        real = SwapApplicationService._check_before_writing
+
+        def check(
+            svc: SwapApplicationService,
+            spec: SwapHardwareSpec,
+            lines: tuple[tuple[str, MarkedLineSpec, int], ...],
+            events: list[D.ApplyEvent],
+        ) -> str | None:
+            found = real(svc, spec, lines, events)
+            fs._unreadable.add(self.env.crypttab)
+            return found
+
+        with mock.patch.object(SwapApplicationService, "_check_before_writing", check):
+            rc, _out, err, _systemd, _system = self._apply_on(fs)
+        self.assertEqual(rc, 1)
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.crypttab}: cannot be read\n")
 
     def test_an_unmarked_fstab_line_is_named_before_an_unreadable_crypttab(self) -> None:
         with open(self.env.crypttab, "w", encoding="utf-8") as f:

@@ -11107,9 +11107,9 @@ EOF
         """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
         set before swap_setup) with /etc/cst/swap.conf in place and a folder where /etc/fstab was
         (the test moves the real one aside; its own trap removes the folder and puts it back before
-        swap_cleanup runs): apply exits 1 with "/etc/fstab: unreadable" on stderr, and every file,
-        link, mode and owner under /etc and the scratch tree, and the install record, are as before
-        (no crypttab.pre-swap-config.bak, crypttab not rewritten). Before, apply rewrote
+        swap_cleanup runs): apply exits 1 with "/etc/fstab: cannot be read: nothing was changed" on
+        stderr, and every file, link, mode and owner under /etc and the scratch tree, and the install
+        record, are as before (no crypttab.pre-swap-config.bak, crypttab not rewritten). Before, apply rewrote
         /etc/crypttab and wrote its .bak first. With /etc/fstab back, the same apply works."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -11136,7 +11136,7 @@ s0="$(snap)"
 r0="$(record)"
 swap_run apply
 [[ $rc == 1 ]] || fail "apply with a folder in place of /etc/fstab exited $rc"
-grep -qF "ERROR: /etc/fstab: unreadable" <<<"$err" || fail "apply's message"
+grep -qF "ERROR: /etc/fstab: cannot be read: nothing was changed" <<<"$err" || fail "apply's message"
 [[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
 [[ ! -e /etc/crypttab.pre-swap-config.bak ]] || fail "crypttab's .bak was written"
 [[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"

@@ -317,7 +317,11 @@ What `apply` does, in order:
    section 2.3), that zswap exists, that the `zstd` compressor loads, and the
    partition (exists, exact size, no filesystem signature), that no `swap0`
    line was written by hand, that `/etc/crypttab` and `/etc/fstab` can
-   be read (a folder in place of one is refused), that the files it writes
+   be read (a folder in place of one is refused with
+   `<file>: cannot be read: nothing was changed`, the words of the files it
+   writes whole; a file found unreadable only later, when `/etc/cst/swap.conf`
+   or `/etc/crypttab` may have been written already, is refused with
+   `<file>: cannot be read` alone), that the files it writes
    whole (`/etc/tmpfiles.d/zswap.conf`,
    `/etc/tmpfiles.d/cst-mm-responsiveness.conf`,
    `/etc/sysctl.d/99-swap-tuning.conf`, `/etc/uresourced.conf`, which
