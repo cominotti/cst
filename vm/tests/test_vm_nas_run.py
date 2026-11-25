@@ -508,5 +508,103 @@ class ResticStartStopTest(unittest.TestCase):
         self.assertEqual(blocked & stops, 0, f"restic started with the stops blocked: {blocked:#x}")
 
 
+class NasUnmergedIndexedTest(unittest.TestCase):
+    """A checked NAS read whose merge back failed is alerted on, then indexed with no listing before the
+    refusal is raised (r25.3); an index failure keeps its words true, and unchecked reads are not indexed."""
+
+    @staticmethod
+    def _fail_commit(args: Sequence[str]) -> tuple[int, str, str] | None:
+        return (1, "", "error: block commit timed out") if args[0] == "blockcommit" else None
+
+    def _run_checked_case(self, *, with_stop: bool) -> None:
+        class _StoppedAfter(FakeNasRestic):
+            @override
+            def backup(
+                self,
+                env: Mapping[str, str],
+                args: Sequence[str],
+                timeout: int,
+                out: object,
+                *,
+                answered: Callable[[], None] | None = None,
+            ) -> tuple[int, vm_domain_backup.ResticSummary]:
+                del env, args, timeout, out, answered
+                raise vm_domain_backup.StopAfterSnapshot("stopped by signal SIGTERM", 0, {"snapshot_id": SNAP_ID})
+
+        events: list[str] = []
+        run = _Run(
+            hook=self._fail_commit,
+            restic=_StoppedAfter() if with_stop else FakeNasRestic(),
+        )
+        orig_write = run.store.write_index
+
+        def tracked_write(entries: Sequence[vm_domain_backup.IndexEntry]) -> None:
+            events.append("write_index")
+            orig_write(entries)
+
+        def record_alert(t: str, b: str) -> None:
+            events.append("alert")
+            run.alerts.append((t, b))
+
+        run.port = replace(run.port, alert=record_alert)
+        with mock.patch.object(run.store, "write_index", side_effect=tracked_write):
+            msg = run.refusal()
+        self.assertEqual(events, ["alert", "write_index"])
+        self.assertEqual([[e["snapshot"] for e in w] for w in run.store.written], [[SNAP_ID]])
+        prefix = "stopped by signal SIGTERM; " if with_stop else ""
+        self.assertIn(
+            f"(the backup itself: {prefix}restic snapshot {SNAP_ID[:8]} of win is a backup: indexed (the "
+            "retention runs at the next backup))",
+            msg,
+        )
+
+    def test_a_checked_read_whose_merge_back_fails_is_alerted_then_indexed(self) -> None:
+        for with_stop in (False, True):
+            with self.subTest(with_stop=with_stop):
+                self._run_checked_case(with_stop=with_stop)
+
+    def test_an_unmerged_checked_read_whose_index_write_fails_keeps_true_words(self) -> None:
+        class _IndexRefused(FakeNasStore):
+            @override
+            def update_index(
+                self, change: Callable[[list[vm_domain_backup.IndexEntry]], list[vm_domain_backup.IndexEntry]]
+            ) -> None:
+                del change
+                raise vm_domain_backup.IndexRefused("index format 99", "move it aside")
+
+        cases: tuple[tuple[str, FakeNasStore, str], ...] = (
+            ("refused", _IndexRefused([DISK]), "index format 99"),
+            ("oserror-before", _IndexFails(replaced=False), _write_failed()),
+            ("oserror-after", _IndexFails(replaced=True), _write_failed()),
+        )
+        for name, store, expected in cases:
+            with self.subTest(case=name):
+                run = _Run(hook=self._fail_commit, store=store)
+                msg = run.refusal()
+                self.assertEqual(len(run.alerts), 1)
+                self.assertIn("DISK NOT MERGED BACK", msg)
+                self.assertIn(expected, msg)
+
+    def test_an_unchecked_read_whose_merge_back_fails_is_never_indexed(self) -> None:
+        class _FailedBackup(FakeNasRestic):
+            @override
+            def backup(
+                self,
+                env: Mapping[str, str],
+                args: Sequence[str],
+                timeout: int,
+                out: object,
+                *,
+                answered: Callable[[], None] | None = None,
+            ) -> tuple[int, vm_domain_backup.ResticSummary]:
+                del env, args, timeout, out, answered
+                return 1, {}
+
+        run = _Run(hook=self._fail_commit, restic=_FailedBackup())
+        msg = run.refusal()
+        self.assertEqual(run.store.written, [])
+        self.assertIn("(the backup itself: restic backup failed: restic exit 1; no backup recorded)", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

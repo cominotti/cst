@@ -111,6 +111,7 @@ SPEC_CALLS: Final = frozenset(
         ("restic_snapshots", OK),
         ("restic_snapshots", FAIL),
         ("write_index", OK),
+        ("write_index", "refused"),  # a checked read whose merge back failed: indexed before the refusal
         ("write_index", "stopped"),  # a stop after a checked read: its snapshot indexed after the merge back
     }
 )
@@ -428,12 +429,13 @@ class _Held(contextlib.AbstractContextManager[object]):
         return self
 
     @override
-    def __exit__(self, *_: object) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
         self.rec.depth -= 1
         if self.freezes:
             self.rec.holding = self.was
-        # A stop pending at the outermost end is raised also when the block raised, as signals_held does.
-        if self.rec.depth == 0 and self.rec.held_stop:
+        # A stop pending at the outermost end is raised also when the block raised, as signals_held does,
+        # unless the test ended by Crash (a kill ends the process without unwinding).
+        if exc_type is not Crash and self.rec.depth == 0 and self.rec.held_stop:
             self.rec.held_stop = False
             raise vm_domain_backup.Stop("stopped by signal SIGTERM")
 
@@ -796,8 +798,8 @@ def replay(case: unittest.TestCase, path: str) -> set[tuple[str, str]]:
         if last.pc == "idle":
             case.assertEqual(ran.end, last.end, f"{where}: {ran.message[:500]}")
         case.assertEqual(world.machine(), last.machine, where)
-        # The alert is a recorded call; the refusal after it names the overlays the spec's alert named.
-        if ran.alerts:
+        # The alert is a recorded call; once the run finishes, its refusal names the overlays the spec's alert named.
+        if ran.alerts and last.pc == "idle":
             alerted = {(t, kind) for t, rr, kind in last.alerted if rr == run[0].r}
             case.assertEqual(named_overlays(ran.message), alerted, f"{where}: {ran.message}")
         for i in last.told - run[0].told:

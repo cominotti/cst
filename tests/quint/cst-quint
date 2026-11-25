@@ -221,6 +221,7 @@ NAS_WITNESSES: Final = (
     ("killed_refused", "nas_mixed", "neverKilledRefused"),
     ("late_switch", "nas_mixed", "neverLateSwitch"),
     ("indexed", "nas_mixed", "neverIndexed"),
+    ("unmerged_indexed", "nas_mixed", "neverUnmergedIndexed"),
     ("ready_failed", "nas_mixed", "neverReadyFailed"),
     ("backup_failed", "nas_mixed", "neverBackupFailed"),
     ("state_unreadable", "nas_mixed", "neverStateUnreadable"),
@@ -233,6 +234,7 @@ NAS_WITNESSES: Final = (
     ("partial_stop_dropped", "nas_partial", "neverPartialStopDropped"),
     ("partial_ok", "nas_partial", "neverPartialOk"),
     ("stop_after_commit", "nas_mixed", "neverStopAfterCommit"),
+    ("retention_ok", "nas_mixed", "neverRetentionOk"),
     ("retention_failed", "nas_mixed", "neverRetentionFailed"),
     ("stop_after_commit_recorded", "nas_shutoff", "neverStopAfterCommitRecorded"),
     ("stop_answered", "nas_shutoff", "neverStopAnswered"),
@@ -288,7 +290,7 @@ TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
     TraceJob("walk_live1", NAS_SPEC, "nas_live1", "simulator", 60, seed=5),
     TraceJob("walk_shutoff", NAS_SPEC, "nas_shutoff", "simulator", 60, seed=2),
     *(
-        TraceJob(name, NAS_SPEC, main, "simulator", 40, seed=7, invariant=invariant, samples=100000)
+        TraceJob(name, NAS_SPEC, main, "simulator", 40, seed=7, invariant=invariant, samples=300000)
         for name, main, invariant in NAS_WITNESSES
     ),
     *(

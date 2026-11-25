@@ -692,25 +692,26 @@ class LiveBackupTest(Nas):
         self.assertTrue(os.path.exists(self.overlay))
         self.assertEqual(self.vm_state()["live"]["sda"], self.overlay)
         self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
-        self.assertFalse(os.path.exists(self.index))
+        self.assertTrue(os.path.exists(self.index))
+        with open(self.index, encoding="utf-8") as f:
+            self.assertEqual([e["snapshot"] for e in json.load(f)["backups"]], [SNAP_ID])
         self.assertNotIn("forget", [c["args"][0] for c in self.restic_calls()])
 
     def test_a_good_read_whose_merge_back_fails_names_its_snapshot(self) -> None:
-        # No stop came: the read was good, only the merge back failed. The snapshot is not indexed, so the
-        # refusal names it with the commands that keep or forget it (else the next run names it as a
-        # snapshot no record names, with no word of where it came from).
+        # No stop came: the read was good, only the merge back failed. The checked read is indexed before
+        # the refusal, so the next backup's retention may forget it and the backstop no longer names it.
         self.vm(fail=["commit"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
         self.assertIn("DISK NOT MERGED BACK", r.stderr)
         self.assertIn(
-            f"(the backup itself: the restic snapshot {SNAP_ID[:8]} of win is a backup, its read checked, but it is "
-            "not in the index: the snapshot stays in the repository",
+            f"(the backup itself: restic snapshot {SNAP_ID[:8]} of win is a backup: indexed (the retention runs at the "
+            "next backup))",
             r.stderr,
         )
-        self.assertIn(f"restic tag --add cst-adopted {SNAP_ID}", r.stderr)
-        self.assertIn(f"restic forget {SNAP_ID}", r.stderr)
-        self.assertFalse(os.path.exists(self.index))
+        self.assertTrue(os.path.exists(self.index))
+        with open(self.index, encoding="utf-8") as f:
+            self.assertEqual([e["snapshot"] for e in json.load(f)["backups"]], [SNAP_ID])
 
     def test_persistent_definition_still_on_the_overlay(self) -> None:
         self.vm(fail=["persistent-stays"], agent="connected")
@@ -2990,7 +2991,7 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
                 raise OSError("commit crashed")
             return None
 
-        port, _commands, _store, _signals, alerts = self._make_backup([("vda", disk_a)], on_virsh=hook)
+        port, _commands, store, _signals, alerts = self._make_backup([("vda", disk_a)], on_virsh=hook)
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
         cfg = self._cfg()
         with self.assertRaises(Refused) as ctx:
@@ -3002,10 +3003,13 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
             msg,
         )
         self.assertIn(overlay_a, msg)
-        # The read was good (no stop, no failure of its own): its snapshot is named, not indexed.
+        # The read was good (no stop, no failure of its own): its snapshot is indexed before the refusal.
         self.assertIn(
-            f"(the backup itself: the restic snapshot {SNAP_ID[:8]} of win is a backup, its read checked", msg
+            f"(the backup itself: restic snapshot {SNAP_ID[:8]} of win is a backup: indexed (the retention runs at the "
+            "next backup))",
+            msg,
         )
+        self.assertEqual(_written(store), [[(SNAP_ID, "crash-consistent")]])
         self.assertEqual(len(alerts), 1)
         self.assertIn("list failed", alerts[0][1])
         self.assertIn("commit crashed", alerts[0][1])
@@ -4163,18 +4167,14 @@ class NasStopHeldFromAnswerTest(unittest.TestCase):
         self.assertEqual(str(stop), STOPPED_INDEXED)
         self.assertIn(f"  note: {note}", lines)
 
-    def test_a_stop_after_a_good_read_whose_merge_back_fails_indexes_nothing(self) -> None:
+    def test_a_stop_after_a_good_read_whose_merge_back_fails_indexes_it(self) -> None:
         refused, store, _commits = self._live_held(commit_fails=True)
         self.assertIsInstance(refused, Refused)
         self.assertNotIsInstance(refused, vm_domain_backup.Stop)
-        self.assertEqual((store.written, store.torn), ([], []))
-        # The refusal names the good snapshot, which the next run names as one no record names.
+        self.assertEqual((_written(store), store.torn), ([[(SNAP_ID, "crash-consistent")]], []))
         self.assertIn(
-            f"\n(the backup itself: stopped by signal SIGTERM; the restic snapshot {SNAP_ID[:8]} of win is a backup, "
-            "its read checked, but it is not in the index: the snapshot stays in the repository: the next NAS "
-            "backups may name it as a snapshot no record names, and their retention waits for it until it is kept "
-            f"as a backup (restic tag --add cst-adopted {SNAP_ID}) or forgotten (restic forget {SNAP_ID}) (restore "
-            'it by its ID: vm/README.md, section "Restore from the NAS"))',
+            f"\n(the backup itself: stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} of win is a backup: "
+            "indexed (the retention runs at the next backup))",
             str(refused),
         )
 

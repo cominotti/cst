@@ -621,8 +621,8 @@ QEMU still runs, so the merge runs as usual.
 **If the VM is shut down during the backup**, the merge cannot run (it needs
 QEMU running). The backup stops with an error, an alert and the commands to
 merge offline (`qemu-img commit`, then `virsh edit`; section 10.8). The data
-restic read is still a good backup, but it is not recorded: the next backup
-names it as a snapshot no record names (section 10.6), to keep or forget.
+restic read is still a good backup, and it is indexed before the refusal so
+the next backup's retention handles it by policy (section 10.6).
 
 A VM that is **shut off** (and not saved: see the managed-save note in
 section 3) is read directly, without a snapshot. CST checks the state again
@@ -662,12 +662,10 @@ index cannot be written then (a full disk, say), the stop says so instead
 ("writing the index failed (...): the index may not name it"),
 names the snapshot as a backup and gives the commands that keep or forget
 it. If the merge
-back fails, the snapshot is not indexed, as without a stop (above); the
-refusal then names it as a backup whose read was checked, with the commands
-that keep it (`restic tag --add cst-adopted ID`) or forget it. Without a
-stop the refusal names it the same way: "(the backup itself: the restic
-snapshot ID of VM is a backup, its read checked, but it is not in the
-index: ...)". After a
+back fails after a checked read, the alert is sent and the snapshot is indexed
+the same way before the refusal is raised ("(the backup itself: ... indexed
+(the retention runs at the next backup))"), or the refusal says why writing the
+index failed with the commands to keep or forget it. After a
 stop that ended restic, a snapshot whose check could not be done at all (an
 error of libvirt or of a file read, not a change it found) is recorded as
 torn (what tore it: "check failed"), and the next NAS backup forgets it;

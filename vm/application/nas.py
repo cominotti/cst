@@ -67,7 +67,6 @@ from vm.domain.backup import (
     restic_failure_why,
     snapshot_args,
     torn_entry,
-    unindexed_backup_text,
     unreadable_keep_keys,
     unreadable_nas_number,
 )
@@ -266,14 +265,20 @@ def nas_run(
         if run.unclear:
             merge.problems.extend(run.unclear)
             _add_overlay_files(p, run)
-        refused = _nas_not_merged_back(cfg, p, run, merge, failure) if merge.problems else None
-        # A stop after a read whose check passed, all merged back: the snapshot is a backup, indexed
-        # before the stop ends the run (no listing, no retention: those wait for the next backup).
-        if refused is None and isinstance(failure, StopAfterBackup):
-            _say_notes(p, run.notes)
-            failure = _index_stopped_backup(
-                p, vm, failure, nas_index_entry(run, nas, failure.snap, failure.consistency, keep)
-            )
+        if merge.problems:
+            refused = _nas_not_merged_back(cfg, p, run, merge, failure)
+            backup_note = _index_unmerged_backup(p, run, nas, keep, failure)
+            if backup_note is not None:
+                refused = Refused(f"{refused}\n{backup_note}")
+        else:
+            refused = None
+            # A stop after a read whose check passed, all merged back: the snapshot is a backup, indexed
+            # before the stop ends the run (no listing, no retention: those wait for the next backup).
+            if isinstance(failure, StopAfterBackup):
+                _say_notes(p, run.notes)
+                failure = _index_stopped_backup(
+                    p, vm, failure, nas_index_entry(run, nas, failure.snap, failure.consistency, keep)
+                )
     if refused is not None:
         raise refused
     if failure is not None:
@@ -610,14 +615,23 @@ def _nas_not_merged_back(
         + "\nNothing was undone or removed. Put each disk back by hand (read each line first):\n  "
         + "\n  ".join(lines)
     )
-    # A good read (a stop after it, or none: run.read has it): its snapshot named, with what keeps it.
-    if isinstance(failure, StopAfterBackup):
-        msg += f"\n(the backup itself: {failure}; {unindexed_backup_text(run.vm, failure.snap)})"
-    elif failure is None and run.read:
-        msg += f"\n(the backup itself: {unindexed_backup_text(run.vm, run.read[0].snap)})"
-    elif failure is not None and not isinstance(failure, Uncertain):
+    if failure is not None and not isinstance(failure, (Uncertain, StopAfterBackup)):
         msg += f"\n(the backup itself: {failure})"
     return Refused(msg)
+
+
+def _index_unmerged_backup(
+    p: NasBackup, run: NasRun, nas: NasRepo, keep: str | None, failure: BaseException | None
+) -> str | None:
+    """Index a checked NAS read whose merge back failed (no listing), returning the note for the refusal."""
+    if isinstance(failure, StopAfterBackup):
+        snap, consistency = failure.snap, failure.consistency
+    elif failure is None and run.read:
+        snap, consistency = run.read[0].snap, run.read[0].consistency
+    else:
+        return None
+    note = _index_alone(p, run.vm, nas_index_entry(run, nas, snap, consistency, keep))
+    return f"(the backup itself: {f'{failure}; ' if failure else ''}{note})"
 
 
 def _add_overlay_files(p: NasBackup, run: NasRun) -> None:
