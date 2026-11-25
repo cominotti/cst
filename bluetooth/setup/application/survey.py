@@ -732,8 +732,8 @@ class Survey:
         self.compute_plan()
         self.out(
             "Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews comments or the install record, restarts nothing;\n"
-            "write/update/remove/set/restart = apply would change that; CONFLICT = apply stops; ? = could not be read;\n"
-            "warn/note = for your information.\n"
+            "write/update/remove/set/restart = apply would change that; forget = apply leaves the file alone and drops its install record line;\n"
+            "CONFLICT = apply stops; ? = could not be read; warn/note = for your information.\n"
         )
         self.header()
         self.files_report()

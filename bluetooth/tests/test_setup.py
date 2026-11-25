@@ -1863,6 +1863,8 @@ class WatcherTest(SetupCase):
         m.put(old, "[Unit]\nDescription=mine\n")
         r = m.run("plan")
         self.assertIn(row("forget", "~/xdg/systemd/user/" + LW, LW_STALE_FOREIGN), r.stdout)
+        # The legend names the word.
+        self.assertIn("; forget = apply leaves the file alone and drops its install record line;", r.stdout)
         # --check says what the run does: it forgets the file and leaves it (before: "would remove").
         r = m.run("revert", "--check")
         self.assertIn(f"would forget {old} (not written by CST: left alone)\n", r.stdout)
