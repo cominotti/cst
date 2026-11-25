@@ -67,6 +67,19 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertIsNotNone(parse_cache_mount_args(["status", "--allow-nonempty"]).error)
         self.assertIsNotNone(parse_cache_mount_args(["attach", "--user", "bad/user"]).error)
 
+    def test_a_user_name_keeps_a_unicode_blank_around_it(self) -> None:
+        # ASCII blanks around the name are dropped; a no-break space stays (str.strip() used to drop it,
+        # and "\N{NO-BREAK SPACE}alice" was alice), so the name is no valid user name.
+        name = "\N{NO-BREAK SPACE}alice"
+        for argv in (["attach", f"--user={name}"], ["attach", "--user", name]):
+            with self.subTest(argv=argv):
+                p = parse_cache_mount_args(argv)
+                self.assertEqual((p.user, p.error), (None, f"invalid username {name!r}"))
+        self.assertEqual(parse_cache_mount_args(["attach", "--user= alice\t"]).user, "alice")
+        self.assertEqual(parse_cache_mount_args(["attach", "--user", "\talice "]).user, "alice")
+        self.assertEqual(parse_cache_mount_args(["attach", "--user=  "]).error, "--user requires a non-empty username")
+        self.assertEqual(parse_cache_mount_args(["attach", "--user", " "]).error, "--user requires a username")
+
     def test_options_first_mean_status(self) -> None:
         p = parse_cache_mount_args(["--user", "alice"])
         self.assertEqual((p.action, p.user, p.error), (CacheMountAction.STATUS, "alice", None))
