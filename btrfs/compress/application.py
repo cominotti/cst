@@ -26,9 +26,9 @@ from btrfs.compress.domain import (
     top_mount_changed,
 )
 from btrfs.compress.domain.args import CompressArgs, CompressCommand
-from btrfs.compress.ports import CompressHostPort
+from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
 from cst_core.domain.errors import Refused
-from cst_core.ports import CommandFailed, WriteFailed
+from cst_core.ports import CommandFailed
 
 
 @dataclass(slots=True)
@@ -169,7 +169,7 @@ class CompressService:
             return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
         try:
             self._host.update_top_mount(uuid, plan.new_top_mount_options)
-        except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
+        except TOP_MOUNT_ERRORS as exc:
             # A failure whose put-back failed too leaves the new unit: it is undone with the rest.
             prog.top_written = top_mount_changed(self._host.read_top_mount(), plan.new_top_mount_options)
             return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
@@ -197,7 +197,7 @@ class CompressService:
         if prog.top_written and snap.top_mount is not None:
             try:
                 self._host.update_top_mount(snap.top_mount.uuid or snap.root_uuid, snap.top_mount.options)
-            except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
+            except TOP_MOUNT_ERRORS as exc:
                 errors.append(f"top-mount: {exc}")
         if prog.remounted and plan.remount_target is not None:
             revert_opt = prog.orig_live_spec.raw if prog.orig_live_spec is not None else "compress=no"

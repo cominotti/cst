@@ -4,9 +4,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Final, Protocol
 
 from btrfs.compress.domain import TopMountInfo
+from cst_core.domain.errors import Refused
+from cst_core.ports import CommandFailed, WriteFailed
+
+# What update_top_mount can raise: installing the unit, marking it and reloading systemd.
+TOP_MOUNT_ERRORS: Final = (OSError, Refused, CommandFailed, WriteFailed, ValueError)
 
 
 class CompressHostPort(Protocol):

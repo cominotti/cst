@@ -34,17 +34,14 @@ from btrfs.compress.domain import (
     pick_root_mounts,
     top_mount_changed,
 )
-from btrfs.compress.ports import CompressHostPort
+from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
 from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines, format_status_note_lines
 from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.domain.errors import Refused
-from cst_core.ports import CommandFailed, WriteFailed
+from cst_core.ports import CommandFailed
 
 SEAM_COMMIT_PROC: Final = "CST_BTRFS_COMMIT_PROC"
 SEAM_COMMIT_ROOT: Final = "CST_BTRFS_COMMIT_ROOT"
-
-# What updating the top-mount unit can raise (the port's adapter: installing, marking, reloading).
-_TOP_MOUNT_ERRORS: Final = (OSError, Refused, CommandFailed, WriteFailed, ValueError)
 
 
 def _host_for_env(env: ManagedCliEnv) -> tuple[CompressHostPort, str, dict[str, str]]:
@@ -166,7 +163,7 @@ def _step_remount(run: _Run) -> str | None:
 def _undo_top_mount(host: CompressHostPort, uuid: str, options: str) -> str | None:
     try:
         host.update_top_mount(uuid, options)
-    except _TOP_MOUNT_ERRORS as exc:
+    except TOP_MOUNT_ERRORS as exc:
         return f"top-mount: {exc}"
     return None
 
@@ -180,7 +177,7 @@ def _step_top_mount(run: _Run) -> str | None:
         return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
     try:
         run.host.update_top_mount(uuid, options)
-    except _TOP_MOUNT_ERRORS as exc:
+    except TOP_MOUNT_ERRORS as exc:
         # A failure whose put-back failed too leaves the new unit: it is undone with the rest.
         if top_mount_changed(run.host.read_top_mount(), options):
             host, prev = run.host, top.options
