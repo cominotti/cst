@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-import errno
 import io
 import os
 import shutil
@@ -41,7 +39,7 @@ from btrfs.compress.domain import (
     parse_fstab_root_entries,
     parse_top_mount_unit,
 )
-from cst_core.domain.errors import Refused
+from btrfs.tests.fakes import CacheTestCtx, LayerHost, LayerHostState
 from tests.repo_files import REPO
 
 SAMPLE_UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
@@ -76,147 +74,37 @@ SAMPLE_TOP_MOUNT = (
 )
 
 
-class _FakeCtx:
-    def __init__(self, *, container: bool = False, root: bool = True) -> None:
-        self._container = container
-        self._root = root
-
-    def is_container(self) -> bool:
-        return self._container
-
-    def is_root(self) -> bool:
-        return self._root
-
-    def path(self, host_path: str) -> str:
-        return f"/run/host/{host_path.lstrip('/')}" if self._container and host_path.startswith("/") else host_path
-
-    def etc_dir(self) -> str:
-        return "/run/host/etc" if self._container else "/etc"
-
-    def host_run_dir(self, subpath: str) -> str:
-        return f"/run/host/{subpath}" if self._container else f"/run/{subpath}"
-
-
 @dataclass
-class _FakeState:
-    is_ostree: bool = True
+class _FakeState(LayerHostState):
     root_uuid: str = SAMPLE_UUID
     fstab: str | None = SAMPLE_FSTAB
     proc_mounts: str | None = SAMPLE_PROC_MOUNTS
     proc_cmdline: str | None = SAMPLE_KARGS
-    kargs_ok: bool = True
     kargs_text: str = SAMPLE_KARGS
-    kargs_err: str = ""
     top_mount: TopMountInfo | None = field(default_factory=lambda: parse_top_mount_unit(SAMPLE_TOP_MOUNT))
-    confirm_answer: bool | None = True
-    fail_kargs: str | None = None
-    fail_remount: str | None = None
-    fake_remount_effect: bool = True
-    fail_top_mount: Exception | None = None
 
 
-class _FakeHost:
-    def __init__(self, state: _FakeState | None = None) -> None:
-        self.s = _FakeState() if state is None else state
-        self.calls: list[str] = []
-
-    def is_ostree(self) -> bool:
-        return self.s.is_ostree
-
-    def root_uuid(self) -> str:
-        return self.s.root_uuid
-
-    def read_fstab(self) -> str | None:
-        return self.s.fstab
-
-    def read_proc_mounts(self) -> str | None:
-        return self.s.proc_mounts
-
-    def read_proc_cmdline(self) -> str | None:
-        return self.s.proc_cmdline
-
-    def read_kargs(self) -> tuple[bool, str, str]:
-        return (self.s.kargs_ok, self.s.kargs_text, self.s.kargs_err)
-
-    def read_settled_kargs(self) -> tuple[bool, str, str]:
-        return self.read_kargs()
-
-    def read_top_mount(self) -> TopMountInfo | None:
-        return self.s.top_mount
-
-    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
-        del put_back  # the fake puts nothing back after a failure
-        self.calls.append("write_fstab")
-        self.s.fstab = text
-
-    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
-        self.calls.append(f"update_kargs:{edits}")
-        if self.s.fail_kargs is not None:
-            return False, self.s.fail_kargs
-        for old_tok, new_tok in edits:
-            self.s.kargs_text = self.s.kargs_text.replace(old_tok, new_tok, 1)
-        return True, ""
-
-    def remount(self, target: str, option: str) -> tuple[bool, str]:
-        self.calls.append(f"remount:{target}:{option}")
-        if self.s.fail_remount is not None:
-            return False, self.s.fail_remount
-        if self.s.fake_remount_effect and self.s.proc_mounts is not None:
-            val = int(option.removeprefix("commit="))
-            target_opt = None if val == 30 else val
-            # The kernel changes every mount of the remounted filesystem (its device), and only those.
-            lines = [line.split() for line in self.s.proc_mounts.splitlines()]
-            device = next((f[0] for f in lines if f[1] == target), None)
-            updated = [
-                f"{f[0]} {f[1]} btrfs {rewrite_commit_options(f[3], target_opt) if f[0] == device else f[3]} 0 0"
-                for f in lines
-            ]
-            self.s.proc_mounts = "\n".join(updated) + "\n"
-        return True, ""
-
-    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
-        del put_back  # the fake puts nothing back after a failure
-        self.calls.append(f"update_top_mount:{uuid}")
-        if self.s.fail_top_mount is not None:
-            raise self.s.fail_top_mount
-        self.s.top_mount = TopMountInfo(installed=True, uuid=uuid, options=options)
-
-    def confirm(self, prompt: str) -> bool:
-        self.calls.append(f"confirm:{prompt}")
-        if self.s.confirm_answer is None:
-            raise Refused("apply asks for confirmation: run it in a terminal")
-        return self.s.confirm_answer
-
-
-class _TornCommitHost(_FakeHost):
-    """The first call of one step changes its layer and then reports a failure, as the adapter can
-    (btrfs/tests/test_compress_faults.py, AdapterFailureTest): torn names it ("fstab", "kargs" or "top")."""
-
-    def __init__(self, torn: str) -> None:
-        super().__init__()
-        self.torn = torn
-
-    def _first(self, prefix: str) -> bool:
-        return sum(1 for c in self.calls if c.startswith(prefix)) == 1
+class _FakeHost(LayerHost):
+    def __init__(self, state: _FakeState | None = None, *, torn: str | None = None) -> None:
+        super().__init__(_FakeState() if state is None else state, torn=torn)
 
     @override
-    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
-        super().write_fstab(text, put_back=put_back)
-        if self.torn == "fstab" and self._first("write_fstab"):
-            raise OSError(errno.EIO, "Input/output error")
+    def remounted(self, mounts: str, target: str, option: str) -> str:
+        val = int(option.removeprefix("commit="))
+        target_opt = None if val == 30 else val
+        # The kernel changes every mount of the remounted filesystem (its device), and only those.
+        lines = [line.split() for line in mounts.splitlines()]
+        device = next((f[0] for f in lines if f[1] == target), None)
+        updated = [
+            f"{f[0]} {f[1]} btrfs {rewrite_commit_options(f[3], target_opt) if f[0] == device else f[3]} 0 0"
+            for f in lines
+        ]
+        return "\n".join(updated) + "\n"
 
     @override
-    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
-        answer = super().update_kargs(edits)
-        if self.torn == "kargs" and self._first("update_kargs"):
-            return False, "timed out"
-        return answer
-
-    @override
-    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
-        super().update_top_mount(uuid, options, put_back=put_back)
-        if self.torn == "top" and self._first("update_top_mount"):
-            raise OSError(errno.ENOSPC, "No space left on device")
+    def top_mount_call(self, uuid: str, options: str) -> str:
+        del options  # written down by its UUID only
+        return f"update_top_mount:{uuid}"
 
 
 class CommitDomainTests(unittest.TestCase):
@@ -481,7 +369,7 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             ),
         ):
             with self.subTest(torn=torn):
-                host = _TornCommitHost(torn)
+                host = _FakeHost(torn=torn)
                 rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
                 self.assertEqual(rc, 1, out)
                 self.assertTrue(out[-1].endswith("; previous configuration restored."), out[-1])
@@ -680,7 +568,7 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             env={"CST_BTRFS_COMMIT_ROOT": tmp, "CST_BTRFS_COMMIT_PROC": os.path.join(tmp, "proc")},
             out=out,
             err=err,
-            ctx=_FakeCtx(container=True, root=False),
+            ctx=CacheTestCtx(container=True, root=False),
         )
         self.assertEqual(run_commit_cli(["status"], deps=deps), 0, err.getvalue())
         self.assertIn("coherent (commit=30 (default))", out.getvalue())

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-import errno
 import io
 import json
 import os
@@ -44,9 +43,9 @@ from btrfs.compress.domain import (
 from btrfs.compress.domain.args import ArgsError, CompressArgs, CompressCommand, parse_compress_args
 from btrfs.compress.presenter import render_compress_change, render_compress_plan, render_compress_status
 from btrfs.compress.wiring import CompressWiringOverrides
+from btrfs.tests.fakes import LayerHost, LayerHostState
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService
-from cst_core.domain.errors import Refused
 from cst_core.domain.install import InstallEntry
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandFailed, CommandResult, WriteFailed
@@ -126,85 +125,22 @@ class _FakeCtx:
 
 
 @dataclass
-class _FakeState:
-    is_ostree: bool = True
+class _FakeState(LayerHostState):
     root_uuid: str = SAMPLE_UUID
     fstab: str | None = SAMPLE_FSTAB
     proc_mounts: str | None = SAMPLE_PROC_MOUNTS
     proc_cmdline: str | None = SAMPLE_KARGS
-    kargs_ok: bool = True
     kargs_text: str = SAMPLE_KARGS
-    kargs_err: str = ""
     top_mount: TopMountInfo | None = field(default_factory=lambda: parse_top_mount_unit(SAMPLE_TOP_MOUNT))
-    confirm_answer: bool | None = True
-    fail_kargs: str | None = None
-    fail_remount: str | None = None
-    fake_remount_effect: bool = True
-    fail_top_mount: Exception | None = None
 
 
-class _FakeHost:
-    def __init__(self, state: _FakeState | None = None) -> None:
-        self.s = _FakeState() if state is None else state
-        self.calls: list[str] = []
+class _FakeHost(LayerHost):
+    def __init__(self, state: _FakeState | None = None, *, torn: str | None = None) -> None:
+        super().__init__(_FakeState() if state is None else state, torn=torn)
 
-    def is_ostree(self) -> bool:
-        return self.s.is_ostree
-
-    def root_uuid(self) -> str:
-        return self.s.root_uuid
-
-    def read_fstab(self) -> str | None:
-        return self.s.fstab
-
-    def read_proc_mounts(self) -> str | None:
-        return self.s.proc_mounts
-
-    def read_proc_cmdline(self) -> str | None:
-        return self.s.proc_cmdline
-
-    def read_kargs(self) -> tuple[bool, str, str]:
-        return (self.s.kargs_ok, self.s.kargs_text, self.s.kargs_err)
-
-    def read_settled_kargs(self) -> tuple[bool, str, str]:
-        return self.read_kargs()
-
-    def read_top_mount(self) -> TopMountInfo | None:
-        return self.s.top_mount
-
-    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
-        del put_back  # the fake puts nothing back after a failure
-        self.calls.append("write_fstab")
-        self.s.fstab = text
-
-    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
-        self.calls.append(f"update_kargs:{edits}")
-        if self.s.fail_kargs is not None:
-            return False, self.s.fail_kargs
-        for old_tok, new_tok in edits:
-            self.s.kargs_text = self.s.kargs_text.replace(old_tok, new_tok, 1)
-        return True, ""
-
-    def remount(self, target: str, option: str) -> tuple[bool, str]:
-        self.calls.append(f"remount:{target}:{option}")
-        if self.s.fail_remount is not None:
-            return False, self.s.fail_remount
-        if self.s.fake_remount_effect and self.s.proc_mounts is not None:
-            self.s.proc_mounts = _rewrite_fake_mounts(self.s.proc_mounts, option, target)
-        return True, ""
-
-    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
-        del put_back  # the fake puts nothing back after a failure
-        self.calls.append(f"update_top_mount:{uuid}:{options}")
-        if self.s.fail_top_mount is not None:
-            raise self.s.fail_top_mount
-        self.s.top_mount = TopMountInfo(installed=True, uuid=uuid, options=options)
-
-    def confirm(self, prompt: str) -> bool:
-        self.calls.append(f"confirm:{prompt}")
-        if self.s.confirm_answer is None:
-            raise Refused("apply asks for confirmation: run it in a terminal")
-        return self.s.confirm_answer
+    @override
+    def remounted(self, mounts: str, target: str, option: str) -> str:
+        return _rewrite_fake_mounts(mounts, option, target)
 
 
 def _rewrite_fake_mounts(cur: str, option: str, target: str = "/var") -> str:
@@ -218,37 +154,6 @@ def _rewrite_fake_mounts(cur: str, option: str, target: str = "/var") -> str:
             case _:
                 updated.append(ln)
     return "".join(updated)
-
-
-class _TornCompressHost(_FakeHost):
-    """The first call of one step changes its layer and then reports a failure, as the adapter can
-    (btrfs/tests/test_compress_faults.py, AdapterFailureTest): torn names it ("fstab", "kargs" or "top")."""
-
-    def __init__(self, torn: str) -> None:
-        super().__init__()
-        self.torn = torn
-
-    def _first(self, prefix: str) -> bool:
-        return sum(1 for c in self.calls if c.startswith(prefix)) == 1
-
-    @override
-    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
-        super().write_fstab(text, put_back=put_back)
-        if self.torn == "fstab" and self._first("write_fstab"):
-            raise OSError(errno.EIO, "Input/output error")
-
-    @override
-    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
-        answer = super().update_kargs(edits)
-        if self.torn == "kargs" and self._first("update_kargs"):
-            return False, "timed out"
-        return answer
-
-    @override
-    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
-        super().update_top_mount(uuid, options, put_back=put_back)
-        if self.torn == "top" and self._first("update_top_mount"):
-            raise OSError(errno.ENOSPC, "No space left on device")
 
 
 class _RecordingRunner:
@@ -848,7 +753,7 @@ class ApplicationTests(unittest.TestCase):
             ),
         ):
             with self.subTest(torn=torn):
-                host = _TornCompressHost(torn)
+                host = _FakeHost(torn=torn)
                 res = CompressService(host).execute_change(CompressArgs(CompressCommand.APPLY, yes=True))
                 self.assertEqual(res.exit_code, 1)
                 self.assertTrue(res.error.endswith("; previous configuration restored."), res.error)

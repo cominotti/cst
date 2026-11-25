@@ -804,7 +804,7 @@ class CompressFaultBase(unittest.TestCase):
             with self.subTest(fault=fault, call=calls[fault[1] - 1]):
                 self.check(fault)
 
-    def torn_points(self) -> int:
+    def _torn_points(self) -> int:
         """The points of a clean run other than the fstab write that can fail after they took effect."""
         return sum(1 for c in self.points() if c in TORN_POINTS - {"fstab write"})
 
@@ -840,7 +840,10 @@ class CompressFaultBase(unittest.TestCase):
 
 
 class P1FaultTest(CompressFaultBase):
-    """compress-force apply from Fedora's default (compress=zstd:1 everywhere)."""
+    """compress-force apply from Fedora's default (compress=zstd:1 everywhere).
+
+    Its seven tests are the matrix of every start state: each class below names its own start and inherits
+    them (one class per start state: a work unit of tests/run_unit.py each)."""
 
     start = BY_NAME["P1"]
 
@@ -860,280 +863,70 @@ class P1FaultTest(CompressFaultBase):
         self.every_failure_then(FaultMode.FAIL)
 
     def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
+        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self._torn_points())
 
     def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
         self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
 
 
-class P2FaultTest(CompressFaultBase):
+class P2FaultTest(P1FaultTest):
     """compress-force apply after one killed after its fstab write."""
 
     start = BY_NAME["P2"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class P3FaultTest(CompressFaultBase):
+class P3FaultTest(P1FaultTest):
     """compress-force apply on a host that is not rpm-ostree booted, with no top mount and a separate /var/home."""
 
     start = BY_NAME["P3"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class P4FaultTest(CompressFaultBase):
+class P4FaultTest(P1FaultTest):
     """compress-force apply with live mounts without compress."""
 
     start = BY_NAME["P4"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class P5FaultTest(CompressFaultBase):
+class P5FaultTest(P1FaultTest):
     """compress-force revert from fully applied."""
 
     start = BY_NAME["P5"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class P6FaultTest(CompressFaultBase):
+class P6FaultTest(P1FaultTest):
     """compress-force revert after one killed after its kargs."""
 
     start = BY_NAME["P6"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class C1FaultTest(CompressFaultBase):
+class C1FaultTest(P1FaultTest):
     """commit-interval apply 60 from no commit= anywhere, with a separate /var/home."""
 
     start = BY_NAME["C1"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class C2FaultTest(CompressFaultBase):
+class C2FaultTest(P1FaultTest):
     """commit-interval apply 60 from commit=90 everywhere."""
 
     start = BY_NAME["C2"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class C3FaultTest(CompressFaultBase):
+class C3FaultTest(P1FaultTest):
     """commit-interval apply 60 after one killed after its kargs."""
 
     start = BY_NAME["C3"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class C4FaultTest(CompressFaultBase):
+class C4FaultTest(P1FaultTest):
     """commit-interval revert from 60 everywhere."""
 
     start = BY_NAME["C4"]
 
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
 
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
-
-
-class C5FaultTest(CompressFaultBase):
+class C5FaultTest(P1FaultTest):
     """commit-interval revert from live mounts at 60 and the files reverted."""
 
     start = BY_NAME["C5"]
-
-    def test_every_kill(self) -> None:
-        self.every(FaultMode.KILL)
-
-    def test_every_failure(self) -> None:
-        self.every(FaultMode.FAIL)
-
-    def test_every_full_disk(self) -> None:
-        self.every(FaultMode.FAIL_FROM)
-
-    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.KILL)
-
-    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
-        self.every_failure_then(FaultMode.FAIL)
-
-    def test_every_failure_that_took_effect(self) -> None:
-        self.assertEqual(self.every_torn_failure(None), self.points().count("fstab write") + self.torn_points())
-
-    def test_every_failure_that_took_effect_then_a_kill_at_each_later_point(self) -> None:
-        self.assertEqual(self.every_torn_failure(FaultMode.KILL), self.start.torn_then_kill)
 
 
 class VerificationFailureTest(unittest.TestCase):

@@ -22,21 +22,25 @@
   mounts and the kernel's rules for them (a bind's device and FSROOT, umount of the top mount, findmnt's
   JSON); FstabSystemdView, what systemd has loaded of /etc/fstab, and mount_units_listing, its answer to
   `systemctl show '*.mount'`; FakeMountRunner, findmnt, mount, umount and systemctl over them and a test
-  root's /etc/fstab; CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry;
-  CacheWorld and FakeFstab, FakeCacheMountTable, FakeCacheSystemd, FakeCacheFolders, FakeCacheHostView and
-  FakeCacheAccounts over it, the in-memory fakes of btrfs/cache/ports.py (over the same MountTable and
-  FstabSystemdView);
-- compress-force and commit-interval (test_compress_faults): CompressWorld, CompressHostPort in memory
-  (/etc/fstab, the staged and booted kernel arguments, the live mounts, the top-mount unit), and
-  kernel_remount_options, a mount's options as the kernel shows them after a remount.
+  root's /etc/fstab; CacheTestCtx, the host or toolbox the command runs in (commit-interval's tests use it
+  too); the UUIDs the mounts carry; CacheWorld and FakeFstab, FakeCacheMountTable, FakeCacheSystemd,
+  FakeCacheFolders, FakeCacheHostView and FakeCacheAccounts over it, the in-memory fakes of
+  btrfs/cache/ports.py (over the same MountTable and FstabSystemdView);
+- compress-force and commit-interval: (test_btrfs_compress, test_commit_interval) LayerHostState and
+  LayerHost, CompressHostPort over the layers' texts, which can tear one step; (test_compress_faults)
+  CompressWorld, CompressHostPort in memory (/etc/fstab, the staged and booted kernel arguments, the live
+  mounts, the top-mount unit), and kernel_remount_options, a mount's options as the kernel shows them
+  after a remount.
 
 Not collected as a test module (unittest finds test*.py).
 """
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
+from dataclasses import dataclass
 import errno
 import json
 import os
@@ -78,6 +82,7 @@ from btrfs.snapshot.domain import CACHE_TAG
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
+from cst_core.domain.errors import Refused
 from cst_core.domain.install import (
     INSTALL_MANIFEST,
     ArtifactKind,
@@ -1950,6 +1955,119 @@ class FakeCacheAccounts:
 
 
 # ---- compress-force and commit-interval ------------------------------------------------------------------
+
+
+@dataclass
+class LayerHostState:
+    """What a LayerHost holds: whether the host is rpm-ostree booted, the root UUID, /etc/fstab's text, the live
+    mounts (/proc/mounts), the booted and the staged kernel arguments, the top-mount unit (None: a layer that is
+    not there), the answer to a confirmation (None: no terminal), and the failures to answer. A test module
+    declares the layers again with its own sample texts as their defaults."""
+
+    is_ostree: bool = True
+    root_uuid: str = ""
+    fstab: str | None = None
+    proc_mounts: str | None = None
+    proc_cmdline: str | None = None
+    kargs_ok: bool = True
+    kargs_text: str = ""
+    kargs_err: str = ""
+    top_mount: TopMountInfo | None = None
+    confirm_answer: bool | None = True
+    fail_kargs: str | None = None
+    fail_remount: str | None = None
+    fake_remount_effect: bool = True
+    fail_top_mount: Exception | None = None
+
+
+class LayerHost(ABC):
+    """compress-force's and commit-interval's port (CompressHostPort) over a LayerHostState (s), for their unit
+    tests (test_btrfs_compress, test_commit_interval); calls holds each mutating call. torn names the step whose
+    first call changes its layer and then reports a failure, as the adapter can (test_compress_faults.py,
+    AdapterFailureTest): "fstab", "kargs" or "top"; None for none. A module says how a remount changes the
+    live mounts (remounted) and how an update of the top mount is written down in calls (top_mount_call)."""
+
+    def __init__(self, state: LayerHostState, *, torn: str | None = None) -> None:
+        self.s = state
+        self.torn = torn
+        self.calls: list[str] = []
+
+    @abstractmethod
+    def remounted(self, mounts: str, target: str, option: str) -> str:
+        """The live mounts after a remount of target with option."""
+
+    def top_mount_call(self, uuid: str, options: str) -> str:
+        return f"update_top_mount:{uuid}:{options}"
+
+    def _first(self, prefix: str) -> bool:
+        return sum(1 for c in self.calls if c.startswith(prefix)) == 1
+
+    def is_ostree(self) -> bool:
+        return self.s.is_ostree
+
+    def root_uuid(self) -> str:
+        return self.s.root_uuid
+
+    def read_fstab(self) -> str | None:
+        return self.s.fstab
+
+    def read_proc_mounts(self) -> str | None:
+        return self.s.proc_mounts
+
+    def read_proc_cmdline(self) -> str | None:
+        return self.s.proc_cmdline
+
+    def read_kargs(self) -> tuple[bool, str, str]:
+        return (self.s.kargs_ok, self.s.kargs_text, self.s.kargs_err)
+
+    def read_settled_kargs(self) -> tuple[bool, str, str]:
+        return self.read_kargs()
+
+    def read_top_mount(self) -> TopMountInfo | None:
+        return self.s.top_mount
+
+    def write_fstab(self, text: str, *, put_back: bool = True) -> None:
+        del put_back  # the fake puts nothing back after a failure
+        self.calls.append("write_fstab")
+        self.s.fstab = text
+        if self.torn == "fstab" and self._first("write_fstab"):
+            raise OSError(errno.EIO, "Input/output error")
+
+    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
+        self.calls.append(f"update_kargs:{edits}")
+        if self.s.fail_kargs is not None:
+            answer = (False, self.s.fail_kargs)
+        else:
+            for old_tok, new_tok in edits:
+                self.s.kargs_text = self.s.kargs_text.replace(old_tok, new_tok, 1)
+            answer = (True, "")
+        if self.torn == "kargs" and self._first("update_kargs"):
+            return False, "timed out"
+        return answer
+
+    def remount(self, target: str, option: str) -> tuple[bool, str]:
+        self.calls.append(f"remount:{target}:{option}")
+        if self.s.fail_remount is not None:
+            return False, self.s.fail_remount
+        if self.s.fake_remount_effect and self.s.proc_mounts is not None:
+            self.s.proc_mounts = self.remounted(self.s.proc_mounts, target, option)
+        return True, ""
+
+    def update_top_mount(self, uuid: str, options: str, *, put_back: bool = True) -> None:
+        del put_back  # the fake puts nothing back after a failure
+        self.calls.append(self.top_mount_call(uuid, options))
+        if self.s.fail_top_mount is not None:
+            raise self.s.fail_top_mount
+        self.s.top_mount = TopMountInfo(installed=True, uuid=uuid, options=options)
+        if self.torn == "top" and self._first("update_top_mount"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    def confirm(self, prompt: str) -> bool:
+        self.calls.append(f"confirm:{prompt}")
+        if self.s.confirm_answer is None:
+            raise Refused("apply asks for confirmation: run it in a terminal")
+        return self.s.confirm_answer
+
 
 _HIDDEN_OPTIONS: Final = frozenset({"commit=30", "compress=no"})  # what the kernel never shows in /proc/mounts
 

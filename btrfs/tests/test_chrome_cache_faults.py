@@ -229,7 +229,7 @@ class ChromeFaultBase(unittest.TestCase):
                 self.assertEqual(text, target_text(self.start), when)
                 self.assertEqual(mode, new_mode, when)
         again = self.run_once(home)
-        self.assertEqual((again or (True, False))[0], False, f"{when}: the run again: {again}")
+        self.assertFalse((again or (True, False))[0], f"{when}: the run again: {again}")
         text, mode = self.file(home)
         self.assertIsNotNone(text, when)
         assert text is not None
@@ -241,7 +241,7 @@ class ChromeFaultBase(unittest.TestCase):
         self.assertEqual(third, (False, False), f"{when}: the third run")
         self.assertEqual([c for c in self.plan.calls if c in CHANGING], [], f"{when}: the third run")
 
-    def check_nothing_to_do(self) -> None:
+    def _check_nothing_to_do(self) -> None:
         home = self.fresh()
         self.assertEqual(self.run_once(home), (False, False))
         self.assertEqual([c for c in self.plan.calls if c in CHANGING], [])
@@ -261,7 +261,7 @@ class ChromeFaultBase(unittest.TestCase):
             with self.subTest(fault=fault, call=calls[fault[1] - 1]):
                 self.check(fault)
 
-    def every_failure_then_a_kill(self) -> None:
+    def _every_failure_then_a_kill(self) -> None:
         cases = 0
         for fail in every_fault(self.start.points, (FaultMode.FAIL,)):
             for then in every_fault(len(self.points(fail)), (FaultMode.KILL,), after=fail[1]):
@@ -286,7 +286,7 @@ class A1ChromeFaultTest(ChromeFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self._every_failure_then_a_kill()
 
 
 class A2ChromeFaultTest(ChromeFaultBase):
@@ -304,7 +304,7 @@ class A2ChromeFaultTest(ChromeFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self._every_failure_then_a_kill()
 
 
 class A3ChromeFaultTest(ChromeFaultBase):
@@ -322,7 +322,7 @@ class A3ChromeFaultTest(ChromeFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self._every_failure_then_a_kill()
 
 
 class A4ChromeFaultTest(ChromeFaultBase):
@@ -340,7 +340,7 @@ class A4ChromeFaultTest(ChromeFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self._every_failure_then_a_kill()
 
 
 class A5ChromeFaultTest(ChromeFaultBase):
@@ -358,7 +358,7 @@ class A5ChromeFaultTest(ChromeFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self._every_failure_then_a_kill()
 
 
 class O1ChromeFaultTest(ChromeFaultBase):
@@ -376,7 +376,7 @@ class O1ChromeFaultTest(ChromeFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self._every_failure_then_a_kill()
 
 
 class O2ChromeFaultTest(ChromeFaultBase):
@@ -394,7 +394,7 @@ class O2ChromeFaultTest(ChromeFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self._every_failure_then_a_kill()
 
 
 class AlreadyManagedChromeTest(ChromeFaultBase):
@@ -403,7 +403,7 @@ class AlreadyManagedChromeTest(ChromeFaultBase):
     start = Start("N", Command.APPLY, folder=True, text=BLOCK, mode=0o644, stale=False, points=0, fail_then_kill=0)
 
     def test_nothing_to_do_makes_no_changing_call(self) -> None:
-        self.check_nothing_to_do()
+        self._check_nothing_to_do()
 
 
 class AlreadyOffChromeTest(ChromeFaultBase):
@@ -414,7 +414,7 @@ class AlreadyOffChromeTest(ChromeFaultBase):
     )
 
     def test_nothing_to_do_makes_no_changing_call(self) -> None:
-        self.check_nothing_to_do()
+        self._check_nothing_to_do()
 
 
 # The matrix classes of this module run in one child process; it prints its open descriptors before and after.
