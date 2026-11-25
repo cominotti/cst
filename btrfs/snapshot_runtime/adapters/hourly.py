@@ -19,13 +19,12 @@ from btrfs.snapshot_runtime.domain import (
     AlertKind,
     CoreCommand,
     CoreExit,
-    GuardError,
+    GUARD_KEYS,
     Stderr,
     blocked_alert,
     core_reason,
     head_spaced,
     nonempty_count,
-    guard_limit,
     guard_number,
     plan_entries,
     read_lines,
@@ -142,17 +141,27 @@ class RunStopped(Exception):
     """The run ends here with exit status 1 (where bash stopped the script: set -u)."""
 
 
-def at_or_below(m: SnapshotRun, free: int, key: str) -> bool:
-    """(( free <= KEY * GIB )) with KEY a GiB setting, as bash evaluated it (guard_number)."""
-    value = m.settings[key]
-    n = guard_number(value)
-    if n is GuardError.BAD_NUMBER:
-        print(f"{m.front}: ((: {key}={value!r}: not a number", file=sys.stderr, flush=True)
-        return False
-    if n is GuardError.NOT_A_NUMBER:
-        print(f"{m.front}: {key}={value!r} in {m.conf}: not a number", file=sys.stderr, flush=True)
-        raise RunStopped
-    return free <= n * GIB
+def guard_limits(m: SnapshotRun) -> dict[str, int]:
+    """The space guard's settings (GUARD_KEYS) that it can hold at, as numbers of GiB, as bash arithmetic
+    computes them (guard_number), read before the guard looks at the free space. Each setting it cannot
+    compute (250GiB, abc, 1 x, a no-break space, or an operator _Arith does not read although bash would
+    compute it: 1<<8, ~5) gets a line naming it and its value, and is left out:
+    after_conversions then stops the run (exit 1), whether this run's comparison would read it or not,
+    once a valid emergency limit has had its purge, or else once the normal retention has pruned: the run
+    never takes a snapshot with no limit."""
+    limits: dict[str, int] = {}
+    for key in GUARD_KEYS:
+        value = m.settings[key]
+        n = guard_number(value, exact=True)
+        if isinstance(n, int):
+            limits[key] = n
+        else:
+            m.log(
+                3,
+                f"{key}={value!r} in {m.conf}: not a number of GiB the space guard can hold at: no snapshot "
+                "until it is fixed",
+            )
+    return limits
 
 
 def skipped(m: SnapshotRun, path: str) -> bool:
@@ -234,24 +243,35 @@ def hourly(m: SnapshotRun, args: Sequence[str]) -> int:
 def after_conversions(m: SnapshotRun) -> int:
     """hourly after the conversions: the space guard, the waits, the snapshot."""
     s = m.settings
+    limits = guard_limits(m)
     free = free_bytes(m)
     if free is None:
         m.log(3, "cannot read free space")
         return 1
     paused = os.path.exists(f"{m.state}/paused")
-    if at_or_below(m, free, "EMERGENCY_AT_OR_BELOW_GIB"):
-        return emergency(m, free)
+    stopped = len(limits) < len(GUARD_KEYS)
+    # A valid emergency limit still purges when another guard setting is invalid: the purge is what
+    # frees a nearly full disk. The run then stops for the other setting (exit 1).
+    emergency_at = limits.get("EMERGENCY_AT_OR_BELOW_GIB")
+    if emergency_at is not None and free <= emergency_at * GIB:
+        rc = emergency(m, free)
+        return 1 if stopped else rc
+    if stopped:
+        # The guard holds back the snapshot, not the expiry: above a valid emergency limit the
+        # emergency is over (its mark and alert go, as below), and the normal retention prunes. An
+        # invalid emergency limit gives no number to be above: its mark stays.
+        if emergency_at is not None:
+            m.rm_f(f"{m.state}/emergency")
+            clear_alert(m, AlertKind.EMERGENCY)
+        prune_only(m)
+        raise RunStopped
     m.rm_f(f"{m.state}/emergency")
-    if at_or_below(m, free, "SKIP_AT_OR_BELOW_GIB") or (paused and at_or_below(m, free, "RESUME_ABOVE_GIB")):
+    skip, resume = limits["SKIP_AT_OR_BELOW_GIB"], limits["RESUME_ABOVE_GIB"]
+    if free <= skip * GIB or (paused and free <= resume * GIB):
         m.touch(f"{m.state}/paused")
-        # Paused while free <= SKIP or (paused and free <= RESUME): they resume above the larger. Read
-        # without at_or_below, which would stop the run on a RESUME the condition above never read.
-        # A RESUME that is a name stops the run once SKIP no longer holds: no number to name, the
-        # setting as written (what the alert said before).
-        above = s["RESUME_ABOVE_GIB"]
-        if guard_number(above) != GuardError.NOT_A_NUMBER:
-            limits = {"pause": guard_limit(s["SKIP_AT_OR_BELOW_GIB"]), "resume": guard_limit(above)}
-            above = str(snapshots_resume_above(limits))
+        # Paused while free <= SKIP or (paused and free <= RESUME): they resume above the larger (a
+        # negative limit never holds them).
+        above = snapshots_resume_above({"pause": max(skip, 0), "resume": max(resume, 0)})
         send_alert(
             m,
             AlertKind.PAUSED,

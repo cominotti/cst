@@ -906,6 +906,33 @@ class VmPinCliTest(unittest.TestCase):
             self.assertIn("nothing changed", str(cm.exception.code))
             self.assertEqual(calls, [], "apply reached virsh with a default BUILD_CPUS")
 
+    def test_a_blank_beside_a_value_keeps_bash_value_and_refuses_apply(self) -> None:
+        # cpu-setup.conf is bash's too: the line keeps the value bash gives (plan and status print the
+        # line), and apply refuses on it as on any problem line, before virsh.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu-setup.conf")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("BUILD_CPUS='8-11\N{NO-BREAK SPACE}'\n")
+            err = io.StringIO()
+            calls: list[tuple[str, ...]] = []
+
+            def virsh(*args: str, check: bool = True) -> str:
+                calls.append(args)
+                return SAMPLE_DOMAIN_XML
+
+            with (
+                unittest.mock.patch.object(cpu_cli, "virsh", virsh),
+                contextlib.redirect_stderr(err),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(cpu_adapters.conf(p)["BUILD_CPUS"], "8-11\N{NO-BREAK SPACE}")
+                self.assertIn(f"{p} line 1: BUILD_CPUS='8-11\N{NO-BREAK SPACE}': a no-break space", err.getvalue())
+                with self.assertRaises(SystemExit) as cm:
+                    cpu_cli.vm_pin(["apply"], doc="DOC", paths=cpu_domain.CpuPaths(runs=tmp, conf=p))
+            self.assertIn("a no-break space (U+00A0) at the end of the value", str(cm.exception.code))
+            self.assertIn("nothing changed", str(cm.exception.code))
+            self.assertEqual(calls, [], "apply reached virsh")
+
     def test_plan_prints_the_diff_and_is_idempotent(self) -> None:
         rc, out, calls = self.run_vm_pin(["plan"], SAMPLE_DOMAIN_XML)
         self.assertEqual(rc, 0)

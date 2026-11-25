@@ -666,7 +666,9 @@ class GameProfileSteps:
         """The problem lines in the journal, then what the profile did not do."""
         for line in self.problem_lines():
             self.log(prio, line)
-        self.log(prio, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works{suffix})")
+        self.log(
+            prio, f"{what}: a line of {self.paths.conf} is not a plain setting (fix it; 'off' still works{suffix})"
+        )
 
     def refuse(self, what: str) -> None:
         """The settings file's problem lines in the journal, and what the profile did not do."""

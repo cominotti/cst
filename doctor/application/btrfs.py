@@ -41,7 +41,7 @@ from doctor.application.findmnt import findmnt_all_mounts, findmnt_root_btrfs_in
 from doctor.application.shared import (
     check,
     conf_value,
-    ignored_line_text,
+    problem_line_text,
     read_text,
     settings_file_warnings,
     settings_of,
@@ -507,7 +507,7 @@ def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
     # Every SCRUB_LIMIT problem line, with what the settings row would have said of the lines it leaves
     # to this row (CST's Python programs find a problem there too); else the value's problem.
     for p in lines.bash:
-        also = f". {ignored_line_text(SNAPSHOT_NOTE)}" if p.line in lines.python_too else ""
+        also = f". {problem_line_text(p, SNAPSHOT_NOTE)}" if p.line in lines.python_too else ""
         yield Result(WARN, f"{SNAP_CONF} {p}: {refuses}{also}")
     if not lines.bash and problem:
         yield Result(WARN, f"{SNAP_CONF} {problem}: {refuses}")

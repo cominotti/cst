@@ -440,6 +440,34 @@ class SettingsTest(unittest.TestCase):
             "bash would expand it (use single quotes) (the line is ignored)\n",
         )
 
+    def test_a_value_with_a_no_break_space_beside_it_is_ignored_with_a_warning(self) -> None:
+        # bluetooth.conf is read only by Python: such a line is a problem line, as one with $, never trimmed
+        # and never taken as written ("on<NBSP>" is no on). `bt-helper settings` warns, naming the line and
+        # the blank, and the setting keeps its default; set_keys does not count it as the user's.
+        tmp = tempfile.mkdtemp(prefix="bt-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        p = os.path.join(tmp, "user.conf")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("LE_AUDIO='on\N{NO-BREAK SPACE}'\nBEARER=le\n")
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", HELPER, "settings", DEFAULTS, p],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LE_AUDIO=off\n", r.stdout)
+        self.assertIn("BEARER=le\n", r.stdout)
+        self.assertEqual(
+            r.stderr,
+            f"warning: {p} line 1: LE_AUDIO='on\N{NO-BREAK SPACE}': a no-break space (U+00A0) at the end of the "
+            "value: CST does not trim it (delete it) (the line is ignored)\n",
+        )
+        with open(p, encoding="utf-8") as f:
+            self.assertEqual(self.m.set_keys(f.read()), ["BEARER"])
+
     def test_settings_keys(self) -> None:
         self.assertEqual(
             self.m.set_keys("# c\nLDAC_RATE=48000\nFOO=1\nLE_AUDIO=on\nLDAC_RATE=\n"), ["LDAC_RATE", "LE_AUDIO"]

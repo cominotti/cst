@@ -2473,6 +2473,32 @@ class TimerTest(Nas):
         self.assertIn(f"{self.conf} line 3: NAS_BAD=$X", r.stderr)
         self.assertNotIn("vm.conf", r.stderr)
 
+    def test_a_keep_number_with_a_no_break_space_refuses_the_backup(self) -> None:
+        # It used to be read as no number, so the retention kept the default 4 weekly backups without a
+        # word. Now it is a problem line: the backup refuses before any command, so no restic forget runs.
+        vm_conf = self.env["CST_VM_CONF"]
+        with open(vm_conf, "w", encoding="utf-8") as f:
+            f.write("VM_NAS_KEEP_WEEKLY=\N{NO-BREAK SPACE}8\n")
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(
+            f"{vm_conf} line 1: VM_NAS_KEEP_WEEKLY=\N{NO-BREAK SPACE}8: a no-break space (U+00A0) at the start of "
+            "the value",
+            r.stderr,
+        )
+        self.assertIn("Fix these lines first; nothing was changed.", r.stderr)
+        self.assertEqual(self.restic_calls(), [], "restic ran: no forget may run on a default")
+        self.assertEqual(self.calls(), [], "the backup ran commands")
+        # Fixed: the same backup runs, and its forget keeps the 8 weekly backups the line asks for.
+        with open(vm_conf, "w", encoding="utf-8") as f:
+            f.write("VM_NAS_KEEP_WEEKLY=8\n")
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        forget = [c["args"] for c in self.restic_calls() if c["args"][:1] == ["forget"]]
+        self.assertTrue(forget, self.restic_calls())
+        self.assertIn("--keep-weekly", forget[0])
+        self.assertEqual(forget[0][forget[0].index("--keep-weekly") + 1], "8")
+
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")

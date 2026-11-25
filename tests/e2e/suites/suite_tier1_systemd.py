@@ -725,6 +725,99 @@ sys.exit(r.returncode)
 """
 
 
+# test_224: the checkout's docker-gc (argv[1]) with a DOCKER_GC_PROTECT item that has a no-break space
+# beside it (the real bytes C2 A0), against the fake docker and systemctl of test_103 and its scenario
+# (an old image of registry.example.com and old unprotected ones, the recorder running). In the settings
+# file, run --dry-run under LC_ALL=C and C.UTF-8; in the environment of a real systemd unit
+# (systemd-run, Environment=): both exit 78 naming the item and the blank, and docker is asked to remove
+# nothing. Without the blank the same unit holds the registry's image back (cannot bite otherwise).
+GC_PROTECT_BLANK = r"""
+import json, os, subprocess, sys, tempfile, time
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.tests import test_docker_gc_program as t
+prog = ["/usr/bin/python3", "-I", "-B", sys.argv[1]]
+tmp = tempfile.mkdtemp(prefix="e2e-gc-blank-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
+fakes = os.path.join(tmp, "bin")
+os.mkdir(fakes)
+for name, text in (("docker", t.FAKE_DOCKER), ("systemctl", t.FAKE_SYSTEMCTL)):
+    path = os.path.join(fakes, name)
+    with open(path, "w") as f:
+        f.write(text.replace("@PYTHON@", sys.executable))
+    os.chmod(path, 0o755)
+now = time.time()
+with open(os.path.join(tmp, "docker.json"), "w") as f:
+    json.dump(t.scenario(now), f)
+state = os.path.join(tmp, "state")
+os.mkdir(state)
+with open(os.path.join(state, "last-used.json"), "w") as f:
+    json.dump({"since": t.OLD + 30 * t.DAY, "images": {t.sha("8"): now - t.DAY}, "heartbeat": now}, f)
+conf = os.path.join(tmp, "docker-gc.conf")
+calls_log = os.path.join(tmp, "calls.log")
+env = {
+    "PATH": fakes + ":/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": state, "DOCKER_GC_RUNTIME": os.path.join(tmp, "run"),
+    "DOCKER_GC_CONF": conf, "DOCKER_GC_INSTALLED": sys.argv[1],
+    "FAKE_DOCKER_STATE": os.path.join(tmp, "docker.json"), "FAKE_DOCKER_LOG": calls_log,
+}
+reg = "registry.example.com"
+item = "\N{NO-BREAK SPACE}" + reg
+blank = "a no-break space (U+00A0) at the start of the value"
+
+
+def removing():
+    if not os.path.exists(calls_log):
+        return []
+    with open(calls_log) as f:
+        return [c for c in map(json.loads, f) if "rm" in c or "prune" in c]
+
+
+def write_conf(value):
+    with open(conf, "wb") as f:
+        f.write(f"DOCKER_GC_PROTECT=other.example.org,{value}\n".encode())
+
+
+def unit(protect):
+    # The dry run as a real unit, DOCKER_GC_PROTECT in its Environment=: (exit status, its journal).
+    name = "e2e-224-gc.service"
+    props = [f"--property=Environment={k}={v}" for k, v in env.items()]
+    props.append(f"--property=Environment=DOCKER_GC_PROTECT=other.example.org,{protect}")
+    start = time.time()
+    subprocess.run(["systemd-run", "--quiet", "--wait", f"--unit={name}", *props, *prog, "run", "--dry-run"],
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
+    status = subprocess.run(["systemctl", "show", "-p", "ExecMainStatus", "--value", name],
+                            capture_output=True, text=True, check=False).stdout.strip()
+    subprocess.run(["journalctl", "--sync"], check=False)
+    log = subprocess.run(["journalctl", "-q", "--no-pager", "-o", "cat", "-u", name, "--since", f"@{int(start) - 1}"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace", check=False).stdout
+    subprocess.run(["systemctl", "reset-failed", name], capture_output=True, check=False)
+    sys.stderr.write(f"test_224 unit {protect!r}: status={status}\n{log}")
+    return status, log
+
+
+# 1. The settings file: exit 78 under both locales, docker asked to remove nothing.
+write_conf(item)
+for locale in ("C", "C.UTF-8"):
+    r = subprocess.run([*prog, "run", "--dry-run"], env={**env, "LC_ALL": locale}, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, check=False, cwd="/")
+    said = r.stdout + r.stderr
+    sys.stderr.write(f"test_224 file LC_ALL={locale}: rc={r.returncode} {said}")
+    if r.returncode != 78 or blank not in said or f"{conf} line 1: DOCKER_GC_PROTECT" not in said:
+        sys.exit(f"test_224: the settings file, LC_ALL={locale}: expected exit 78 naming the line and the blank")
+if removing():
+    sys.exit(f"test_224: docker was asked to remove {removing()}")
+# 2. The environment of a real unit: the same refusal.
+write_conf(reg)
+status, log = unit(item)
+if status != "78" or f"DOCKER_GC_PROTECT in the environment: {blank}" not in log:
+    sys.exit("test_224: the unit's environment: expected exit 78 naming the blank")
+if removing():
+    sys.exit(f"test_224: docker was asked to remove {removing()}")
+# 3. Without the blank the same unit's dry run holds the registry's image back.
+status, log = unit(reg)
+if status != "0" or "protected registry" not in log:
+    sys.exit("test_224: without the blank: expected exit 0 and the protected image held back")
+print("E2E-OK")
+"""
+
 # test_145: the program at argv[1] with its settings file at argv[2] against the same fake docker and
 # scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
 # run --dry-run and status (which plan as the weekly run does), twice each, stop with "no Image;
@@ -2321,6 +2414,80 @@ echo E2E-OK
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("SETUP-RAN", r.stdout)
         self.assertEqual(exec_bash(self.SYSTEMD_CONTAINER, state).stdout, before, r.stdout + r.stderr)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_225_cpu_irq_vm_pin_and_game_profile_refuse_a_cpu_setup_line_with_a_no_break_space(self) -> None:
+        """cpu-setup.conf with BUILD_CPUS='N<NBSP>' (the real bytes C2 A0; N the last CPU), a line bash
+        reads with the blank, as root: `cst cpu irq apply --no-pkg` exits 1 naming the line and the blank
+        and writes neither irqbalance.env nor its drop-in; cpu-vm-pin apply exits 1 with the same reason and
+        "nothing changed", before any virsh call (a recording stub first on PATH); the game profile's `on`
+        exits 1, "not switched on", with no game.state. Before, the value was taken as written: an invalid
+        CPU list for irq, or a list with a blank for vm-pin and the game profile. With the line fixed, the
+        same vm-pin apply reaches virsh and the profile switches on (cannot bite otherwise). A fake cannot
+        show the installed readers on the real bytes under a root shell's locale."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-cpu-nbsp"
+        conf = "/etc/cpu-setup/cpu-setup.conf"
+        busy = exec_bash(
+            c,
+            "[[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf "
+            "&& ! -e /run/cpu-setup/game.state ]] || echo busy",
+        ).stdout.strip()
+        self.assertEqual(busy, "", "irqbalance files or a game profile are already there")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"python3 -I -B /opt/cst-rw/cpu/game-profile off >/dev/null 2>&1 || true; rm -f {conf}; "
+            f"if [[ -e {w}/conf.bak ]]; then mv {w}/conf.bak {conf}; fi; "
+            f"if [[ -e {w}/made-dir ]]; then rmdir /etc/cpu-setup 2>/dev/null; fi; "
+            f"if [[ -e {w}/made-run ]]; then rm -rf /run/cpu-setup; fi; rm -rf {w}",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_225 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w} conf={conf}
+            rm -rf "$w" && mkdir -p "$w/bin"
+            [[ -d /etc/cpu-setup ]] || touch "$w/made-dir"
+            [[ -d /run/cpu-setup ]] || touch "$w/made-run"
+            if [[ -e "$conf" ]]; then cp -a "$conf" "$w/conf.bak"; fi
+            install -d -m 0755 /etc/cpu-setup /run/cpu-setup
+            printf '#!/bin/sh\necho "virsh $*" >>%s/calls\nexit 1\n' "$w" >"$w/bin/virsh"
+            chmod 0755 "$w/bin/virsh"
+            last="$(( $(nproc) - 1 ))"
+            printf "TARGET_USER='tester'\nBUILD_CPUS='%s\302\240'\n" "$last" >"$conf"
+            blank="BUILD_CPUS='$last"$'\302\240'"': a no-break space (U+00A0) at the end of the value"
+            for locale in C C.UTF-8 ""; do
+                rc=0; LC_ALL=$locale /opt/cst-rw/cst cpu irq apply --no-pkg >"$w/irq" 2>&1 || rc=$?
+                echo "test_225 irq LC_ALL=$locale: rc=$rc $(cat "$w/irq")" >&2
+                [[ "$rc" == 1 ]]
+                grep -qF "$conf line 2: $blank" "$w/irq"
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                rc=0; LC_ALL=$locale PATH="$w/bin:$PATH" python3 -I -B /opt/cst-rw/cpu/vm-pin apply e2evm >"$w/pin" 2>&1 || rc=$?
+                echo "test_225 vm-pin LC_ALL=$locale: rc=$rc $(cat "$w/pin")" >&2
+                [[ "$rc" == 1 ]]
+                grep -qF "a no-break space (U+00A0) at the end of the value" "$w/pin"
+                grep -qF "nothing changed" "$w/pin"
+                [[ ! -e "$w/calls" ]]
+                rc=0; LC_ALL=$locale python3 -I -B /opt/cst-rw/cpu/game-profile on >"$w/gp" 2>&1 || rc=$?
+                echo "test_225 game-profile LC_ALL=$locale: rc=$rc $(cat "$w/gp")" >&2
+                [[ "$rc" == 1 ]]
+                [[ ! -e /run/cpu-setup/game.state ]]
+            done
+            # The line fixed: vm-pin apply reaches virsh, the profile switches on (then off).
+            printf "TARGET_USER='tester'\nBUILD_CPUS='%s'\n" "$last" >"$conf"
+            rc=0; PATH="$w/bin:$PATH" python3 -I -B /opt/cst-rw/cpu/vm-pin apply e2evm >"$w/pin" 2>&1 || rc=$?
+            cat "$w/pin" >&2
+            [[ -s "$w/calls" ]]
+            python3 -I -B /opt/cst-rw/cpu/game-profile on
+            [[ -e /run/cpu-setup/game.state ]]
+            python3 -I -B /opt/cst-rw/cpu/game-profile off
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.CPU, E2ETag.DOCTOR)
     def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
@@ -5260,6 +5427,30 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS)
+    def test_224_docker_gc_refuses_a_protected_registry_with_a_no_break_space_beside_it(self) -> None:
+        """This checkout's docker-gc with DOCKER_GC_PROTECT=other.example.org,<NBSP>registry.example.com (the
+        real bytes C2 A0), against test_103's fake docker and scenario: in the settings file, run --dry-run
+        under LC_ALL=C and C.UTF-8 exits 78 naming the line and the no-break space; in the Environment= of a
+        real systemd unit (systemd-run) the dry run exits 78 too, naming the blank in the environment. Docker
+        is asked to remove nothing. Before, the item was trimmed in the file and taken as written from the
+        environment, where it matched no image, so the registry lost its protection. Without the blank the
+        same unit exits 0 and holds the registry's image back (cannot bite otherwise). A fake cannot show
+        how systemd hands the bytes of Environment= to the program, nor how Python decodes them under the
+        unit's locale."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            "systemctl reset-failed e2e-224-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-blank-*",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_BLANK)} /opt/cst-rw/btrfs/docker-gc",
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
     def test_145_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
         """The installed docker-gc (the whole manifest of root, staged under /var/tmp/e2e-gc-hole) with
         a fake docker whose container record lacks "Image": run --dry-run and status exit 76 naming the
@@ -5694,6 +5885,63 @@ EOF
             echo E2E-OK
             """,
             env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.VM)
+    def test_216_a_vm_conf_number_with_a_no_break_space_refuses_the_nas_backup(self) -> None:
+        """cst vm (the checkout's program, as root; its settings scratch files, CST_VM_*) with
+        VM_NAS_KEEP_WEEKLY=<NBSP>8 in vm.conf, the real bytes C2 A0: `backup e2evm --nas` and
+        `backup-timer on e2evm` exit 1 naming the line and the no-break space, before any virsh, restic
+        or systemctl call (recording stubs first on PATH) and with no unit written. Before, the line read as
+        no number: the retention's default 4 weekly backups, without a word. With VM_NAS_KEEP_WEEKLY=8 the
+        same backup passes that check and reaches the stubs (cannot bite otherwise). A fake cannot show the
+        installed reader on the real bytes under a root shell's locale (C and the default)."""
+        w = "/var/tmp/e2e-vm-nbsp"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -E
+            trap 'echo "test_216 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/bin" "$w/units" "$w/sbin"
+            for c in virsh restic systemctl rpm rpm-ostree flatpak-spawn; do
+                printf '#!/bin/sh\\necho "%s $*" >>%s/calls\\nexit 1\\n' "$c" "$w" >"$w/bin/$c"
+                chmod 0755 "$w/bin/$c"
+            done
+            printf 'NAS_ENABLED=1\\nNAS_PATH=/srv/none\\nNAS_RESTIC_HOST=e2ehost\\n' >"$w/nas.conf"
+            printf 'e2e-pass' >"$w/pw" && chmod 0600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_CONF="$w/vm.conf" CST_VM_NAS_CONF="$w/nas.conf" \\
+                CST_VM_RESTIC_PASSWORD="$w/pw" CST_VM_RESTIC_CACHE="$w/cache" CST_VM_RUN_DIR="$w/run" \\
+                CST_VM_INDEX="$w/lib/vm-backups.json" CST_VM_TORN="$w/lib/vm-nas-torn.json" \\
+                CST_VM_CPU_CONF="$w/cpu-setup.conf" CST_VM_UNIT_DIR="$w/units" CST_VM_SBIN_COPY="$w/sbin/cst-vm" \\
+                PATH="$w/bin:$PATH"
+            tool=/opt/cst-rw/vm/cst-vm
+            printf 'VM_NAS_KEEP_WEEKLY=\\302\\2408\\n' >"$w/vm.conf"
+            for locale in C C.UTF-8 ""; do
+                for args in "backup e2evm --nas" "backup-timer on e2evm"; do
+                    rc=0
+                    err="$(LC_ALL=$locale /usr/bin/python3 -I "$tool" $args 2>&1 >/dev/null)" || rc=$?
+                    echo "test_216 LC_ALL=$locale $args: rc=$rc $err" >&2
+                    [[ "$rc" == 1 ]]
+                    grep -qF "$w/vm.conf line 1: VM_NAS_KEEP_WEEKLY=" <<<"$err"
+                    grep -qF ": a no-break space (U+00A0) at the start of the value" <<<"$err"
+                    grep -qF "Fix these lines first; nothing was changed." <<<"$err"
+                    [[ ! -e "$w/calls" ]]
+                    [[ -z "$(ls -A "$w/units")" ]]
+                    [[ ! -e /etc/systemd/system/cst-vm-backup@.timer ]]
+                done
+            done
+            # The same backup with the number fixed passes that check and reaches the stubs.
+            printf 'VM_NAS_KEEP_WEEKLY=8\\n' >"$w/vm.conf"
+            rc=0; err="$(/usr/bin/python3 -I "$tool" backup e2evm --nas 2>&1 >/dev/null)" || rc=$?
+            echo "test_216 fixed: rc=$rc $err" >&2
+            if grep -qF "Fix these lines first" <<<"$err"; then exit 1; fi
+            [[ -s "$w/calls" ]]
+            cat "$w/calls" >&2
+            echo E2E-OK
+            """,
         ).stdout
         self.assertIn("E2E-OK", out)
 
@@ -7315,7 +7563,7 @@ PY
             grep -q libgamemode "/proc/$(cat /tmp/e2e-86-client.pid)/maps"
             tick() { systemd-run --wait --pipe --quiet --collect --unit="e2e-86-tick-$1" python3 -I -B /opt/cst-rw/cpu/game-profile tick; }
             first=$(tick 1)   # exit 0: the unit does not fail
-            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$first"                 || { echo "first tick: $first" >&2; exit 1; }
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf is not a plain setting' <<<"$first"                 || { echo "first tick: $first" >&2; exit 1; }
             second=$(tick 2)
             [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
             sleep 1
@@ -7327,13 +7575,13 @@ PY
             # Fixed: the watchdog starts the unit again, and says nothing about the settings.
             third=$(tick 3)
             grep -q 'switching on' <<<"$third"
-            if grep -q 'sets nothing' <<<"$third"; then echo "third tick: $third" >&2; exit 1; fi
+            if grep -q 'is not a plain setting' <<<"$third"; then echo "third tick: $third" >&2; exit 1; fi
             for _ in $(seq 50); do [[ -e /tmp/e2e-86-starts ]] && break; sleep 0.1; done
             test -e /tmp/e2e-86-starts
             # Broken again after a tick found it fixed: the warning is said again.
             sed -i 's/^BUILD_CPUS=.*/BUILD_CPUS=$(nproc)/' /etc/cpu-setup/cpu-setup.conf
             fourth=$(tick 4)
-            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$fourth" \
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf is not a plain setting' <<<"$fourth" \
                 || { echo "fourth tick (broken again): $fourth" >&2; exit 1; }
             sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
             kill "$(cat /tmp/e2e-86-client.pid)"
@@ -8362,9 +8610,13 @@ rm -rf /var/tmp/cst-e2e-bulk-home "$s"
 systemctl daemon-reload
 """
 
-    def bulk_boot(self, script: str) -> str:
-        """script after BULK_BOOT_SETUP, as root in the systemd container; its output."""
+    def bulk_boot(self, script: str, *, cleanup: str = "") -> str:
+        """script after BULK_BOOT_SETUP, as root in the systemd container; its output. cleanup, a test's
+        own, runs before BULK_BOOT_CLEANUP (registered after it), so the folders that one removes are
+        empty by then."""
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, self.BULK_BOOT_CLEANUP, check=False)
+        if cleanup:
+            self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, cleanup, check=False)
         return exec_bash(self.SYSTEMD_CONTAINER, self.BULK_BOOT_SETUP + script).stdout
 
     @e2e_tags(E2ETag.BTRFS)
@@ -8997,6 +9249,51 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS)
+    def test_223_bulk_keep_unkeep_and_plan_refuse_a_keep_line_with_a_no_break_space(self) -> None:
+        """This checkout's btrfs-bulk, as root, with /etc/btrfs-setup/bulk-keep holding the line
+        apps<NBSP> (the real bytes C2 A0) and BULK_USER in bulk.conf: `keep apps`, `unkeep apps` and
+        `keep iso` each exit 1 with "cannot update /etc/btrfs-setup/bulk-keep: line 3: ..." naming the
+        no-break space, under LC_ALL=C, C.UTF-8 and the default, and the file keeps its bytes; `plan` says
+        NEEDS A LOOK with "has a line it cannot read". Before, keep read the line as apps (said it was kept, left the line
+        apply cannot read) and unkeep deleted it. With the line fixed, keep apps exits 0 (cannot bite
+        otherwise). A fake cannot show the installed reader on the real bytes under a root shell's locale."""
+        keep = "/etc/btrfs-setup/bulk-keep"
+        out = self.bulk_boot(
+            rf"""
+set -E
+trap 'echo "test_223 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+keep={keep}
+if [ -e "$keep" ]; then mv "$keep" /var/tmp/e2e-bulk-keep.bak; fi
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+printf '# kept\nm2\napps\302\240\n' >"$keep"
+cp "$keep" "$s/keep.before"
+bulk() {{ /usr/bin/python3 -I /opt/cst-rw/btrfs/btrfs-bulk "$@"; }}
+for locale in C C.UTF-8 ""; do
+    for args in "keep apps" "unkeep apps" "keep iso"; do
+        rc=0; err="$(LC_ALL=$locale bulk $args 2>&1 >"$s/out")" || rc=$?
+        echo "test_223 LC_ALL=$locale $args: rc=$rc $err" >&2
+        [ "$rc" = 1 ]
+        grep -qF "btrfs-bulk: cannot update $keep: line 3: apps" <<<"$err"
+        grep -qF ": a no-break space (U+00A0) at the end of the value" <<<"$err"
+        if grep -qF "by choice" "$s/out"; then exit 1; fi
+        cmp "$s/keep.before" "$keep"
+    done
+done
+bulk plan >"$s/plan" 2>&1
+grep -qF "NEEDS A LOOK: $keep has a line it cannot read: line 3: apps" "$s/plan"
+cmp "$s/keep.before" "$keep"
+# The line fixed: keep goes through.
+printf '# kept\nm2\napps\n' >"$keep"
+bulk keep apps >"$s/out"
+grep -qF "apps: kept in /home by choice" "$s/out"
+echo E2E-OK
+""",
+            # Before BULK_BOOT_CLEANUP, whose rmdir of an /etc/btrfs-setup it made needs the folder empty.
+            cleanup=f"rm -f {keep}; if [ -e /var/tmp/e2e-bulk-keep.bak ]; then mv /var/tmp/e2e-bulk-keep.bak {keep}; fi",
+        )
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
         """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
         checkout's docker-gc, under a name of its own; a stub docker.service when the container has
@@ -9416,6 +9713,134 @@ echo test_110-ok
 """,
         ).stdout
         self.assertIn("test_110-ok", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_217_an_invalid_space_guard_setting_stops_the_hourly_run_naming_it(self) -> None:
+        """btrfs-snapshot and its runtime as install writes them, run as real root with a fake btrfs (300
+        GiB free) and a fake btrfs-snapshot-core that writes down its arguments. SKIP_AT_OR_BELOW_GIB='250GiB'
+        in snapshots.conf, the hourly run as a systemd unit: the unit fails (Result exit-code), its journal
+        names the setting and its value, and the core is never asked for a snapshot. Before, bash's error
+        line and a false test: the snapshot was made with no limit. RESUME_ABOVE_GIB=abc, not paused, from
+        a shell: the same stop. With valid values the same run makes its snapshot (cannot bite otherwise).
+        Last, 100 GiB free (at or below the valid EMERGENCY_AT_OR_BELOW_GIB=150) with RESUME_ABOVE_GIB=abc:
+        the emergency purge still runs (the core is asked for a prune with --allow-mass-delete, the
+        emergency mark is set), then the run stops for RESUME_ABOVE_GIB (exit 1, its line). Then 200 GiB
+        free, above that limit, the setting still invalid: the emergency mark goes and the normal retention
+        prunes (a prune without --allow-mass-delete), before the same stop. With
+        EMERGENCY_AT_OR_BELOW_GIB='150GiB' itself, no purge, only that prune. The alert, with no
+        btrfs-notify, is kept in the pending folder, which is set aside and put back.
+        A fake cannot show that the installed front hands hourly to the runtime under a real unit and that
+        the unit fails, which is what the health check and cst doctor see."""
+        d = "/var/tmp/e2e-snapshot-guard"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        files = "btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot"
+        core = "/usr/local/sbin/btrfs-snapshot-core"
+        notify = "/usr/local/sbin/btrfs-notify"
+        pending = "/var/lib/cst-alerts/pending"
+        found = exec_bash(self.SYSTEMD_CONTAINER, f"[ ! -e {core} ]", check=False)
+        self.assertEqual(found.returncode, 0, f"a btrfs-snapshot-core is already installed ({core}) {found.stderr}")
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"{inst} remove {files} >/dev/null 2>&1; rm -f {core}; systemctl reset-failed e2e-217-hourly.service; "
+            f"if [ -e {d}/notify.bak ]; then mv -f {d}/notify.bak {notify}; fi; "
+            f"if [ -e {d}/pending.bak ]; then rm -rf {pending}; mv {d}/pending.bak {pending}; "
+            f"elif [ -e {d}/made-pending ]; then rm -rf {pending}; fi; "
+            f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock; "
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_217 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf} core={core} notify={notify} pending={pending}
+S=/usr/local/sbin/btrfs-snapshot
+rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock
+install -d -m 0755 "$d" "$d/bin" /etc/btrfs-setup
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+if [ -e "$notify" ]; then mv "$notify" "$d/notify.bak"; fi
+if [ -e "$pending" ]; then mv "$pending" "$d/pending.bak"; else touch "$d/made-pending"; fi
+{inst} install {files} >/dev/null
+# The fake core writes down what it was asked for, then succeeds.
+printf '%s\n' '#!/bin/bash' "echo \"\$*\" >>$d/core-args" 'exit 0' >"$core"
+chmod 0755 "$core"
+# The fake btrfs: 300 GiB free, above every default limit (or the bytes in $d/free), and subvolume sync.
+printf '%s\n' '#!/bin/bash' "f=\$(cat $d/free 2>/dev/null || echo 322122547200)" \
+    'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     $f      (min: $f)"; fi' 'exit 0' \
+    >"$d/bin/btrfs"
+chmod 0755 "$d/bin/btrfs"
+P="$d/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+base() {{ printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" "$@" >"$conf"; }}
+
+# 1. As a unit, SKIP_AT_OR_BELOW_GIB='250GiB': the unit fails and its journal names the setting.
+base "SKIP_AT_OR_BELOW_GIB='250GiB'"
+rc=0; systemd-run --quiet --wait --unit=e2e-217-hourly -p Environment=PATH="$P" "$S" hourly || rc=$?
+journalctl --sync
+journalctl -q --no-pager -o cat -u e2e-217-hourly.service >"$d/unit.log" || true
+cat "$d/unit.log"
+[ "$rc" != 0 ]
+[ "$(systemctl show -p Result --value e2e-217-hourly.service)" = exit-code ]
+systemctl reset-failed e2e-217-hourly.service
+grep -qF "SKIP_AT_OR_BELOW_GIB='250GiB' in $conf: not a number of GiB the space guard can hold at" "$d/unit.log"
+if grep -q '^snapshot' "$d/core-args" 2>/dev/null; then exit 1; fi
+
+# 2. From a shell, RESUME_ABOVE_GIB=abc and not paused: the same stop.
+base "RESUME_ABOVE_GIB=abc"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: RESUME_ABOVE_GIB='abc' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+if grep -q '^snapshot' "$d/core-args" 2>/dev/null; then exit 1; fi
+[ ! -e /var/lib/btrfs-snapshot/paused ]
+
+# 3. Valid values: the same run makes its snapshot.
+base "SKIP_AT_OR_BELOW_GIB=250" "RESUME_ABOVE_GIB=270"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out" "$d/core-args"
+[ "$rc" = 0 ]
+grep -q '^snapshot' "$d/core-args"
+
+# 4. 100 GiB free, at or below the valid EMERGENCY_AT_OR_BELOW_GIB=150, and RESUME_ABOVE_GIB=abc: the
+# emergency purge still runs, then the run stops for RESUME_ABOVE_GIB (exit 1, its line).
+rm -rf /var/lib/btrfs-snapshot; : >"$d/core-args"
+echo 107374182400 >"$d/free"
+base "RESUME_ABOVE_GIB=abc" "EMERGENCY_AT_OR_BELOW_GIB=150"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out" "$d/core-args"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: RESUME_ABOVE_GIB='abc' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+grep -q '^prune .*--allow-mass-delete' "$d/core-args"
+if grep -q '^snapshot' "$d/core-args"; then exit 1; fi
+[ -e /var/lib/btrfs-snapshot/emergency ]
+
+# 5. The purge freed the disk: 200 GiB free, above the valid emergency limit, RESUME_ABOVE_GIB still
+# abc. The emergency mark goes and the normal retention prunes, then the same stop (exit 1, its line).
+: >"$d/core-args"
+echo 214748364800 >"$d/free"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out" "$d/core-args"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: RESUME_ABOVE_GIB='abc' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+grep -q '^prune ' "$d/core-args"
+if grep -q -e '--allow-mass-delete' -e '^snapshot' "$d/core-args"; then exit 1; fi
+[ ! -e /var/lib/btrfs-snapshot/emergency ]
+# An invalid EMERGENCY_AT_OR_BELOW_GIB gives no number to purge at: no purge, the normal prune only.
+rm -rf /var/lib/btrfs-snapshot; : >"$d/core-args"
+base "EMERGENCY_AT_OR_BELOW_GIB=150GiB"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out" "$d/core-args"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: EMERGENCY_AT_OR_BELOW_GIB='150GiB' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+grep -q '^prune ' "$d/core-args"
+if grep -q -e '--allow-mass-delete' -e '^snapshot' "$d/core-args"; then exit 1; fi
+[ ! -e /var/lib/btrfs-snapshot/emergency ]
+echo test_217-ok
+""",
+        ).stdout
+        self.assertIn("test_217-ok", out)
 
     @e2e_tags(E2ETag.BTRFS)
     def test_111_snapshots_status_reads_snapshots_conf_through_settings_lines(self) -> None:

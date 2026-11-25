@@ -385,7 +385,7 @@ def state_head(*, on: bool, manual: bool, problem_lines: Sequence[str], why: str
     head = "game profile: ON (by hand)" if manual else "game profile: ON"
     lines = [head if on else "game profile: off"]
     lines += [
-        f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
+        f"  settings: {line} (not a plain setting: 'on' refuses and the watchdog changes nothing until it is fixed)"
         for line in problem_lines
     ]
     if why is not None:

@@ -45,7 +45,7 @@ from cst_core.domain import contracts
 from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.record import USER_RECORD_REL
 from cst_core.domain.shapes import json_object, object_of, parse_json
-from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
+from cst_core.domain.text import blank_edge_problem, parse_shell_assignments, parse_snapshots_conf
 from doctor.domain import scrub_dropin_limit, scrub_limit_setting
 from tests.shell_source import shell_function
 
@@ -1093,17 +1093,24 @@ class SnapshotsConfTest(unittest.TestCase):
                     # The snapshots.conf reader (doctor, cst vm) reads every old line as bash does;
                     # the generic reader stays strict on them.
                     old = parse_snapshots_conf(old_text)
-                    self.assertEqual(old.problems, ())
+                    # A value with a blank other than space or tab at an end ($'line\n', B11: \v then x)
+                    # keeps bash's value, with a kept problem; no other line is one.
+                    edged = {k for k in keys if blank_edge_problem(want[k]) is not None}
+                    self.assertTrue(edged)
+                    self.assertEqual({p.text.partition("=")[0] for p in old.problems if p.kept}, edged)
+                    self.assertEqual([p for p in old.problems if not p.kept], [])
                     self.assertEqual({k: old.values[k] for k in keys}, want)
                     self.assertTrue(any("\\" in p.text for p in parse_shell_assignments(old_text).problems))
                     err = self.set_values({"HOME_SUBVOL": "home"}, locale=new_locale)
                     self.assertEqual(self.bash_values(keys), want, "the rewrite changed a value")
                     new = parse_snapshots_conf(self.text())
-                    self.assertEqual(new.problems, ())
+                    self.assertEqual({p.text.partition("=")[0] for p in new.problems if p.kept}, edged)
+                    self.assertEqual([p for p in new.problems if not p.kept], [])
                     self.assertEqual({k: new.values[k] for k in keys}, want)
                     # Only lines no quoted form holds keep their old form (and say so); all the
-                    # others now read with zero problems in the strict reader.
-                    kept = {p.text.partition("=")[0] for p in parse_shell_assignments(self.text()).problems}
+                    # others now read with no problem but a kept one in the strict reader.
+                    strict = parse_shell_assignments(self.text()).problems
+                    kept = {p.text.partition("=")[0] for p in strict if not p.kept}
                     self.assertEqual(kept, {k for k in keys if not writable(want[k])})
                     self.assertEqual(err.count("is kept as an older CST wrote it"), len(kept))
                     # A line the old writer escaped is now in quotes; a plain one (x#y) stays as it was.

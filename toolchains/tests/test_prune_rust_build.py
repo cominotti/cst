@@ -345,7 +345,11 @@ class SettingsTest(Base):
         self.write_conf("INCREMENTAL_IDLE=\N{NO-BREAK SPACE}off\n")
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 1)
-        self.assertIn("is not a duration", out)
+        self.assertIn(
+            "line 1: RUST_BUILD_INCREMENTAL_IDLE=\N{NO-BREAK SPACE}off: a no-break space (U+00A0) at the start "
+            "of the value",
+            out,
+        )
         self.assertTrue(self.present("aa/0123456789abcd"))
 
 

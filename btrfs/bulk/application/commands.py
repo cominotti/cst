@@ -85,7 +85,7 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
     try:
         kept, _ = b.state.read_keep()
     except OSError as e:
-        sv["fatal"] = f"{b.paths.keep} cannot be read ({e})"
+        sv["fatal"] = b.paths.keep_unreadable(e)
         return sv
     if "steam" in kept:
         sv["fatal"] = "steam is kept out of ~/Bulk by choice: 'cst btrfs bulk unkeep steam' first"
@@ -232,7 +232,7 @@ def print_shader_caches(b: Bulk, sv: SteamSurvey) -> None:
 
 def print_copies(b: Bulk, sv: SteamSurvey) -> None:
     """steam_print's lines on the real (byte by byte) copies and the free space they need."""
-    g, floor = b.host.snapshot_guard(), steam_copy_floor(b)
+    g, floor, invalid = b.host.snapshot_guard(), steam_copy_floor(b), b.host.snapshot_guard_invalid()
     need, left = sv["copy_bytes"] + floor, sv["free"] - sv["copy_bytes"]
     row(
         b,
@@ -253,10 +253,15 @@ def print_copies(b: Bulk, sv: SteamSurvey) -> None:
             f"NOTE: about {gib(max(left, 0))} free after all copies: /home snapshots pause at or below "
             f"{gib(g['pause'])}",
         )
+        # With a guard setting the hourly run stops at, no number says where they resume.
+        resume = "" if invalid else f"and resume above {gib(snapshots_resume_above(g))} (once old snapshots expire); "
+        row(b, "", f"{resume}fewer games per run may avoid it")
+    for name, value in invalid:
         row(
             b,
             "",
-            f"and resume above {gib(snapshots_resume_above(g))} (once old snapshots expire); fewer games per run may avoid it",
+            f"NOTE: btrfs-snapshot's hourly run stops at {name}={value!r} in snapshots.conf (no number): no /home "
+            "snapshots until it is fixed",
         )
     row(b, "", "each copy is read back and compared byte for byte before the old one is deleted;")
     row(b, "", "at idle priority: expect minutes per 10 GiB, more while the PC is busy")

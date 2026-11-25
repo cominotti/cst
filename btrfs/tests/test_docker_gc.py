@@ -736,6 +736,30 @@ class SettingsDomainTest(unittest.TestCase):
             self.assertIn(why, str(cm.exception))
             self.assertTrue(str(cm.exception).endswith("nothing is removed until /f is fixed"))
 
+    def test_an_item_with_a_blank_beside_it_stops_the_run(self) -> None:
+        # str.strip() dropped a no-break space or U+3000 beside an item; trimmed to ASCII blanks only, the
+        # item would match no image and its registry would lose its protection. Now the run stops.
+        nbsp, ideo = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}"
+        for text, item in (
+            (f"DOCKER_GC_PROTECT=a.io,{nbsp}b.io\n", f"{nbsp}b.io"),
+            (f"DOCKER_GC_PROTECT='a.io, {ideo}b.io , c.io'\n", f"{ideo}b.io"),
+            (f"DOCKER_GC_PROTECT='b.io{nbsp},a.io'\n", f"b.io{nbsp}"),
+        ):
+            with self.subTest(text=text), self.assertRaises(gc_domain.UnknownProtection) as cm:
+                gc_domain.parse_settings_file("/f", text)
+            self.assertIn("/f line 1: DOCKER_GC_PROTECT: ", str(cm.exception))
+            self.assertIn(f"CST does not trim it (delete it) (item {item!r})", str(cm.exception))
+            self.assertTrue(str(cm.exception).endswith("nothing is removed until /f is fixed"))
+        # ASCII blanks around an item are still trimmed.
+        self.assertEqual(gc_domain.parse_settings_file("/f", "DOCKER_GC_PROTECT='a.io, b.io\t'\n"), ("a.io", "b.io"))
+        # The environment's DOCKER_GC_PROTECT (a drop-in of the unit) the same.
+        resolve = gc_domain.resolve_protection
+        with self.assertRaises(gc_domain.UnknownProtection) as cm:
+            resolve(PATHS, env=f"a.io, {ideo}b.io", file_text=None, installed=None)
+        self.assertIn("DOCKER_GC_PROTECT in the environment: an ideographic space (U+3000)", str(cm.exception))
+        self.assertTrue(str(cm.exception).endswith("nothing is removed until it is fixed"))
+        self.assertEqual(resolve(PATHS, env="a.io, b.io", file_text=None, installed=None).registries, ("a.io", "b.io"))
+
     def test_the_file_it_writes_reads_back(self) -> None:
         for regs in ((), (REGISTRY,), ("a.example", "ghcr.io/team")):
             self.assertEqual(gc_domain.parse_settings_file("/f", gc_domain.render_settings_file(regs)), regs)
@@ -860,9 +884,36 @@ class SettingsUseCaseTest(unittest.TestCase):
                 self.assertEqual(f.gc.execute(command), gc_domain.BAD_SETTINGS_EXIT, command)
                 self.assertTrue(f.console.lines and all(ln.startswith("<3>") for ln in f.console.lines))
                 self.assertEqual(f.docker.calls, [], "it reached docker")
+        # A protected item with a no-break space beside it: the same refusal, nothing removed.
+        for command in (GcCommand.RUN, GcCommand.CLEANUP_NOW):
+            f = Fixture(config=FakeConfig("DOCKER_GC_PROTECT=a.io,\N{NO-BREAK SPACE}b.io\n"))
+            f.state.state = GcState(since=NOW - 30 * DAY)
+            f.docker.listed_images = [Image("sha256:b", tags=("b.io/x:1",), size=1)]
+            self.assertEqual(f.gc.execute(command), gc_domain.BAD_SETTINGS_EXIT, command)
+            self.assertIn("a no-break space (U+00A0) at the start of the value", "\n".join(f.console.lines))
+            self.assertEqual(f.docker.calls, [], "it reached docker")
         f = Fixture(config=FakeConfig("DOCKER_GC_PROTCT=x\n"))
         f.gc.execute(GcCommand.RECORD)
         self.assertEqual(f.config.reads, 0, "the recorder read the settings")
+
+    def test_a_problem_line_whose_text_holds_a_line_separator_is_one_journal_line(self) -> None:
+        # str.splitlines() of the refusal's text split such a line in two, the second piece with no file or
+        # line number; only a newline ends a settings line. The exit status and the refusal are unchanged.
+        conf = PATHS.settings_file
+        for sep in ("\f", "\x1c", "\N{LINE SEPARATOR}"):
+            with self.subTest(sep=repr(sep)):
+                f = Fixture(config=FakeConfig(f"DOCKER_GC_PROTECT='{REGISTRY}{sep}'\nDOCKER_GC_PROTCT=x\n"))
+                f.state.state = GcState(since=NOW - 30 * DAY)
+                f.docker.listed_images = [Image("sha256:r", tags=(f"{REGISTRY}/x:1",), size=1)]
+                self.assertEqual(f.gc.execute(GcCommand.RUN), gc_domain.BAD_SETTINGS_EXIT)
+                name = "a line separator" if sep == "\N{LINE SEPARATOR}" else "a control character"
+                first = (
+                    f"<3>{conf} line 1: DOCKER_GC_PROTECT='{REGISTRY}{sep}': {name} (U+{ord(sep):04X}) at the end of "
+                    "the value: CST does not trim it (delete it)"
+                )
+                second = f"<3>{conf} line 2: DOCKER_GC_PROTCT: unknown setting (known: DOCKER_GC_PROTECT)"
+                self.assertEqual(f.console.lines, [first, second, f"<3>nothing is removed until {conf} is fixed"])
+                self.assertEqual(f.docker.calls, [], "it reached docker")
 
 
 class SettingsFileTest(unittest.TestCase):
