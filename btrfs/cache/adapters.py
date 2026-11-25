@@ -207,8 +207,12 @@ class CacheMountTable:
 
     def bind(self, binding: CacheMountBinding) -> str | None:
         rt = self._rt
-        argv = ["mount", "--bind", _map_path(binding.source, rt, read_only=False)]
-        argv.append(_map_path(binding.target, rt, read_only=False))
+        argv = [
+            "mount",
+            "--bind",
+            _map_path(binding.source, rt, read_only=False),
+            _map_path(binding.target, rt, read_only=False),
+        ]
         return _run_mount(rt, argv, f"mount --bind {binding.source} {binding.target}")
 
     def unbind(self, binding: CacheMountBinding) -> str | None:
@@ -260,17 +264,13 @@ class CacheHostView:
         tgt = _map_path(binding.target, self._rt, read_only=True)
         is_link = os.path.islink(tgt)
         exists = os.path.lexists(tgt)
-        nonempty = False if is_link else _dir_is_nonempty(tgt)
-        source_is_dir = os.path.isdir(src)
-        source_is_link = os.path.islink(src)
-        target_is_dir = exists and not is_link and os.path.isdir(tgt)
         return BindingPaths(
             target_is_link=is_link,
             target_exists=exists,
-            target_nonempty=nonempty,
-            source_is_dir=source_is_dir,
-            source_is_link=source_is_link,
-            target_is_dir=target_is_dir,
+            target_nonempty=False if is_link else _dir_is_nonempty(tgt),
+            source_is_dir=os.path.isdir(src),
+            source_is_link=os.path.islink(src),
+            target_is_dir=exists and not is_link and os.path.isdir(tgt),
         )
 
     def home_exists(self, home: str) -> bool:
