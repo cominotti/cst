@@ -12,9 +12,7 @@ from collections.abc import Generator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 import errno
 import os
-import resource
 import shutil
-import signal
 import stat
 import tempfile
 from typing import Protocol, override
@@ -38,7 +36,7 @@ from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.domain.install import Component
 from cst_core.domain.record import ComponentState
 from cst_core.ports import CommandResult, OutputMode
-from tests.fault_injection import no_space
+from tests.fault_injection import no_file_may_grow, no_space
 
 TEXT_A = "[Service]\nExecStartPre=a\n"
 TEXT_B = "[Service]\nExecStartPre=b\n"
@@ -47,21 +45,6 @@ INSTALLER = "/opt/cst/cst_core/installer.py"
 
 def _access_denied() -> OSError:
     return OSError(errno.EACCES, "Access denied")
-
-
-@contextmanager
-def _no_file_may_grow() -> Generator[None]:
-    """RLIMIT_FSIZE 0 for this process: a write of a byte to a file fails (EFBIG), as a full disk's does;
-    making a folder or an empty file still works. Python starts with SIGXFSZ ignored, which turns the
-    kernel's signal into that error."""
-    if signal.getsignal(signal.SIGXFSZ) != signal.SIG_IGN:
-        raise AssertionError("SIGXFSZ is not ignored: RLIMIT_FSIZE would kill the test process")
-    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
-    resource.setrlimit(resource.RLIMIT_FSIZE, (0, hard))
-    try:
-        yield
-    finally:
-        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
 
 
 @contextmanager
@@ -191,7 +174,7 @@ class RealSide:
             fh.write("x\n")
 
     def conf_write_fails_before_rename(self) -> AbstractContextManager[None]:
-        return _no_file_may_grow()
+        return no_file_may_grow()
 
     def conf_sync_fails_after_rename(self) -> AbstractContextManager[None]:
         return _folder_unreadable(os.path.dirname(self.conf))

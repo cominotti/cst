@@ -5,6 +5,9 @@
 - docker-volumes-nocow (test_docker_volumes_nocow and its fault tests): FakeSystem, the inode-flag
   ioctls, getxattr, the commands, os.sync and the fake cp; Crash, which its copy_into raises; the
   flag bits NOCOW and OTHER; entries, carries_flags and tree, to walk and compare a folder;
+- systemd (scrub-limit's and iocost's fakes): SystemdState, what systemd has loaded of one unit
+  (its files' text at the last reload that worked, whether they changed since) and whether the unit
+  is enabled and active; one model, not a copy per package;
 - scrub-limit (test_scrub_limit, test_scrub_limit_ports): ScrubFakeRunner, the installer and
   systemctl; RecordingInstallerRunner, the installer's text, remove-text and mark through the real
   InstallService and one install record; SystemdModel, the same and what systemd has loaded of the
@@ -316,6 +319,29 @@ class FakeSystem:
         return n
 
 
+# ---- systemd (scrub-limit and iocost) -------------------------------------
+
+
+class SystemdState:
+    """What systemd has of one unit, for the fakes of every package that reloads it: the text of its
+    files at the last daemon-reload that worked (loaded), whether a write or a removal of them came since
+    (dirty: what NeedDaemonReload follows), and whether the unit is enabled and active."""
+
+    def __init__(self, *, loaded: str | None = None, dirty: bool = False) -> None:
+        self.loaded = loaded
+        self.dirty = dirty
+        self.enabled = False
+        self.active = False
+
+    def changed(self) -> None:
+        """A write or a removal of the unit's files: systemd is behind until the next reload."""
+        self.dirty = True
+
+    def reloaded(self, text: str | None) -> None:
+        """A daemon-reload that worked: systemd has text, as the files are now."""
+        self.loaded, self.dirty = text, False
+
+
 # ---- scrub-limit ---------------------------------------------------------
 
 
@@ -434,8 +460,18 @@ class SystemdModel(RecordingInstallerRunner):
     def __init__(self, dropin: str, record: str, *, loaded: str | None = None, behind: bool = False) -> None:
         super().__init__(record)
         self.dropin = dropin
-        self.loaded = loaded
-        self.dirty = behind  # a write or a removal of the drop-in since the last reload that worked
+        # dirty: a write or a removal of the drop-in since the last reload that worked
+        self.systemd = SystemdState(loaded=loaded, dirty=behind)
+
+    @property
+    def loaded(self) -> str | None:
+        """The drop-in's text at the last daemon-reload that worked."""
+        return self.systemd.loaded
+
+    @property
+    def dirty(self) -> bool:
+        """A write or a removal of the drop-in since the last reload that worked."""
+        return self.systemd.dirty
 
     @override
     def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
@@ -443,9 +479,9 @@ class SystemdModel(RecordingInstallerRunner):
         self.need_daemon_reload = "yes\n" if self.dirty else "no\n"
         r = super().run(argv, input_text=input_text, **kw)
         if "installer.py" in " ".join(cmd) and r.stdout.startswith(("written:", "removed:")):
-            self.dirty = True
+            self.systemd.changed()
         if cmd == ["systemctl", "daemon-reload"] and r.returncode == 0:
-            self.loaded, self.dirty = read(self.dropin), False
+            self.systemd.reloaded(read(self.dropin))
         return r
 
 
@@ -481,8 +517,7 @@ class ScrubWorld:
         self.conf_unreadable = False
         self.dropin_folder = False
         self.dropin_unreadable = False
-        self.loaded: str | None = None
-        self.dirty = False
+        self.systemd = SystemdState()  # what systemd has loaded of the drop-in (loaded, dirty)
         self.show_fails = False  # systemctl cannot say whether systemd loaded the files
         self.live: tuple[str, ...] = ()  # sysfs's lines (ScrubSysfsPort)
         self.reload_timeouts: list[float | None] = []  # the time limit of each daemon-reload asked for
@@ -493,6 +528,24 @@ class ScrubWorld:
         self.target = MemoryTarget()
         self.records = MemoryRecord()
         self.svc = InstallService(self.target, lambda _e: b"", record=self.records)
+
+    @property
+    def loaded(self) -> str | None:
+        """The drop-in's text at the last daemon-reload that worked."""
+        return self.systemd.loaded
+
+    @loaded.setter
+    def loaded(self, text: str | None) -> None:
+        self.systemd.loaded = text
+
+    @property
+    def dirty(self) -> bool:
+        """A write or a removal of the drop-in since the last reload that worked."""
+        return self.systemd.dirty
+
+    @dirty.setter
+    def dirty(self, behind: bool) -> None:
+        self.systemd.dirty = behind
 
     @property
     def dropin(self) -> str | None:
@@ -654,7 +707,8 @@ class FakeScrubDropin:
             place = core_text(w.dropin_path, w.record)
             written = w.svc.put(place, text.encode(), as_root=False, keep_state=True)
             w.dropin_folder = True
-            w.dirty = w.dirty or written
+            if written:
+                w.systemd.changed()
             word = InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED
             return 0, [word.line(w.dropin_path)], ""
 
@@ -665,7 +719,8 @@ class FakeScrubDropin:
 
         def remove_text() -> tuple[int, list[str], str]:
             lines = list(w.svc.remove([core_text(w.dropin_path, w.record)]))
-            w.dirty = w.dirty or bool(lines)
+            if lines:
+                w.systemd.changed()
             return 0, lines, ""
 
         return w.step("drop-in remove-text", remove_text, _installer_failed)
@@ -697,7 +752,7 @@ class FakeScrubSystemd:
 
         def reload() -> CommandResult:
             w.reload_timeouts.append(timeout)
-            w.loaded, w.dirty = w.dropin, False
+            w.systemd.reloaded(w.dropin)
             return CommandResult(0, "", "", argv=argv)
 
         def failed(err: OSError) -> CommandResult:
