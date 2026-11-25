@@ -577,11 +577,11 @@ class GameProfile:
         self.s = dataclasses.replace(self.s, target_user=name)
         return True
 
-    def undo_record(self, rec: Sequence[str], reload: dict[str, bool]) -> bool:
+    def undo_record(self, rec: Sequence[str], reload: dict[str, bool], *, say: bool = True) -> bool:
         """Undo one record of game.state (as state_undo reads it); False when the undo failed: a file write
         or set-property that failed, an override file there that cannot be removed. A unit that is gone is
         no failure (unit_gone), nor is a file whose folder is gone (write_back), nor a record it cannot read
-        (it is skipped)."""
+        (it is skipped). say: see _lookup_uid ('off' only; the tick's retry passes False)."""
         match state_undo(rec):
             case CgroupUndo(file=f, old=old) | SysfsUndo(file=f, old=old):
                 return write_back(f, old)
@@ -589,7 +589,7 @@ class GameProfile:
                 return write_back(self.paths.epp(cpu), old)
             case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
                 if mode == "new":
-                    f = self.ctl_file(mgr, unit, prop, say=True)
+                    f = self.ctl_file(mgr, unit, prop, say=say)
                     try:
                         os.unlink(f)
                     except FileNotFoundError:

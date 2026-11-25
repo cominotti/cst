@@ -62,7 +62,7 @@ def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: dict[st
             if user_manager_gone(profile, uid):
                 continue
             user: str | None = uid
-        elif profile.undo_record(rec, reload):
+        elif profile.undo_record(rec, reload, say=say):
             continue
         else:
             user = (profile.uid(say=say) or None) if of_user_manager(rec) else None

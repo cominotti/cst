@@ -2762,6 +2762,19 @@ class LeftoversTest(GameProfileCase):
             out, actions = self.run_profile("tick")
             self.assertEqual((out, self.sets(actions)), ("", []))
 
+    def test_the_tick_prints_no_id_line_for_a_kept_record(self) -> None:
+        # Kept while TARGET_USER named no account (no "user" line); it still names none. The tick says nothing
+        # on stderr (id's "no such user" line is 'off''s alone: _lookup_uid); 'off' says it once.
+        self.no_game()
+        for action, said in (("tick", ""), ("off", "id: 'nobody-here': no such user\n")):
+            with self.subTest(action=action):
+                self.write(self.paths.leftovers, "cst-game-leftovers 1\nprop usr app.slice CPUWeight new -\n")
+                p, _ = self.accounts_profile("nobody-here")
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
+                self.assertEqual(err.getvalue(), said)
+
     def test_a_newer_file_and_a_failed_undo_end_with_not_undone(self) -> None:
         newer = "cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n"
         self.write(self.paths.leftovers, newer)
