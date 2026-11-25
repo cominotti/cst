@@ -1275,6 +1275,22 @@ class SummariseBranchesTest(unittest.TestCase):
         """The records of a window [T0, T0 + 60] after a v8 meta record, for analyse()."""
         return [meta(T0 - 100, 8), *records]
 
+    def test_a_vmstat_value_the_daemon_could_not_read_adds_nothing(self) -> None:
+        # pswpout 100, 120, null, 130: the pairs add 20, nothing, nothing (main recorded null as 0: the last
+        # pair added all 130 pages, every page since boot as a burst). A null nr_dirty gives no peak.
+        def vm(nr_dirty: int | None, pswpout: int | None) -> list[int | None]:
+            return [nr_dirty, 0, 0, pswpout, 0, 0, 0]
+
+        samples = [
+            self.rec(T0 + 1, vm=vm(1, 100)),
+            self.rec(T0 + 6, vm=vm(3, 120)),
+            self.rec(T0 + 11, vm=vm(None, None)),
+            self.rec(T0 + 16, vm=vm(2, 130)),
+        ]
+        res, _ = load().analyse(self.window(samples), T0, T0 + 20, with_below=False, verbose=False)
+        self.assertEqual(res["vm"]["swap_out_bytes"], 20 * rp_records.PAGE)
+        self.assertEqual(res["peak"]["dirty_bytes"], 3 * rp_records.PAGE)
+
     def test_totals_of_the_sample_pairs(self) -> None:
         fs_a = {"u": {"c": [10, 100, 0, 0, 0, 50], "err": {"1": 1, "2": 0}, "space": {"metadata": [1, 2, 0, 0, 0]}}}
         fs_b = {"u": {"c": [12, 160, 0, 0, 0, 900], "err": {"1": 3, "2": 0}}, "v": {"c": [1, 1, 0, 0, 0, 5], "err": {}}}

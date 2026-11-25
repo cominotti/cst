@@ -236,10 +236,12 @@ def _pair_totals(samples: list[SampleRecord], vm_keys: list[str], v7_since: floa
     return t
 
 
-def _vm_value(rec: SampleRecord, vm_idx: dict[str, int], key: str) -> int:
-    """A vmstat counter of a sample (0 when its daemon did not record it)."""
+def _vm_value(rec: SampleRecord, vm_idx: dict[str, int], key: str) -> int | None:
+    """A vmstat counter of a sample: 0 when its daemon did not record it (an older daemon's list), None
+    where the daemon could not read it (null)."""
     i = vm_idx.get(key, -1)
-    return rec["vm"][i] if 0 <= i < len(rec.get("vm", [])) else 0
+    vm = rec.get("vm", [])
+    return vm[i] if 0 <= i < len(vm) else 0
 
 
 def _add_psi(psi: dict[str, float], a: SampleRecord, b: SampleRecord) -> None:
@@ -274,8 +276,10 @@ def _add_peaks(t: _PairTotals, b: SampleRecord, vm_idx: dict[str, int]) -> None:
             peak["mem_tasks"] = max(peak["mem_tasks"], b["d_mem"])
         else:
             t["old_d"].append((b["ts"], b.get("d", 0), "d_maint" in b))
-    peak["dirty_bytes"] = max(peak["dirty_bytes"], _vm_value(b, vm_idx, "nr_dirty") * PAGE)
-    peak["writeback_bytes"] = max(peak["writeback_bytes"], _vm_value(b, vm_idx, "nr_writeback") * PAGE)
+    for name, key in (("dirty_bytes", "nr_dirty"), ("writeback_bytes", "nr_writeback")):
+        pages = _vm_value(b, vm_idx, key)
+        if pages is not None:  # a value the daemon could not read gives no peak
+            peak[name] = max(peak[name], pages * PAGE)
 
 
 def _add_vm(t: _PairTotals, a: SampleRecord, b: SampleRecord, vm_idx: dict[str, int], *, full_vm: bool) -> None:
@@ -284,7 +288,10 @@ def _add_vm(t: _PairTotals, a: SampleRecord, b: SampleRecord, vm_idx: dict[str, 
     for k in vmd:
         if k in ZSWAP_KEYS and not full_vm:
             continue
-        d = _vm_value(b, vm_idx, k) - _vm_value(a, vm_idx, k)
+        va, vb = _vm_value(a, vm_idx, k), _vm_value(b, vm_idx, k)
+        if va is None or vb is None:  # a side the daemon could not read: no growth across it
+            continue
+        d = vb - va
         if d > 0:
             vmd[k] += d
             if k == "pswpout" and full_vm:

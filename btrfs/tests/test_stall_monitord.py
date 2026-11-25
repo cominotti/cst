@@ -652,7 +652,8 @@ class SampleRecordTest(unittest.TestCase):
             {
                 "t": "s",
                 "psi": {"io": [1.5, 20, 0.5, 10], "memory": [0.0, 3, 0.0, 1], "cpu": [2.0, 40, 0.0, 0]},
-                "vm": [5, 0, 0, 0, 0, 0, 0, 7, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                # null for each key /proc/vmstat did not give (read_kv left it out).
+                "vm": [5, None, None, None, None, None, None, 7, None, None, 2, *[None] * 9],
                 "procs": [3, 1],
                 "d": 0,
                 "d_all": 0,
@@ -726,6 +727,30 @@ class SampleRecordTest(unittest.TestCase):
                 got = mon.sample([])["cg"]
         # machine.slice has no memory.pressure and no io.stat: zeros, as before.
         self.assertEqual(got, {"machine.slice": [3, 2, 0, 0, 0, 0], "docker-good": [31, 21, 0, 0, 10, 20]})
+
+    def test_a_vmstat_key_that_does_not_read_is_null(self) -> None:
+        # The real read_kv on a /proc/vmstat without pgscan_direct and with pswpout "+5" (main: 0 at both,
+        # a counter gone back to 0, which the report counted as every page since boot at the next pair).
+        mon = monitor(load())
+        mon.topo.fs, mon.topo.disks, mon.topo.containers = {}, {}, {}
+        lines = {k: str(n) for n, k in enumerate(md_domain.VMSTAT_KEYS, 1) if k != "pgscan_direct"}
+        lines["pswpout"] = "+5"
+        with tempfile.TemporaryDirectory() as tmp:
+            vmstat = os.path.join(tmp, "vmstat")
+            with open(vmstat, "w", encoding="utf-8") as f:
+                f.write("".join(f"{k} {v}\n" for k, v in lines.items()))
+            with (
+                mock.patch.object(
+                    md_monitor, "read_kv", lambda path: md_proc.read_kv(vmstat) if path == "/proc/vmstat" else {}
+                ),
+                mock.patch.object(md_monitor, "read_text", lambda path: None),
+                mock.patch.object(md_monitor, "parse_psi", lambda path, unreadable=None: unreadable),
+            ):
+                vm = mon.sample([])["vm"]
+        want: list[int | None] = list(range(1, len(md_domain.VMSTAT_KEYS) + 1))
+        for key in ("pswpout", "pgscan_direct"):
+            want[md_domain.VMSTAT_KEYS.index(key)] = None
+        self.assertEqual(vm, want)
 
 
 class WaitKindTest(unittest.TestCase):

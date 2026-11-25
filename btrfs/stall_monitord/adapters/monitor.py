@@ -304,7 +304,9 @@ class Monitor:
             "ts": ts,
             "mono": mono,
             "psi": psi,
-            "vm": [vm.get(k, 0) for k in VMSTAT_KEYS],
+            # null where /proc/vmstat has no readable value for the key (read_kv left it out): a 0 would be
+            # a cumulative counter gone back, and the report would count the next pair as every page since boot.
+            "vm": [vm.get(k) for k in VMSTAT_KEYS],
             # procs_blocked counts tasks in iowait only; "d" counts every D-state task.
             "procs": [st.get("procs_running", 0), st.get("procs_blocked", 0)],
             "d": counts.d,
