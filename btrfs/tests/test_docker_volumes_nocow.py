@@ -1667,7 +1667,12 @@ class DaemonJsonProblemTest(PostponeBase):
         before = tree(self.vols)
         rc, out, err = self.main("mark")
         self.assertEqual(rc, 2)
-        self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
+        self.assertEqual(err, "")
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: {self.PROBLEM}: the migration is requested, and the volumes folder is not marked "
+            "(no +C): fix the file, and the first boot after that runs it\n",
+        )
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
         self.assertTrue(os.path.exists(self.flag))
         self.assertEqual(read_attempts(self), "0")
@@ -1680,9 +1685,13 @@ class DaemonJsonProblemTest(PostponeBase):
         self.fs.sets.clear()
         before = tree(self.vols)
         rc, out, err = self.main("mark")
-        self.assertEqual(rc, 2)
-        self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
-        self.assertIn(f"<3>{TAG}: cannot schedule the migration ([Errno 17] File exists", out + err)
+        self.assertEqual((rc, err), (2, ""))
+        # request_migration's line first (why no request), then mark's, which claims no request.
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); [^\n]*\n"
+            rf"<3>{TAG}: {re.escape(self.PROBLEM)}: the volumes folder is not marked \(no \+C\)\n$",
+        )
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
         self.assertFalse(os.path.exists(self.flag))
 

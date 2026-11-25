@@ -5515,7 +5515,7 @@ EOF
             rc=0; out="$($prog mark 2>&1)" || rc=$?
             echo "test_114 mark: rc=$rc $out" >&2
             [[ "$rc" == 2 ]]
-            grep -qF "nothing marked (fix the file, then run it again)" <<<"$out"
+            grep -qF "/etc/docker/daemon.json: not JSON: the migration is requested, and the volumes folder is not marked (no +C): fix the file, and the first boot after that runs it" <<<"$out"
             [[ -e /etc/btrfs-setup/docker-nocow-pending ]] || { echo "mark wrote no request" >&2; exit 1; }
             [[ "$(cat /var/lib/docker-volumes-nocow/attempts)" == 0 ]] || { echo "the old count stayed" >&2; exit 1; }
             printf '{}' >/etc/docker/daemon.json

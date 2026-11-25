@@ -56,8 +56,16 @@ class DockerVolumesNocow:
                     # own (the count reset, then the flag, each flushed), so the first boot after the
                     # fix runs the migration. Nothing else writes it: a flag written by btrfs-setup
                     # could sit beside an old count, which the next boot would take for this request's.
-                    self.out.log(3, f"{self.paths.config_problem}: nothing marked (fix the file, then run it again)")
-                    self.request_migration(renew=True)
+                    # The line after the request, as it went (request_migration's own line says why not).
+                    problem = self.paths.config_problem
+                    if self.request_migration(renew=True):
+                        self.out.log(
+                            3,
+                            f"{problem}: the migration is requested, and the volumes folder is not marked (no +C): "
+                            "fix the file, and the first boot after that runs it",
+                        )
+                    else:
+                        self.out.log(3, f"{problem}: the volumes folder is not marked (no +C)")
                     return 2
                 case NocowCommand.MARK:
                     return self.mark()
