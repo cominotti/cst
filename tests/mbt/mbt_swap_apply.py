@@ -61,7 +61,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, rule
 
 from swap.application.apply import SwapApplicationService
-from swap.application.reports import DROPIN_ENTRY, SYSCTL_ENTRY, TMPFILES_ENTRY
+from swap.application.environment import DROPIN_ENTRY, SYSCTL_ENTRY, TMPFILES_ENTRY
 from swap.application.memory_tuning import MM_TMPFILES_ENTRY, URESOURCED_ENTRY
 from swap.domain import SwapCommand
 from swap.presenter import run_command

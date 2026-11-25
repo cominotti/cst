@@ -26,7 +26,7 @@ from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort, SystemctlHost
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.application.apply import SwapApplicationService
-from swap.application.reports import SwapEnvironment
+from swap.application.environment import SwapEnvironment
 
 # The test seam's variables (kernel_dirs).
 SEAM_PROC: Final = "CST_SWAP_PROC"

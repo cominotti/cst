@@ -19,14 +19,8 @@ from swap.application.memory_tuning import (
     uresourced_settings_row,
     wait_for_uresourced_floor,
 )
-from swap.application.reports import (
-    DROPIN_ENTRY,
-    OLD_DROPIN_ENTRY,
-    SLICE_DROPIN_NOT_REGULAR,
-    SYSCTL_ENTRY,
-    TMPFILES_ENTRY,
-    SwapReports,
-)
+from swap.application.environment import DROPIN_ENTRY, OLD_DROPIN_ENTRY, SYSCTL_ENTRY, TMPFILES_ENTRY
+from swap.application.reports import SLICE_DROPIN_NOT_REGULAR, SwapReports
 from swap.domain import (
     SETTING_STATE_WIDTH,
     WSF_EXPERIMENT,
