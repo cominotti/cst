@@ -2659,7 +2659,9 @@ class DockerNocowOutcomeTest(Scratch):
         self.assertIn("fix: cst btrfs install", r.stdout)
         self.assert_read_only()
 
-    def _root_rows(self, *, uid: int = 0, container: bool = False, answer: tuple[str, str] | None) -> tuple[list[Result], int]:
+    def _root_rows(
+        self, *, uid: int = 0, container: bool = False, answer: tuple[str, str] | None
+    ) -> tuple[list[Result], int]:
         host = doc_adapters.Host(dict(self.env))
         host.uid = uid
         host.container = container
@@ -2736,7 +2738,11 @@ class DockerNocowOutcomeTest(Scratch):
                 try:
                     rows, asked = self._root_rows(uid=uid, container=container, answer=None)
                 finally:
-                    for p in (self.flag, os.path.join(self.state_dir, "outcome"), os.path.join(self.state_dir, "attempts")):
+                    for p in (
+                        self.flag,
+                        os.path.join(self.state_dir, "outcome"),
+                        os.path.join(self.state_dir, "attempts"),
+                    ):
                         if os.path.exists(p):
                             os.remove(p)
                     if not os.path.exists(self.helper):
