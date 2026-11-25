@@ -264,9 +264,8 @@ class UserFiles:
         return as_user(self.pw, self.home, is_bool, self.u_create_bulk, bulk)
 
     def u_relabel(self, path: str) -> bool:
-        """A new subvolume root has no SELinux label (unlabeled_t), and files
-        created in it would inherit that: give it the policy's label (as the
-        user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
+        """A new subvolume root has no SELinux label (unlabeled_t), and files created in it would inherit that:
+        give it the policy's label (as the user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
         with contextlib.suppress(OSError):
             self.machine.run(["restorecon", path])
         return True
@@ -594,11 +593,10 @@ class UserFiles:
         return n
 
     def u_steam_prepare(self, parts: Sequence[SteamPart], idle: bool = False) -> int:
-        """Copy every part to its .bulk-new name and check it: a reflink clone,
-        or (mode 'copy': NOCOW data) a real copy whose every byte is compared
-        afterwards. Returns the ctime stamp (ns) taken before the copy. idle:
-        this is a child process of its own (as_user): it lowers its own
-        priority for the copy and the comparison."""
+        """Copy every part to its .bulk-new name and check it: a reflink clone, or (mode 'copy': NOCOW data)
+        a real copy whose every byte is compared afterwards. Returns the ctime stamp (ns) taken before the
+        copy. idle: this is a child process of its own (as_user): it lowers its own priority for the copy
+        and the comparison."""
         for p in parts:
             self.drop_marked(p["new"])  # what a cut u_drop left, without its journal (as u_prepare)
             for x in (p["new"], p["dst"]):
