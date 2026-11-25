@@ -258,6 +258,47 @@ class ReadBytesTest(unittest.TestCase):
             with self.subTest(text=text[:8]):
                 self.assertEqual(self.m.read_int(self.write("v", text.encode())), want)
 
+    def test_kv_psi_and_io_stat_skip_a_value_they_cannot_read(self) -> None:
+        # int() and float() also took "+5", "1_0", "nan", "inf", "1e9" and digits of other scripts
+        # ("\N{ARABIC-INDIC DIGIT THREE}" as 3), and raised ValueError past 4300 digits, out of the
+        # sample and the daemon's loop. A name with such a value is left out of read_kv; a PSI or io.stat
+        # file with one is unreadable (None), the fall-through the callers already have.
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        huge = "1" * 5000
+        for bad in ("+5", "1_0", three, huge):
+            with self.subTest(kv=bad[:8]):
+                path = self.write("vmstat", f"zswpout {bad}\nnr -5\npswpin 7\n".encode())
+                self.assertEqual(self.m.read_kv(path), {"nr": -5, "pswpin": 7})
+        good_psi = "some avg10=1.50 avg60=0.00 avg300=0.00 total=20\nfull avg10=0.50 avg60=0.00 avg300=0.00 total=10\n"
+        self.assertEqual(md_proc.parse_psi(self.write("io", good_psi.encode())), [1.5, 20, 0.5, 10])
+        # A field the file does not have stays 0, as before.
+        self.assertEqual(md_proc.parse_psi(self.write("io", b"some avg10=2.00 total=4\n")), [2.0, 4, 0.0, 0])
+        for avg, total in (
+            ("nan", "20"),
+            ("inf", "20"),
+            ("1e9", "20"),
+            ("1_0", "20"),
+            (three, "20"),
+            ("1.50", three),
+            ("1.50", "+20"),
+            ("1.50", huge),
+            ("1.50", "-1"),
+        ):
+            with self.subTest(avg=avg, total=total[:8]):
+                text = f"some avg10={avg} avg60=0.00 avg300=0.00 total={total}\n"
+                self.assertIsNone(md_proc.parse_psi(self.write("io", text.encode())))
+        devs = {"253:0"}
+        self.assertEqual(
+            md_proc.parse_io_stat(self.write("io.stat", b"253:0 rbytes=5 wbytes=7 rios=1\n"), devs), [5, 7]
+        )
+        for bad in ("+5", three, huge, "x"):
+            with self.subTest(io_stat=bad[:8]):
+                text = f"253:0 rbytes={bad} wbytes=7 rios=1\n8:0 rbytes=x\n"
+                self.assertIsNone(md_proc.parse_io_stat(self.write("io.stat", text.encode()), devs))
+        # A device that is not counted is not read either.
+        path = self.write("io.stat", f"253:0 rbytes=5 wbytes=7\n8:0 rbytes={three}\n".encode())
+        self.assertEqual(md_proc.parse_io_stat(path, devs), [5, 7])
+
     def test_error_during_first_read(self) -> None:
         path = self.write("big", b"a" * (2 * PAGE))
 
