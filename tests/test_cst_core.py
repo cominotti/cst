@@ -263,6 +263,12 @@ class ValueObjectsTest(unittest.TestCase):
         for bad in ("", " , ", "3-1", "a-b", "0-1-2", "cpu0", "²", "0-²", "٣"):
             with self.subTest(bad=bad), self.assertRaises(DomainValidationError):
                 CpuSet.parse(bad)
+        # ASCII blanks around the list and an element are dropped; a no-break space or an ideographic
+        # space is an invalid element, as systemd's AllowedCPUs= reads it (str.strip() dropped them).
+        self.assertEqual(CpuSet.parse(" 0-3, 6\n").cpus, frozenset({0, 1, 2, 3, 6}))
+        for bad in ("12-23\N{NO-BREAK SPACE}", "0-3,\N{IDEOGRAPHIC SPACE}6", "\N{NO-BREAK SPACE}1", "1\x1c"):
+            with self.subTest(blank=bad), self.assertRaises(DomainValidationError):
+                CpuSet.parse(bad)
         # An index past int()'s digit limit (4300 digits) is an invalid index or range too, not the
         # plain ValueError int() raises: callers that catch only DomainValidationError (cpu irq's
         # BUILD_CPUS, cpu power's topology) would see a traceback.

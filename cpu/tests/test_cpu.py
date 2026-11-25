@@ -754,6 +754,13 @@ class QuietTest(unittest.TestCase):
         # Duration.parse_float's grammar: a fraction with no unit, d and w, blanks, any case.
         self.assertEqual([cpu_domain.duration(x) for x in ("1.5", "1d", "1w", " 2 H ")], [1.5, 86400, 604800, 7200])
 
+    def test_a_wait_with_a_unicode_blank_is_no_duration(self) -> None:
+        # --wait needed no change: Duration.parse_float matches with re.ASCII, so its blanks are ASCII.
+        # This pins it (it passes on the code before the ASCII-blanks change too).
+        for text in ("\N{NO-BREAK SPACE}3m", "3m\N{IDEOGRAPHIC SPACE}"):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "^not a duration"):
+                cpu_domain.duration(text)
+
     def test_a_duration_too_large_to_hold_is_a_usage_error(self) -> None:
         # 400 digits passed the regex and float() gave inf: --wait inf never ran out, so a noisy machine
         # kept quiet waiting for ever.

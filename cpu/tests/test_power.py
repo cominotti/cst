@@ -22,8 +22,11 @@ from cpu.power.adapters import (
     power_paths_for,
 )
 from cpu.power.cli import PowerCliDeps, run_power_cli
+from cpu.game.domain import parse_cstate_limit_us
 from cpu.power.domain import (
+    GpuPmMode,
     PowerAction,
+    parse_gpu_pm_mode,
     format_power_plan,
     format_power_status,
     parse_power_args,
@@ -69,6 +72,24 @@ class CpuPowerDomainTest(unittest.TestCase):
         self.assertIsNotNone(parse_power_args(["revert", "--gpu-only"]).error)
         self.assertIsNotNone(parse_power_args(["apply", "--unknown"]).error)
         self.assertIsNotNone(parse_power_args(["bogus"]).error)
+
+
+class CpuSettingsWordsTest(unittest.TestCase):
+    def test_a_unicode_blank_around_a_word_is_part_of_it(self) -> None:
+        # cpu-setup.conf is read as bash sources it, so a no-break space stays in the value; str.strip()
+        # used to drop it, and "\N{NO-BREAK SPACE}game" was game, "50\N{NO-BREAK SPACE}" 50 us.
+        self.assertEqual(parse_gpu_pm_mode(" game\t"), (GpuPmMode.GAME, None))
+        word = "\N{NO-BREAK SPACE}game"
+        self.assertEqual(
+            parse_gpu_pm_mode(word), (GpuPmMode.ALWAYS, f"GPU_PM_MODE={word!r} must be always, game, or off")
+        )
+        self.assertEqual(parse_cstate_limit_us(" 50\n", default_us=200), (50, None))
+        for value in ("50\N{NO-BREAK SPACE}", "off\N{IDEOGRAPHIC SPACE}"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    parse_cstate_limit_us(value, default_us=200),
+                    (200, f"{value!r} must be a positive microsecond integer or 'off'"),
+                )
 
 
 class CpuPowerLifecycleTest(unittest.TestCase):
@@ -250,6 +271,10 @@ class CpuPowerLifecycleTest(unittest.TestCase):
             ("acpi_idle", "GPU_PM_MODE='always'\nCPU_CSTATE_MAX_LATENCY_US='200'\n", 200),
             ("acpi_idle", "CPU_CSTATE_MAX_LATENCY_US='off'\n", None),
             ("intel_idle", "CPU_CSTATE_MAX_LATENCY_US='off'\n", None),
+            # A value of a no-break space is set (not empty to bash), and no number: the 200 us default
+            # with a warning, also with acpi_idle (str.strip() made it "not set": no cap there).
+            ("acpi_idle", "CPU_CSTATE_MAX_LATENCY_US='\N{NO-BREAK SPACE}'\n", 200),
+            ("intel_idle", "CPU_CSTATE_MAX_LATENCY_US='50\N{NO-BREAK SPACE}'\n", 200),
         )
         for drv, conf, want in cases:
             with self.subTest(driver=drv, conf=conf):

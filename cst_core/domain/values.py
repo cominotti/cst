@@ -241,13 +241,15 @@ class CpuSet:
 
     @classmethod
     def parse(cls, spec: str) -> Self:
-        """Parse a CPU range specification such as '0-3,6' into a CpuSet."""
-        cleaned = spec.strip()
+        """Parse a CPU range specification such as '0-3,6' into a CpuSet. ASCII blanks around the list and
+        around each element are dropped; a no-break space or another Unicode blank is an invalid element
+        (systemd's AllowedCPUs= refuses it too)."""
+        cleaned = spec.strip(ASCII_BLANKS)
         if not cleaned:
             raise DomainValidationError("CpuSet specification must not be empty")
         selected: set[int] = set()
         for part in cleaned.split(","):
-            token = part.strip()
+            token = part.strip(ASCII_BLANKS)
             if not token:
                 raise DomainValidationError(f"invalid empty range element in {spec!r}")
             if "-" in token:

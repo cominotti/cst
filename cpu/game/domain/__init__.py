@@ -21,7 +21,7 @@ import re
 from typing import Final, Literal
 
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, first_line_version, state_format
-from cst_core.domain.text import enum_member, file_lines, group, printf_q, printf_q_words
+from cst_core.domain.text import enum_member, file_lines, group, printf_q, printf_q_words, strip_ascii_blanks
 from cst_core.domain.values import MINUTE
 
 # How long a writer under the run lock (/run/cpu-setup/lock: the game profile's on, off and tick,
@@ -189,8 +189,9 @@ _AMD_FULLSCREEN_PROFILE: Final = "3D_FULL_SCREEN"
 
 
 def parse_cstate_limit_us(raw: str, *, default_us: int) -> tuple[int | None, str | None]:
-    """Parse a C-state exit latency ceiling (`200`, `50`, or `off`/`0`); return `(limit_us_or_None, error)`."""
-    cleaned = raw.strip().lower()
+    """Parse a C-state exit latency ceiling (`200`, `50`, or `off`/`0`); return `(limit_us_or_None, error)`.
+    ASCII blanks around the value are dropped; a no-break space is part of it."""
+    cleaned = strip_ascii_blanks(raw).lower()
     if not cleaned:
         return default_us, None
     if cleaned in _CSTATE_OFF_WORDS:
