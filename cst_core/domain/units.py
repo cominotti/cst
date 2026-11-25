@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
 """systemd units: their files as CST writes them (header comment lines, then sections), the answer
 of `systemctl show` (parse_show_props, parse_show_units), the question of every loaded unit of a glob
-(show_units_argv) and of a property of the manager itself (show_manager_value_argv), the folder a user
-manager reads the user's own units from (user_unit_dir; named_user_unit_dir when it must have said so), and systemd's ActiveState words (ActiveState).
+(show_units_argv) and of a property of the manager itself (show_manager_value_argv), the head that
+reaches another user's user manager (user_manager_head), the folder a user manager reads the user's
+own units from (user_unit_dir; named_user_unit_dir when it must have said so), and systemd's
+ActiveState words (ActiveState).
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])
 
@@ -43,19 +45,27 @@ def parse_show_units(text: str) -> list[dict[str, str]]:
     return [unit for block in text.split("\n\n") if (unit := parse_show_props(block))]
 
 
+def user_manager_head(user: str) -> list[str]:
+    """`systemctl --user -M USER@`: the head that reaches USER's user manager from root (or from another
+    user), for show_units_argv, show_manager_value_argv or a caller's own ARGS. USER as given: an empty
+    name gives `-M @` (no name is checked here)."""
+    return ["systemctl", "--user", "-M", f"{user}@"]
+
+
 def show_units_argv(head: Sequence[str], pattern: str, props: Sequence[str]) -> list[str]:
-    """`HEAD... show --state=loaded -p PROP... PATTERN` (HEAD: `systemctl`, or `systemctl --user`): every
-    unit the manager has loaded whose name matches the glob, active or not (without --state=loaded a glob
-    hides the inactive units that have no job queued), and it loads none. SystemctlAdapter.show_units runs
-    it; a caller that runs systemctl through another runner (cst doctor's host) builds it here, so both ask
-    the same question."""
+    """`HEAD... show --state=loaded -p PROP... PATTERN` (HEAD: `systemctl`, `systemctl --user`, or
+    user_manager_head(USER)): every unit the manager has loaded whose name matches the glob, active or
+    not (without --state=loaded a glob hides the inactive units that have no job queued), and it loads
+    none. SystemctlAdapter.show_units runs it; a caller that runs systemctl through another runner (cst
+    doctor's host) builds it here, so both ask the same question."""
     return [*head, "show", f"--state={LoadState.LOADED}", *(a for p in props for a in ("-p", p)), pattern]
 
 
 def show_manager_value_argv(head: Sequence[str], prop: str) -> list[str]:
-    """`HEAD... show -p PROP --value`: a property of the manager itself (no unit named), such as its
-    UnitPath. SystemctlAdapter.show_value(None, PROP) runs it; a caller that runs systemctl through
-    another runner (cst doctor's host) builds it here, so both ask the same question."""
+    """`HEAD... show -p PROP --value` (HEAD as show_units_argv's): a property of the manager itself (no
+    unit named), such as its UnitPath. SystemctlAdapter.show_value(None, PROP) runs it; a caller that
+    runs systemctl through another runner (cst doctor's host) builds it here, so both ask the same
+    question."""
     return [*head, "show", "-p", prop, "--value"]
 
 

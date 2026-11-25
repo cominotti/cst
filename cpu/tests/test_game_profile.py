@@ -32,6 +32,7 @@ from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFil
 from cpu.game.adapters.kernel import GameKernelFiles
 from cpu.game.adapters.power import GameSysfsFiles
 from cpu.game.adapters.profile import GameProfile, load_profile, machine_ports
+from cpu.game.application.leftovers import unit_gone, user_manager_gone
 from cpu.game.application.profile import GameProfileSteps
 from cst_core.adapters import files as cst_files
 from cst_core.adapters.files import read_text
@@ -46,6 +47,7 @@ from cpu.game.domain import (
     escapes_in_state,
     expand_cpus,
     has_prop_record,
+    intended_header,
     intended_records,
     newer_intended,
     record_line,
@@ -55,10 +57,20 @@ from cpu.game.domain import (
     unit_name_valid,
     vm_io_weight,
 )
-from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
+from cpu.game.domain.boxes import (
+    Unset,
+    cpuset_file_form,
+    intended_covers,
+    set_again_text,
+    setting_holds,
+    unset_settings,
+)
 from cpu.game.domain.leftovers import (
+    Entry,
     entry_key,
+    kept_count_text,
     leftover_entries,
+    leftovers_line,
     leftovers_text,
     merged_entries,
     newer_leftovers,
@@ -68,6 +80,20 @@ from cpu.game.domain.leftovers import (
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
 from cpu.tests.fakes import SYS, UID, USER, USR, add_gamemode_pid, game_scratch, override_path
+
+
+class FailingOnceKernel(GameKernelFiles):
+    """The cgroup tree, whose first write of each of these files fails (False, as an OSError gives)."""
+
+    def __init__(self, failing: set[str]) -> None:
+        self.failing = set(failing)
+
+    @override
+    def write(self, path: str, value: str) -> bool:
+        if path in self.failing:
+            self.failing.discard(path)
+            return False
+        return super().write(path, value)
 
 
 class GameProfileCase(unittest.TestCase):
@@ -151,6 +177,13 @@ class GameProfileCase(unittest.TestCase):
 
 
 class PureRulesTest(unittest.TestCase):
+    def test_a_cpu_list_as_the_kernel_shows_it_in_cpuset_cpus(self) -> None:
+        self.assertEqual(cpuset_file_form("12-23"), "12-23")
+        self.assertEqual(cpuset_file_form("12,13,14"), "12-14")
+        self.assertEqual(cpuset_file_form("0-3,8 20-23"), "0-3,8,20-23")  # systemd's blanks too: no blank
+        self.assertEqual(cpuset_file_form("junk"), "junk")  # as it is: no CPU list
+        self.assertEqual(cpuset_file_form(""), "")
+
     def test_the_last_record_of_a_setting_in_game_intended_wins_at_its_place(self) -> None:
         one_each = "cst-game-intended 1\nprop sys a.slice CPUWeight 10 10\ncgw /cg/cpuset.cpus 1-2 1-2\n"
         self.assertEqual(
@@ -1586,6 +1619,105 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.state))
 
 
+class NoAccountNoUserManagerCallTest(GameProfileCase):
+    """No `systemctl --user` runs for a name no account has (TARGET_USER unset, or naming none, and no uid
+    in game.state to act for): `-M @` reaches the caller's own user manager (root's), `-M NAME@` none. A
+    record of the user manager of no user is dropped, said, never undone elsewhere (r26.2)."""
+
+    NOBODY = "cst-test-nobody"
+
+    def nameless(self, target: str) -> tuple[GameProfile, io.StringIO]:
+        """The profile for target, a name no account has; only USER has one (uid UID)."""
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            GameSettings(target_user=target),
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "",
+            name_of=lambda uid: USER if uid == UID else "",
+            out=out,
+        )
+        self.systemd.actions = []
+        return p, out
+
+    def user_calls(self) -> list[str]:
+        return [a for a in self.systemd.actions if a.startswith("systemctl --user")]
+
+    def test_off_drops_an_old_value_of_the_user_manager_with_no_user_to_undo_it_for(self) -> None:
+        # An 'on' whose first record failed: no user@UID.service record, so no uid to act for.
+        for target in ("", self.NOBODY):
+            with self.subTest(target=target):
+                self.write(
+                    self.state,
+                    "prop usr app.slice CPUWeight existed 100\nprop sys machine.slice CPUWeight existed 50\n",
+                )
+                p, out = self.nameless(target)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(p.off(), 0)
+                self.assertEqual(self.user_calls(), [])  # the old 'off' ran `--user -M @ set-property`
+                self.assertIn(f"{SYS} set-property --runtime machine.slice CPUWeight=50", self.systemd.actions)
+                self.assertIn(
+                    "<4>game-profile: off: could not undo app.slice CPUWeight=100: TARGET_USER names no account,"
+                    " no user manager to undo it in: dropped\n",
+                    out.getvalue(),
+                )
+                self.assertEqual(err.getvalue(), f"id: '{target}': no such user\n")  # said once
+                self.assertFalse(os.path.exists(self.state))
+                self.assertFalse(os.path.exists(self.paths.leftovers))  # dropped, not kept
+
+    def test_the_tick_drops_a_kept_old_value_of_no_user(self) -> None:
+        self.no_game()
+        self.write(self.paths.leftovers, "cst-game-leftovers 2\nuser -\nprop usr app.slice CPUWeight existed 100\n")
+        p, out = self.nameless(self.NOBODY)
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.user_calls(), [])  # the old tick ran `--user -M cst-test-nobody@ set-property`
+        self.assertIn(
+            "<4>game-profile: could not undo app.slice CPUWeight=100: TARGET_USER names no account,"
+            " no user manager to undo it in: dropped\n",
+            out.getvalue(),
+        )
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_the_tick_and_state_ask_no_user_manager_for_no_user(self) -> None:
+        # On with no uid in game.state and TARGET_USER unset: the user manager's drift is not compared, set or
+        # shown (the old tick asked `--user -M @` and set user.slice's CPUWeight in root's user manager).
+        self.write(self.state, "prop sys machine.slice CPUWeight existed 50\n")
+        self.write(self.intended, intended_header() + "prop usr user.slice CPUWeight idle idle\n")
+        self.write(self.manual, "")
+        p, out = self.nameless("")
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.user_calls(), [])
+        self.assertNotIn("user.slice CPUWeight", out.getvalue())
+        p, out = self.nameless("")
+        self.assertEqual(p.state(), 0)
+        self.assertEqual(self.user_calls(), [])
+        self.assertNotIn("DRIFT", out.getvalue())
+
+    def test_off_s_no_such_user_line_survives_a_quiet_lookup_before_it(self) -> None:
+        p, _ = self.nameless(self.NOBODY)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.ask("usr", "show", "-P", "CPUWeight", "user.slice").returncode, 1)  # quiet, first
+            self.assertEqual(p.uid(say=True), "")
+            self.assertEqual(p.uid(say=True), "")
+        self.assertEqual(err.getvalue(), f"id: '{self.NOBODY}': no such user\n")  # once
+        self.assertEqual(self.user_calls(), [])
+
+    def test_a_user_manager_of_no_uid_is_never_gone(self) -> None:
+        p, _ = self.nameless("")
+        self.assertFalse(user_manager_gone(p, ""))
+        self.assertFalse(unit_gone(p, "usr", "app.slice"))  # the old one: True, the call counted done
+        self.assertFalse(unit_gone(p, "usr", "run-u7.scope"))
+        self.assertEqual(self.user_calls(), [])
+        # A uid whose runtime folder is gone (a logout): gone, as before.
+        mine, _ = self.profile()
+        self.assertFalse(user_manager_gone(mine, UID))
+        shutil.rmtree(os.path.join(self.paths.run_user, UID))
+        self.assertTrue(user_manager_gone(mine, UID))
+        self.assertTrue(unit_gone(mine, "usr", "app.slice"))
+
+
 class TickForARecordedUidWithoutAccountTest(GameProfileCase):
     """G7, the tick and 'state': with game.state of a uid no account has now and a TARGET_USER that names another
     account, the user manager's side is left alone: no setting and no record in TARGET_USER's manager (it is
@@ -2085,6 +2217,100 @@ class GameProfileEscapesTest(GameProfileCase):
         self.assertIn(f"cgw {f} 12-23 12-23\n", self.read(self.intended))
         self.run_profile("off")
         self.assertEqual(self.read(f), "8-23\n")
+
+    def fallback_tree(self) -> str:
+        """cpuset delegated, and a user manager that ignores AllowedCPUs on user.slice: its cpuset.cpus (8-23)."""
+        self.tree(delegated=True)
+        cpus = self.cg("user.slice")
+        self.write(os.path.join(cpus, "cpuset.cpus"), "8-23\n")
+        self.set_now("usr", "user.slice", ControlGroup="/" + os.path.relpath(cpus, self.paths.cgroot))
+        return os.path.join(cpus, "cpuset.cpus")
+
+    def test_a_cpuset_fallback_whose_write_failed_in_on_is_written_by_the_next_tick(self) -> None:
+        # r26.1, G1's twin: the record of game.intended comes before the write, so the tick writes it; the old
+        # 'on' wrote it only after a write that worked, and the toolboxes kept the game's CPUs until 'off'.
+        f = self.fallback_tree()
+        kernel = FailingOnceKernel({f})
+        with self.ports(kernel=kernel):
+            out, _ = self.run_profile("on")
+        self.assertEqual(self.read(f), "8-23\n")  # the write failed
+        self.assertIn(f"<4>game-profile: user.slice: could not write {f}\n", out)
+        self.assertIn(f"cgw {f} 8-23\n", self.read(self.state))
+        self.assertEqual(
+            [r for r in intended_records(self.read(self.intended)) if r[1] == f], [("cgw", f, "12-23", "12-23")]
+        )
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick")
+        self.assertEqual(self.read(f), "12-23\n")
+        self.assertIn(f"<5>game-profile: drift: {f} was '8-23', wrote 12-23 again\n", out)
+        out, _ = self.run_profile("tick")
+        self.assertNotIn(f, out)  # held: nothing written again
+        self.run_profile("off")
+        self.assertEqual(self.read(f), "8-23\n")
+
+    def test_a_cpuset_fallback_the_kernel_shows_in_another_form_gets_a_second_record(self) -> None:
+        # The prediction is the kernel's form of the list (commas and ranges); a read-back in another form after
+        # a write that worked is recorded too, so the tick does not write it every 30 s. The same for the tick's
+        # own write of a prediction whose write failed in 'on'.
+        f = self.fallback_tree()
+        commas = dataclasses.replace(self.settings, build_cpus="12,13,14,15")
+        self.run_profile("on", commas)
+        self.assertEqual(
+            [r for r in intended_records(self.read(self.intended)) if r[1] == f],
+            [("cgw", f, "12,13,14,15", "12,13,14,15")],
+        )
+        self.assertEqual(  # the prediction first, then the read-back
+            [r for r in records(self.read(self.intended)) if r[:2] == ("cgw", f)],
+            [("cgw", f, "12,13,14,15", "12-15"), ("cgw", f, "12,13,14,15", "12,13,14,15")],
+        )
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick", commas)
+        self.assertNotIn(f, out)
+        self.run_profile("off", commas)
+        self.assertEqual(self.read(f), "8-23\n")
+        with self.ports(kernel=FailingOnceKernel({f})):
+            self.run_profile("on", commas)
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick", commas)
+        self.assertIn(f"<5>game-profile: drift: {f} was '8-23', wrote 12,13,14,15 again\n", out)
+        self.assertEqual(
+            [r for r in intended_records(self.read(self.intended)) if r[1] == f],
+            [("cgw", f, "12,13,14,15", "12,13,14,15")],
+        )
+        out, _ = self.run_profile("tick", commas)
+        self.assertNotIn(f, out)
+
+    def test_a_cpuset_fallback_the_manager_wrote_in_the_kernel_s_form_is_left_alone(self) -> None:
+        # A user manager that honours AllowedCPUs has written user.slice's cpuset.cpus in the kernel's form (12-15)
+        # when the fallback reads it, for a BUILD_CPUS written another way (12,13,14,15): nothing to write and
+        # nothing recorded. The old one compared the file with BUILD_CPUS as written: it recorded the game's own
+        # value as the file's old one (cgw FILE 12-15), wrote the file again, and 'off' wrote 12-15 back.
+        f = self.fallback_tree()
+        self.write(f, "12-15\n")
+        commas = dataclasses.replace(self.settings, build_cpus="12,13,14,15")
+        self.run_profile("on", commas)
+        self.assertEqual([r for r in records(self.read(self.state)) if r[:2] == ("cgw", f)], [])
+        self.assertEqual([r for r in records(self.read(self.intended)) if r[:2] == ("cgw", f)], [])
+        self.assertEqual(self.read(f), "12-15\n")
+        # BUILD_CPUS in the kernel's form already: left alone as before.
+        self.run_profile("off", commas)
+        self.write(f, "12-23\n")
+        self.run_profile("on")
+        self.assertEqual([r for r in records(self.read(self.state)) if r[:2] == ("cgw", f)], [])
+
+    def test_a_game_intended_of_the_previous_version_reads_the_same(self) -> None:
+        # Upgrade: the previous 'on' wrote one cgw record per file, after a write that worked.
+        f = self.fallback_tree()
+        self.write(self.state, f"prop sys user@{UID}.service MemoryLow new -\ncgw {f} 8-23\n")
+        self.write(self.intended, intended_header() + f"cgw {f} 12-23 12-23\n")
+        self.write(f, "12-23\n")
+        self.write(self.manual, "")
+        out, _ = self.run_profile("tick")
+        self.assertNotIn(f, out)
+        self.write(f, "8-23\n")
+        out, _ = self.run_profile("tick")
+        self.assertIn(f"<5>game-profile: drift: {f} was '8-23', wrote 12-23 again\n", out)
+        self.assertEqual(self.read(f), "12-23\n")
 
     def test_a_box_with_the_game_in_it_is_left_alone(self) -> None:
         self.tree()
@@ -2591,12 +2817,48 @@ class LeftoversFormatTest(unittest.TestCase):
         )
         self.assertEqual(undo_text(("epp", "3", "balance_power"), epp), "/cpu3/epp = balance_power")
         self.assertEqual(undo_text(("cgw", "/cg/cpuset.cpus", ""), epp, short=True), "/cg/cpuset.cpus")
+        prop: Entry = (None, ("prop", "sys", "m.slice", "CPUWeight", "existed", "70"))
+        sysfs: Entry = (None, ("sysfs", "/x", "0"))
+        reload_sys: Entry = (None, ("reload", "sys"))
+        reload_usr: Entry = ("1000", ("reload", "usr"))
         self.assertEqual(
-            off_text(0, "/l", kept=0), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
+            off_text([], "/l", kept=0), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
         )
-        self.assertTrue(off_text(2, "/l", kept=2).endswith("restored, except 2 setting(s) kept in /l"))
-        self.assertTrue(off_text(2, "/l", kept=0).endswith("restored, except 2 setting(s) not undone"))
-        self.assertTrue(off_text(3, "/l", kept=2).endswith("restored, except 3 setting(s): 2 kept in /l, 1 not undone"))
+        # Settings only: the words as before.
+        self.assertTrue(off_text([prop, sysfs], "/l", kept=2).endswith("restored, except 2 setting(s) kept in /l"))
+        self.assertTrue(off_text([prop, sysfs], "/l", kept=0).endswith("restored, except 2 setting(s) not undone"))
+        self.assertTrue(
+            off_text([prop, sysfs, prop], "/l", kept=2).endswith(
+                "restored, except 3 setting(s): 2 kept in /l, 1 not undone"
+            )
+        )
+        # r26.6: a daemon-reload is counted apart, and one not kept is "not done".
+        self.assertTrue(off_text([reload_sys], "/l", kept=1).endswith("restored, except 1 daemon-reload(s) kept in /l"))
+        self.assertTrue(
+            off_text([reload_sys, reload_usr], "/l", kept=0).endswith("restored, except 2 daemon-reload(s) not done")
+        )
+        self.assertTrue(
+            off_text([prop, sysfs, reload_sys], "/l", kept=3).endswith(
+                "restored, except 2 setting(s) and 1 daemon-reload(s) kept in /l"
+            )
+        )
+        self.assertTrue(
+            off_text([prop, sysfs, reload_sys], "/l", kept=2).endswith(
+                "restored, except 2 setting(s) and 1 daemon-reload(s): 2 kept in /l, 1 not done"
+            )
+        )
+        self.assertEqual(kept_count_text([prop]), "1 setting(s)")
+        self.assertEqual(kept_count_text([reload_usr]), "1 daemon-reload(s)")
+        self.assertEqual(kept_count_text([reload_sys, prop, reload_usr]), "1 setting(s) and 2 daemon-reload(s)")
+        self.assertEqual(
+            leftovers_line([prop], epp),
+            "  leftovers: 1 setting(s) 'off' could not undo, retried by the next off and tick: m.slice CPUWeight",
+        )
+        self.assertEqual(
+            leftovers_line([prop, reload_usr], epp),
+            "  leftovers: 1 setting(s) and 1 daemon-reload(s) 'off' could not finish, retried by the next off and"
+            " tick: m.slice CPUWeight, daemon-reload of uid 1000's user manager",
+        )
 
 
 class LeftoversTest(GameProfileCase):
@@ -3278,9 +3540,13 @@ class LeftoversTest(GameProfileCase):
             " and tick\n",
             out,
         )
-        self.assertTrue(out.endswith(f"restored, except 1 setting(s) kept in {left}\n"), out)
+        self.assertTrue(out.endswith(f"restored, except 1 daemon-reload(s) kept in {left}\n"), out)
         out, _ = self.run_profile("state")
-        self.assertIn("retried by the next off and tick: daemon-reload of the system manager\n", out)
+        self.assertIn(
+            "  leftovers: 1 daemon-reload(s) 'off' could not finish, retried by the next off and tick: daemon-reload"
+            " of the system manager\n",
+            out,
+        )
         self.no_game()
         out, actions = self.run_profile("tick")
         self.assertEqual(actions, [f"{SYS} daemon-reload"])
@@ -3367,7 +3633,7 @@ class LeftoversTest(GameProfileCase):
             f"<3>game-profile: off: could not keep the daemon-reload of the system manager in {left}: not done\n", out
         )
         self.assertNotIn("kept in", out)
-        self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)
+        self.assertTrue(out.endswith("restored, except 1 daemon-reload(s) not done\n"), out)
         self.assertFalse(os.path.exists(left))
 
     def test_state_names_them(self) -> None:
@@ -3638,6 +3904,25 @@ class GameProfilePowerTest(GameProfileCase):
 
         self.run_profile("off")
         self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+
+    def test_a_cpu_whose_cpuidle_folder_goes_meanwhile_does_not_stop_on(self) -> None:
+        # r36.1: CPU 0 taken offline between the power step's isdir and its listdir of cpuidle. 'on' ends in
+        # success with its records (the old adapter's listdir raised, 'on' failed and cpu-game.service with it,
+        # so its ExecStop never undid what 'on' had set).
+        gone = os.path.join(self.paths.sys_cpu, "cpu0", "cpuidle")
+
+        class Vanishing(GameSysfsFiles):
+            @override
+            def is_dir(self, path: str) -> bool:
+                return path == gone or super().is_dir(path)
+
+        p_cores = dataclasses.replace(self.settings, p_cores="0")
+        with self.ports(power=Vanishing()):
+            out, _ = self.run_profile("on", p_cores)  # asserts exit 0
+        self.assertIn(f"prop sys user@{UID}.service MemoryLow", self.read(self.state))
+        self.assertIn("<5>game-profile: on: ", out)
+        self.run_profile("off", p_cores)
+        self.assertFalse(os.path.exists(self.state))
 
     def test_card0_is_a_gpu_card(self) -> None:
         # The DRM node card0 (number 0) is a card like card1: on a machine whose only GPU is card0,

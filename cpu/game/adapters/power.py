@@ -19,16 +19,21 @@ class GameSysfsFiles(GameSysValues):
     """sysfs and the processes' DRM file descriptors, as files."""
 
     def list_dir(self, path: str) -> list[str]:
-        """The names in the folder."""
-        return os.listdir(path)
+        """The names in the folder; none when it cannot be listed, whatever the error (gone since it was seen: a
+        CPU taken offline; EACCES, EIO), with no journal line, as the sysfs reads beside it (read_stripped)."""
+        try:
+            return os.listdir(path)
+        except OSError:
+            return []
 
     def drm_cards(self, sys_drm: str) -> tuple[dict[str, str], list[str]]:
-        """Each DRM card's device (its real path) to its cardN name, and every cardN, by number."""
+        """Each DRM card's device (its real path) to its cardN name, and every cardN, by number; none when the
+        folder cannot be listed (list_dir: gone meanwhile, or any other error)."""
         dev_to_card: dict[str, str] = {}
         cards: list[str] = []
         if not os.path.isdir(sys_drm):
             return dev_to_card, cards
-        for entry in os.listdir(sys_drm):
+        for entry in self.list_dir(sys_drm):  # none when gone since isdir saw it
             if not is_card(entry):
                 continue
             cards.append(entry)
@@ -39,12 +44,13 @@ class GameSysfsFiles(GameSysValues):
         return dev_to_card, cards
 
     def connected_cards(self, sys_drm: str, cards: list[str]) -> list[str]:
-        """The cards with a connected display, in the order of cards."""
+        """The cards with a connected display, in the order of cards; a card whose folder cannot be listed (a
+        GPU removed since drm_cards saw it) is not connected."""
         connected: list[str] = []
         for card in cards:
             card_dir = os.path.join(sys_drm, card)
             prefix = f"{card}-"
-            for child in os.listdir(card_dir):
+            for child in self.list_dir(card_dir):
                 if not child.startswith(prefix):
                     continue
                 if read_stripped(os.path.join(card_dir, child, "status")) == _CONNECTED_STATE:

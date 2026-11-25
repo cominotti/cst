@@ -65,6 +65,14 @@ def setting_holds(prop: str, value: str, now: str) -> bool | None:
     return None if got is None else got == want
 
 
+def cpuset_file_form(value: str) -> str:
+    """A CPU list as the kernel shows it in a cgroup's cpuset.cpus (commas and ranges, no blanks: "12-23",
+    "0-3,8"): for the record of game.intended written before the profile writes that file. The value as it is
+    when it is no CPU list CpuSet reads."""
+    cpus = _cpus_key(value)
+    return value if cpus is None else format_cpulist(cpus)
+
+
 def shown_form(prop: str, value: str) -> str:
     """The value the profile sets, as systemd shows it (16G in bytes, a CPU list with blanks): for the journal,
     and for the record of game.intended written before its set-property."""

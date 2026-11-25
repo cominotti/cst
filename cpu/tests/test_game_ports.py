@@ -5,7 +5,7 @@ adapter in a temporary folder, a full disk staged with RLIMIT_FSIZE 0), and the 
 pass on: systemctl's argv and options, the files' encoding and modes, the run lock, the order of the boxes and
 the output's lines; and the start of the composition root (cpu.game.wiring) for each action."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 import contextlib
 import fcntl
 import io
@@ -21,6 +21,7 @@ from cpu.game import wiring
 from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFiles, GameUnitFiles
 from cpu.game.adapters.kernel import GameKernelFiles
 from cpu.game.adapters.output import GameStreamOutput
+from cpu.game.adapters import power as power_adapters
 from cpu.game.adapters.power import GameSysfsFiles
 from cpu.game.adapters.profile import machine_ports
 from cpu.game.adapters.systemd import GameSystemctl
@@ -31,22 +32,12 @@ from cpu.tests.fakes import (
     FaultyStateFiles,
     FaultySysfsFiles,
     FaultyUnitFiles,
+    RecordingRunner,
 )
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import CommandResult, OutputMode
 from tests.fault_injection import FaultMode, FaultPlan, Killed, no_file_may_grow
-
-
-class RecordingRunner:
-    """A command runner that answers exit 0 and keeps each call with its options."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[list[str], dict[str, object]]] = []
-
-    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
-        self.calls.append((list(argv), kw))
-        return CommandResult(0, "out\n", "err\n")
 
 
 class Case(unittest.TestCase):
@@ -435,6 +426,27 @@ class DrmDiscoveryPinTest(Case):
         self.among(os.path.join(drm, "card1"), connector(None), "card1-HDMI-A-1")  # no status: not connected
         self.among(os.path.join(drm, "card2"), connector(b"disconnected\n"), "card2-DP-1")
         self.assertEqual(GameSysfsFiles().connected_cards(drm, ["card0", "card1", "card2"]), ["card0"])
+
+    def test_a_folder_gone_since_it_was_seen_is_empty(self) -> None:
+        # r36.1: a CPU taken offline or a GPU removed between isdir and listdir. The old adapter raised
+        # FileNotFoundError, which failed 'on' (cpu-game.service failed, so its ExecStop never ran).
+        sysfs = GameSysfsFiles()
+        gone = self.path("cpu9", "cpuidle")
+        os.makedirs(gone)
+        os.rmdir(gone)
+        self.assertEqual(sysfs.list_dir(gone), [])
+        self.put(self.path("a-file"), b"")
+        self.assertEqual(sysfs.list_dir(self.path("a-file")), [])  # no longer a folder
+        drm = self.path("drm")
+        os.makedirs(os.path.join(drm, "card0", "card0-DP-1"))
+        self.put(os.path.join(drm, "card0", "card0-DP-1", "status"), b"connected\n")
+        self.assertEqual(sysfs.connected_cards(drm, ["card0", "card9"]), ["card0"])  # card9's folder is gone
+        missing = self.path("no-drm")
+        real_isdir = os.path.isdir
+        with unittest.mock.patch.object(
+            power_adapters.os.path, "isdir", side_effect=lambda p: p == missing or real_isdir(p)
+        ):
+            self.assertEqual(sysfs.drm_cards(missing), ({}, []))  # isdir saw it, listdir did not
 
     def test_the_cards_a_process_holds_open(self) -> None:
         proc, drm = self.path("proc"), self.path("drm")

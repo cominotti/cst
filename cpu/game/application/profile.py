@@ -21,7 +21,7 @@ from cpu.game.application.drift import repair_drift, settings_drift
 from cpu.game.application.leftovers import Reloads, keep, read_kept, retry_kept, undo_pass, unit_gone, user_side
 from cpu.game.application.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.application.report import show_state
-from cpu.game.domain.boxes import shown_form
+from cpu.game.domain.boxes import cpuset_file_form, shown_form
 from cpu.game.domain.leftovers import (
     LEFTOVER_DROPINS_TEXT,
     UserSide,
@@ -96,6 +96,7 @@ class GameProfileSteps:
         self.problems = tuple(problems)
         self.ports = ports
         self._uids: dict[str, str] = {}
+        self._said_unknown: set[str] = set()  # the names whose "no such user" line was printed
 
     # ---- output ----------------------------------------------------------------------
     def log(self, prio: int, msg: str) -> None:
@@ -117,20 +118,31 @@ class GameProfileSteps:
         return self._lookup_uid(self.s.target_user, say=say)
 
     def _lookup_uid(self, user: str, *, say: bool) -> str:
-        """The uid of user ("" for none), looked up once per run. With say ('off' only), the first lookup
-        of a user with no account prints id's "no such user" line on stderr, once; on, tick and state
+        """The uid of user ("" for none), looked up once per run. With say ('off' only), a user with no
+        account gets id's "no such user" line on stderr, once per run, whatever quiet lookups came before
+        (the calls of the user manager look the name up quietly first: _no_user_manager); on, tick and state
         never print it."""
         if user not in self._uids:
-            found = self.ports.uid_of(user)
-            if say and not found:
-                self.ports.out.error(f"id: '{user}': no such user")
-            self._uids[user] = found
-        return self._uids[user]
+            self._uids[user] = self.ports.uid_of(user)
+        found = self._uids[user]
+        if say and not found and user not in self._said_unknown:
+            self._said_unknown.add(user)
+            self.ports.out.error(f"id: '{user}': no such user")
+        return found
+
+    def _no_user_manager(self, mgr: Manager, name: str) -> bool:
+        """A call of the user manager (usr) for a name no account has: none is run. `systemctl --user -M @`
+        (an empty name) reaches the caller's own user manager (root's, from 'off' or the tick), and a name of
+        no account reaches none, so neither is ever asked."""
+        return mgr == "usr" and not self._lookup_uid(name, say=False)
 
     def ctl(self, mgr: Manager, *args: str, quiet: bool = False, user: str | None = None) -> int:
         """systemctl ARGS for the system manager (sys) or the user's (usr: the user acted for, or user),
-        its output on ours (quiet: its stderr dropped); the exit status."""
+        its output on ours (quiet: its stderr dropped); the exit status, 1 with nothing run for the user
+        manager of a name no account has (_no_user_manager)."""
         name = self.s.target_user if user is None else user
+        if self._no_user_manager(mgr, name):
+            return 1  # refused: no account, no user manager to call (_no_user_manager)
         if not quiet:
             self.ports.out.flush()
             return self.ports.systemd.run(mgr, name, args, output=OutputMode.INHERIT).returncode
@@ -139,7 +151,10 @@ class GameProfileSteps:
         return res.returncode
 
     def ask(self, mgr: Manager, *args: str, keep_stderr: bool = False) -> CommandResult:
-        """systemctl ARGS, its output captured (its stderr dropped, or shown with keep_stderr)."""
+        """systemctl ARGS, its output captured (its stderr dropped, or shown with keep_stderr); exit 1 and no
+        output, with nothing run, for the user manager of a name no account has (_no_user_manager)."""
+        if self._no_user_manager(mgr, self.s.target_user):
+            return CommandResult(1, "", "")
         output = OutputMode.CAPTURE if keep_stderr else OutputMode.STDOUT
         res = self.ports.systemd.run(mgr, self.s.target_user, args, output=output)
         if keep_stderr and res.stderr:
@@ -313,23 +328,28 @@ class GameProfileSteps:
 
     def cpus_fallback(self, unit: str) -> None:
         """A user manager started before cpuset was delegated to it accepts AllowedCPUs but never
-        writes cpuset.cpus: the cgroup file is written directly, and recorded for 'off'."""
+        writes cpuset.cpus: the cgroup file is written directly, and recorded for 'off'; nothing when the file
+        already holds the list, as written or in the kernel's form (a manager that honours it). game.intended gets
+        the value as the kernel shows it (cpuset_file_form) before the write, so the drift repair writes one
+        whose write failed (setp's rule); after a write that worked, a second record when the kernel shows
+        another form, never for an empty read-back."""
         cg = self.ask("usr", "show", "-P", "ControlGroup", unit).stdout.rstrip("\n")
         f = f"{self.paths.cgroot}{cg}/cpuset.cpus"
         if not cg or not self.ports.kernel.writable(f):
             return
         old = self.ports.kernel.read_stripped(f) or ""
-        if old == self.s.build_cpus:
+        predicted = cpuset_file_form(self.s.build_cpus)
+        if old in {self.s.build_cpus, predicted}:  # systemd wrote it already (the kernel shows its own form)
             return
         if not self._append(self.paths.state, GameRecordKind.CGW, f, old):
             self.report_unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
             return
-        if self.ports.kernel.write(f, self.s.build_cpus):
-            self._append(
-                self.paths.intended, GameRecordKind.CGW, f, self.s.build_cpus, self.ports.kernel.read_stripped(f) or ""
-            )
-        else:
+        self.append_intended(GameRecordKind.CGW, f, self.s.build_cpus, predicted)
+        if not self.ports.kernel.write(f, self.s.build_cpus):
             self.log(4, f"{unit}: could not write {f}")
+            return
+        if (now := self.ports.kernel.read_stripped(f) or "") not in {"", predicted}:
+            self.append_intended(GameRecordKind.CGW, f, self.s.build_cpus, now)
 
     def _recorded(self, unit: str, settings: Sequence[str]) -> bool:
         """game.state holds a whole record of each of settings for unit, a box of the user manager: setp
@@ -507,7 +527,7 @@ class GameProfileSteps:
         for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
                 self.ports.state.remove(f)
-        self.log(5, off_text(len(failed), p.leftovers, kept=held))
+        self.log(5, off_text(failed, p.leftovers, kept=held))
         return 0
 
     def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> bool:
