@@ -186,7 +186,7 @@ _SETTING_KEYS: Final = {
 
 
 _CSTATE_OFF_WORDS: Final = frozenset({"0", "off", "none"})
-_AMD_PROFILE_ROW_RE: Final = re.compile(r"^\s*([0-9]+)\s+([A-Z0-9_]+)\s*(\*?)\s*(?::|$)")
+_AMD_PROFILE_ROW_RE: Final = re.compile(r"^\s*((?a:\d+))\s+([A-Z0-9_]+)\s*(\*?)\s*(?::|$)")
 _AMD_FULLSCREEN_PROFILE: Final = "3D_FULL_SCREEN"
 
 

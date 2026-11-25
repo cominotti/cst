@@ -96,7 +96,7 @@ _LATENCY_IRQ_TOKENS: Final[tuple[str, ...]] = (
 _GPU_RUNTIME_CONTROL_AUTO: Final = "auto"
 _GPU_AMD_BOOTUP_PROFILE: Final = "BOOTUP_DEFAULT"
 _SCHED_NONE: Final = "none"
-_MANAGED_NVME_QUEUE_RE: Final = re.compile(r"\bnvme[0-9]+q[1-9][0-9]*\b")
+_MANAGED_NVME_QUEUE_RE: Final = re.compile(r"\bnvme(?a:\d+)q[1-9](?a:\d*)\b")
 _ZERO_HEX: Final = "0x0000"
 _ZERO_DEC: Final = "0"
 # The commands a finding names as its fix (PerfFinding.fix_command); doctor only tests them for truth.
