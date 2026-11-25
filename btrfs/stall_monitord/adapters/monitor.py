@@ -354,26 +354,26 @@ class Monitor:
         return disks
 
     def _cgroup_sample(self) -> dict[str, list[float | int]]:
-        """IO and memory pressure and IO bytes of the slices, then IO pressure and bytes of the containers."""
+        """IO and memory pressure and IO bytes of the slices, then IO pressure and bytes of the containers.
+        A memory.pressure or io.stat that cannot be read counts as 0; one with a value it cannot read
+        leaves the cgroup out of this sample: its counters are cumulative, so a 0 there would make the
+        report count every byte since boot at the next sample."""
         cg: dict[str, list[float | int]] = {}
         for sl in SLICES:
             path = f"{CGROUP_ROOT}/{sl}"
             p = parse_psi(f"{path}/io.pressure")
             if p is None:
                 continue
-            m = parse_psi(f"{path}/memory.pressure")
-            cg[sl] = [
-                p[1],
-                p[3],
-                m[1] if m is not None else 0,
-                m[3] if m is not None else 0,
-                *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0]),
-            ]
+            m = parse_psi(f"{path}/memory.pressure", unreadable=[0.0, 0, 0.0, 0])
+            io = parse_io_stat(f"{path}/io.stat", self.topo.top_devs, unreadable=[0, 0])
+            if m is not None and io is not None:
+                cg[sl] = [p[1], p[3], m[1], m[3], *io]
         self.topo.scan_cgroups(time.monotonic())
         for name, path in self.topo.containers.items():
             p = parse_psi(f"{path}/io.pressure")
-            if p is not None:
-                cg[name] = [p[1], p[3], 0, 0, *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0])]
+            io = None if p is None else parse_io_stat(f"{path}/io.stat", self.topo.top_devs, unreadable=[0, 0])
+            if p is not None and io is not None:
+                cg[name] = [p[1], p[3], 0, 0, *io]
         return cg
 
     def interval_io_some_pct(self, rec: SampleOut) -> float:

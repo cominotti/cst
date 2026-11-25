@@ -85,16 +85,16 @@ def read_int(path: str) -> int:
 _PSI_AVG: Final = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 
 
-def parse_psi(path: str) -> list[float | int] | None:
+def parse_psi(path: str, *, unreadable: list[float | int] | None = None) -> list[float | int] | None:
     """Return [some_avg10, some_total_us, full_avg10, full_total_us].
 
-    None for a file that cannot be read, and for one whose avg10 or total is not a number as the kernel
-    writes it (the total: ASCII digits within int()'s limit): the whole reading, not a 0 for one field,
-    since the totals are cumulative and a 0 would make the next sample's difference a false spike. A
-    field that is not there stays 0."""
+    UNREADABLE (None by default) for a file that cannot be read or is empty. None for one whose avg10 or
+    total is not a number as the kernel writes it (the total: ASCII digits within int()'s limit): the
+    whole reading, not a 0 for one field, since the totals are cumulative and a 0 would make the next
+    sample's difference a false spike. A field that is not there stays 0."""
     text = read_text(path)
     if text is None or text == "":
-        return None
+        return unreadable
     res: list[float | int] = [0.0, 0, 0.0, 0]
     for line in text.splitlines():
         fields = line.split()
@@ -111,16 +111,17 @@ def parse_psi(path: str) -> list[float | int] | None:
     return res
 
 
-def parse_io_stat(path: str, devices: AbstractSet[str]) -> list[int] | None:
+def parse_io_stat(path: str, devices: AbstractSet[str], *, unreadable: list[int] | None = None) -> list[int] | None:
     """Sum rbytes/wbytes of a cgroup io.stat over the given "maj:min" devices.
 
     Only the top-level devices (dm-crypt of each btrfs member, swap) are
-    counted, otherwise every byte is counted again for the NVMe below it. None for a file that cannot be
-    read, and for one whose rbytes or wbytes is not ASCII digits within int()'s limit.
+    counted, otherwise every byte is counted again for the NVMe below it. UNREADABLE (None by default)
+    for a file that cannot be read; None for one whose rbytes or wbytes is not ASCII digits within
+    int()'s limit.
     """
     text = read_text(path)
     if text is None:
-        return None
+        return unreadable
     rb = wb = 0
     for line in text.splitlines():
         if line.split(" ", 1)[0] not in devices:

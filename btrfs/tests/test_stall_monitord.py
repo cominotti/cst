@@ -638,9 +638,11 @@ class SampleRecordTest(unittest.TestCase):
             mock.patch.object(md_monitor, "read_kv", lambda path: kv.get(path, {})),
             mock.patch.object(md_monitor, "read_int", read_int),
             mock.patch.object(md_monitor, "read_text", texts.get),
-            mock.patch.object(md_monitor, "parse_psi", psi.get),
+            mock.patch.object(md_monitor, "parse_psi", lambda path, unreadable=None: psi.get(path, unreadable)),
             mock.patch.object(
-                md_monitor, "parse_io_stat", lambda path, devs: io_stat.get(path) if devs == {"253:0"} else None
+                md_monitor,
+                "parse_io_stat",
+                lambda path, devs, unreadable=None: io_stat.get(path, unreadable) if devs == {"253:0"} else None,
             ),
         ):
             rec = dict(mon.sample([]))
@@ -682,6 +684,48 @@ class SampleRecordTest(unittest.TestCase):
             },
         )
         self.assertEqual(mon.cmax, {"gone": 5})
+
+    def test_a_cgroup_with_a_value_it_cannot_read_is_left_out(self) -> None:
+        # A bad total in memory.pressure or a bad rbytes in io.stat used to be recorded as 0, a cumulative
+        # counter gone back to 0: the report then counted every byte since boot at the next sample. Such
+        # a cgroup is left out of the sample; a file that cannot be read still counts as 0.
+        mon = monitor(load())
+        mon.topo.top_devs = {"253:0"}
+        psi_line = "some avg10=0.00 avg60=0.00 avg300=0.00 total={}\nfull avg10=0.00 avg60=0.00 avg300=0.00 total={}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {
+                "system.slice/io.pressure": psi_line.format(7, 6),
+                "system.slice/memory.pressure": psi_line.format(5, 4),
+                "system.slice/io.stat": "253:0 rbytes=\N{ARABIC-INDIC DIGIT THREE} wbytes=7\n",
+                "user.slice/io.pressure": psi_line.format(9, 8),
+                "user.slice/memory.pressure": psi_line.format("+5", 4),
+                "user.slice/io.stat": "253:0 rbytes=1 wbytes=2\n",
+                "machine.slice/io.pressure": psi_line.format(3, 2),
+                "bad/io.pressure": psi_line.format(30, 20),
+                "bad/io.stat": "253:0 rbytes=" + "1" * 5000 + " wbytes=2\n",
+                "good/io.pressure": psi_line.format(31, 21),
+                "good/io.stat": "253:0 rbytes=10 wbytes=20\n",
+            }
+            for rel, text in files.items():
+                os.makedirs(os.path.dirname(f"{tmp}/{rel}"), exist_ok=True)
+                with open(f"{tmp}/{rel}", "w", encoding="utf-8") as f:
+                    f.write(text)
+            mon.topo.fs, mon.topo.disks = {}, {}
+            mon.topo.containers = {"docker-bad": f"{tmp}/bad", "docker-good": f"{tmp}/good"}
+
+            def cgroup_psi(path: str, unreadable: list[float | int] | None = None) -> list[float | int] | None:
+                # The real reader for the cgroup files of the temporary folder; none for /proc/pressure.
+                return md_proc.parse_psi(path, unreadable=unreadable) if path.startswith(tmp) else None
+
+            with (
+                mock.patch.object(md_monitor, "CGROUP_ROOT", tmp),
+                mock.patch.object(md_monitor, "parse_psi", cgroup_psi),
+                mock.patch.object(md_monitor, "read_kv", lambda path: {}),
+                mock.patch.object(md_monitor, "read_text", lambda path: None),
+            ):
+                got = mon.sample([])["cg"]
+        # machine.slice has no memory.pressure and no io.stat: zeros, as before.
+        self.assertEqual(got, {"machine.slice": [3, 2, 0, 0, 0, 0], "docker-good": [31, 21, 0, 0, 10, 20]})
 
 
 class WaitKindTest(unittest.TestCase):
