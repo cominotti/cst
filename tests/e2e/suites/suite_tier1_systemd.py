@@ -11675,3 +11675,49 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP, E2ETag.DOCTOR)
+    def test_214_doctor_and_swap_plan_agree_on_a_swap_conf_that_is_not_a_regular_file(self) -> None:
+        """cst swap plan and cst doctor as root on the container's /etc (SWAP_E2E_LIB, its cleanup trap set
+        before swap_setup), nothing applied yet, with what is at /etc/cst/swap.conf first a link to
+        /dev/null, then a FIFO that nothing ever writes to. Each run is bounded by timeout(1) at 60 s. Both
+        times plan's row is "REFUSE ... not a regular file: apply stops" and doctor's line says the same
+        ("not a regular file: cst swap apply refuses until it is fixed"), at once. Before this change
+        doctor read the link as an empty swap.conf ("not configured (no SWAP_PARTUUID ...)": add one to a
+        link to /dev/null) and waited in the FIFO's open for ever (exit 124 here)."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+trap swap_cleanup EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+bounded() {
+    rc=0
+    timeout 60 "$CST" "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "$* blocked at swap.conf"
+}
+
+CONF=/etc/cst/swap.conf
+mkdir -p /etc/cst
+for kind in link fifo; do
+    rm -f "$CONF"
+    if [[ $kind == link ]]; then ln -s /dev/null "$CONF"; else mkfifo -m 0644 "$CONF"; fi
+    bounded swap plan
+    grep -qF "  REFUSE    cst/swap.conf                          not a regular file: apply stops" <<<"$out" ||
+        fail "plan's row of a $kind at $CONF"
+    bounded doctor
+    grep -qF "WARN   swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed" \
+        <<<"$out" || fail "doctor's line of a $kind at $CONF"
+    [[ "$out" != *"swap partition: not configured"* ]] || fail "doctor took a $kind at $CONF for no settings"
+done
+rm -f "$CONF"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

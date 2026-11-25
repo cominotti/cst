@@ -191,14 +191,16 @@ def unit_file_state_at(
     return owned_file_state_at(path, wanted, is_ours, owner=owner)
 
 
-def _open_regular_text(path: str) -> TextIO:
-    """path opened for reading as byte-transparent text if it is a regular file (after links), else
-    OSError(EINVAL); the open never waits (LocalFileSystemAdapter.read_existing_text's regular_only)."""
+def open_regular_text(path: str, *, errors: str = "surrogateescape", newline: str | None = "") -> TextIO:
+    """path opened for reading as UTF-8 text if it is a regular file (after links), else OSError(EINVAL);
+    the open never waits (LocalFileSystemAdapter.read_existing_text's regular_only). errors and newline
+    are open()'s: by default byte-transparent, line ends kept; cst doctor asks for errors="replace" and
+    newline=None, as its plain open of a settings file reads."""
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, "not a regular file", path)
-        return os.fdopen(fd, encoding="utf-8", errors="surrogateescape", newline="")
+        return os.fdopen(fd, encoding="utf-8", errors=errors, newline=newline)
     except BaseException:
         os.close(fd)  # fdopen did not take it
         raise
@@ -281,7 +283,7 @@ class LocalFileSystemAdapter:
             if not regular_only:
                 with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
                     return fh.read()
-            with _open_regular_text(path) as fh:
+            with open_regular_text(path) as fh:
                 return fh.read()
         except FileNotFoundError, NotADirectoryError:
             return None

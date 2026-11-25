@@ -385,6 +385,22 @@ class AdaptersTest(unittest.TestCase):
         self.assertIsNone(fs.read_existing_text(os.path.join(p, "below"), regular_only=True))
         self.assertEqual(fs.read_text(self.path("missing"), "d", regular_only=True), "d")
 
+    def test_open_regular_text_takes_open_s_errors_and_newline(self) -> None:
+        # cst doctor's reading (errors="replace", newline=None: bad bytes replaced, line ends made LF)
+        # through the same refusal of what is not a regular file; the default is byte-transparent.
+        p = self.path("f", b"a\xffb\r\nc")
+        with core_files.open_regular_text(p, errors="replace", newline=None) as fh:
+            self.assertEqual(fh.read(), "a" + chr(0xFFFD) + "b\nc")
+        with core_files.open_regular_text(p) as fh:
+            self.assertEqual(fh.read(), "a" + chr(0xDCFF) + "b\r\nc")
+        fifo = self.path("fifo")
+        os.mkfifo(fifo)
+        before = open_fds()
+        with time_bound(5), self.assertRaises(OSError) as cm:
+            core_files.open_regular_text(fifo, errors="replace", newline=None)
+        self.assertEqual(cm.exception.errno, errno.EINVAL)
+        self.assertEqual(open_fds(), before, "a descriptor left open")
+
     def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
         existing = self.path("existing")
         os.mkdir(existing, 0o700)
