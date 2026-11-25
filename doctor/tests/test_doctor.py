@@ -4343,7 +4343,8 @@ class UnitsLoadedTest(Scratch):
         return Result(
             doc_domain.WARN,
             f"{unit_id}: systemd has not loaded its files as they are on disk (CST installed {', '.join(dests)}): "
-            "a change stopped before its daemon-reload, or an edit; systemd runs it as it loaded it before",
+            "this manager has not been reloaded since they changed (a command stopped before its daemon-reload "
+            "or reloaded only another user's manager, or a hand edit); systemd runs it as it loaded it before",
             fix,
         )
 
