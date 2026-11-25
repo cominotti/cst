@@ -27,6 +27,7 @@ from cst_core.domain.values import MINUTE, parse_whole_number
 # How long a writer under the run lock (/run/cpu-setup/lock: the game profile's on, off and tick,
 # cpu-power's apply and revert) waits for it before it gives up.
 RUN_LOCK_WAIT_S: Final = MINUTE
+RUN_FOLDER_MODE: Final = 0o755  # the run folder's mode, as install -d -m 0755 sets it
 
 type Manager = Literal["sys", "usr"]
 type Record = tuple[str, ...]

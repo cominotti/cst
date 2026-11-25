@@ -39,7 +39,7 @@ not permanent within a boot either: every daemon-reload re-reads the
 drop-ins, and a drop-in that sorts after it, or a same-named file in
 /etc/systemd/system.control (uresourced's 50-MemoryLow.conf), wins again.
 For the MemoryLow chain 'on' therefore also writes a drop-in named
-zz-cst-game.conf, which sorts after every other one (see write_game_dropins in cpu/game/adapters/profile.py).
+zz-cst-game.conf, which sorts after every other one (see write_game_dropins in cpu/game/application/profile.py).
 
 For other projects: /run/cpu-setup/game.state exists exactly while the
 profile is on. Key on its existence only; its contents may change.

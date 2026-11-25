@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: MPL-2.0
 """The game profile's `state`: what is applied now, and which settings drifted from what 'on' set.
 
-It reads, never writes, and takes no lock (it never waits); GameProfile.state runs show_state over the
-profile's paths, settings, runner and the steps it shares with on, off and tick.
+It reads, never writes, and takes no lock (it never waits); GameProfileSteps.state runs show_state over the
+profile's paths, settings, ports and the steps it shares with on, off and tick. No I/O.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-import os
 from typing import TYPE_CHECKING
 
-from cpu.game.adapters.host import read_snapshot, read_stripped
-from cpu.game.adapters.leftovers import read_kept
+from cpu.game.application.leftovers import read_kept
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -29,15 +27,16 @@ from cpu.game.domain import (
 from cpu.game.domain.leftovers import leftovers_line
 
 if TYPE_CHECKING:
-    from cpu.game.adapters.profile import GameProfile
+    from cpu.game.application.profile import GameProfileSteps
 
 
-def show_state(profile: GameProfile) -> int:
+def show_state(profile: GameProfileSteps) -> int:
     """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
     user manager of the user 'on' acted for)."""
     # One snapshot of both files (None: not there; an empty game.state is on), with no lock: never waits.
-    state_text, intended_text = read_snapshot(profile.paths.state), read_snapshot(profile.paths.intended)
-    on, manual = state_text is not None, os.path.exists(profile.paths.manual)
+    files = profile.ports.state
+    state_text, intended_text = files.snapshot(profile.paths.state), files.snapshot(profile.paths.intended)
+    on, manual = state_text is not None, files.exists(profile.paths.manual)
     state_recs = records(state_text or "")
     why = None if profile.problems else profile.target_refusal()  # as 'on' reads TARGET_USER
     owned = not on or profile.user_from_state(state_recs, say=False)
@@ -51,7 +50,8 @@ def show_state(profile: GameProfile) -> int:
     if on:
         profile.say_lines(unreadable_report(p, state_text or "", intended_text or "", judged=newer is None))
     first = first_cpu(s.build_cpus)
-    profile.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
+    epp0, epp_first = profile.ports.power.read_stripped(p.epp("0")), profile.ports.power.read_stripped(p.epp(first))
+    profile.say(f"  EPP cpu0 {epp0 or ''}, cpu{first} {epp_first or ''}")
     kept = read_kept(profile, say=False)
     if kept is not None and kept:
         profile.say(leftovers_line(kept, p.epp))
@@ -60,19 +60,19 @@ def show_state(profile: GameProfile) -> int:
     return 0
 
 
-def _user_manager_lines(profile: GameProfile, state_recs: Sequence[Record] | None) -> None:
+def _user_manager_lines(profile: GameProfileSteps, state_recs: Sequence[Record] | None) -> None:
     """The lines of the user manager 'on' acted for (none without one), with game.state's idle boxes when on."""
     if profile.target_refusal() is not None:
         return
     profile.say(f"  toolboxes       weight={profile.prop('usr', USER_SLICE, 'CPUWeight')}")
     profile.say(f"  app.slice       zswap writeback={profile.prop('usr', APP_SLICE, 'MemoryZSwapWriteback')}")
     cg = profile.ask("usr", "show", "-P", "ControlGroup", USER_SLICE).stdout.rstrip("\n")
-    effective = read_stripped(f"{profile.paths.cgroot}{cg}/cpuset.cpus.effective") or ""
+    effective = profile.ports.kernel.read_stripped(f"{profile.paths.cgroot}{cg}/cpuset.cpus.effective") or ""
     profile.say(f"  toolboxes       cpus effective={effective}")
     if state_recs is not None:
         profile.say(f"  other boxes     idle: {escapes_in_state(state_recs)}")
 
 
-def _slice_line(profile: GameProfile, unit: str) -> None:
+def _slice_line(profile: GameProfileSteps, unit: str) -> None:
     cpus, weight, io = (profile.prop("sys", unit, n) for n in ("AllowedCPUs", "CPUWeight", "IOWeight"))
     profile.say(f"  {unit:<15} cpus={cpus:<8} weight={weight:<4} io={io}")
