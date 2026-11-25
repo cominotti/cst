@@ -3705,6 +3705,32 @@ class NasStraySnapshotTest(unittest.TestCase):
         self.assert_retention_ran(lines, calls)
         self.assertEqual(alerts, [])
 
+    def test_an_upgrade_names_a_backup_an_older_cst_left_out_of_the_index_until_it_is_adopted(self) -> None:
+        # The state an older cst vm left: it dropped the entry of A once restic tag saved A again as C (it
+        # read only the listed ids), and left a good read a stop ended (B) out of the index. Both are newer
+        # than the oldest indexed backup (D), so the first run after the update names them; adopted, they
+        # are counted and the next run is quiet.
+        older = "dddd4444" + "d" * 56
+        index = [_stray_entry(older)]
+        listed = [
+            _listed(older, STRAY_T0),
+            _listed(STRAY_C, STRAY_T1, original=STRAY_A),
+            _listed(STRAY_B, STRAY_T2),
+        ]
+        lines, alerts, calls = self._run(index, listed)
+        self.assertIn("restic lists 2 snapshots of win that neither", lines[0])
+        self.assertIn("cccc3333 (2026-11-01T04:30:00+01:00), bbbb2222 (2026-11-08T04:30:00+01:00)", lines[0])
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual([c[0] for c in calls], ["snapshots"], "the retention waits")
+        adopted = [
+            _listed(older, STRAY_T0),
+            _listed(STRAY_C, STRAY_T1, "cst-adopted", original=STRAY_A),
+            _listed(STRAY_B, STRAY_T2, "cst-adopted"),
+        ]
+        lines, alerts, calls = self._run(index, adopted)
+        self.assert_retention_ran(lines, calls)
+        self.assertEqual(alerts, [])
+
     def test_a_short_id_in_the_index_names_the_listed_snapshot(self) -> None:
         lines, alerts, calls = self._run(
             [_stray_entry(STRAY_A[:8])], [_listed(STRAY_A, STRAY_T1), _listed(STRAY_B, STRAY_T0)]

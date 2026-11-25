@@ -913,7 +913,18 @@ from the oldest snapshot the index names: a snapshot older than it (made by
 an older CST, or before the index was moved aside) is left alone, and with
 no NAS backup of the VM in the index (its first backup, or the index moved
 aside) nothing is compared and restic is not asked. So a snapshot no record
-names that is older than every indexed backup is not seen. When the index or
+names that is older than every indexed backup is not seen.
+
+**After updating from a CST without this check**, the first NAS backup of a
+VM can name good backups the older `cst vm` left out of the index, when they
+are newer than its oldest indexed backup: one whose tags you changed with
+`restic tag` (for example `restic tag --remove cst-keep ID`; the older
+version then dropped its entry), and one whose run a stop ended after
+restic's read. It names each once in the output and one alert, and skips the
+retention until you act; nothing is forgotten. Look at each (`restic ls
+ID`); keep the ones you want as backups with `restic tag --add cst-adopted
+ID` (the retention then counts them; they stay out of `cst vm list`) and
+forget the others. The next backup is quiet again. When the index or
 the record cannot be read, or `restic snapshots` fails, the retention waits
 too, with the reason.
 
