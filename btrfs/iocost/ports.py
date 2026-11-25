@@ -156,7 +156,12 @@ class IocostLockPort(Protocol):
 
     def take(self) -> bool:
         """Wait for the lock (its folder made first); False when another run still holds it after the
-        time limit. OSError when the folder or the lock file cannot be made."""
+        time limit. OSError when the folder or the lock file cannot be made.
+
+        A take while this run already holds that lock is a programming error: both implementations
+        raise AssertionError (which _locked does not catch), never wait or answer False. The real
+        adapter (IocostLockFile) checks its own lock object, the fake (FakeIocostLock) the lock's name
+        in its world; wiring builds one IocostLockFile per path, so the two agree in production."""
         ...
 
     def release(self) -> None:
