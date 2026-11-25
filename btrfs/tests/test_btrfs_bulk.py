@@ -671,6 +671,22 @@ class BulkTest(BulkBase):
             self.assertEqual(bulk_cli.main(["btrfs-bulk", "apply"], TOOL, wiring=self.wiring), 0)
         self.assertLink("Programs", "apps")
 
+    def test_apply_whose_boot_count_is_a_folder_moves_nothing(self) -> None:
+        # The real CounterFile: a folder where the count belongs cannot be removed, and forget says so.
+        self.write("Programs/a", "a")
+        os.makedirs(self.paths.attempts)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = bulk_cli.main(["btrfs-bulk", "apply"], TOOL, wiring=self.wiring)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            err.getvalue(),
+            "btrfs-bulk: cannot reset the count of boot attempts: "
+            f"[Errno 21] Is a directory: '{self.paths.attempts}'; nothing was moved\n",
+        )
+        self.assertFalse(os.path.islink(self.H("Programs")))
+        self.assertTrue(os.path.isdir(self.paths.attempts))
+
     def test_written_during_switch_is_rolled_back(self) -> None:
         self.write("Programs/a", "a")
         self.fake(self.user, "u_late_write", lambda j: True)

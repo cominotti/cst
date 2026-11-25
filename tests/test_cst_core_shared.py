@@ -662,6 +662,17 @@ class CounterFileTest(unittest.TestCase):
         self.counter.forget()
         self.assertFalse(os.path.exists(self.path))
 
+    def test_forget_raises_an_error_other_than_a_missing_file(self) -> None:
+        # forget swallowed every OSError: a count it could not remove was left behind in silence,
+        # and the next boot took it for the new request's.
+        os.mkdir(self.path)
+        with self.assertRaises(IsADirectoryError):
+            self.counter.forget()
+        self.assertTrue(os.path.isdir(self.path))
+        os.rmdir(self.path)
+        self.counter.forget()  # none: nothing to forget, no error
+        self.assertFalse(os.path.exists(self.path))
+
 
 class WriteBytesAtomicTest(unittest.TestCase):
     """write_bytes_atomic: the mode is exact, a link is replaced (not followed), restorecon as root."""

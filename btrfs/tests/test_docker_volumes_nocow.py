@@ -520,6 +520,20 @@ class MarkUnmarkTest(Base):
         self.assertIsNone(read_attempts(self))
         self.assertFalse(os.path.exists(self.flag))
 
+    def test_mark_with_nothing_to_copy_whose_old_count_cannot_go_sets_no_nocow(self) -> None:
+        # forget swallowed the error: mark set +C and exited 0 beside the old count. Now the error is
+        # mark's (a journal line, exit 2) before +C; the next boot sets +C (no data: no request).
+        self.fs.set(self.vols, nocow=False)
+        self.volume("empty", data={"a/b": b""})
+        os.makedirs(self.attempts)
+        rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, f"<3>{TAG}: {self.vols}: [Errno 21] Is a directory: '{self.attempts}'\n")
+        self.assertEqual(self.fs.sets, [])
+        self.assertFalse(self.fs.nocow(self.vols))
+        self.assertTrue(os.path.isdir(self.attempts))
+        self.assertFalse(os.path.exists(self.flag))
+
     def test_mark_writes_the_flag_durably_before_nocow_is_set(self) -> None:
         # The install's request, as the boot's: the flag, its entry in its folder and the folder's
         # entry in /etc are flushed before +C is set on the volumes folder. A kill or a power loss

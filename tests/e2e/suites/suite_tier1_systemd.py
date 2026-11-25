@@ -5578,6 +5578,62 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_191_docker_volumes_nocow_says_what_it_cannot_reset_or_records(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) on a data root of the
+        test's own on a tmpfs (/etc/docker/daemon.json names it). Part 1: a volume with no
+        copy-on-write data (an empty file) and a folder where the count of boots belongs: mark exits 2
+        with a journal line naming that path and "Is a directory", before it tries +C, and the folder
+        stays. Before, CounterFile.forget swallowed the error and mark went on to the +C that tmpfs
+        refuses, so its line named that refusal instead."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-191-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-191-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-191-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-191-made-docker /var/tmp/e2e-191-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_191 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            state={state}
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-191-made-docker; }}
+            [ -d /etc/btrfs-setup ] || touch /var/tmp/e2e-191-made-setup
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e "$state" ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            # Part 1: no copy-on-write data, and a folder where the count belongs.
+            mkdir -p "$vols/v/_data"
+            : >"$vols/v/_data/empty"
+            mkdir -p "$state/attempts"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_191 mark, the count a folder: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]
+            grep -qF "Is a directory: '$state/attempts'" <<<"$out" || {{ echo "mark did not name the count it cannot remove" >&2; exit 1; }}
+            if grep -qiF "not supported" <<<"$out"; then echo "mark tried +C before it forgot the count" >&2; exit 1; fi
+            [[ -d "$state/attempts" ]]
+            [[ ! -e "$flag" ]]
+            rmdir "$state/attempts"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.TOOLCHAINS)
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root

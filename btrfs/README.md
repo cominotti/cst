@@ -830,6 +830,10 @@ docker volume rm <name>         # or one volume by name
   asks again. One gap is left: a container that writes into a volume during
   the few milliseconds between mark's two looks at the volumes is asked for
   after `+C` (still flushed), so a kill exactly there can lose that request.
+  When no volume holds copy-on-write data, `mark` removes an old counter
+  instead; if that fails (a folder in its place, a read-only `/var`), it
+  sets no `+C`, exits 2 and the journal names the file (the next boot sets
+  `+C`, as no data needs a request).
 - At the **next boot**, `docker-volumes-nocow.service` runs **before Docker
   starts**. For each volume with copy-on-write data it makes a full NOCOW copy
   (the empty copy folder first gets the volume folder's SELinux label with

@@ -467,8 +467,9 @@ class CounterFile:
         os.remove(self.path)
 
     def forget(self) -> None:
-        """Remove the file if there is one."""
-        with contextlib.suppress(OSError):  # none: nothing to forget
+        """Remove the file if there is one; any other error (a folder in its place, a read-only
+        file system, no permission) is raised: a count left behind is not forgotten."""
+        with contextlib.suppress(FileNotFoundError):  # none: nothing to forget
             os.remove(self.path)
 
 
