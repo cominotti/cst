@@ -1,32 +1,30 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Host and toolbox adapters for `cst btrfs iocost` (`btrfs/btrfs-iocost`)."""
+"""Host and toolbox adapters for `cst btrfs iocost` (`btrfs/btrfs-iocost`): the ports of ports.py over
+io.cost.qos, the managed-devices file, sysfs, udevadm, systemctl, the installer, InstallService and the
+lock files, and where they are (IocostPaths). wiring.py builds the use cases over them."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 import os
 import re
 from typing import Final
 
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
-from cst_core.adapters.files import ensure_dir, read_text, write_atomic
-from cst_core.adapters.install import program_installer
+from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
+from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import (
-    ManagedCliEnv,
     host_view_path,
     installer_script_for,
     probe_systemd_unit,
     run_installer,
 )
-from cst_core.application.install import InstallRefused, InstallRequest, InstallService, record_file
-from cst_core.domain.install import INSTALL_MANIFEST, Component, Owner, select_entries
+from cst_core.application.install import InstallRequest, InstallService, record_file
+from cst_core.domain.install import INSTALL_MANIFEST, Component, InstallReportWord, Owner, select_entries
 from cst_core.domain.record import ComponentState
-from cst_core.domain.text import enum_member, first_line, group
-from cst_core.domain.units import ActiveState, EnablementState
-from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
+from cst_core.domain.text import first_line, group
+from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
     IOCOST_COMPONENT_LOCK_NAME,
@@ -37,27 +35,14 @@ from btrfs.iocost.domain import (
     IOCOST_QOS_PATH,
     IOCOST_RULE_DEST,
     IOCOST_SERVICE,
-    IOCOST_SOLUTIONS_PROP,
     UDEV_CONTROL,
     UDEVADM_TIMEOUT_S,
-    USEC_INITIALIZED_PROP,
     BlockDisk,
-    IocostAction,
-    IocostParsedArgs,
-    IocostPlan,
-    IocostSnapshot,
-    format_iocost_plan,
-    format_iocost_status,
-    is_auto_eligible_disk,
-    parse_iocost_qos,
-    plan_iocost_apply,
-    plan_iocost_revert,
+    UdevProperties,
 )
 
 _DEVNO_RE: Final = re.compile(r"^[0-9]+:[0-9]+$")
 _ACTIVE_SCHED_RE: Final = re.compile(r"\[([^\]]+)\]")
-_UNINSTALL_ERRORS: Final = (InstallRefused, WriteFailed, OSError)
-_INSTALL_PLAN_CHANGES: Final = ("would write:", "would record:")  # the installer plan's lines for a change
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,166 +129,21 @@ def _scan_sys_block(sys_block: str) -> tuple[BlockDisk, ...]:
     return tuple(disks)
 
 
-def _read_managed_devnos(path: str) -> frozenset[str]:
-    text = read_text(path)
-    if text is None:
-        return frozenset()
-    return frozenset(line.strip() for line in text.splitlines() if _DEVNO_RE.fullmatch(line.strip()))
-
-
-def _save_managed_devnos(path: str, devnos: frozenset[str]) -> None:
-    ordered = sorted(devnos)
-    if not ordered:
-        if os.path.lexists(path):
-            os.remove(path)
-        return
-    ensure_dir(os.path.dirname(path), 0o755)
-    write_atomic(path, "".join(f"{d}\n" for d in ordered), mode=0o644, durable=False, relabel=False)
-
-
-def _write_qos_line(qos_path: str, payload: str) -> OSError | None:
-    try:
-        with open(qos_path, "w", encoding="utf-8") as fh:
-            fh.write(payload + "\n")
-    except OSError as exc:
-        return exc
-    return None
-
-
-def _with_udev_fields(disk: BlockDisk, *, hwdb_solution: str, udev_ready: bool, udev_error: str) -> BlockDisk:
-    """disk with its three udev fields given: what dataclasses.replace would build (Sonar types replace's
-    result as DataclassInstance, python:S5886)."""
-    return BlockDisk(
-        name=disk.name,
-        devno=disk.devno,
-        rotational=disk.rotational,
-        scheduler=disk.scheduler,
-        model=disk.model,
-        hwdb_solution=hwdb_solution,
-        udev_ready=udev_ready,
-        udev_error=udev_error,
-    )
-
-
-def with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDisk:
-    """disk with what udev knows of it: its hwdb solution, whether udev has processed it, or why
-    `udevadm info` could not tell (missing, failed: the disk is judged as before)."""
+def udev_properties(runner: CommandRunnerPort, name: str) -> UdevProperties:
+    """`udevadm info -q property -n /dev/NAME` on the host, in the C locale, at most UDEVADM_TIMEOUT_S: its
+    KEY=VALUE lines, or why it could not say (its first stderr line stripped, or "exit N")."""
     res = runner.run(
-        ["udevadm", "info", "-q", "property", "-n", f"/dev/{disk.name}"],
+        ["udevadm", "info", "-q", "property", "-n", f"/dev/{name}"],
         on_host=True,
         locale_c=True,
         timeout=UDEVADM_TIMEOUT_S,
         output=OutputMode.CAPTURE,
     )
     if res.fault is not None or res.returncode != 0:
-        return _with_udev_fields(
-            disk,
-            hwdb_solution=disk.hwdb_solution,
-            udev_ready=disk.udev_ready,
-            udev_error=first_line(res.stderr) or f"exit {res.returncode}",
-        )
-    props = {key: value for key, sep, value in (line.partition("=") for line in res.stdout.splitlines()) if sep}
-    return _with_udev_fields(
-        disk,
-        hwdb_solution=props.get(IOCOST_SOLUTIONS_PROP, "").strip(),
-        udev_ready=USEC_INITIALIZED_PROP in props,
-        udev_error=disk.udev_error,
+        return UdevProperties(None, first_line(res.stderr) or f"exit {res.returncode}")
+    return UdevProperties(
+        {key: value for key, sep, value in (line.partition("=") for line in res.stdout.splitlines()) if sep}
     )
-
-
-def collect_iocost_snapshot(
-    paths: IocostPaths, *, runner: CommandRunnerPort | None = None, udev: bool = True
-) -> IocostSnapshot:
-    """Collect kernel `io.cost.qos`, block devices, runtime state, and systemd unit state.
-
-    udev: ask udev about each disk the scan of every disk would write (its hwdb solution); a --device
-    run and revert do not need it."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    disks = _scan_sys_block(paths.sys_block)
-    if udev:
-        disks = tuple(with_udev_properties(cmd_runner, d) if is_auto_eligible_disk(d) else d for d in disks)
-    ctrl_raw = read_text(paths.controllers_path)
-    io_present = ("io" in ctrl_raw.split()) if ctrl_raw is not None else None
-    qos_raw = read_text(paths.qos_path)
-    svc_present, active, enabled = probe_systemd_unit(cmd_runner, IOCOST_SERVICE)
-    return IocostSnapshot(
-        io_controller_present=io_present,
-        qos_exists=qos_raw is not None,
-        qos_entries=parse_iocost_qos(qos_raw or ""),
-        model_raw=(read_text(paths.model_path) or "").strip(),
-        disks=disks,
-        managed_devnos=_read_managed_devnos(paths.managed_file),
-        service_present=svc_present,
-        service_active=active,
-        service_enabled=enabled,
-        rule_installed=os.path.exists(paths.rule_dest),
-    )
-
-
-def _saved(paths: IocostPaths, devnos: frozenset[str]) -> list[str]:
-    """_save_managed_devnos, or its ERROR line when the file cannot be written or removed (ENOSPC, a
-    read-only /run): `cannot write PATH: REASON`, as every write of CST says it."""
-    try:
-        _save_managed_devnos(paths.managed_file, devnos)
-    except OSError as exc:
-        return [f"ERROR: {WriteFailed(paths.managed_file, exc.strerror or str(exc))}"]
-    return []
-
-
-def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan) -> tuple[int, list[str]]:
-    """Write the plan's io.cost.qos lines and save the devices CST manages: (1 when a write or the save
-    failed, lines). apply saves the devices it is about to enable before it writes their lines, and
-    then the set without the ones whose write failed."""
-    if not snap.qos_exists:
-        # No blk-iocost here: nothing to reset, and nothing stays CST's.
-        err = _saved(paths, frozenset()) if plan.revert_mode else []
-        return (1 if err else 0), [f"skipped:   {paths.qos_path} unavailable", *err]
-    managed = set(plan.next_managed)
-    if not plan.revert_mode and plan.writes and frozenset(managed) != snap.managed_devnos:
-        # Intent first: the devices apply is about to enable are CST's before their lines are written, so
-        # a save that fails (or a kill) after a write cannot leave a line CST wrote and no longer knows
-        # as its own (the next apply would keep it as a vendor's, and revert would never reset it).
-        err = _saved(paths, frozenset(managed))
-        if err:
-            return 1, [*err, "nothing was written to io.cost.qos"]
-    out: list[str] = []
-    rc = 0
-    verb = "reverted:" if plan.revert_mode else "set:"
-    for op in plan.writes:
-        err = _write_qos_line(paths.qos_path, op.line)
-        if err is None:
-            out.append(f"{verb:<10} {paths.qos_path} <- '{op.line}' ({op.device_name})")
-            continue
-        rc = 1
-        out.append(f"ERROR: {paths.qos_path} {op.device_name}: {err.strerror or err}")
-        if plan.revert_mode:
-            managed.add(op.devno)
-        else:
-            managed.discard(op.devno)
-    out.extend(f"unchanged: {item}" for item in plan.unchanged)
-    out.extend(f"kept:      {item}" for item in plan.preexisting)
-    out.extend(f"note:      {item}" for item in plan.notes)
-    err = _saved(paths, frozenset(managed))
-    return (1 if err else rc), [*out, *err]
-
-
-def _locked(
-    paths: IocostPaths, work: Callable[[], tuple[int, list[str]]], *, lock_path: str = ""
-) -> tuple[int, list[str]]:
-    """work() while this run holds the iocost lock (or lock_path); an error, with nothing done, when it
-    cannot take it."""
-    lock = lock_path or paths.lock_path
-    try:
-        ensure_dir(os.path.dirname(lock), 0o755)
-        fd = take_lock(lock, wait=True, mode=0o644, timeout=paths.lock_timeout)
-    except OSError as exc:
-        return 1, [f"ERROR: cannot take {lock}: {exc.strerror or exc}"]
-    if fd is None:
-        return 1, [f"ERROR: another btrfs-iocost run holds {lock}"]
-    try:
-        return work()
-    finally:
-        os.close(fd)
 
 
 def _installer_step(runner: CommandRunnerPort, script: str, subargs: list[str]) -> tuple[int, list[str]]:
@@ -311,240 +151,212 @@ def _installer_step(runner: CommandRunnerPort, script: str, subargs: list[str]) 
     return rc, [*lines, *([err] if err else [])]
 
 
-def _failed(what: str, result: CommandResult) -> tuple[int, list[str]]:
-    return (result.returncode or 1), [f"ERROR: {result.failure(what)}"]
+@dataclass(frozen=True, slots=True)
+class QosControlFile:
+    """QosControlPort over io.cost.qos at path: one open and one write of the line per call."""
+
+    path: str
+
+    def read(self) -> str | None:
+        """Its text; None when it is not there."""
+        return read_text(self.path)
+
+    def write(self, line: str) -> None:
+        """line and a newline, in one write (write_text_direct); the kernel's refusal raised."""
+        LocalFileSystemAdapter().write_text_direct(self.path, line + "\n")
 
 
-def _reload_udev_rules(runner: CommandRunnerPort, paths: IocostPaths) -> tuple[int, list[str]]:
-    """`udevadm control --reload-rules` when udevd runs; without it there is nothing to reload."""
-    if not os.path.exists(paths.udev_control):
-        return 0, ["note:      udevd not running; rules are read when it starts"]
-    res = runner.run(["udevadm", "control", "--reload-rules"], output=OutputMode.CAPTURE)
-    return _failed("udevadm control --reload-rules", res) if res.returncode != 0 else (0, [])
+@dataclass(frozen=True, slots=True)
+class ManagedDevicesFile:
+    """ManagedDevicesPort over the file at path: 0644 in a folder 0755, replaced atomically (not durably:
+    /run does not outlive a boot), never relabelled."""
+
+    path: str
+
+    def read(self) -> frozenset[str]:
+        """The MAJ:MIN lines it holds."""
+        text = read_text(self.path)
+        if text is None:
+            return frozenset()
+        return frozenset(line.strip() for line in text.splitlines() if _DEVNO_RE.fullmatch(line.strip()))
+
+    def save(self, devnos: frozenset[str]) -> None:
+        """The file holding devnos, one per line in order; removed for an empty set."""
+        ordered = sorted(devnos)
+        if not ordered:
+            if os.path.lexists(self.path):
+                os.remove(self.path)
+            return
+        ensure_dir(os.path.dirname(self.path), 0o755)
+        write_atomic(self.path, "".join(f"{d}\n" for d in ordered), mode=0o644, durable=False, relabel=False)
 
 
-def _enable_iocost_service(runner: CommandRunnerPort, paths: IocostPaths) -> tuple[int, list[str]]:
-    systemd = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL)
-    dr = systemd.daemon_reload_result()
-    if dr.returncode != 0:
-        return _failed("systemctl daemon-reload", dr)
-    en = systemd.enable(IOCOST_SERVICE, now=True)
-    if en.returncode != 0:
-        return _failed(f"systemctl enable --now {IOCOST_SERVICE}", en)
-    rc_u, lines_u = _reload_udev_rules(runner, paths)
-    return rc_u, [f"enabled:   {IOCOST_SERVICE}", *lines_u]
+@dataclass(frozen=True, slots=True)
+class IocostSysfs:
+    """IocostSysfsPort over the block folder, cgroup.controllers and io.cost.model at these paths."""
+
+    sys_block: str
+    controllers_path: str
+    model_path: str
+
+    def disks(self) -> tuple[BlockDisk, ...]:
+        """The scan of sys_block."""
+        return _scan_sys_block(self.sys_block)
+
+    def io_controller(self) -> bool | None:
+        """ "io" among cgroup.controllers' words."""
+        ctrl_raw = read_text(self.controllers_path)
+        return ("io" in ctrl_raw.split()) if ctrl_raw is not None else None
+
+    def model(self) -> str:
+        """io.cost.model, stripped."""
+        return (read_text(self.model_path) or "").strip()
 
 
-def _install_and_write(
-    paths: IocostPaths, runner: CommandRunnerPort, *, live_only: bool, target_device: str | None
-) -> tuple[int, list[str]]:
-    """Read, plan, install btrfs:iocost (not live-only) and write io.cost.qos: the part under the lock."""
-    snap = collect_iocost_snapshot(paths, runner=runner, udev=target_device is None)
-    plan = plan_iocost_apply(snap, target_device=target_device)
-    if plan.error is not None:
-        return (
-            (0, [f"skipped:   {target_device} ({plan.error})"])
-            if (live_only and target_device is not None)
-            else (1, [f"ERROR: {plan.error}"])
+@dataclass(frozen=True, slots=True)
+class IocostUdev:
+    """UdevPort through runner: udevadm, udevd's control socket at udev_control, the rule at rule_dest."""
+
+    runner: CommandRunnerPort
+    udev_control: str
+    rule_dest: str
+
+    def running(self) -> bool:
+        """Whether udevd's control socket is there."""
+        return os.path.exists(self.udev_control)
+
+    def rule_installed(self) -> bool:
+        """Whether the rule is there."""
+        return os.path.exists(self.rule_dest)
+
+    def properties(self, name: str) -> UdevProperties:
+        """udev_properties of /dev/NAME."""
+        return udev_properties(self.runner, name)
+
+    def reload_rules(self) -> CommandResult:
+        """`udevadm control --reload-rules`, here (no flatpak-spawn), its output captured."""
+        return self.runner.run(["udevadm", "control", "--reload-rules"], output=OutputMode.CAPTURE)
+
+
+@dataclass(frozen=True, slots=True)
+class IocostSystemd:
+    """IocostSystemdPort through SystemctlAdapter over runner: the unit's state asked on the host from a
+    toolbox (status and plan), every change made here."""
+
+    runner: CommandRunnerPort
+
+    def probe(self) -> tuple[bool, str, str]:
+        """probe_systemd_unit of the service."""
+        return probe_systemd_unit(self.runner, IOCOST_SERVICE)
+
+    def _systemctl(self) -> SystemctlAdapter:
+        """systemctl through runner, here (no flatpak-spawn): every change of the unit."""
+        return SystemctlAdapter(self.runner, on_host=SystemctlHost.LOCAL)
+
+    def daemon_reload(self) -> CommandResult:
+        """`systemctl daemon-reload`."""
+        return self._systemctl().daemon_reload_result()
+
+    def enable_now(self) -> CommandResult:
+        """`systemctl enable --now cst-btrfs-iocost.service`."""
+        return self._systemctl().enable(IOCOST_SERVICE, now=True)
+
+    def disable_now(self) -> CommandResult:
+        """`systemctl disable --now cst-btrfs-iocost.service`."""
+        return self._systemctl().disable(IOCOST_SERVICE, now=True)
+
+
+@dataclass(frozen=True, slots=True)
+class IocostInstaller:
+    """IocostInstallerPort: the installer at installer_script ("" for none: the installed zipapp) run by
+    runner; its plan reads the files under install_root ("" for the real root)."""
+
+    runner: CommandRunnerPort
+    installer_script: str
+    install_root: str
+
+    def available(self) -> bool:
+        """Whether a checkout's installer is known."""
+        return bool(self.installer_script)
+
+    def install(self) -> tuple[int, list[str]]:
+        """installer.py install --component btrfs:iocost."""
+        return _installer_step(
+            self.runner, self.installer_script, ["install", "--component", Component.BTRFS_IOCOST.value]
         )
-    out: list[str] = []
-    if not live_only:
-        component = Component.BTRFS_IOCOST.value
-        rc_i, lines_i = _installer_step(runner, paths.installer_script, ["install", "--component", component])
-        out.extend(lines_i)
-        if rc_i != 0:
-            return rc_i, out
-    rc_w, lines_w = _apply_qos_writes(paths, snap, plan)
-    return rc_w, [*out, *lines_w]
 
-
-def apply_iocost(
-    paths: IocostPaths,
-    *,
-    runner: CommandRunnerPort | None = None,
-    live_only: bool = False,
-    target_device: str | None = None,
-) -> tuple[int, list[str]]:
-    """Enable `blk-iocost` in `io.cost.qos` and optionally install unit + udev persistence.
-
-    Not live-only: install btrfs:iocost, write, daemon-reload, enable --now, reload the udev rules, and
-    only then mark the component done; the first step that fails stops there (rc != 0, still pending).
-    It holds the component lock from the first step to the mark, as a full revert does."""
-    if not live_only and not paths.installer_script:
-        # The installed zipapp has no installer.py, unit verifier or payload to install from.
-        return 1, ["ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"]
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-
-    def install_and_write() -> tuple[int, list[str]]:
-        return _locked(
-            paths, lambda: _install_and_write(paths, cmd_runner, live_only=live_only, target_device=target_device)
-        )
-
-    if live_only:
-        return install_and_write()
-
-    def full() -> tuple[int, list[str]]:
-        rc_w, out = install_and_write()
-        if rc_w != 0:
-            return rc_w, out
-        # The iocost lock is free again: enable --now starts the service, which takes it.
-        rc_s, lines_s = _enable_iocost_service(cmd_runner, paths)
-        out.extend(lines_s)
-        if rc_s != 0:
-            return rc_s, out
+    def mark_done(self) -> tuple[int, list[str]]:
+        """installer.py mark --component btrfs:iocost done."""
         mark = ["mark", "--component", Component.BTRFS_IOCOST.value, "done"]
-        rc_m, lines_m = _installer_step(cmd_runner, paths.installer_script, mark)
-        return rc_m, [*out, *lines_m]
+        return _installer_step(self.runner, self.installer_script, mark)
 
-    return _locked(paths, full, lock_path=paths.component_lock_path)
-
-
-def _remove_iocost_files(svc: InstallService, paths: IocostPaths) -> tuple[int, list[str]]:
-    req = InstallRequest(root=paths.install_root, as_root=True)
-    places = [svc.placement(e, req) for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST)]
-    try:
-        return 0, list(svc.remove(places))
-    except _UNINSTALL_ERRORS as exc:
-        return 1, [f"ERROR: {exc}"]
-
-
-def _unchanged_since(runner: CommandRunnerPort, before: tuple[bool, str, str]) -> bool:
-    """The service as the probe before found it: both probes answered with systemd's words (not "unknown":
-    a probe that cannot say proves nothing) and they agree on ActiveState and UnitFileState."""
-    now = probe_systemd_unit(runner, IOCOST_SERVICE)
-    known = enum_member(ActiveState, before[1]) is not None and enum_member(EnablementState, before[2]) is not None
-    return known and now == before
+    def changes(self) -> tuple[str, ...] | None:
+        """The btrfs:iocost files `apply` would write or record again, by the installer's plan (under
+        install_root: the host's files from a toolbox); None when it cannot tell (no checkout to install
+        from, or the plan failed)."""
+        if not self.installer_script:
+            return None
+        root = ["--root", self.install_root] if self.install_root else []
+        rc, lines, _err = run_installer(
+            self.runner, self.installer_script, ["plan", "--component", Component.BTRFS_IOCOST.value, *root]
+        )
+        if rc != 0:
+            return None
+        return tuple(
+            line.partition(": ")[2].strip().removeprefix(self.install_root)
+            for line in lines
+            if line.startswith((InstallReportWord.WOULD_WRITE, InstallReportWord.WOULD_RECORD))
+        )
 
 
-def _put_state_back(
-    runner: CommandRunnerPort,
-    svc: InstallService,
-    paths: IocostPaths,
-    before: tuple[bool, str, str],
-    prior: ComponentState | None,
-) -> list[str]:
-    """After a failed disable: btrfs:iocost back to done when it was done and the disable changed nothing
-    (_unchanged_since). Otherwise it stays pending, the truth: disable --now can disable the unit and then
-    fail to stop it. The ERROR line when the record cannot be written again (pending stays: it only
-    overstates what is left to do)."""
-    if prior != ComponentState.DONE or not _unchanged_since(runner, before):
-        return []
-    try:
-        svc.mark(paths.record_path, Component.BTRFS_IOCOST.value, ComponentState.DONE)
-    except _UNINSTALL_ERRORS as exc:
-        return [f"ERROR: cannot put {Component.BTRFS_IOCOST.value} back to done: {exc}"]
-    return []
+@dataclass(frozen=True, slots=True)
+class IocostUninstall:
+    """IocostUninstallPort over svc: btrfs:iocost's files under install_root ("" for the real root), their
+    lines and its state in root's install record under the same root (record_path)."""
+
+    svc: InstallService
+    install_root: str
+    record_path: str
+
+    def mark(self, state: ComponentState) -> ComponentState | None:
+        """btrfs:iocost marked state in the record; the state it had."""
+        return self.svc.mark(self.record_path, Component.BTRFS_IOCOST.value, state)
+
+    def remove(self) -> list[str]:
+        """The manifest's btrfs:iocost entries removed with their lines."""
+        req = InstallRequest(root=self.install_root, as_root=True)
+        places = [
+            self.svc.placement(e, req) for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST)
+        ]
+        return list(self.svc.remove(places))
 
 
-def _remove_iocost_component(
-    runner: CommandRunnerPort, svc: InstallService, paths: IocostPaths
-) -> tuple[int, list[str]]:
-    """Mark btrfs:iocost pending, stop the service, remove the component and reload systemd and udev; the
-    first failure stops there. A failure after the disable leaves pending (or no state, once its last file
-    and line are gone), never done; a record that cannot be marked stops revert before anything changes."""
-    systemd = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL)
-    out: list[str] = []
-    try:
-        prior = svc.mark(paths.record_path, Component.BTRFS_IOCOST.value, ComponentState.PENDING)
-    except _UNINSTALL_ERRORS as exc:
-        return 1, [f"ERROR: {exc}", "nothing was removed"]
-    before = probe_systemd_unit(runner, IOCOST_SERVICE)
-    if before[0]:
-        dis = systemd.disable(IOCOST_SERVICE, now=True)
-        if dis.returncode != 0:
-            rc_d, lines_d = _failed(f"systemctl disable --now {IOCOST_SERVICE}", dis)
-            back = _put_state_back(runner, svc, paths, before, prior)
-            return rc_d, [*lines_d, "nothing was removed", *back]
-        out.append(f"disabled:  {IOCOST_SERVICE}")
-    rc_r, lines_r = _remove_iocost_files(svc, paths)
-    out.extend(lines_r)
-    if rc_r != 0:
-        return rc_r, out
-    dr = systemd.daemon_reload_result()
-    if dr.returncode != 0:
-        rc_dr, lines_dr = _failed("systemctl daemon-reload", dr)
-        return rc_dr, [*out, *lines_dr]
-    rc_u, lines_u = _reload_udev_rules(runner, paths)
-    return rc_u, [*out, *lines_u]
+class IocostLockFile:
+    """IocostLockPort over the lock file at path (0644, its folder 0755), waited for at most timeout
+    seconds; release closes it (a killed run's lock goes with its process)."""
 
+    __slots__ = ("_fd", "path", "timeout")
 
-def revert_iocost(
-    paths: IocostPaths,
-    *,
-    live_only: bool = False,
-    runner: CommandRunnerPort | None = None,
-    installer: InstallService | None = None,
-) -> tuple[int, list[str]]:
-    """Disable CST-managed `blk-iocost` entries in `io.cost.qos` and optionally uninstall unit/rule.
+    def __init__(self, path: str, timeout: float) -> None:
+        self.path = path
+        self.timeout = timeout
+        self._fd: int | None = None
 
-    Not live-only, the service and the rule go first (so no udev event enables a disk again after its
-    reset), then the managed devices are reset, all under the component lock (as a full apply)."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
+    def take(self) -> bool:
+        """The lock, once its folder is made; False when another run holds it after timeout seconds. A take
+        while this object holds it is a programming error (AssertionError), as in the fake: it would wait on
+        this run's own lock and leak the first descriptor."""
+        if self._fd is not None:
+            raise AssertionError(f"{self.path} taken twice")
+        ensure_dir(os.path.dirname(self.path), 0o755)
+        fd = take_lock(self.path, wait=True, mode=0o644, timeout=self.timeout)
+        if fd is None:
+            return False
+        self._fd = fd
+        return True
 
-    def reset() -> tuple[int, list[str]]:
-        snap = collect_iocost_snapshot(paths, runner=cmd_runner, udev=False)
-        return _apply_qos_writes(paths, snap, plan_iocost_revert(snap))
-
-    if live_only:
-        return _locked(paths, reset)
-    svc = program_installer(paths.entry_file, paths.fallback_root) if installer is None else installer
-
-    def full() -> tuple[int, list[str]]:
-        rc_c, out = _remove_iocost_component(cmd_runner, svc, paths)
-        if rc_c != 0:
-            return rc_c, out
-        rc_w, lines_w = _locked(paths, reset)
-        return rc_w, [*out, *lines_w]
-
-    return _locked(paths, full, lock_path=paths.component_lock_path)
-
-
-def component_changes(paths: IocostPaths, runner: CommandRunnerPort) -> tuple[str, ...] | None:
-    """The btrfs:iocost files `apply` would write or record again, by the installer's plan (under
-    install_root: the host's files from a toolbox); None when it cannot tell (no checkout to install
-    from, or the plan failed)."""
-    if not paths.installer_script:
-        return None
-    root = ["--root", paths.install_root] if paths.install_root else []
-    rc, lines, _err = run_installer(
-        runner, paths.installer_script, ["plan", "--component", Component.BTRFS_IOCOST.value, *root]
-    )
-    if rc != 0:
-        return None
-    return tuple(
-        line.partition(": ")[2].strip().removeprefix(paths.install_root)
-        for line in lines
-        if line.startswith(_INSTALL_PLAN_CHANGES)
-    )
-
-
-def plan_iocost(
-    paths: IocostPaths, runner: CommandRunnerPort, *, live_only: bool, target_device: str | None
-) -> tuple[int, list[str]]:
-    """`cst btrfs iocost plan`: what apply would write, changing nothing."""
-    snap = collect_iocost_snapshot(paths, runner=runner, udev=target_device is None)
-    pl = plan_iocost_apply(snap, target_device=target_device)
-    # The installer's plan builds the zipapp: ask it only when the unit and the rule are there, since
-    # otherwise the plan says "would install:" whatever it answers.
-    installed = snap.service_present and snap.rule_installed
-    changes = component_changes(paths, runner) if not live_only and pl.error is None and installed else None
-    return (1 if pl.error is not None else 0), format_iocost_plan(
-        snap, pl, live_only=live_only, component_changes=changes
-    )
-
-
-def dispatch_iocost_cli_action(
-    parsed: IocostParsedArgs, env: ManagedCliEnv, *, read_only: bool
-) -> tuple[int, list[str]]:
-    """Resolve `IocostPaths` and invoke the requested `btrfs-iocost` subcommand."""
-    paths = iocost_paths_for(env.entry_file, ctx=env.ctx, read_only=read_only, fallback_root=env.fallback_root)
-    match parsed.action:
-        case IocostAction.STATUS:
-            return 0, format_iocost_status(collect_iocost_snapshot(paths, runner=env.runner))
-        case IocostAction.PLAN:
-            runner = SubprocessCommandRunner() if env.runner is None else env.runner
-            return plan_iocost(paths, runner, live_only=parsed.live_only, target_device=parsed.device)
-        case IocostAction.APPLY:
-            return apply_iocost(paths, live_only=parsed.live_only, target_device=parsed.device, runner=env.runner)
-        case _:
-            return revert_iocost(paths, live_only=parsed.live_only, runner=env.runner)
+    def release(self) -> None:
+        """The lock let go."""
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None

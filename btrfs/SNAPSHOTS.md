@@ -1686,12 +1686,16 @@ undone, that `.bulk-new` folder holds nothing you need: delete it and run
 holds anything you need: delete it if one is left (for example after going
 back to an older CST).
 
-This covers the moves of `cst btrfs bulk apply` only. The undo of a
-`cst btrfs bulk steam apply` move still deletes a game's copy under its own
-name, so a cut deletion there can still lead here (the message then ends with
-"run 'bulk steam apply' again"). If you did not play or install through the
-new library while the move was being undone, that copy holds nothing you
-need: delete it and run `cst btrfs bulk steam apply`.
+The undo of a `cst btrfs bulk steam apply` move works the same way: once a
+game's copy (or the copy of its manifest or Workshop files) passed this
+check, it is renamed to `<path>.bulk-new.bulk-drop` and then deleted, and the
+next repair (or the next `bulk steam apply`) goes on deleting the marked copy
+without checking it again. A cut deletion there no longer leads here either
+(the message ends with "run 'bulk steam apply' again"). A half-deleted
+`.bulk-new` copy of a game left by an older CST still can: if you did not
+play or install through the new library while the move was being undone,
+that copy holds nothing you need: delete it and run
+`cst btrfs bulk steam apply`.
 
 **`bulk status` says `NEEDS A LOOK: ... was created again after its data was moved to ...`.**
 An old subvolume was being moved into `~/Bulk` (the rename is instant) and the
@@ -2444,10 +2448,17 @@ journal first:
 |---|---|
 | `prepared` | deletes the `.bulk-new` copies (also a half-done real copy); the game stays in the main library |
 | `switching`, not every part switched | puts every part back (the manifest leaves `~/Bulk/steam` first), deletes the copies |
+| `switching`, the undo of step 9 | the same: every part back, then the copies deleted |
 | `switching`, every part switched | the last check of step 9, then steps 10 and 11 |
 | `switched` | writes both `libraryfolders.vdf` as intended (also when only one was written), then step 11 |
 | `finishing` | makes sure both lists are right, deletes what is left of the old copies |
 | written on both sides | keeps everything and reports it, until you resolve it |
+
+When the copies are deleted after the parts are back (the undo), each copy that
+passed the "written to" check is renamed to `<name>.bulk-new.bulk-drop` first
+and then deleted; a repair that finds that name goes on deleting it without
+checking again, as for the items above. A move that finds such a name before
+it copies deletes it too.
 
 Writing the list is safe to repeat: listing a game under one library and
 removing it from the others gives the same result however often it is done.

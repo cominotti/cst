@@ -52,9 +52,10 @@ type _SwapLines = tuple[tuple[str, MarkedLineSpec, int], ...]
 _WRITABLE_LINE_STATES: Final[frozenset[ManagedState]] = frozenset(
     {OwnedState.OK, OwnedState.ADOPT, OwnedState.DUPLICATE, OwnedState.MISSING, OwnedState.CHANGE}
 )
-# What apply says of a file it writes whole that it cannot read (a folder in its place, a policy), refused before
-# the first write.
-_FILE_CANNOT_BE_READ: Final = "cannot be read: nothing was changed"
+# What apply says of a file it cannot read (a folder in its place, a policy): a file it writes whole, crypttab or
+# fstab, refused before the first write; _CANNOT_BE_READ alone when a file of lines is found so later, after a write.
+_CANNOT_BE_READ: Final = "cannot be read"
+_FILE_CANNOT_BE_READ: Final = f"{_CANNOT_BE_READ}: nothing was changed"
 # What apply says of a folder where it puts a link (zram-generator.conf) or removes a file (the legacy sysctl
 # file): the rename or the unlink would fail on it.
 _FOLDER_IN_PLACE: Final = "a folder is in its place: nothing was changed"
@@ -143,7 +144,7 @@ class SwapApplicationService(SwapReports):
             events.append(ApplyEvent("out", ApplyEventKind.LINE, f"unchanged: {path} ({name} entry)"))
             return True, False, False
         # _check_before_writing refused these already; the file may have changed since.
-        refusal = self._line_refusal(path, line_spec, st)
+        refusal = self._line_refusal(path, line_spec, st, before_writing=False)
         if refusal is not None:
             events.append(ApplyEvent("err", ApplyEventKind.ERROR, refusal))
             return False, False, False
@@ -151,7 +152,7 @@ class SwapApplicationService(SwapReports):
         if not self._fs.exists(path):
             self._fs.write_atomic(path, "", mode)
         self._fs.copy_if_absent(path, f"{path}.pre-swap-config.bak")
-        existing = self._fs.read_text(path, "") or ""
+        existing = self._fs.read_text(path, "", regular_only=True) or ""
         self._fs.write_atomic(path, line_spec.render_updated(existing), mode)
 
         if st == OwnedState.ADOPT:
@@ -297,7 +298,7 @@ class SwapApplicationService(SwapReports):
         states = [(path, line_spec, self._inspect_marked(path, line_spec)) for path, line_spec, _mode in lines]
         # An unmarked swap line is named first, whichever file has it; then a file apply cannot read.
         for path, line_spec, st in sorted(states, key=lambda s: s[2] != OwnedState.CONFLICT):
-            refusal = self._line_refusal(path, line_spec, st)
+            refusal = self._line_refusal(path, line_spec, st, before_writing=True)
             if refusal is not None:
                 events.append(ApplyEvent("err", ApplyEventKind.ERROR, refusal))
                 return None
@@ -330,14 +331,19 @@ class SwapApplicationService(SwapReports):
                 return f"{path}: {_FOLDER_IN_PLACE}"
         return None
 
-    def _line_refusal(self, path: str, line_spec: MarkedLineSpec, st: ManagedState) -> str | None:
-        """The error line apply stops with for a marked line in state st, None when apply may write it."""
+    def _line_refusal(
+        self, path: str, line_spec: MarkedLineSpec, st: ManagedState, *, before_writing: bool
+    ) -> str | None:
+        """The error line apply stops with for a marked line in state st, None when apply may write it.
+        before_writing: no file was written yet (_check_before_writing), so the line says so."""
         prog = self._env.prog
         if st == OwnedState.CONFLICT:
             return (
                 f"{prog}: ERROR: {path} has an unmarked entry for {line_spec.key}: "
                 "remove it by hand, then run apply again."
             )
+        if st == OwnedState.UNREADABLE:
+            return f"{prog}: ERROR: {path}: {_FILE_CANNOT_BE_READ if before_writing else _CANNOT_BE_READ}"
         if st not in _WRITABLE_LINE_STATES:
             return f"{prog}: ERROR: {path}: {st}"
         return None

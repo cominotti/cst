@@ -2055,6 +2055,7 @@ class StateContractsTest(unittest.TestCase):
         StateFormatKey.GAME_INTENDED,
         StateFormatKey.GAME_LEFTOVERS,
         StateFormatKey.DOCKER_NOCOW_OUTCOME,
+        StateFormatKey.DOCKER_NOCOW_POSTPONED,
     )
 
     def test_every_format_names_real_writers_and_readers(self) -> None:
@@ -2110,7 +2111,7 @@ class StateContractsTest(unittest.TestCase):
         from cpu.domain import GAME_STATE
         from cpu.game.domain import GamePaths
         from cst_core.domain.record import ROOT_RECORD
-        from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX, VM_TORN
+        from doctor.domain import ALERT_PENDING, GAME_INTENDED, NOCOW_POSTPONED, VM_INDEX, VM_TORN
 
         self.assertEqual(GcPaths().last_used, state_format(StateFormatKey.DOCKER_GC_STATE).path)
         self.assertEqual(GcPaths().last_run, state_format(StateFormatKey.DOCKER_GC_LAST_RUN).path)
@@ -2129,6 +2130,9 @@ class StateContractsTest(unittest.TestCase):
         self.assertEqual(VM_TORN, state_format(StateFormatKey.VM_NAS_TORN).path)
         self.assertEqual(ROOT_RECORD, state_format(StateFormatKey.INSTALL_RECORD).path)
         self.assertEqual(NocowPaths().outcome, state_format(StateFormatKey.DOCKER_NOCOW_OUTCOME).path)
+        postponed = state_format(StateFormatKey.DOCKER_NOCOW_POSTPONED)
+        self.assertEqual((NocowPaths().postponed, NOCOW_POSTPONED), (postponed.path, postponed.path))
+        self.assertEqual(postponed.version, 1)
 
     def test_paths_of_installed_programs_come_from_the_manifest(self) -> None:
         from btrfs.bulk.domain import BulkPaths

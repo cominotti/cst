@@ -5515,7 +5515,7 @@ EOF
             rc=0; out="$($prog mark 2>&1)" || rc=$?
             echo "test_114 mark: rc=$rc $out" >&2
             [[ "$rc" == 2 ]]
-            grep -qF "nothing marked (fix the file, then run it again)" <<<"$out"
+            grep -qF "/etc/docker/daemon.json: not JSON: the migration is requested, and mark sets no +C on the volumes folder: fix the file, and the first boot after that runs it" <<<"$out"
             [[ -e /etc/btrfs-setup/docker-nocow-pending ]] || { echo "mark wrote no request" >&2; exit 1; }
             [[ "$(cat /var/lib/docker-volumes-nocow/attempts)" == 0 ]] || { echo "the old count stayed" >&2; exit 1; }
             printf '{}' >/etc/docker/daemon.json
@@ -5909,6 +5909,115 @@ EOF
                 [[ -z "$d" ]] || {{ echo "doctor warns without the helper: $d" >&2; exit 1; }}
             fi
             rm -f "$state/outcome"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_215_docker_volumes_nocow_postponed_record_is_format_1_and_read_safely(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root) and cst doctor (as tester) on the record of
+        postponed boots, /var/lib/docker-volumes-nocow/postponed. migrate runs with an
+        /etc/docker/daemon.json that is not JSON (it postpones before any btrfs call); status runs with
+        the file naming a data root of the test's own on a tmpfs (status shows the record under its
+        volumes folder's line). The whole cycle of the state file: migrate writes format 1 ("v": 1,
+        mode 0644); a record of format 99 (a newer CST) is left byte for byte, migrate's line, status
+        and doctor name it; a format-1 record whose time no clock can show reads "?" in status and
+        "at an unknown time" in doctor (status stopped with a traceback, doctor's check failed); a file
+        in place of the state folder is no record for doctor (it said "cannot read" at every run); a
+        record of format 0, as the previous version wrote it, is counted on and rewritten as format
+        1."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-215-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /var/tmp/e2e-215-saved /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-215-made-docker ] && rm -rf /etc/docker || true; "
+            "rm -f /var/tmp/e2e-215-made-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_215 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            rec={state}/postponed
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            doctor() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}
+            broken() {{ printf '{{' >/etc/docker/daemon.json; }}
+            fixed() {{ printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json; }}
+            newer="$rec is format 99 of the docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST"
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-215-made-docker; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e {state} ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p {root}/volumes
+            # 1. Written as format 1.
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            echo "test_215 record: $(cat "$rec")" >&2
+            grep -qF '{{"v": 1, "reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown", "boots": 1,' "$rec"
+            [[ "$(stat -c %a "$rec")" == 644 ]]
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 1: $out" >&2
+            grep -qE '^  migration postponed at 1 boot[(]s[)] in a row, last [0-9-]+ [0-9:]+: /etc/docker/daemon.json: not JSON' <<<"$out"
+            # 2. A record of format 99: left as it is, and named.
+            printf '{{"v": 99, "reason": "r", "boots": 5, "first": 1, "last": 2, "boot_id": "b", "new": [1]}}\n' >"$rec"
+            cp -p "$rec" /var/tmp/e2e-215-saved
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate, format 99: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "$newer: left as it is, and this boot is not counted in it" <<<"$out"
+            cmp "$rec" /var/tmp/e2e-215-saved || {{ echo "migrate wrote over a record of a newer format" >&2; exit 1; }}
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 99: $out" >&2
+            grep -qxF "  $newer" <<<"$out"
+            d="$(doctor | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_215 doctor, format 99: $d" >&2
+            grep -qxF "  info   Docker volumes NOCOW: $newer" <<<"$d"
+            # 3. A time no clock can show.
+            printf '{{"v": 1, "reason": "r", "boots": 1, "first": 1, "last": 100000000000000000000, "boot_id": "b"}}\n' >"$rec"
+            rc=0; out="$($prog status 2>&1)" || rc=$?
+            echo "test_215 status, a time past the clock: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            if grep -qF Traceback <<<"$out"; then echo "status stopped with a traceback" >&2; exit 1; fi
+            grep -qxF "  migration postponed at 1 boot(s) in a row, last ?: r" <<<"$out"
+            d="$(doctor)"
+            echo "test_215 doctor, a time past the clock: $(grep -F "Docker volumes NOCOW" <<<"$d" || true)" >&2
+            if grep -qF "check_docker_nocow_postponed: the check itself failed" <<<"$d"; then echo "doctor's check failed" >&2; exit 1; fi
+            grep -qF "info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last at an unknown time: r;" <<<"$d"
+            # 4. A file in place of the state folder: no record.
+            rm -rf {state}
+            printf 'in the way\n' >{state}
+            d="$(doctor | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_215 doctor, the state folder a file: $d" >&2
+            if grep -qF "cannot read $rec" <<<"$d"; then echo "doctor took the file for a record it cannot read" >&2; exit 1; fi
+            rm -f {state}
+            # 5. A record of format 0, as the previous version wrote it: counted on, written as format 1.
+            mkdir -p {state}
+            printf '{{"reason": "r", "boots": 1, "first": 1700000000, "last": 1700000000, "boot_id": "old"}}\n' >"$rec"
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate, format 0: rc=$rc $out; record: $(cat "$rec")" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF '{{"v": 1, "reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown", "boots": 2, "first": 1700000000,' "$rec"
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 0 counted on: $out" >&2
+            grep -qF "  migration postponed at 2 boot(s) in a row, last " <<<"$out"
             echo E2E-OK
             """,
         ).stdout
@@ -12119,9 +12228,9 @@ EOF
         """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
         set before swap_setup) with /etc/cst/swap.conf in place and a folder where /etc/fstab was
         (the test moves the real one aside; its own trap removes the folder and puts it back before
-        swap_cleanup runs): apply exits 1 with "/etc/fstab: unreadable" on stderr, and every file,
-        link, mode and owner under /etc and the scratch tree, and the install record, are as before
-        (no crypttab.pre-swap-config.bak, crypttab not rewritten). Before, apply rewrote
+        swap_cleanup runs): apply exits 1 with "/etc/fstab: cannot be read: nothing was changed" on
+        stderr, and every file, link, mode and owner under /etc and the scratch tree, and the install
+        record, are as before (no crypttab.pre-swap-config.bak, crypttab not rewritten). Before, apply rewrote
         /etc/crypttab and wrote its .bak first. With /etc/fstab back, the same apply works."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -12148,7 +12257,7 @@ s0="$(snap)"
 r0="$(record)"
 swap_run apply
 [[ $rc == 1 ]] || fail "apply with a folder in place of /etc/fstab exited $rc"
-grep -qF "ERROR: /etc/fstab: unreadable" <<<"$err" || fail "apply's message"
+grep -qF "ERROR: /etc/fstab: cannot be read: nothing was changed" <<<"$err" || fail "apply's message"
 [[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
 [[ ! -e /etc/crypttab.pre-swap-config.bak ]] || fail "crypttab's .bak was written"
 [[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
@@ -12439,6 +12548,294 @@ if [[ -e "$W/orig/uresourced.conf" ]]; then
 else
     [[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there, where the image had none"
 fi
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_211_swap_plan_rows_match_what_apply_refuses(self) -> None:
+        """cst swap plan and apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup
+        trap set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, five times:
+        a folder where /etc/systemd/zram-generator.conf goes, a folder where the legacy
+        /etc/sysctl.d/99-zram-tuning.conf is, a file in place of /etc/systemd/system/machine.slice.d (the
+        real one moved aside), a folder where /etc/tmpfiles.d/zswap.conf goes and a folder where
+        /etc/fstab was (the real one moved aside). The test's own trap puts each back before swap_cleanup
+        runs. Each time plan exits 0 and its row of that path is "?" with apply's reason ("a folder is in
+        its place: apply refuses before it writes anything", "<folder> is not a folder: ...", "cannot be
+        read, even as root: ..."), and apply then exits 1 with the matching "...: nothing was changed"
+        line, every file, link, mode and owner under /etc and the scratch tree, and the install record,
+        as before (no .pre-swap-config.bak, no sysctl run). The pair (plan's row, apply's refusal) per
+        case is the point: before 02409d4d plan said "mask", "remove" and "write" for the first three.
+        With each one put back, the same apply works and a second one changes nothing."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/tmpfiles.d/zswap.conf
+ZRAM=/etc/systemd/zram-generator.conf
+OLD=/etc/sysctl.d/99-zram-tuning.conf
+DROPIN="$DROPIN_DIR/10-swap-memory-low.conf"
+REFUSES="apply refuses before it writes anything"
+made=""
+put_back() {
+    case "$made" in
+        conf) rm -rf "$CONF" ;;
+        zram) rmdir "$ZRAM" ;;
+        old) rmdir "$OLD" ;;
+        dropin) rm -f "$DROPIN_DIR"; mv "$W/dropin.real" "$DROPIN_DIR" ;;
+        fstab) rm -rf /etc/fstab; if [[ -e "$W/fstab.real" ]]; then mv "$W/fstab.real" /etc/fstab; fi ;;
+    esac
+    made=""
+}
+trap 'put_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+esc() { sed 's/[][\.*^$+?(){}|]/\\&/g' <<<"$1"; }
+# plan's row of TARGET is "?" with NOTE; then apply refuses with LINE and changes nothing.
+pair() {
+    local what="$1" target="$2" note="$3" line="$4"
+    swap_run plan
+    [[ $rc == 0 ]] || fail "plan with $what exited $rc"
+    grep -qE "^  \?  +$(esc "$target") +$(esc "$note")\$" <<<"$out" || fail "plan's row of $target with $what"
+    s0="$(snap)"
+    r0="$(record)"
+    : >"$W/calls"
+    swap_run apply
+    [[ $rc == 1 ]] || fail "apply with $what exited $rc"
+    grep -qF "swap: ERROR: $line" <<<"$err" || fail "apply's message with $what"
+    [[ "$out" != *"written:"* ]] || fail "apply with $what wrote before it refused"
+    [[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+    [[ "$(snap)" == "$s0" ]] || fail "a refused apply with $what changed /etc or the scratch tree"
+    [[ "$(record)" == "$r0" ]] || fail "a refused apply with $what changed the install record"
+    if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply with $what ran sysctl"; fi
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$CONF" && ! -L "$CONF" && ! -d "$ZRAM" && ! -e "$OLD" && ! -L "$OLD" ]] \
+    || fail "the container's files are not as the test expects"
+[[ -d "$DROPIN_DIR" && ! -L "$DROPIN_DIR" && ! -d /etc/fstab ]] \
+    || fail "the container's folders are not as the test expects"
+
+rm -f "$ZRAM"  # the image's own, if any: swap_cleanup puts it back
+mkdir "$ZRAM"
+made=zram
+pair "a folder in place of $ZRAM" systemd/zram-generator.conf "a folder is in its place: $REFUSES" \
+    "$ZRAM: a folder is in its place: nothing was changed"
+put_back
+mkdir "$OLD"
+made=old
+pair "a folder in place of $OLD" sysctl.d/99-zram-tuning.conf "a folder is in its place: $REFUSES" \
+    "$OLD: a folder is in its place: nothing was changed"
+put_back
+mv "$DROPIN_DIR" "$W/dropin.real"
+: >"$DROPIN_DIR"
+made=dropin
+pair "a file in place of $DROPIN_DIR" machine.slice.d/10-swap-memory-low.conf \
+    "$DROPIN_DIR is not a folder: $REFUSES" "$DROPIN: $DROPIN_DIR is not a folder: nothing was changed"
+put_back
+mkdir -p "$CONF"
+made=conf
+pair "a folder in place of $CONF" tmpfiles.d/zswap.conf "cannot be read, even as root: $REFUSES" \
+    "$CONF: cannot be read: nothing was changed"
+put_back
+if [[ -e /etc/fstab ]]; then mv /etc/fstab "$W/fstab.real"; fi
+mkdir /etc/fstab
+made=fstab
+pair "a folder in place of /etc/fstab" "fstab: /dev/mapper/swap0 line" "cannot be read, even as root: $REFUSES" \
+    "/etc/fstab: cannot be read: nothing was changed"
+put_back
+
+# Each one put back: the same apply works, and a second one changes nothing.
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with each one put back exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+[[ -f "$CONF" && -f "$DROPIN" ]] || fail "$CONF or $DROPIN is not a file"
+[[ "$(readlink "$ZRAM")" == /dev/null ]] || fail "$ZRAM is not masked"
+s1="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_212_swap_plan_and_apply_refuse_a_fifo_at_once(self) -> None:
+        """cst swap plan and apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup
+        trap set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, and a FIFO
+        where /etc/tmpfiles.d/zswap.conf goes, which nothing ever writes to. Each run is bounded by
+        timeout(1) at 30 s: before this change plan opened the FIFO and waited for a writer for ever
+        (exit 124 here). Now plan exits 0 at once and its row of that path is "?" with "cannot be read,
+        even as root: apply refuses before it writes anything"; apply exits 1 at once with "...: cannot
+        be read: nothing was changed" and changes nothing (every file, link, mode and owner under /etc
+        and the scratch tree, the install record; no .pre-swap-config.bak, no sysctl run). With the FIFO
+        removed (the test's trap removes it too, before swap_cleanup runs) the same apply works and a
+        second one changes nothing."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/tmpfiles.d/zswap.conf
+trap 'if [[ -p "$CONF" ]]; then rm -f "$CONF"; fi; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+bounded() {
+    rc=0
+    timeout 30 "$CST" swap "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "swap $* blocked on the FIFO"
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "the container's $CONF is not as the test expects"
+mkdir -p "$(dirname "$CONF")"
+mkfifo -m 0644 "$CONF"
+
+bounded plan
+[[ $rc == 0 ]] || fail "plan with a FIFO at $CONF exited $rc"
+grep -qE '^  \?  +tmpfiles\.d/zswap\.conf +cannot be read, even as root: apply refuses before it writes anything$' \
+    <<<"$out" || fail "plan's row of the FIFO"
+s0="$(snap)"
+r0="$(record)"
+: >"$W/calls"
+bounded apply
+[[ $rc == 1 ]] || fail "apply with a FIFO at $CONF exited $rc"
+grep -qF "swap: ERROR: $CONF: cannot be read: nothing was changed" <<<"$err" || fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply with a FIFO wrote before it refused"
+[[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+[[ -p "$CONF" ]] || fail "apply replaced the FIFO"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+[[ "$(record)" == "$r0" ]] || fail "a refused apply changed the install record"
+if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply ran sysctl"; fi
+
+# The FIFO removed: the same apply works, and a second one changes nothing.
+rm -f "$CONF"
+bounded apply
+[[ $rc == 0 ]] || fail "apply without the FIFO exited $rc"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+s1="$(snap)"
+bounded apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_213_swap_plan_and_status_answer_at_once_with_a_fifo_at_the_old_drop_in_name(self) -> None:
+        """cst swap plan and status as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup
+        trap set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, and a FIFO
+        that nothing ever writes to at /etc/systemd/system/machine.slice.d/50-memory-low.conf, the name an
+        older CST gave its drop-in (plan reads it to decide whether apply removes it). Each run is bounded
+        by timeout(1) at 30 s: before this change plan opened the FIFO and waited for a writer for ever
+        (exit 124 here). Now the FIFO is not CST's file: plan and status exit 0 at once with no row for it,
+        and change nothing. machine.slice is started before the FIFO is made, so systemd has loaded it and
+        its drop-ins already: systemd itself opens a FIFO drop-in when it loads the slice (and at a
+        daemon-reload) and waits for a writer, and PID 1 then stops answering (seen in a first version of
+        this test). So apply, whose daemon-reload reloads the slice, is not run here; the unit tests show
+        that apply's own read of the FIFO does not wait and leaves it alone."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+OLD="$DROPIN_DIR/50-memory-low.conf"
+# A reader that waits in the FIFO's open (systemd, should it load the slice again) is let go by a writer's
+# open; the FIFO goes before swap_cleanup's daemon-reload.
+release() { if [[ -p "$OLD" ]]; then timeout 2 sh -c 'exec 3>"$1"' sh "$OLD" || true; rm -f "$OLD"; fi; }
+trap 'release; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+bounded() {
+    rc=0
+    timeout 30 "$CST" swap "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "swap $* blocked on the FIFO"
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$OLD" && ! -L "$OLD" ]] || fail "the container's $OLD is not as the test expects"
+systemctl start machine.slice
+mkdir -p "$DROPIN_DIR"
+mkfifo -m 0644 "$OLD"
+s0="$(snap)"
+
+bounded plan
+[[ $rc == 0 ]] || fail "plan with a FIFO at $OLD exited $rc"
+grep -qE '^  write +crypttab: swap0 line' <<<"$out" || fail "plan's crypttab row"
+if grep -qF '50-memory-low.conf' <<<"$out"; then fail "plan has a row for the FIFO"; fi
+bounded status
+[[ $rc == 0 || $rc == 1 ]] || fail "status with a FIFO at $OLD exited $rc"
+if grep -qF '50-memory-low.conf' <<<"$out"; then fail "status has a row for the FIFO"; fi
+[[ -p "$OLD" ]] || fail "the FIFO is gone"
+[[ "$(snap)" == "$s0" ]] || fail "plan or status changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP, E2ETag.DOCTOR)
+    def test_214_doctor_and_swap_plan_agree_on_a_swap_conf_that_is_not_a_regular_file(self) -> None:
+        """cst swap plan and cst doctor as root on the container's /etc (SWAP_E2E_LIB, its cleanup trap set
+        before swap_setup), nothing applied yet, with what is at /etc/cst/swap.conf first a link to
+        /dev/null, then a FIFO that nothing ever writes to. Each run is bounded by timeout(1) at 60 s. Both
+        times plan's row is "REFUSE ... not a regular file: apply stops" and doctor's line says the same
+        ("not a regular file: cst swap apply refuses until it is fixed"), at once. Before this change
+        doctor read the link as an empty swap.conf ("not configured (no SWAP_PARTUUID ...)": add one to a
+        link to /dev/null) and waited in the FIFO's open for ever (exit 124 here)."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+trap swap_cleanup EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+bounded() {
+    rc=0
+    timeout 60 "$CST" "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "$* blocked at swap.conf"
+}
+
+CONF=/etc/cst/swap.conf
+mkdir -p /etc/cst
+for kind in link fifo; do
+    rm -f "$CONF"
+    if [[ $kind == link ]]; then ln -s /dev/null "$CONF"; else mkfifo -m 0644 "$CONF"; fi
+    bounded swap plan
+    grep -qF "  REFUSE    cst/swap.conf                          not a regular file: apply stops" <<<"$out" ||
+        fail "plan's row of a $kind at $CONF"
+    bounded doctor
+    grep -qF "WARN   swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed" \
+        <<<"$out" || fail "doctor's line of a $kind at $CONF"
+    [[ "$out" != *"swap partition: not configured"* ]] || fail "doctor took a $kind at $CONF for no settings"
+done
+rm -f "$CONF"
 echo E2E-OK
 """,
             check=False,

@@ -25,6 +25,7 @@ from btrfs.docker_volumes_nocow.domain import (
     outcome_line,
     outcome_record,
     postponed_line,
+    postponed_newer,
     recovery,
 )
 from btrfs.docker_volumes_nocow.ports import DockerDaemonPort, NocowOutputPort, NocowStatePort, VolumeTreePort
@@ -51,12 +52,21 @@ class DockerVolumesNocow:
         try:
             match command:
                 case NocowCommand.MARK if self.paths.config_problem:
-                    # Which folder Docker uses is unknown: no +C, but the request is written as mark's
-                    # own (the count reset, then the flag, each flushed), so the first boot after the
-                    # fix runs the migration. Nothing else writes it: a flag written by btrfs-setup
+                    # Which folder Docker uses is unknown: mark sets no +C (an earlier install may have
+                    # set it, so the line says what mark did, not what the folder has), but the request is
+                    # written as mark's own (the count reset, then the flag, each flushed), so the first
+                    # boot after the fix runs the migration. Nothing else writes it: a flag written by btrfs-setup
                     # could sit beside an old count, which the next boot would take for this request's.
-                    self.out.log(3, f"{self.paths.config_problem}: nothing marked (fix the file, then run it again)")
-                    self.request_migration(renew=True)
+                    # The line after the request, as it went (request_migration's own line says why not).
+                    problem = self.paths.config_problem
+                    if self.request_migration(renew=True):
+                        self.out.log(
+                            3,
+                            f"{problem}: the migration is requested, and mark sets no +C on the volumes folder: "
+                            "fix the file, and the first boot after that runs it",
+                        )
+                    else:
+                        self.out.log(3, f"{problem}: mark sets no +C on the volumes folder")
                     return 2
                 case NocowCommand.MARK:
                     return self.mark()
@@ -224,9 +234,16 @@ class DockerVolumesNocow:
             self.out.log(4, f"cannot remove the outcome record {self.paths.outcome}: {e}")
 
     def note_postponed(self, why: str) -> None:
-        """Count this boot as postponed (once per boot) and keep the latest reason."""
+        """Count this boot as postponed (once per boot) and keep the latest reason. A record of a newer
+        format (a newer CST wrote it) is left as it is: this boot is not counted in it, and the journal
+        says so."""
+        old = self.state.read_postponed()
+        newer = postponed_newer(old, self.paths.postponed)
+        if newer is not None:
+            self.out.log(4, f"{newer}: left as it is, and this boot is not counted in it")
+            return
         boot = self.state.boot_id()
-        record = next_postponed(self.state.read_postponed(), why=why, boot=boot, now=int(self.clock.now()))
+        record = next_postponed(old, why=why, boot=boot, now=int(self.clock.now()))
         self.state.write_postponed(record)
 
     def postpone(self, busy: str, *, always: bool = False) -> None:
@@ -334,7 +351,8 @@ class DockerVolumesNocow:
         migrate; 1 existing volumes still need migrating, and the flag that asks the next boot is
         written; 2 the request could not be written (a journal line says why; no +C then, so the
         next boot asks again, unless the folder had +C already and no flag was there: then no boot
-        asks, and the outcome record says so)."""
+        asks, and the outcome record says so). Also 2 when the second look at the volumes (after +C)
+        fails: the request is written all the same, and the next boot looks again."""
         vols = self.paths.volumes
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent (Docker not set up yet): nothing to mark")
@@ -349,7 +367,15 @@ class DockerVolumesNocow:
         elif not self.request_migration(renew=True, install=True):  # a new request gets its two boots again
             return 2
         self.tree.set_nocow(vols, on=True)
-        todo = self.pending(fix=True)  # folders and empty files: in place, now
+        try:
+            todo = self.pending(fix=True)  # folders and empty files: in place, now
+        except OSError as e:
+            # What a container wrote since the first scan is unknown, and no boot asks for a folder with
+            # +C: asked anyway (a migration with nothing to copy only removes its flag at the next boot).
+            if not requested and not self.request_migration(renew=True, install=True):
+                raise
+            self.out.log(3, f"{vols}: {e}; the migration is requested: the next boot looks at the volumes again")
+            return 2
         if not todo:
             return 0
         # A container wrote between the two scans (install does not stop Docker): asked now,
@@ -400,6 +426,6 @@ class DockerVolumesNocow:
                 self.out.say("  no boot asks for it: run cst btrfs install")
         if recorded:
             self.out.say(recorded)
-        line = postponed_line(self.state.read_postponed())
+        line = postponed_line(self.state.read_postponed(), self.paths.postponed)
         if line:
             self.out.say(line)

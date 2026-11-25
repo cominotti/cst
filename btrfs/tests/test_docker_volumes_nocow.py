@@ -774,6 +774,85 @@ class MarkUnmarkTest(Base):
         self.assertTrue(os.path.exists(self.flag))
         self.assertTrue(self.fs.nocow(self.vols))
 
+    def second_scan_fails(self, *, write: bool = True) -> contextlib.AbstractContextManager[object]:
+        """The first scan with fix (mark's second look, after +C) first writes a file with data into
+        volume v (a container writing between the two looks; write) and then fails (EIO); every other
+        scan is the real one."""
+        service = self.cli.service
+        real_scan = service.tree.scan
+        failed: list[bool] = []
+
+        def scan(top: str, *, fix: bool = False) -> TreeScan:
+            if fix and not failed:
+                failed.append(True)
+                if write:
+                    with open(os.path.join(self.vols, "v", "_data", "late"), "wb") as f:
+                        f.write(b"\x02" * (1 << 20))
+                raise OSError(errno.EIO, "Input/output error")
+            return real_scan(top, fix=fix)
+
+        return mock.patch.object(service.tree, "scan", scan)
+
+    def test_mark_whose_second_scan_fails_after_nocow_still_requests(self) -> None:
+        # Nothing to copy at the first look, so no request yet; +C; the second look fails. Before, mark
+        # stopped there with no request: +C stayed with what a container wrote, and no boot asked again.
+        self.fs.set(self.vols, nocow=False)
+        top = self.volume("v", data={"empty": b""})
+        with self.second_scan_fails():
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertTrue(self.fs.nocow(self.vols))
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: {self.vols}: [Errno 5] Input/output error; the migration is requested: the next boot "
+            "looks at the volumes again\n",
+        )
+        self.assertIsNone(read_attempts(self))
+        self.assertFalse(os.path.exists(self.outcome))
+        # The next boot rewrites what was written between the two looks.
+        _rc, out = self.call(self.cli.migrate)
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assert_all_nocow(top)
+        self.assert_no_leftovers("v")
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+
+    def test_mark_whose_second_scan_fails_and_whose_request_cannot_be_written_records_it(self) -> None:
+        # The request cannot be written either: +C is set and no flag is there, so no boot asks; the
+        # not-scheduled record says so, and the scan's error ends mark as before.
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=False)
+        self.volume("v", data={"empty": b""})
+        with self.second_scan_fails():
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); "
+            rf"{self.vols} has \+C already, so no boot asks again: fix that, then run cst btrfs install\n"
+            rf"<3>{TAG}: {self.vols}: \[Errno 5\] Input/output error\n$",
+        )
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "not-scheduled")
+
+    def test_mark_whose_second_scan_fails_after_its_request_says_it_is_requested(self) -> None:
+        # Copy-on-write data at the first look: the request was written before +C, as always; the line
+        # says so now (before: the error alone).
+        self.fs.set(self.vols, nocow=False)
+        self.volume("v")
+        with self.second_scan_fails(write=False):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: {self.vols}: [Errno 5] Input/output error; the migration is requested: the next boot "
+            "looks at the volumes again\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+
     def test_mark_after_an_old_install_left_nocow_without_its_flag(self) -> None:
         # An older install set +C first and the flag after mark: killed in between, it left +C,
         # copy-on-write data and no flag. No boot asks again; the next install does.
@@ -1588,8 +1667,16 @@ class DaemonJsonProblemTest(PostponeBase):
         before = tree(self.vols)
         rc, out, err = self.main("mark")
         self.assertEqual(rc, 2)
-        self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
+        self.assertEqual(err, "")
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: {self.PROBLEM}: the migration is requested, and mark sets no +C on the volumes "
+            "folder: fix the file, and the first boot after that runs it\n",
+        )
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        # The folder has +C from an earlier install (PostponeBase): the line says what mark did, never
+        # that the folder has no +C.
+        self.assertTrue(self.fs.nocow(self.vols))
         self.assertTrue(os.path.exists(self.flag))
         self.assertEqual(read_attempts(self), "0")
 
@@ -1601,10 +1688,15 @@ class DaemonJsonProblemTest(PostponeBase):
         self.fs.sets.clear()
         before = tree(self.vols)
         rc, out, err = self.main("mark")
-        self.assertEqual(rc, 2)
-        self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
-        self.assertIn(f"<3>{TAG}: cannot schedule the migration ([Errno 17] File exists", out + err)
+        self.assertEqual((rc, err), (2, ""))
+        # request_migration's line first (why no request), then mark's, which claims no request.
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); [^\n]*\n"
+            rf"<3>{TAG}: {re.escape(self.PROBLEM)}: mark sets no \+C on the volumes folder\n$",
+        )
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        self.assertTrue(self.fs.nocow(self.vols))  # +C from an earlier install, as the line allows
         self.assertFalse(os.path.exists(self.flag))
 
 
@@ -1998,7 +2090,7 @@ class PostponedRecordTest(PostponeBase):
         self.boot("b1", 1000)
         self.assertEqual(
             self.record(),
-            {"reason": "Docker is running", "boots": 1, "first": 1000, "last": 1000, "boot_id": "b1"},
+            {"v": 1, "reason": "Docker is running", "boots": 1, "first": 1000, "last": 1000, "boot_id": "b1"},
         )
         self.assertEqual(stat.S_IMODE(os.stat(self.postponed).st_mode), 0o644)  # cst doctor reads it as the user
         # Run again in the same boot, for another reason: still one boot.
@@ -2014,7 +2106,7 @@ class PostponedRecordTest(PostponeBase):
         self.boot("b3", 3000)
         self.assertEqual(
             self.record(),
-            {"reason": "Docker is running", "boots": 3, "first": 1000, "last": 3000, "boot_id": "b3"},
+            {"v": 1, "reason": "Docker is running", "boots": 3, "first": 1000, "last": 3000, "boot_id": "b3"},
         )
         self.assertEqual(sorted(os.listdir(os.path.dirname(self.postponed))), ["attempts", "postponed"])  # no .new
         self.assertEqual(read_attempts(self), "1")
@@ -2078,6 +2170,84 @@ class PostponedRecordTest(PostponeBase):
                 assert rec is not None
                 self.assertEqual((rec["boots"], rec["first"]), (1, 1000))
                 self.assertIn("postponed at 1 boot(s) in a row", self.call(self.cli.status)[1])
+
+    def plant(self, text: str) -> None:
+        os.makedirs(os.path.dirname(self.postponed), exist_ok=True)
+        with open(self.postponed, "w") as f:
+            f.write(text)
+
+    def test_a_record_of_format_0_is_counted_on_and_written_as_format_1(self) -> None:
+        # The record an older CST wrote (no "v"): read as format 0, counted on, rewritten as format 1.
+        self.fs.docker_state = "active"
+        self.plant('{"reason": "Docker is running", "boots": 2, "first": 500, "last": 600, "boot_id": "old"}\n')
+        self.boot("b1", 1000)
+        self.assertEqual(
+            self.record(),
+            {"v": 1, "reason": "Docker is running", "boots": 3, "first": 500, "last": 1000, "boot_id": "b1"},
+        )
+
+    def test_a_record_of_a_newer_format_is_left_as_it_is(self) -> None:
+        # A newer CST wrote it: this boot is not counted in it, and nothing writes over it.
+        self.fs.docker_state = "active"
+        text = '{"v": 99, "reason": "r", "boots": 5, "first": 1, "last": 2, "boot_id": "b0", "new": [1]}\n'
+        self.plant(text)
+        os.utime(self.postponed, (1000, 1000))
+        newer = (
+            f"{self.postponed} is format 99 of the docker-nocow-postponed (this CST reads format 1 and older): "
+            "written by a newer CST"
+        )
+        _rc, out = self.boot("b1", 2000)
+        self.assertEqual(
+            out,
+            f"<4>{TAG}: Docker is running: migration left for the next boot\n"
+            f"<4>{TAG}: {newer}: left as it is, and this boot is not counted in it\n",
+        )
+        with open(self.postponed) as f:
+            self.assertEqual(f.read(), text)
+        self.assertEqual(os.stat(self.postponed).st_mtime, 1000)
+        _rc, out = self.call(self.cli.status)
+        self.assertTrue(out.endswith(f"\n  {newer}\n"), out)
+        self.assertNotIn("migration postponed at", out)
+        # A boot not held back removes it all the same: the removal ends the record, whatever its format.
+        self.fs.docker_state = "inactive"
+        _rc, out = self.boot("b2", 3000)
+        self.assert_migrated(out)
+        self.assertIsNone(self.record())
+
+    def test_a_version_that_is_no_whole_number_starts_afresh(self) -> None:
+        # Not a record this helper wrote: status shows no line for it, and the next boot starts afresh.
+        self.fs.docker_state = "active"
+        for version in ('"x"', "true", "-1", "1.0"):
+            with self.subTest(version=version):
+                self.plant(f'{{"v": {version}, "reason": "r", "boots": 2, "first": 500, "last": 600, "boot_id": "o"}}')
+                rc, out = self.call(self.cli.status)
+                self.assertEqual(rc, 0)
+                self.assertNotIn("postponed", out)
+                self.assertNotIn(self.postponed, out)
+                self.boot("b1", 1000)
+                self.assertEqual(
+                    self.record(),
+                    {"v": 1, "reason": "Docker is running", "boots": 1, "first": 1000, "last": 1000, "boot_id": "b1"},
+                )
+
+    def test_a_time_no_clock_can_show_reads_as_unknown(self) -> None:
+        # localtime raises OverflowError past its range and OSError EOVERFLOW below it, and strftime
+        # fails on a time localtime accepts (a year past a C int): status stopped with a traceback, or
+        # with "[Errno 75]" and exit 2. The rest of the line stays.
+        for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
+            with self.subTest(last=last):
+                self.plant(json.dumps({"v": 1, "reason": "r", "boots": 2, "first": 1, "last": last, "boot_id": "b"}))
+                rc, out, err = self.main("status")
+                self.assertEqual((rc, err), (0, ""))
+                self.assertTrue(out.endswith("\n  migration postponed at 2 boot(s) in a row, last ?: r\n"), out)
+
+    def test_a_file_in_place_of_the_state_folder_is_no_record(self) -> None:
+        shutil.rmtree(os.path.dirname(self.postponed))
+        with open(os.path.dirname(self.postponed), "w") as f:
+            f.write("in the way\n")
+        rc, out, err = self.main("status")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertNotIn("postponed", out)
 
     def test_without_a_boot_id(self) -> None:
         # No boot id to read: the first postponement is still recorded.
@@ -2673,16 +2843,34 @@ class PostponedLineTest(unittest.TestCase):
     def test_last_must_be_an_integer(self) -> None:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
         self.assertEqual(
-            postponed_line({"boots": 2, "last": 3000, "reason": "r"}),
+            postponed_line({"boots": 2, "last": 3000, "reason": "r"}, "/p"),
             f"  migration postponed at 2 boot(s) in a row, last {when}: r",
         )
         # A bool is no time (next_postponed and cst doctor refuse it too); before, True read as 1970.
         for last in (True, False, "3000", None):
             with self.subTest(last=last):
                 self.assertEqual(
-                    postponed_line({"boots": 2, "last": last, "reason": "r"}),
+                    postponed_line({"boots": 2, "last": last, "reason": "r"}, "/p"),
                     "  migration postponed at 2 boot(s) in a row, last ?: r",
                 )
+
+    def test_a_time_no_clock_can_show_reads_as_unknown(self) -> None:
+        # Past localtime's range (OverflowError), EOVERFLOW (OSError), and a year past a C int (strftime).
+        for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
+            with self.subTest(last=last):
+                self.assertEqual(
+                    postponed_line({"v": 1, "boots": 2, "last": last, "reason": "r"}, "/p"),
+                    "  migration postponed at 2 boot(s) in a row, last ?: r",
+                )
+
+    def test_a_newer_format_is_named_and_a_broken_version_shows_nothing(self) -> None:
+        self.assertEqual(
+            postponed_line({"v": 2, "boots": 2, "last": 3000, "reason": "r"}, "/p"),
+            "  /p is format 2 of the docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST",
+        )
+        for v in ("1", True, -1, 1.0, None):
+            with self.subTest(v=v):
+                self.assertEqual(postponed_line({"v": v, "boots": 2, "last": 3000, "reason": "r"}, "/p"), "")
 
 
 if __name__ == "__main__":

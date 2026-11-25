@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: MPL-2.0
 """A state machine over `cst btrfs iocost` apply and revert, live or not, with any one step failing (Hypothesis).
 
-It runs the real apply_iocost and revert_iocost (btrfs/iocost/adapters.py)
-on a folder of its own: one NVMe disk (259:1), maybe a second one whose
-vendor line (`259:2 enable=1 ctrl=user`) CST must keep, with udevd running
-or not. The runner is IocostHost, below: the installer's install, mark and
-plan through one real InstallService over the unit tests' in-memory target
-and record (tests.test_install.MemoryTarget, tests.test_install_record
-.MemoryRecord), which revert also removes through; and systemctl and udevadm,
-with what systemd and udev have loaded. Its answers follow the unit tests'
-fake (btrfs/tests/test_iocost.py). The kernel's io.cost.qos keeps one line
-per device: the machine replaces the module's _write_qos_line (the seam
-btrfs/tests/test_iocost_faults.py uses) with a write that merges the line by
-MAJ:MIN. os.fsync is stubbed (the TestCase's setUp).
+It runs iocost's use cases (btrfs/iocost/application.py, Iocost.apply and
+Iocost.revert) over IocostWorld (btrfs/tests/fakes.py), the in-memory fakes
+of their ports, which btrfs/tests/test_iocost_ports.py keeps equal to the
+real adapters: one NVMe disk (259:1), maybe a second one whose vendor line
+(`259:2 enable=1 ctrl=user`) CST must keep, with udevd running or not. The
+installer's install and mark and revert's removal go through the world's
+real InstallService over the unit tests' in-memory target and record
+(tests.test_install.MemoryTarget, here FiringTarget, and
+tests.test_install_record.MemoryRecord); the world keeps what systemd and
+udev have loaded, and its io.cost.qos keeps one line per device, as the
+kernel's does.
 
 Each step arms at most one fault: a write or a removal of one of the
 component's three files, the io.cost.qos write, daemon-reload, enable --now,
@@ -49,39 +48,28 @@ Not modelled: a failed write of the managed-devices file, kills (the fault
 tests cover them for one apply), --device, a reboot.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from enum import StrEnum
 import errno
 import functools
 import os
-import shutil
-import tempfile
 from typing import Final, override
 import unittest
-from unittest import mock
 
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 
-from btrfs.iocost import adapters as iocost_adapters
-from btrfs.iocost.adapters import IocostPaths, apply_iocost, revert_iocost
-from btrfs.iocost.domain import IOCOST_DISABLE_CTRL_AUTO, IOCOST_ENABLE_CTRL_AUTO, IOCOST_SERVICE
-from btrfs.tests.fakes import write
-from cst_core.application.install import InstallRefused, InstallRequest, InstallService, record_file
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, Component, Owner, select_entries
+from btrfs.iocost.domain import IOCOST_DISABLE_CTRL_AUTO, IOCOST_ENABLE_CTRL_AUTO
+from btrfs.tests.fakes import IOCOST_ENTRIES, IocostWorld
+from cst_core.application.install import InstallService
 from cst_core.domain.record import ComponentState
 from cst_core.installer import NAME as INSTALLER_NAME
-from cst_core.ports import CommandResult, WriteFailed
-from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
 from tests.test_install import MemoryTarget
-from tests.test_install_record import MemoryRecord
 
 profiles.load()
 
-COMPONENT: Final = Component.BTRFS_IOCOST.value
-ENTRIES: Final = tuple(select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST))
-DESTS: Final = tuple(e.dest for e in ENTRIES)
+DESTS: Final = tuple(e.dest for e in IOCOST_ENTRIES)
 DISK: Final = "259:1"
 ENABLED_LINE: Final = f"{DISK} {IOCOST_ENABLE_CTRL_AUTO}"
 DISABLED_LINE: Final = f"{DISK} {IOCOST_DISABLE_CTRL_AUTO}"
@@ -120,6 +108,15 @@ REVERT_FAULTS: Final = (
     IocostStepFault.QOS,
 )
 LIVE_FAULTS: Final = (IocostStepFault.NONE, IocostStepFault.QOS)
+# The world's point each command fault fails: the command answers exit 1, "Access denied" (the installer's
+# mark: its own error line).
+POINT_OF: Final = {
+    IocostStepFault.RELOAD: "systemd daemon-reload",
+    IocostStepFault.ENABLE: "systemd enable --now",
+    IocostStepFault.DISABLE: "systemd disable --now",
+    IocostStepFault.UDEV: "udev reload-rules",
+    IocostStepFault.MARK: "installer mark done",
+}
 
 
 class FiringTarget(MemoryTarget):
@@ -140,231 +137,80 @@ class FiringTarget(MemoryTarget):
         return super().remove(path)
 
 
-def _done(rc: int = 0, out: str = "", err: str = "", *, argv: Sequence[str]) -> CommandResult:
-    return CommandResult(rc, out, err, argv=tuple(argv))
-
-
-class IocostHost:
-    """installer.py, systemctl and udevadm for btrfs:iocost, and what they changed.
-
-    events: what this step did that worked, in order ("install", "reload", "enable", "udev", ...);
-    violations: the marks of btrfs:iocost done that came before what the component stands for."""
-
-    def __init__(self, svc: InstallService, target: FiringTarget, req: InstallRequest, record: str) -> None:
-        self.svc = svc
-        self.target = target
-        self.req = req
-        self.record = record
-        self.paths = {e.dest: svc.placement(e, req).path for e in ENTRIES}
-        self.unit = next(self.paths[e.dest] for e in ENTRIES if e.kind == ArtifactKind.UNIT)
-        self.rule = next(self.paths[e.dest] for e in ENTRIES if e.dest.endswith(".rules"))
-        self.enabled = False
-        self.loaded_unit: bytes | None = None  # the unit file as systemd loaded it at its last reload
-        self.loaded_rule: bytes | None = None  # the rule as udev loaded it at its last reload
-        self.udevd = True
-        self.fail: IocostStepFault = IocostStepFault.NONE
-        self.fired = False
-        self.events: list[str] = []
-        self.violations: list[str] = []
-        # Set by the machine: whether io.cost.qos holds 259:1 enable=1 now.
-        self.disk_enabled: Callable[[], bool] = lambda: False
-
-    def file(self, path: str) -> bytes | None:
-        held = self.target.files.get(path)
-        return None if held is None else held[0]
-
-    def _failing(self, fault: IocostStepFault) -> bool:
-        if self.fail != fault:
-            return False
-        self.fired = True
-        return True
-
-    def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
-        cmd = list(argv)
-        if len(cmd) > 4 and cmd[3].endswith("installer.py"):
-            return self._installer(cmd)
-        handler = {
-            ("systemctl", "show"): self._show,
-            ("systemctl", "daemon-reload"): self._daemon_reload,
-            ("systemctl", "enable"): self._enable,
-            ("systemctl", "disable"): self._disable,
-            ("udevadm", "control"): self._udev_reload,
-            ("udevadm", "info"): self._udev_info,
-        }.get((cmd[0], cmd[1]) if len(cmd) > 1 else ("", ""))
-        if handler is None:
-            raise AssertionError(f"command not modelled: {cmd}")
-        return handler(cmd)
-
-    def _show(self, cmd: list[str]) -> CommandResult:
-        load = "loaded" if self.unit in self.target.files else "not-found"
-        active, state = ("active", "enabled") if self.enabled else ("inactive", "disabled")
-        return _done(out=f"LoadState={load}\nActiveState={active}\nUnitFileState={state}\n", argv=cmd)
-
-    def _daemon_reload(self, cmd: list[str]) -> CommandResult:
-        if self._failing(IocostStepFault.RELOAD):
-            return _done(1, err="Failed to reload daemon: Access denied", argv=cmd)
-        self.loaded_unit = self.file(self.unit)
-        self.events.append("reload")
-        return _done(argv=cmd)
-
-    def _enable(self, cmd: list[str]) -> CommandResult:
-        if cmd != ["systemctl", "enable", "--now", IOCOST_SERVICE]:
-            raise AssertionError(f"command not modelled: {cmd}")
-        if self._failing(IocostStepFault.ENABLE):
-            return _done(1, err="Failed to enable unit: Access denied", argv=cmd)
-        if self.unit not in self.target.files:
-            return _done(1, err=f"Failed to enable unit: Unit file {IOCOST_SERVICE} does not exist", argv=cmd)
-        self.enabled = True
-        self.events.append("enable")
-        return _done(argv=cmd)
-
-    def _disable(self, cmd: list[str]) -> CommandResult:
-        if cmd != ["systemctl", "disable", "--now", IOCOST_SERVICE]:
-            raise AssertionError(f"command not modelled: {cmd}")
-        if self._failing(IocostStepFault.DISABLE):
-            return _done(1, err="Failed to disable unit: Access denied", argv=cmd)
-        self.enabled = False
-        self.events.append("disable")
-        return _done(argv=cmd)
-
-    def _udev_reload(self, cmd: list[str]) -> CommandResult:
-        if cmd != ["udevadm", "control", "--reload-rules"]:
-            raise AssertionError(f"command not modelled: {cmd}")
-        if self._failing(IocostStepFault.UDEV):
-            return _done(1, err="Failed to send reload request: Access denied", argv=cmd)
-        self.loaded_rule = self.file(self.rule)
-        self.events.append("udev")
-        return _done(argv=cmd)
-
-    def _udev_info(self, cmd: list[str]) -> CommandResult:
-        return _done(out="USEC_INITIALIZED=1234\n", argv=cmd)  # processed by udev, no hwdb solution
-
-    def _installer(self, cmd: list[str]) -> CommandResult:
-        match cmd[4:]:
-            case ["install", "--component", c] if c == COMPONENT:
-                lines: list[str] = []
-                try:
-                    lines.extend(self.svc.install(ENTRIES, self.req))
-                except (WriteFailed, InstallRefused) as e:
-                    self.events.append("install failed")
-                    return _done(1, "".join(f"{x}\n" for x in lines), f"{INSTALLER_NAME}: {e}", argv=cmd)
-                self.events.append("install")
-                return _done(out="".join(f"{x}\n" for x in lines), argv=cmd)
-            case ["mark", "--component", c, "done"] if c == COMPONENT:
-                if self._failing(IocostStepFault.MARK):
-                    return _done(1, err=f"{INSTALLER_NAME}: cannot write {self.record}: Access denied", argv=cmd)
-                missing = self._marked_too_soon()
-                if missing:
-                    self.violations.append(f"mark done before {', '.join(missing)}: this step did {self.events}")
-                self.svc.mark(self.record, COMPONENT)
-                self.events.append("mark")
-                return _done(argv=cmd)
-            case ["plan", *_]:
-                return _done(argv=cmd)
-            case _:
-                raise AssertionError(f"installer command not modelled: {cmd}")
-
-    def _marked_too_soon(self) -> list[str]:
-        """What a mark done now comes before (a7c5e92's contract), from this step's events."""
-        ev = self.events
-        if "install" not in ev:
-            return ["the install worked"]
-        after = ev[ev.index("install") + 1 :]
-        missing = [] if self.disk_enabled() and "qos failed" not in ev else ["io.cost.qos was written"]
-        if "reload" not in after:
-            missing.append("systemd reloaded")
-        if "enable" not in after:
-            missing.append("the service was enabled")
-        if self.udevd and "udev" not in after:
-            missing.append("the udev rules were reloaded")
-        return missing
-
-
 class IocostMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
         super().__init__()
-        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-mbt-iocost-"))
-        sys_fs = os.path.join(self.tmp, "sys", "fs", "cgroup")
-        root = os.path.join(self.tmp, "root")
-        # The machine's own install root, record path and udevd socket (an older IocostPaths has none of them).
-        self.record = record_file(Owner.ROOT, None, root)
-        self.udev_control = os.path.join(self.tmp, "run", "udev", "control")
-        self.paths = IocostPaths(
-            qos_path=os.path.join(sys_fs, "io.cost.qos"),
-            model_path=os.path.join(sys_fs, "io.cost.model"),
-            controllers_path=os.path.join(sys_fs, "cgroup.controllers"),
-            sys_block=os.path.join(self.tmp, "sys", "block"),
-            managed_file=os.path.join(self.tmp, "run", "btrfs-setup", "iocost-managed"),
-            rule_dest=os.path.join(self.tmp, "etc", "udev", "rules.d", "91-cst-iocost.rules"),
-            installer_script="/opt/fake/cst_core/installer.py",
-            udev_control=self.udev_control,
-            lock_path=os.path.join(self.tmp, "run", "btrfs-setup", "iocost-managed.lock"),
-            install_root=root,
-        )
+        w = IocostWorld()
         self.target = FiringTarget()
-        self.records = MemoryRecord()
-        self.release = 0  # the CST whose payload install writes: an apply's upgrade moves it on
-        self.svc = InstallService(self.target, lambda e: f"{e.dest} {self.release}\n".encode(), record=self.records)
-        self.host = IocostHost(self.svc, self.target, InstallRequest(root=root, as_root=True), self.record)
-        self.host.disk_enabled = lambda: self._disk_line() == ENABLED_LINE
+        w.target = self.target
+        w.svc = InstallService(self.target, lambda e: f"{e.dest} {w.release}\n".encode(), record=w.records)
+        w.before_mark = self._check_mark
+        self.world = w
+        # violations: the marks of btrfs:iocost done that came before what the component stands for.
+        self.violations: list[str] = []
         self.vendor = False
-        self.qos_fault = False
-        self.qos_fired = False
-
-    @override
-    def teardown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ---- helpers -----------------------------------------------------------------------------
     def _qos(self) -> dict[str, str]:
         """io.cost.qos as {MAJ:MIN: its line}."""
-        with open(self.paths.qos_path, encoding="utf-8") as fh:
-            return {line.split()[0]: line for line in fh.read().splitlines() if line.strip()}
+        return dict(self.world.qos or {})
 
-    def _write_qos_line(self, qos_path: str, payload: str) -> OSError | None:
-        """The kernel's io.cost.qos: a write replaces the line of its device, the others stay."""
-        if self.qos_fault:
-            self.qos_fired = True
-            self.host.events.append("qos failed")
-            return OSError(errno.EINVAL, os.strerror(errno.EINVAL))
-        lines = self._qos()
-        lines[payload.split(maxsplit=1)[0]] = payload
-        write(qos_path, "".join(f"{line}\n" for line in lines.values()))
-        return None
+    def _check_mark(self) -> None:
+        missing = self._marked_too_soon()
+        if missing:
+            self.violations.append(f"mark done before {', '.join(missing)}: this step did {self.world.events}")
+
+    def _marked_too_soon(self) -> list[str]:
+        """What a mark done now comes before (a7c5e92's contract), from this step's events."""
+        ev = self.world.events
+        if "install" not in ev:
+            return ["the install worked"]
+        after = ev[ev.index("install") + 1 :]
+        missing = [] if self._disk_line() == ENABLED_LINE and "qos failed" not in ev else ["io.cost.qos was written"]
+        if "reload" not in after:
+            missing.append("systemd reloaded")
+        if "enable" not in after:
+            missing.append("the service was enabled")
+        if self.world.udevd and "udev" not in after:
+            missing.append("the udev rules were reloaded")
+        return missing
 
     def _component(self) -> tuple[ComponentState | None, set[str]]:
         """btrfs:iocost's state in the install record, and the destinations it lists for it."""
-        rec = self.records.read(self.record)
-        if rec is None:
-            return None, set()
-        return rec.components.get(COMPONENT), {d for d, f in rec.files.items() if f.component == COMPONENT}
+        return self.world.state(), self.world.recorded()
 
     def _in_place(self) -> list[str]:
         """The component's files that are in the target."""
-        return [d for d in DESTS if self.host.paths[d] in self.target.files]
+        return self.world.in_place()
 
     def _disk_line(self) -> str | None:
         return self._qos().get(DISK)
 
     def _managed(self) -> bool:
-        if not os.path.exists(self.paths.managed_file):
-            return False
-        with open(self.paths.managed_file, encoding="utf-8") as fh:
-            return DISK in fh.read().split()
+        return DISK in self.world.managed
+
+    def _unit_loaded(self) -> bool:
+        w = self.world
+        return w.systemd.loaded is not None and w.systemd.loaded == w.file(w.unit_path)
 
     def _step(
         self, run: Callable[[], tuple[int, list[str]]], what: str, fault: IocostStepFault, dest: str
     ) -> tuple[int, list[str]]:
-        self.host.events, self.host.fired, self.target.fired, self.qos_fired = [], False, False, False
-        self.host.fail = fault
-        self.qos_fault = fault == IocostStepFault.QOS
-        self.target.fail_on = self.host.paths[dest] if fault == IocostStepFault.FILE else None
+        w = self.world
+        w.events, w.answered, self.target.fired = [], [], False
+        point = POINT_OF.get(fault)
+        if point is not None:
+            said = f"{INSTALLER_NAME}: cannot write {w.record}: Access denied"  # installer.py's own error line
+            w.fail(point, OSError(errno.EACCES, said if fault == IocostStepFault.MARK else "Access denied"))
+        if fault == IocostStepFault.QOS:
+            w.qos_refusal = OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+        self.target.fail_on = w.dest_path(dest) if fault == IocostStepFault.FILE else None
         try:
-            with mock.patch.object(iocost_adapters, "_write_qos_line", self._write_qos_line):
-                rc, lines = run()
+            rc, lines = run()
         finally:
-            self.host.fail, self.qos_fault, self.target.fail_on = IocostStepFault.NONE, False, None
-        fired = self.host.fired or self.target.fired or self.qos_fired
+            w.failing.clear()
+            w.qos_refusal, self.target.fail_on = None, None
+        fired = bool(w.answered) or self.target.fired or "qos failed" in w.events
         label = f"{what} ({fault}{' ' + dest if fault == IocostStepFault.FILE else ''})"
         if not fired:
             assert rc == 0, f"{label}: no fault fired, exit {rc}: {lines}"
@@ -375,18 +221,18 @@ class IocostMachine(RuleBasedStateMachine):
         return rc, lines
 
     def _assert_applied(self, lines: list[str]) -> None:
-        h = self.host
+        w = self.world
         state, recorded = self._component()
         assert state == ComponentState.DONE, f"apply exit 0, btrfs:iocost {state}: {lines}"
         assert self._in_place() == list(DESTS), f"apply exit 0, files in place: {self._in_place()}"
         assert recorded == set(DESTS), f"apply exit 0, recorded: {sorted(recorded)}"
-        assert h.loaded_unit is not None and h.loaded_unit == h.file(h.unit), "apply exit 0, unit not loaded"
-        assert not h.udevd or h.loaded_rule == h.file(h.rule), "apply exit 0, udev rule not loaded"
-        assert h.enabled, f"apply exit 0, service not enabled: {lines}"
+        assert self._unit_loaded(), "apply exit 0, unit not loaded"
+        assert not w.udevd or w.udev_loaded == w.file(w.rule_path), "apply exit 0, udev rule not loaded"
+        assert w.systemd.enabled, f"apply exit 0, service not enabled: {lines}"
         assert self._disk_line() == ENABLED_LINE, f"apply exit 0, io.cost.qos: {self._qos()}"
 
     def _assert_reset(self, *, managed: bool, what: str) -> None:
-        assert not os.path.exists(self.paths.managed_file), f"{what} exit 0, the managed-devices file is still there"
+        assert not self.world.managed, f"{what} exit 0, the managed-devices file is still there"
         if managed:
             assert self._disk_line() == DISABLED_LINE, f"{what} exit 0, io.cost.qos: {self._qos()}"
 
@@ -394,31 +240,26 @@ class IocostMachine(RuleBasedStateMachine):
     @initialize(udevd=st.booleans(), vendor=st.booleans())
     def start(self, *, udevd: bool, vendor: bool) -> None:
         """One NVMe disk (and maybe a vendor's), io.cost.qos without CST's line, nothing installed."""
-        write(self.paths.controllers_path, "cpuset cpu io memory pids\n")
-        write(self.paths.qos_path, f"{VENDOR_LINE}\n" if vendor else "")
-        write(self.paths.model_path, "")
-        disks = [("nvme0n1", DISK), *([("nvme1n1", VENDOR_DISK)] if vendor else [])]
-        for name, devno in disks:
-            base = os.path.join(self.paths.sys_block, name)
-            for rel, text in (("dev", devno), ("queue/rotational", "0"), ("queue/scheduler", "[none]")):
-                write(os.path.join(base, rel), text + "\n")
-        if udevd:
-            write(self.udev_control, "")
-        self.host.udevd = udevd
+        w = self.world
+        w.qos = {VENDOR_DISK: VENDOR_LINE} if vendor else {}
+        w.put_disk("nvme0n1", DISK)
+        if vendor:
+            w.put_disk("nvme1n1", VENDOR_DISK)
+        w.udevd = udevd
         self.vendor = vendor
 
     @rule(fault=st.sampled_from(APPLY_FAULTS), dest=st.sampled_from(DESTS), upgrade=st.booleans())
     def apply(self, fault: IocostStepFault, dest: str, *, upgrade: bool) -> None:
         if upgrade:
-            self.release += 1
+            self.world.release += 1
         what = "apply (upgrade)" if upgrade else "apply"
-        rc, lines = self._step(functools.partial(apply_iocost, self.paths, runner=self.host), what, fault, dest)
+        rc, lines = self._step(self.world.service().apply, what, fault, dest)
         if rc == 0:
             self._assert_applied(lines)
 
     @rule(fault=st.sampled_from(LIVE_FAULTS))
     def apply_live_only(self, fault: IocostStepFault) -> None:
-        run = functools.partial(apply_iocost, self.paths, runner=self.host, live_only=True)
+        run = functools.partial(self.world.service().apply, live_only=True)
         rc, _ = self._step(run, "apply --live-only", fault, DESTS[0])
         if rc == 0:
             assert self._disk_line() == ENABLED_LINE, f"apply --live-only exit 0, io.cost.qos: {self._qos()}"
@@ -427,22 +268,22 @@ class IocostMachine(RuleBasedStateMachine):
     def revert(self, fault: IocostStepFault, dest: str) -> None:
         managed = self._managed()
         before, _ = self._component()
-        run = functools.partial(revert_iocost, self.paths, runner=self.host, installer=self.svc)
+        run = self.world.service().revert
         rc, lines = self._step(run, "revert", fault, dest)
         state, recorded = self._component()
         if rc == 0:
             assert (state, recorded, self._in_place()) == (None, set(), []), f"revert exit 0 left {state} {recorded}"
-            assert not self.host.enabled, f"revert exit 0, the service is enabled: {lines}"
+            assert not self.world.systemd.enabled, f"revert exit 0, the service is enabled: {lines}"
             self._assert_reset(managed=managed, what="revert")
-        elif fault == IocostStepFault.DISABLE and self.host.fired:
+        elif fault == IocostStepFault.DISABLE and self.world.answered:
             assert state == before, f"revert ({fault}): the disable failed, btrfs:iocost {before} -> {state}: {lines}"
-        elif "disable" in self.host.events:
+        elif "disable" in self.world.events:
             assert state in {ComponentState.PENDING, None}, f"revert ({fault} {dest}) after its disable left {state}"
 
     @rule(fault=st.sampled_from(LIVE_FAULTS))
     def revert_live_only(self, fault: IocostStepFault) -> None:
         managed = self._managed()
-        run = functools.partial(revert_iocost, self.paths, runner=self.host, live_only=True)
+        run = functools.partial(self.world.service().revert, live_only=True)
         rc, _ = self._step(run, "revert --live-only", fault, DESTS[0])
         if rc == 0:
             self._assert_reset(managed=managed, what="revert --live-only")
@@ -450,7 +291,7 @@ class IocostMachine(RuleBasedStateMachine):
     # ---- invariants --------------------------------------------------------------------------
     @invariant()
     def marked_done_only_after_what_it_stands_for(self) -> None:
-        assert not self.host.violations, self.host.violations
+        assert not self.violations, self.violations
 
     @invariant()
     def the_vendor_line_stays(self) -> None:
@@ -462,19 +303,14 @@ class IocostMachine(RuleBasedStateMachine):
         state, _ = self._component()
         if state != ComponentState.DONE:
             return
-        h = self.host
         assert self._in_place() == list(DESTS), f"btrfs:iocost done, files in place: {self._in_place()}"
-        assert h.loaded_unit is not None and h.loaded_unit == h.file(h.unit), "btrfs:iocost done, unit not loaded"
-        assert h.enabled, "btrfs:iocost done, the service is not enabled"
+        assert self._unit_loaded(), "btrfs:iocost done, unit not loaded"
+        assert self.world.systemd.enabled, "btrfs:iocost done, the service is not enabled"
 
 
 class IocostMachineTest(profiles.MbtTestCase):
     # Not `IocostMachine.TestCase`: Hypothesis makes that class in hypothesis.stateful, where run_unit's
     # workers cannot load it by name, and ty takes no subclass of it (unsupported-base).
-    @override
-    def setUp(self) -> None:
-        stub_fsync(self)
-
     def test_any_sequence_of_steps_keeps_the_invariants(self) -> None:
         profiles.run_machine(IocostMachine)
 

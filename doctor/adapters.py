@@ -12,6 +12,7 @@ from typing import BinaryIO, TextIO
 
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
+from cst_core.adapters.files import open_regular_text
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template
@@ -73,6 +74,11 @@ class Host:
     def open_text(self, path: ViewPath) -> TextIO:
         """open(path) as UTF-8, undecodable bytes replaced."""
         return open(path, encoding="utf-8", errors="replace")
+
+    def open_regular_text(self, path: ViewPath) -> TextIO:
+        """open_text's text of a regular file; OSError(EINVAL) at once for anything else (cst_core's
+        open_regular_text, as cst swap reads its files)."""
+        return open_regular_text(path, errors="replace", newline=None)
 
     def open_bytes(self, path: ViewPath) -> BinaryIO:
         """open(path, "rb")."""
