@@ -555,11 +555,14 @@ class Change(Checks):
                 else:
                     self.checked(["forget-text", "--home", self.p.home, path])
                     self.out(f"forgotten: {path} (the same file as {current})\n")
-            elif self.o.check:
-                self.out(f"would remove {path} (an older CST's copy)\n")
             elif kind == OlderCopy.FOREIGN:
+                if self.o.check:
+                    self.out(f"would forget {path} (not written by CST: left alone)\n")
+                    continue
                 self.checked(["forget-text", "--home", self.p.home, path])
                 self.err(f"WARNING: {path} was not written by CST: left alone (forgotten from the install record)\n")
+            elif self.o.check:
+                self.out(f"would remove {path} (an older CST's copy)\n")
             else:
                 said = self.checked(["remove-text", "--home", self.p.home, path])
                 self.out(f"{said.rstrip(chr(10))} (an older CST's copy)\n" if said else f"forgotten: {path}\n")
