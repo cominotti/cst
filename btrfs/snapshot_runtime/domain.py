@@ -9,7 +9,7 @@ from enum import IntEnum, StrEnum
 import re
 from typing import Final
 
-from btrfs.health_check.domain import awk_field, bash_div, bash_int
+from btrfs.health_check.domain import awk_field, bash_div, bash_int, bash_wrap
 from cst_core.domain.shapes import ShapeError, first_item, items_of, object_of, object_or_empty, parse_json
 from cst_core.domain.text import group, read_fields
 from cst_core.domain.values import DAY, HOUR, MINUTE
@@ -50,12 +50,6 @@ class GuardError(StrEnum):
     NOT_A_NUMBER = "not-a-number"
 
 
-def _wrap(n: int) -> int:
-    """n as bash's 64-bit integer arithmetic gives it (it wraps around)."""
-    n &= (1 << 64) - 1
-    return n - (1 << 64) if n >= 1 << 63 else n
-
-
 # The bases bash takes in a BASE#DIGITS number, and its digits 0-9 and a-z (A-Z read as a-z up to that base).
 _MIN_BASE: Final = 2
 _MAX_BASE: Final = 64
@@ -80,7 +74,7 @@ def _based(base: int, digits: str) -> int:
         if d >= base:
             raise ValueError("value too great for base")
         n = n * base + d
-    return _wrap(n)
+    return bash_wrap(n)
 
 
 class _Arith:
@@ -108,7 +102,7 @@ class _Arith:
         while self.peek() in ("+", "-"):
             op = self.take()
             m = self.term()
-            n = _wrap(n + m if op == "+" else n - m)
+            n = bash_wrap(n + m if op == "+" else n - m)
         return n
 
     def term(self) -> int:
@@ -117,12 +111,12 @@ class _Arith:
             op = self.take()
             m = self.power()
             if op == "*":
-                n = _wrap(n * m)
+                n = bash_wrap(n * m)
             elif m == 0:
                 raise ValueError("division by 0")
             else:
                 q = bash_div(n, m)
-                n = _wrap(q if op == "/" else n - q * m)
+                n = bash_wrap(q if op == "/" else n - q * m)
         return n
 
     def power(self) -> int:
@@ -133,11 +127,11 @@ class _Arith:
         e = self.power()
         if e < 0:
             raise ValueError("exponent less than 0")
-        return _wrap(pow(n, e, 1 << 64))
+        return bash_wrap(pow(n, e, 1 << 64))
 
     def unary(self) -> int:
         if self.peek() in ("+", "-"):
-            return _wrap(-self.unary()) if self.take() == "-" else self.unary()
+            return bash_wrap(-self.unary()) if self.take() == "-" else self.unary()
         return self.atom()
 
     def atom(self) -> int:
@@ -149,8 +143,14 @@ class _Arith:
             return n
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tok):
             raise LookupError(tok)
+        return self._constant(tok)
+
+    @staticmethod
+    def _constant(tok: str) -> int:
+        """An integer constant as bash reads it (0x hexadecimal, BASE#DIGITS, decimal, a leading 0
+        octal), wrapped to 64 bits; ValueError for a token bash cannot read as one."""
         if re.fullmatch(r"0[xX][0-9a-fA-F]*", tok):
-            return _wrap(int(tok[2:] or "0", 16))
+            return bash_wrap(int(tok[2:] or "0", 16))
         if m := re.fullmatch(r"([0-9]+)#([0-9A-Za-z@_]+)", tok):
             if m.group(1).startswith("0"):
                 raise ValueError("invalid number")  # bash reads no base with a leading 0
@@ -158,7 +158,7 @@ class _Arith:
         n = bash_int(tok)
         if n is None:
             raise ValueError(tok)
-        return _wrap(n)
+        return bash_wrap(n)
 
 
 def guard_number(text: str) -> int | GuardError:

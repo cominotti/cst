@@ -72,6 +72,12 @@ def lines_of(items: Sequence[str]) -> str:
     return output("".join(item + "\n" for item in items))
 
 
+def bash_wrap(n: int) -> int:
+    """n as bash's 64-bit integer arithmetic gives it (it wraps around)."""
+    n &= (1 << 64) - 1
+    return n - (1 << 64) if n >= 1 << 63 else n
+
+
 def bash_int(text: str) -> int | None:
     """A string of digits as bash arithmetic reads it (a leading 0 is octal); None where bash fails
     (not digits, or an 8 or 9 after a leading 0)."""
