@@ -63,6 +63,7 @@ from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import (
+    GIVE_UP_AFTER,
     NocowCommand,
     NocowPaths,
     TreeScan,
@@ -191,6 +192,7 @@ class Base(unittest.TestCase):
         self.flag = os.path.join(self.tmp, "etc/btrfs-setup/docker-nocow-pending")
         self.attempts = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/attempts")
         self.postponed = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/postponed")
+        self.outcome = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/outcome")
         self.notify = os.path.join(self.tmp, "usr/local/sbin/btrfs-notify")
         # The processes the helper looks at: none, unless a test adds one.
         self.proc = os.path.join(self.tmp, "proc")
@@ -207,6 +209,7 @@ class Base(unittest.TestCase):
             flag=self.flag,
             attempts=self.attempts,
             postponed=self.postponed,
+            outcome=self.outcome,
             notify=self.notify,
             alerts=os.path.join(self.tmp, "alerts", "pending"),
             proc=self.proc,
@@ -222,6 +225,7 @@ class Base(unittest.TestCase):
             paths.flag,
             paths.attempts,
             paths.postponed,
+            paths.outcome,
             paths.notify,
             paths.alerts,
             paths.proc,
@@ -354,6 +358,7 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(paths.flag, "/etc/btrfs-setup/docker-nocow-pending")
         self.assertEqual(paths.attempts, "/var/lib/docker-volumes-nocow/attempts")
         self.assertEqual(paths.postponed, "/var/lib/docker-volumes-nocow/postponed")
+        self.assertEqual(paths.outcome, "/var/lib/docker-volumes-nocow/outcome")
         self.assertEqual(paths.proc, "/proc")
         self.assertEqual(paths, NocowPaths())
 
@@ -421,7 +426,8 @@ class StatusTest(Base):
         self.assertEqual(
             out,
             f"{self.vols}: new volumes NOCOW; 1 of 3 volume(s) fully NOCOW\n"
-            "  1 with copy-on-write data (2 MiB), migration not scheduled\n",
+            "  1 with copy-on-write data (2 MiB), migration not scheduled\n"
+            "  no boot asks for it: run cst btrfs install\n",
         )
         schedule(self)
         rc, out = self.call(self.cli.status)
@@ -520,6 +526,20 @@ class MarkUnmarkTest(Base):
         self.assertIsNone(read_attempts(self))
         self.assertFalse(os.path.exists(self.flag))
 
+    def test_mark_with_nothing_to_copy_whose_old_count_cannot_go_sets_no_nocow(self) -> None:
+        # forget swallowed the error: mark set +C and exited 0 beside the old count. Now the error is
+        # mark's (a journal line, exit 2) before +C; the next boot sets +C (no data: no request).
+        self.fs.set(self.vols, nocow=False)
+        self.volume("empty", data={"a/b": b""})
+        os.makedirs(self.attempts)
+        rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, f"<3>{TAG}: {self.vols}: [Errno 21] Is a directory: '{self.attempts}'\n")
+        self.assertEqual(self.fs.sets, [])
+        self.assertFalse(self.fs.nocow(self.vols))
+        self.assertTrue(os.path.isdir(self.attempts))
+        self.assertFalse(os.path.exists(self.flag))
+
     def test_mark_writes_the_flag_durably_before_nocow_is_set(self) -> None:
         # The install's request, as the boot's: the flag, its entry in its folder and the folder's
         # entry in /etc are flushed before +C is set on the volumes folder. A kill or a power loss
@@ -562,6 +582,7 @@ class MarkUnmarkTest(Base):
         self.assertFalse(self.fs.nocow(self.vols))
         self.assertEqual(tree(top), before)
         self.assertIsNone(read_attempts(self))
+        self.assertFalse(os.path.exists(self.outcome))  # the next boot asks: nothing to record
 
     def test_mark_that_cannot_reset_the_count_makes_no_request(self) -> None:
         # The reset of an old count is part of the request: when it fails, no flag and no +C.
@@ -577,6 +598,150 @@ class MarkUnmarkTest(Base):
         self.assertFalse(os.path.exists(self.flag))
         self.assertEqual(self.fs.sets, [])
         self.assertEqual(read_attempts(self), "1")
+
+    def test_mark_on_a_folder_with_nocow_already_that_cannot_reset_the_count_says_no_boot_asks(self) -> None:
+        # The old state (an older install stopped between +C and its flag: +C, copy-on-write data, no
+        # flag) and a count of 2 mark cannot reset: no boot asks again (a boot asks only for a folder
+        # without +C). The line said "the next boot tries again"; it tells the truth now, and the
+        # outcome record keeps it for status and cst doctor.
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.set_attempts("2")
+        with (
+            mock.patch.object(
+                nocow_adapters.NocowStateFiles, "save_attempts", side_effect=OSError(errno.EIO, "Input/output error")
+            ),
+            mock.patch.object(time, "time", return_value=1_700_000_000.0),
+        ):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} has +C already, "
+            "so no boot asks again: fix that, then run cst btrfs install\n",
+        )
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), "2")
+        with open(self.outcome) as f:
+            self.assertEqual(
+                object_of(parse_json(f.read())),
+                {
+                    "v": 1,
+                    "outcome": "not-scheduled",
+                    "at": 1_700_000_000,
+                    "volumes": self.vols,
+                    "reason": "cannot schedule the migration: [Errno 5] Input/output error",
+                },
+            )
+        self.assertEqual(stat.S_IMODE(os.stat(self.outcome).st_mode), 0o644)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        _rc, status = self.call(self.cli.status)
+        self.assertEqual(
+            status,
+            f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
+            "  1 with copy-on-write data (2 MiB), migration not scheduled\n"
+            f"  migration not scheduled by the install at {when} (cannot schedule the migration: [Errno 5] "
+            "Input/output error); no boot asks for it: fix that, then run cst btrfs install\n",
+        )
+        # Fixed: the next install writes the request and removes the record.
+        rc, _out, _err = self.main("mark")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_mark_beside_an_earlier_flag_that_cannot_reset_the_count_says_the_next_boot_tries(self) -> None:
+        # A boot's copy failed (a count of 1, the flag kept) on a folder with +C, and the install's
+        # reset of that count fails: the flag is still there, so the next boot runs the migration.
+        # The line said no boot asks again, and a not-scheduled record was left beside the flag.
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts("1")
+        with mock.patch.object(
+            nocow_adapters.NocowStateFiles, "save_attempts", side_effect=OSError(errno.EIO, "Input/output error")
+        ):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} has +C and "
+            "its volumes keep copy-on-write data, and the earlier request stays: the next boot tries again\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), "1")
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_mark_beside_an_earlier_flag_whose_count_is_at_the_limit_says_the_next_boot_gives_up(self) -> None:
+        # Two boots' copies failed (the flag and a count of GIVE_UP_AFTER) on a folder with +C, and the
+        # install's reset of that count fails: the next boot gives up without a try. The line said it
+        # tries again, and that the folder keeps copy-on-write.
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts(str(GIVE_UP_AFTER))
+        with mock.patch.object(
+            nocow_adapters.NocowStateFiles, "save_attempts", side_effect=OSError(errno.EIO, "Input/output error")
+        ):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); an earlier request is "
+            f"there with {GIVE_UP_AFTER} boot(s) counted, so the next boot gives up without a try: fix that, "
+            "then run cst btrfs install\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), str(GIVE_UP_AFTER))
+        self.assertFalse(os.path.exists(self.outcome))
+        # And so it does: no copy, the flag removed, a gave-up record.
+        _rc, out, _err = self.main("migrate")
+        self.assertEqual(self.fs.commands("cp"), [])
+        self.assertFalse(os.path.exists(self.flag))
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "gave-up")
+
+    def test_mark_on_a_folder_with_nocow_already_that_cannot_write_the_flag_says_no_boot_asks(self) -> None:
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); "
+            rf"{self.vols} has \+C already, so no boot asks again: fix that, then run cst btrfs install\n$",
+        )
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "not-scheduled")
+
+    def test_mark_whose_request_after_its_own_nocow_fails_says_no_boot_asks(self) -> None:
+        # The second scan finds data the first did not (a container wrote between them): the request
+        # comes after mark's own +C, so when it fails no boot asks either.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        service = self.cli.service
+        real_scan = service.tree.scan
+        first: list[bool] = []
+
+        def scan(top: str, *, fix: bool = False) -> TreeScan:
+            if not fix and not first:
+                first.append(True)
+                return TreeScan()
+            return real_scan(top, fix=fix)
+
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with (
+            mock.patch.object(service.tree, "scan", scan),
+            mock.patch.object(nocow_adapters.NocowStateFiles, "request_migration", side_effect=denied),
+        ):
+            rc, out = self.call(lambda: service.execute(NocowCommand.MARK))
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{self.vols} has +C already, so no boot asks again", out)
+        self.assertTrue(self.fs.nocow(self.vols))
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "not-scheduled")
 
     def test_mark_with_a_flag_already_there_gives_two_boots_again(self) -> None:
         self.volume("cow")
@@ -1301,11 +1466,16 @@ class MigrateTest(Base):
         with mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=denied):
             rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
-        self.assertIn("cannot schedule the migration ([Errno 13] Permission denied)", out)
+        self.assertIn(
+            f"cannot schedule the migration ([Errno 13] Permission denied); {self.vols} keeps copy-on-write, "
+            "the next boot tries again\n",
+            out,
+        )
         self.assertFalse(os.path.exists(self.flag))
         self.assertFalse(self.fs.nocow(self.vols))
         self.assertEqual(read_attempts(self), "2")
         self.assertEqual(self.fs.commands("cp"), [])
+        self.assertFalse(os.path.exists(self.outcome))  # migrate's request: the next boot asks again
 
     def test_a_request_already_scheduled_keeps_its_count(self) -> None:
         # The flag is there (the request is under way) but the volumes folder has no +C: the count stays.
@@ -2248,6 +2418,253 @@ class PostponedDurableTest(PostponeBase):
             self.call(self.cli.migrate)
         assert_replaced_durably(self, self.postponed, synced)
         self.assertTrue(os.path.exists(self.postponed))
+
+
+class OutcomeRecordTest(Base):
+    """The outcome record (/var/lib/docker-volumes-nocow/outcome): written by a give-up, shown by status,
+    removed by a new request, by a migration that ends, by mark with nothing to migrate and by unmark."""
+
+    def gave_up(self, at: int = 1_700_000_000, *, version: int = 1) -> None:
+        """A record of a give-up, as give_up writes it."""
+        os.makedirs(os.path.dirname(self.outcome), exist_ok=True)
+        with open(self.outcome, "w") as f:
+            json.dump(
+                {"v": version, "outcome": "gave-up", "at": at, "volumes": self.vols, "reason": "it did not finish"}, f
+            )
+
+    def record(self) -> dict[str, object]:
+        with open(self.outcome) as f:
+            return object_of(parse_json(f.read()))
+
+    def give_up_boot(self) -> str:
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts("2")
+        _rc, out = self.call(self.cli.migrate)
+        return out
+
+    def test_a_give_up_is_recorded_durably_before_the_counter_and_the_flag_go(self) -> None:
+        seen: list[tuple[str, bool]] = []
+        state = nocow_adapters.NocowStateFiles
+        real_remove_attempts, real_remove_flag = state.remove_attempts, state.remove_flag
+
+        def remove_attempts(this: nocow_adapters.NocowStateFiles) -> None:
+            seen.append(("remove_attempts", os.path.exists(self.outcome)))
+            real_remove_attempts(this)
+
+        def remove_flag(this: nocow_adapters.NocowStateFiles) -> None:
+            seen.append(("remove_flag", os.path.exists(self.outcome)))
+            real_remove_flag(this)
+
+        with (
+            mock.patch.object(state, "remove_attempts", remove_attempts),
+            mock.patch.object(state, "remove_flag", remove_flag),
+            recorded_fsyncs() as synced,
+            mock.patch.object(time, "time", return_value=1_700_000_000.5),
+        ):
+            out = self.give_up_boot()
+        self.assertEqual(seen, [("remove_attempts", True), ("remove_flag", True)])
+        assert_replaced_durably(self, self.outcome, synced)
+        self.assertEqual(stat.S_IMODE(os.stat(self.outcome).st_mode), 0o644)
+        self.assertEqual(
+            self.record(),
+            {
+                "v": 1,
+                "outcome": "gave-up",
+                "at": 1_700_000_000,
+                "volumes": self.vols,
+                "reason": "the migration did not finish after 2 boot(s); see journalctl -u docker-volumes-nocow",
+            },
+        )
+        self.assertIn("Gave up after two boots", out)
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+        self.assertEqual(len(self.fs.commands(self.notify)), 1)
+
+    def test_a_record_that_cannot_be_written_changes_nothing_else(self) -> None:
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "write_outcome", side_effect=denied):
+            out = self.give_up_boot()
+        self.assertEqual(
+            out,
+            f"<4>{TAG}: cannot record the outcome (gave-up) in {self.outcome} for status: [Errno 13] Permission denied\n"
+            f"<3>{TAG}: Gave up after two boots; see journalctl -u docker-volumes-nocow.\n",
+        )
+        self.assertFalse(os.path.exists(self.outcome))
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+        self.assertEqual(len(self.fs.commands(self.notify)), 1)
+
+    def test_a_give_up_whose_flag_stays_keeps_the_record_and_the_count(self) -> None:
+        erofs = OSError(errno.EROFS, "Read-only file system")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "remove_flag", side_effect=erofs):
+            self.volume("cow")
+            schedule(self)
+            self.set_attempts("2")
+            rc, _out = self.call(lambda: self.cli.service.execute(NocowCommand.MIGRATE))
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.record()["outcome"], "gave-up")
+        self.assertEqual(read_attempts(self), "2")
+        self.assertTrue(os.path.exists(self.flag))
+
+    def test_the_record_s_new_folder_is_0755_whatever_the_umask(self) -> None:
+        # The install runs under sudo, which keeps the user's umask (077, say), and the state folder is
+        # not there yet: the record's folder must still let cst doctor, as the user, read the record.
+        # A makedirs of its own made it 0700 before write_atomic's ensure_dir saw it.
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        state = os.path.dirname(self.outcome)
+        self.assertFalse(os.path.exists(state))
+        old = os.umask(0o077)
+        try:
+            rc, _out = self.call(self.cli.mark)
+        finally:
+            os.umask(old)
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.record()["outcome"], "not-scheduled")
+        self.assertEqual(stat.S_IMODE(os.stat(state).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(self.outcome).st_mode), 0o644)
+
+    def test_status_shows_a_give_up_without_the_flag(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        line = f"  migration gave up {when}: it did not finish; run cst btrfs install to try again\n"
+        rc, out = self.call(self.cli.status)
+        self.assertEqual(rc, 0)
+        # Under the folder's line it belongs to (it came before it, as a detail of the section above).
+        self.assertEqual(
+            out,
+            f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
+            "  1 with copy-on-write data (2 MiB), migration not scheduled\n" + line,
+        )
+        # The volumes folder gone: the record is still shown, under that line.
+        shutil.rmtree(self.vols)
+        self.assertEqual(self.call(self.cli.status), (0, f"{self.vols}: absent\n" + line))
+
+    def test_status_hides_the_record_beside_the_flag(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        schedule(self)
+        _rc, out = self.call(self.cli.status)
+        self.assertNotIn("gave up", out)
+        self.assertIn("migration at the next boot\n", out)
+        self.assertNotIn("no boot asks", out)
+
+    def test_status_of_a_record_it_cannot_read_or_of_a_newer_cst(self) -> None:
+        # +C, copy-on-write data, no flag: no outcome is known, so the install hint stays (it was hidden
+        # whenever the record's line was there, a problem line included).
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+
+        def shown(problem: str) -> str:
+            return (
+                f"{self.vols}: new volumes NOCOW; 0 of 1 volume(s) fully NOCOW\n"
+                "  1 with copy-on-write data (2 MiB), migration not scheduled\n"
+                f"  no boot asks for it: run cst btrfs install\n  {problem}\n"
+            )
+
+        for text in (
+            "not json",
+            "[1]",
+            '{"outcome": "gave-up"}',
+            '{"outcome": "lost", "at": 1, "volumes": "v", "reason": "r"}',
+            # A time past what the C library can show: OverflowError, and OSError EOVERFLOW (status
+            # stopped with a traceback, or with "[Errno 75]" and exit 2).
+            '{"v": 1, "outcome": "gave-up", "at": 100000000000000000000, "volumes": "v", "reason": "r"}',
+            '{"v": 1, "outcome": "gave-up", "at": 1000000000000000000, "volumes": "v", "reason": "r"}',
+            # A time localtime accepts but strftime cannot show (a year past a C int, in UTC and west).
+            '{"v": 1, "outcome": "gave-up", "at": 67768036191676799, "volumes": "v", "reason": "r"}',
+        ):
+            with self.subTest(text=text):
+                os.makedirs(os.path.dirname(self.outcome), exist_ok=True)
+                with open(self.outcome, "w") as f:
+                    f.write(text)
+                self.assertEqual(self.call(self.cli.status), (0, shown(f"cannot read {self.outcome}")))
+        os.remove(self.outcome)
+        os.mkdir(self.outcome)
+        self.assertEqual(self.call(self.cli.status), (0, shown(f"cannot read {self.outcome}")))
+        os.rmdir(self.outcome)
+        self.gave_up(version=99)
+        self.assertEqual(
+            self.call(self.cli.status),
+            (
+                0,
+                shown(
+                    f"{self.outcome} is format 99 of the docker-nocow-outcome (this CST reads format 1 and older): "
+                    "written by a newer CST"
+                ),
+            ),
+        )
+
+    def test_status_reads_the_record_as_cst_doctor_does(self) -> None:
+        # A byte that is not UTF-8 in a damaged record: U+FFFD, as cst doctor decodes it (status said it
+        # could not read the record while doctor showed it).
+        self.fs.set(self.vols, nocow=True)
+        os.makedirs(os.path.dirname(self.outcome))
+        with open(self.outcome, "wb") as f:
+            f.write(b'{"v": 1, "outcome": "gave-up", "at": 1700000000, "volumes": "v", "reason": "bad \xff byte"}')
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        _rc, out = self.call(self.cli.status)
+        self.assertIn(
+            f"  migration gave up {when}: bad \N{REPLACEMENT CHARACTER} byte; run cst btrfs install to try again\n", out
+        )
+        # Its folder a file: no record there, for doctor too.
+        os.remove(self.outcome)
+        os.rmdir(os.path.dirname(self.outcome))
+        with open(os.path.dirname(self.outcome), "w") as f:
+            f.write("in the way\n")
+        self.assertEqual(
+            self.call(self.cli.status), (0, f"{self.vols}: new volumes NOCOW; 0 of 0 volume(s) fully NOCOW\n")
+        )
+
+    def test_a_new_request_removes_the_record(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        rc, _out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_mark_with_nothing_to_migrate_removes_the_record(self) -> None:
+        self.volume("done", nocow=True)
+        self.gave_up()
+        self.assertEqual(self.call(self.cli.mark), (0, ""))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_the_end_of_a_migration_removes_the_record(self) -> None:
+        # A record left beside the flag (a stop between give_up's write and its removals, then no counter).
+        self.fs.set(self.vols, nocow=True)
+        top = self.volume("cow")
+        schedule(self)
+        self.gave_up()
+        _rc, out = self.call(self.cli.migrate)
+        self.assertIn("all Docker volumes are NOCOW now", out)
+        self.assert_all_nocow(top)
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_unmark_removes_the_record(self) -> None:
+        self.gave_up()
+        self.assertEqual(self.call(self.cli.unmark), (0, ""))
+        self.assertFalse(os.path.exists(self.outcome))
+
+    def test_a_removal_that_fails_is_one_line_and_the_request_stands(self) -> None:
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        self.gave_up()
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "clear_outcome", side_effect=denied):
+            rc, out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"<4>{TAG}: cannot remove the outcome record {self.outcome}: [Errno 13] Permission denied\n", out)
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertTrue(self.fs.nocow(self.vols))
 
 
 class PostponedLineTest(unittest.TestCase):

@@ -222,6 +222,12 @@ class BadSettings(Exception):
         self.lines = lines
 
 
+class BootCountKeptError(Exception):
+    """apply cannot remove the count of boot attempts a boot left: main() stops the run with exit 1 and
+    the message on stderr, before anything moves (the next boot would count this request's boots
+    from that old count and give up too early)."""
+
+
 class NoUser(Exception):
     """As root, neither --user NAME nor BULK_USER names whose home it is (or
     it names root), or --user NAME names no account: main() stops the run with

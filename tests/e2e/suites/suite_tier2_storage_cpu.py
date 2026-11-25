@@ -98,6 +98,7 @@ vols=/var/lib/docker/volumes
 flag=/etc/btrfs-setup/docker-nocow-pending
 attempts=/var/lib/docker-volumes-nocow/attempts
 postponed=/var/lib/docker-volumes-nocow/postponed
+outcome=/var/lib/docker-volumes-nocow/outcome
 stub=/run/systemd/system/docker.service
 dropin=/run/systemd/system/docker-volumes-nocow.service.d
 target=/run/systemd/system/e2e-nocow-boot.target
@@ -118,7 +119,8 @@ cleanup() {
     systemctl stop e2e-nocow-boot.target docker.service e2e-dind.service 2>/dev/null || true
     rm -rf "$stub" "$dropin" "$target" "$wrap" "$fake" "$seen"
     rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4" "$vols/e2e-cow5" "$vols/e2e-cow6"
-    rm -f "$flag" "$attempts" "$postponed"
+    while mountpoint -q "$attempts"; do umount "$attempts" || break; done   # part 7's read-only count
+    rm -f "$flag" "$attempts" "$postponed" "$outcome"
     [[ -d /etc/btrfs-setup || ! -e /etc/btrfs-setup ]] || rm -f /etc/btrfs-setup   # part 6's obstacle
     if [[ -d "$saved" ]]; then
         rm -rf /etc/btrfs-setup
@@ -415,6 +417,51 @@ rc=0; "$helper" mark || rc=$?
 [[ "$(lsattr -d "$vols" | awk '{print $1}')" != *C* ]]
 rm -f /etc/btrfs-setup
 echo "E2E-NOCOW part 6: mark writes the flag before +C, and sets no +C when it cannot"
+
+# 7. The old state for real (+C on the volumes folder, a volume with copy-on-write data, no flag) and a
+# count of 2 mark cannot reset (its file a read-only bind mount: a rename over a mount point fails).
+# No boot asks for a folder with +C, so mark says so and records it (not-scheduled, 0644) for status
+# and cst doctor; the old line said the next boot tries again. With the mount gone, mark writes the
+# request and removes the record.
+chattr +C "$vols"
+install -d -m 0755 /var/lib/docker-volumes-nocow
+rm -f "$outcome"
+printf '2\n' >"$attempts"
+mount --bind "$attempts" "$attempts"
+mount -o remount,bind,ro "$attempts"
+rc=0; out="$("$helper" mark 2>&1)" || rc=$?
+printf '%s\n' "$out" | sed 's/^/E2E-NOCOW part 7: /'
+[[ "$rc" == 2 ]]
+grep -qF "has +C already, so no boot asks again: fix that, then run cst btrfs install" <<<"$out"
+test ! -e "$flag"
+[[ "$(cat "$attempts")" == 2 ]]
+[[ "$(stat -c %a "$outcome")" == 644 ]]
+grep -qF '"outcome": "not-scheduled"' "$outcome"
+grep -q 'migration not scheduled by the install at' <<<"$("$helper" status)"
+umount "$attempts"
+rc=0; "$helper" mark || rc=$?
+[[ "$rc" == 1 ]]
+test -f "$flag"
+test ! -e "$outcome"
+[[ "$(cat "$attempts")" == 0 ]]
+echo "E2E-NOCOW part 7: mark on +C with copy-on-write data and a count it cannot reset records no boot asks"
+
+# 8. The same with the flag of an earlier request still there (a boot's copy failed: a count of 1 beside
+# the flag): the next boot runs the migration, so mark says so and records nothing. The old line said no
+# boot asks again, and a not-scheduled record was left beside the flag.
+printf '1\n' >"$attempts"
+mount --bind "$attempts" "$attempts"
+mount -o remount,bind,ro "$attempts"
+rc=0; out="$("$helper" mark 2>&1)" || rc=$?
+printf '%s\n' "$out" | sed 's/^/E2E-NOCOW part 8: /'
+[[ "$rc" == 2 ]]
+grep -qF "$vols has +C and its volumes keep copy-on-write data, and the earlier request stays: the next boot tries again" <<<"$out"
+if grep -qF "no boot asks again" <<<"$out"; then echo "mark says no boot asks beside the flag" >&2; exit 1; fi
+test -f "$flag"
+test ! -e "$outcome"
+[[ "$(cat "$attempts")" == 1 ]]
+umount "$attempts"
+echo "E2E-NOCOW part 8: mark beside an earlier flag with a count it cannot reset says the next boot tries"
 """
 
 
@@ -470,7 +517,9 @@ wait_lines() {   # wait_lines T TEXT N: up to 10 s for N such lines; the journal
 # folder is read-only (a read-only bind mount over /etc/btrfs-setup) while the
 # count's is not. The count of 2 must stay with the flag: three boots each give
 # up again at once (no copy, no alert); once the mount is gone, the next boot
-# gives up for good, removes both and keeps one alert for the next login.
+# gives up for good, removes both and keeps one alert for the next login. Each
+# give-up records itself first (/var/lib/docker-volumes-nocow/outcome, 0644):
+# status shows it once the flag is gone, and a later boot leaves it.
 NOCOW_GIVE_UP_SCRIPT = (
     r"""
 set -E
@@ -489,7 +538,7 @@ cleanup() {
     local f
     while mountpoint -q /etc/btrfs-setup; do umount /etc/btrfs-setup || break; done
     rm -rf "${vols:?}/$vol"
-    rm -f "$flag" "$attempts" "$state/postponed"
+    rm -f "$flag" "$attempts" "$state/postponed" "$state/outcome"
     for f in $(ours); do rm -f "$f"; done
     if [[ -d "$aside" ]]; then
         for f in "$aside"/*.alert; do
@@ -518,7 +567,7 @@ d="$vols/$vol/_data"
 ino="$(stat -c %i "$d")"
 sum="$(sha256sum <"$d/db")"
 install -d -m 0755 "$state"
-rm -f "$state/postponed"
+rm -f "$state/postponed" "$state/outcome"
 touch "$flag"
 printf 2 >"$attempts"   # two boots have tried: the next one gives up
 mount --bind /etc/btrfs-setup /etc/btrfs-setup
@@ -541,6 +590,8 @@ done
 [[ "$(ls -A "$vols/$vol")" == _data ]]   # no copy beside it
 [[ "$(lsattr "$d/db" | awk '{print $1}')" != *C* ]]
 [[ -z "$(ours)" ]] || fail "an alert was kept before the give-up: $(ours)"
+grep -qF '"outcome": "gave-up"' "$state/outcome" || fail "no record of the give-up: $(cat "$state/outcome" 2>&1)"
+if grep -q 'migration gave up' <<<"$("$helper" status)"; then fail "status shows the give-up beside the flag"; fi
 echo "E2E-NOCOW give-up with /etc/btrfs-setup read-only: 3 boots, count $(cat "$attempts"), flag kept"
 
 # 2. The flag's folder writable again: the next boot gives up for good and keeps one alert.
@@ -555,12 +606,17 @@ grep -qx 'count=1' "$kept"
 [[ "$(stat -c %i "$d")" == "$ino" ]]
 [[ "$(lines "$t0" "$rewriting")" == 0 ]]
 grep -q 'migration not scheduled' <<<"$("$helper" status)"
+[[ "$(stat -c %a "$state/outcome")" == 644 ]]
+grep -qF '"outcome": "gave-up"' "$state/outcome"
+grep -qF 'did not finish after 2 boot(s)' "$state/outcome"
+grep -qE '^  migration gave up [0-9-]+ [0-9:]+: the migration did not finish after 2 boot\(s\)' <<<"$("$helper" status)"
 
-# 3. A later boot has nothing left to give up: no second alert.
+# 3. A later boot has nothing left to give up: no second alert, and the record stays.
 run_unit
 [[ "$(lines "$t0" "$gave_up")" == 1 ]]
 [[ "$(lines "$t0" "$erofs")" == 3 ]]
 grep -qx 'count=1' "$kept"
+grep -qF '"outcome": "gave-up"' "$state/outcome"
 echo E2E-OK
 """
 )
@@ -1590,7 +1646,9 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
         )
 
     def test_04_btrfs_bulk_real_subvolume_and_nocow(self) -> None:
-        """btrfs-bulk creates ~/Bulk subvolume, links items, sets +C NOCOW, and supports keep/unkeep."""
+        """btrfs-bulk creates ~/Bulk subvolume, links items, sets +C NOCOW, and supports keep/unkeep. First
+        `cst btrfs bulk apply` with a folder where its count of boot attempts belongs: exit 1, its line, and
+        nothing moved; with the folder gone, the same apply moves the items."""
         as_tester_bash(
             self.PRIV_CONTAINER,
             """
@@ -1603,6 +1661,19 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             """
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk keep models steam
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk plan >/dev/null
+            # The count of boot attempts cannot be reset (a folder in its place): apply stops before it
+            # moves anything, and cst btrfs bulk apply passes its exit 1 and its line on.
+            count=/var/lib/btrfs-bulk/boot-attempts
+            trap 'rmdir "$count" 2>/dev/null || true' EXIT
+            install -d -m 0755 "$count"
+            rc=0; out="$(SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk apply 2>&1)" || rc=$?
+            [[ "$rc" == 1 ]] || { echo "bulk apply with the count a folder: rc=$rc $out" >&2; exit 1; }
+            grep -qF "btrfs-bulk: cannot reset the count of boot attempts: [Errno 21] Is a directory: '$count'; nothing was moved" <<<"$out"
+            test ! -L /home/tester/.android/avd
+            test -f /home/tester/.android/avd/pixel.qcow2
+            test -d "$count"
+            rmdir "$count"
+            # The count can be reset again: the same apply moves the items.
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk apply
             btrfs subvolume show /home/tester/Bulk >/dev/null
             test -L /home/tester/.android/avd
