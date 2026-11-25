@@ -143,7 +143,9 @@ halfway: docker-volumes-nocow's boot migration, `cst btrfs scrub-limit set`
 and `off` with their rollback, `cst btrfs iocost apply`'s "done last",
 `cst btrfs cache attach` and `detach` (no line in /etc/fstab for a bind
 that is not mounted), `cst btrfs compress-force` and `commit-interval`
-`apply` and `revert` with their rollback over four layers, `cst toolchains prune apply rust:build` (a folder
+`apply` and `revert` with their rollback over four layers, `chrome-cache
+apply` and `off` (an atomic replace of the flags file),
+`cst toolchains prune apply rust:build` (a folder
 renamed to the trash before it is deleted, the leftovers of a run that
 died), `cst bluetooth apply` and `revert` with their restarts and the
 record of the restarts still owed, and btrfs-bulk's moves of an item into
@@ -192,7 +194,8 @@ run (recovery), and at the end (the same command again converges).
   `AdapterFailureTest`, which pins what the real adapter gives in each),
   put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
-  `os` as it is: `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
+  `os` as it is: `toolchains/tests/test_prune_faults.py`,
+  `btrfs/tests/test_chrome_cache_faults.py`; `kill_only=True` for calls
   whose errors the code does not handle: a failure armed there does not
   fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
@@ -249,16 +252,19 @@ a Steam undo's, or the switch's when the source changed) must converge too, beca
 copy is renamed to `<target>.bulk-new.bulk-drop` before it is deleted and a
 repair deletes a marked copy without the "written to" check.
 
-**Cost.** The nine modules (`tests.test_fault_injection`,
+**Cost.** The ten modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
 `btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
 `btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
 `bluetooth.tests.test_setup_faults`, `btrfs.tests.test_btrfs_bulk_faults`,
-`btrfs.tests.test_compress_faults`)
-together: 11.9 to 12.6 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
--I -B tests/run_unit.py --jobs 4` on the nine, 3 runs, on a workstation
-whose load average was 5 to 6 on 16 CPUs; compress-force's and
-commit-interval's alone, in memory, 0.7 s wall and 1.8 s of CPU; 10.5 to
+`btrfs.tests.test_compress_faults`, `btrfs.tests.test_chrome_cache_faults`)
+together: 11.9 and 13.2 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
+-I -B tests/run_unit.py --jobs 4` on the ten, 3 runs, on a workstation of
+16 CPUs; a third run took 24.2 s while another test run lifted the load
+average to 47). The first nine took 11.9 to 12.6 s under a load average of 5
+to 6. compress-force's and commit-interval's alone, in memory: 0.7 s wall
+and 1.8 s of CPU; chrome-cache's, on files in `TMPDIR`: 0.3 s wall and
+0.8 s of CPU. 10.5 to
 10.8 s for the first eight at an earlier measurement under a load average of
 3 to 4, 6.5 to 10.1 s there without the
 Steam undo's classes, and 4.3 to 4.8 s at an earlier measurement under a
