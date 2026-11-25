@@ -1384,6 +1384,15 @@ Settings in `/etc/btrfs-setup/snapshots.conf`: `NAS_HOST`, `NAS_PORT`,
 `NAS_TIMEOUT=6h`, `NAS_KEEP_DAILY=14`, `NAS_KEEP_WEEKLY=8`,
 `NAS_KEEP_MONTHLY=12`.
 
+A NAS number the run would compute only past 2**63 - 1, where bash's 64-bit
+arithmetic wraps around, is a problem line: `NAS_STALE_DAYS` itself,
+`NAS_PRUNE_EVERY_DAYS` and `NAS_CHECK_EVERY_DAYS` times 86400 (more than
+106751991167300 days), `NAS_TIMEOUT`'s seconds, and the run's deadline (now
+plus those seconds). The run warns (`snapshots.conf line N: NAS_TIMEOUT=...:
+a number past 2**63 - 1 (bash would wrap it): not wrapped; ignored`) and uses
+the default of that setting. Before, `NAS_CHECK_EVERY_DAYS=4611686018427387904`
+wrapped to 0 days, a check at every run.
+
 ### The VM backups share this repository
 
 `cst vm backup --nas` (and its weekly timer) stores the libvirt VM in the
@@ -2708,9 +2717,11 @@ How it works, as a sequence:
 
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
 `RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`. Each limit is read as
-bash arithmetic reads it (64-bit: a number too large wraps around; `010` is
-8, `2#1010` is 10; blanks are spaces, tabs and newlines). A value bash cannot
-compute (`250GiB`, `abc`, `1 x`, digits of another script, a no-break space)
+bash arithmetic reads it (`010` is 8, `2#1010` is 10; blanks are spaces,
+tabs and newlines). A value bash cannot compute (`250GiB`, `abc`, `1 x`,
+digits of another script, a no-break space), and a number past 2**63 - 1,
+which bash's 64-bit arithmetic would wrap around (`18446744073709551866`
+would be 250, `9223372036854775808` a negative number, so no limit),
 **stops the hourly run**, with exit 1 and a journal line naming the setting
 and its value (`SKIP_AT_OR_BELOW_GIB='250GiB' in /etc/btrfs-setup/snapshots.conf:
 not a number of GiB the space guard can hold at: no snapshot until it is

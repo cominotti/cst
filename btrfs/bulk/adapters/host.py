@@ -250,7 +250,9 @@ class Host:
         order. The hourly run stops at each, so no /home snapshot is made until it is fixed;
         snapshot_guard reads such a value as 0 (no limit)."""
         conf = parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
-        return tuple((k, conf[k]) for k in GUARD_KEYS if k in conf and not isinstance(guard_number(conf[k]), int))
+        return tuple(
+            (k, conf[k]) for k in GUARD_KEYS if k in conf and not isinstance(guard_number(conf[k], exact=True), int)
+        )
 
     @staticmethod
     def _read_settings_text(path: str) -> str:

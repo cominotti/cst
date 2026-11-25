@@ -149,7 +149,7 @@ def guard_limits(m: SnapshotRun) -> dict[str, int]:
     limits: dict[str, int] = {}
     for key in GUARD_KEYS:
         value = m.settings[key]
-        n = guard_number(value)
+        n = guard_number(value, exact=True)
         if isinstance(n, int):
             limits[key] = n
         else:

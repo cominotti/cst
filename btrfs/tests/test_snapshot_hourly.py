@@ -872,6 +872,29 @@ class SpaceGuardTest(Base):
                         self.assertFalse(os.path.exists(self.state_file("emergency")))
                         self.assertEqual(self.notified(), [])
 
+    def test_a_guard_setting_past_64_bits_stops_the_hourly_run(self) -> None:
+        # bash wrapped it around: 9223372036854775808 to -2**63 (no limit), 18446744073709551866 to 250. The
+        # run stops, as for any setting it cannot hold at.
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        for key in ("SKIP_AT_OR_BELOW_GIB", "RESUME_ABOVE_GIB", "EMERGENCY_AT_OR_BELOW_GIB"):
+            for value in ("9223372036854775808", "18446744073709551866", "2**63"):
+                with self.subTest(key=key, value=value):
+                    shutil.rmtree(self.state, ignore_errors=True)
+                    self.conf(**{key: value})
+                    self.machine(free=300 * GIB)
+                    self.forget_calls()
+                    r = self.run_prog("hourly")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(
+                        log(
+                            3,
+                            f"{key}={value!r} in {conf}: not a number of GiB the space guard can hold at: no "
+                            "snapshot until it is fixed",
+                        ),
+                        self.lines(r.stdout),
+                    )
+                    self.assertEqual(self.core_calls(), [])
+
     def test_emergency_purge(self) -> None:
         self.machine(free=[150 * GIB, 160 * GIB])
         self.core(prune={"out": log(5, "home: deleted 3") + "\n"})

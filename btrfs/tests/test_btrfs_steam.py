@@ -867,6 +867,19 @@ class SteamTest(tb.BulkBase):
                     f.write(text)
                 self.assertEqual(self.host.snapshot_guard_invalid(), want)
 
+    def test_a_guard_setting_past_64_bits_is_one_the_hourly_run_stops_at(self) -> None:
+        # bash wraps 18446744073709551866 around to 250; the hourly run reads it exactly and stops, so bulk
+        # names it and holds no limit for it.
+        conf = os.path.join(self.paths.etc, "snapshots.conf")
+        with open(conf, "w", encoding="utf-8") as f:
+            f.write("SKIP_AT_OR_BELOW_GIB=18446744073709551866\nRESUME_ABOVE_GIB='2**63'\n")
+        self.assertEqual(
+            self.host.snapshot_guard_invalid(),
+            (("SKIP_AT_OR_BELOW_GIB", "18446744073709551866"), ("RESUME_ABOVE_GIB", "2**63")),
+        )
+        guard = self.host.snapshot_guard()
+        self.assertEqual((guard["pause"], guard["resume"]), (0, 0))
+
     def test_snapshot_guard_agrees_with_btrfs_snapshot_s_hourly_test(self) -> None:
         # For every value, bulk's limit is crossed exactly where btrfs-snapshot's hourly run, which compares
         # (( free <= KEY * GIB )) through guard_number (checked against bash in test_snapshot_settings), acts.

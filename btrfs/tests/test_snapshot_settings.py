@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 import unittest
 
-from btrfs.snapshot_runtime.domain import GuardError, guard_number
+from btrfs.snapshot_runtime.domain import BASH_INT_MAX, GuardError, duration_s, guard_number, nas_out_of_range
 from btrfs.tests.snapshot_fakes import SCRIPT
 from cst_core.domain.text import file_lines, parse_snapshots_conf
 from tests.shell_source import shell_function
@@ -146,6 +146,71 @@ class GuardNumberTest(unittest.TestCase):
                     else:
                         want = "le" if free <= n else "gt"
                     self.assertEqual(self.bash(value, free), want)
+
+    def test_exact_refuses_what_bash_wraps(self) -> None:
+        # exact=True: a constant or a result past 64 bits is OUT_OF_RANGE, where bash wraps it around (the
+        # values of the bash differential above, every way to a number). Elsewhere the same answer.
+        wraps = ["9223372036854775808", "0x8000000000000000", "18446744073709551616", "2**63", "7**30"]
+        wraps += ["2**63/-1", "0xffffffffffffffff", "-(2**63)", "-9223372036854775808", "18446744073709551866"]
+        wraps += ["2**62*2", "4611686018427387904 * 86400", "01777777777777777777777", "64#" + "_" * 11, "1" * 5000]
+        wraps += ["2**63 * 0", "-(-9223372036854775807-1)", "3**40", "(-2)**64"]
+        for value in wraps:
+            with self.subTest(value=value):
+                self.assertIsInstance(guard_number(value), int)  # bash computes it, wrapped
+                self.assertEqual(guard_number(value, exact=True), GuardError.OUT_OF_RANGE)
+        fits = ["9223372036854775807", "-9223372036854775807-1", "0x7fffffffffffffff", "0777777777777777777777"]
+        fits += ["2**62", "(-2)**63", "1**999999999999", "(-1)**99999999999", "0**0", "0**999999999999", "-2**63"]
+        fits += ["250", "", "-5", "08", "abc", "x 9223372036854775808", "1/0", "2.5", "64#@_", "1 2", "2**-1"]
+        for value in fits:
+            with self.subTest(value=value):
+                self.assertEqual(guard_number(value, exact=True), guard_number(value))
+
+    def test_an_exact_duration_never_passes_64_bits(self) -> None:
+        for text, loose, exact in (
+            ("2562047788015216h", 2562047788015216 * 3600, None),
+            ("106751991167301d", 106751991167301 * 86400, None),
+            ("9223372036854775808", -(1 << 63), None),
+            ("2562047788015215h", 2562047788015215 * 3600, 2562047788015215 * 3600),
+            ("9223372036854775807", BASH_INT_MAX, BASH_INT_MAX),
+            ("010", 8, 8),
+            ("08", None, None),
+            ("1 h", 21600, 21600),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual((duration_s(text), duration_s(text, exact=True)), (loose, exact))
+
+    def test_nas_numbers_past_64_bits_as_the_run_computes_them(self) -> None:
+        # Each NAS number as the run puts it into bash arithmetic: STALE as it is, the two intervals times
+        # 86400, the time budget's seconds and the run's deadline NOW + those seconds.
+        now = 1764000000
+        defaults = {
+            "NAS_STALE_DAYS": "7",
+            "NAS_PRUNE_EVERY_DAYS": "7",
+            "NAS_CHECK_EVERY_DAYS": "30",
+            "NAS_TIMEOUT": "6h",
+            "SKIP_AT_OR_BELOW_GIB": "9223372036854775808",  # the hourly run's business, not this check's
+        }
+        for change, want in (
+            ({}, ()),
+            ({"NAS_STALE_DAYS": "9223372036854775808"}, ("NAS_STALE_DAYS",)),
+            ({"NAS_STALE_DAYS": "9223372036854775807"}, ()),
+            ({"NAS_PRUNE_EVERY_DAYS": "106751991167301"}, ("NAS_PRUNE_EVERY_DAYS",)),
+            ({"NAS_PRUNE_EVERY_DAYS": "106751991167300"}, ()),
+            ({"NAS_CHECK_EVERY_DAYS": "4611686018427387904"}, ("NAS_CHECK_EVERY_DAYS",)),
+            ({"NAS_CHECK_EVERY_DAYS": "7+106751991167300"}, ()),  # put in as text: 7 + N * 86400 fits
+            ({"NAS_CHECK_EVERY_DAYS": "(7+106751991167300)"}, ("NAS_CHECK_EVERY_DAYS",)),
+            ({"NAS_CHECK_EVERY_DAYS": "abc"}, ()),  # an error, not a wrap: the run meets it where it did
+            ({"NAS_TIMEOUT": "2562047788015216h"}, ("NAS_TIMEOUT",)),
+            ({"NAS_TIMEOUT": str(BASH_INT_MAX - now)}, ()),
+            ({"NAS_TIMEOUT": str(BASH_INT_MAX - now + 1)}, ("NAS_TIMEOUT",)),  # the deadline does not fit
+            ({"NAS_TIMEOUT": "08"}, ()),
+            (
+                {"NAS_TIMEOUT": "9223372036854775808", "NAS_STALE_DAYS": "2**63", "NAS_PRUNE_EVERY_DAYS": "2**62"},
+                ("NAS_STALE_DAYS", "NAS_TIMEOUT", "NAS_PRUNE_EVERY_DAYS"),
+            ),
+        ):
+            with self.subTest(change=change):
+                self.assertEqual(nas_out_of_range({**defaults, **change}, now), want)
 
     def want(self, value: str, free: int) -> str:
         """What bash prints for VALUE and FREE, by guard_number's answer."""

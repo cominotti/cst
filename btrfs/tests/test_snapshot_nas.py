@@ -37,6 +37,7 @@ ALIAS = "btrfs-setup-nas"
 REPO_ID = "ab" * 32
 SNAP = "home.20261118T0905"
 DAY = 86400
+PAST_64_BITS = "a number past 2**63 - 1 (bash would wrap it): not wrapped; ignored"
 
 
 class Base(RuntimeTest):
@@ -434,6 +435,45 @@ class BackupTest(Base):
             err,
         )
 
+    def test_a_stale_limit_past_64_bits_is_a_problem_line_and_the_seven_days(self) -> None:
+        # bash wrapped 2**63 around to -2**63, so every failed run alerted as stale; the runtime names the
+        # line and holds at the default 7 days.
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_STALE_DAYS="9223372036854775808")
+        self.days_ago("nas-last-ok", 1)
+        self.restic(backup={"rc": 1})
+        _rc, _lines, err = self.nas()
+        self.assertIn(f"{conf} line 6: NAS_STALE_DAYS='9223372036854775808': {PAST_64_BITS}", err)
+        self.assertEqual(self.notified(), [])
+        self.days_ago("nas-last-ok", 8)
+        self.nas()
+        self.assertEqual(self.notified(), [self.stale("Last attempt failed; see journalctl -u btrfs-snapshot-nas.")])
+
+    def test_a_time_budget_past_64_bits_is_a_problem_line_and_the_six_hours(self) -> None:
+        # Seconds past 2**63 - 1 (2562047788015216h), or a run's deadline past it (now + 2**63 - 1 seconds):
+        # the line is named and the run has its 6 hours.
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        for value in ("2562047788015216h", "9223372036854775807", "106751991167301d"):
+            with self.subTest(value):
+                self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT=value)
+                _rc, lines, err = self.nas()
+                self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
+                self.assertIn(f"{conf} line 6: NAS_TIMEOUT='{value}': {PAST_64_BITS}", err)
+
+    def test_nas_numbers_that_fit_in_64_bits_are_no_problem_line(self) -> None:
+        self.conf(
+            NAS_ENABLED="1",
+            NAS_PATH="/volume1/restic",
+            NAS_STALE_DAYS="9223372036854775807",
+            NAS_PRUNE_EVERY_DAYS="106751991167300",
+            NAS_CHECK_EVERY_DAYS="106751991167300",
+            NAS_TIMEOUT="100000d",
+        )
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
+        self.assertNotIn("2**63", err)
+
     def test_a_time_budget_bash_arithmetic_refuses_stops_the_run(self) -> None:
         # 08 is no number for bash (a leading 0 is octal): its run stopped there with exit 1, after
         # its exit trap had unmounted (found by the parity harness of the port; 010 is 8 seconds).
@@ -735,6 +775,45 @@ class MaintenanceTest(Base):
         rc, _, err = self.nas()
         self.assertEqual(rc, 0, err)
         self.assertIn("--prune", self.restic_calls()[4])
+
+    def test_an_interval_past_64_bits_is_a_problem_line_and_the_default(self) -> None:
+        # bash's DAYS * 86400 wrapped past 2**63 - 1: 106751991167301 days to a negative number and 2**62
+        # days to 0, so a prune and a check at every run. The runtime names each line and keeps the
+        # defaults, 7 and 30 days: neither is due yet.
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.known_repository()
+        self.conf(
+            NAS_ENABLED="1",
+            NAS_PATH="/volume1/restic",
+            NAS_PRUNE_EVERY_DAYS="106751991167301",
+            NAS_CHECK_EVERY_DAYS="4611686018427387904",
+        )
+        self.days_ago("nas-last-prune", 6.9)
+        self.days_ago("nas-last-check", 29.9)
+        rc, _, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.restic_commands()[3:], ["backup", "forget", "snapshots"])
+        self.assertNotIn("--prune", self.restic_calls()[4])
+        self.assertIn(f"{conf} line 6: NAS_PRUNE_EVERY_DAYS='106751991167301': {PAST_64_BITS}", err)
+        self.assertIn(f"{conf} line 7: NAS_CHECK_EVERY_DAYS='4611686018427387904': {PAST_64_BITS}", err)
+
+    def test_a_check_interval_past_64_bits_alerts_after_two_default_intervals(self) -> None:
+        # A check that keeps not completing alerts at twice the interval: 60 days with the default 30, not
+        # never (twice 2**62 days).
+        self.known_repository()
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_CHECK_EVERY_DAYS="4611686018427387904")
+        self.days_ago("nas-last-check", 60)
+        self.restic(check={"rc": 11})
+        self.nas()
+        self.assertEqual(
+            [a[4:] for a in self.notified()],
+            [
+                [
+                    "NAS backup: repository not checked for 60 days",
+                    "restic check did not complete at the last attempts; see journalctl -u btrfs-snapshot-nas.",
+                ]
+            ],
+        )
 
     def test_a_last_prune_bash_cannot_read_is_not_due_before_its_interval_is_read(self) -> None:
         # bash failed on NOW - 08 first, so a name in NAS_PRUNE_EVERY_DAYS was never read: no prune, and
