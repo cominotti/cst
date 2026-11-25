@@ -11,8 +11,9 @@ from collections.abc import Callable
 from bluetooth.domain import LDAC_UNIT, MARKER
 from bluetooth.setup.domain import LW_STALE_FOREIGN_NOTE, LW_STALE_NOTE
 from bluetooth.setup.ports import SetupFilesPort
-from cst_core.domain.install import Component
-from cst_core.domain.record import USER_RECORD_REL, RecordFormatError, component_dests
+from cst_core.application.install import record_file
+from cst_core.domain.install import Component, Owner
+from cst_core.domain.record import RecordFormatError, component_dests
 from cst_core.domain.units import UNIT_PATH_PROP, user_unit_dir
 from cst_core.ports import InstallRecordPort, SystemdPort
 
@@ -26,10 +27,11 @@ def unit_file(user_manager: SystemdPort, home: str) -> str:
 
 def older_copies(records: InstallRecordPort, home: str, current: str) -> tuple[str, ...]:
     """The watcher's unit files the user's install record lists elsewhere than current (component
-    bluetooth:ldac, the unit's name); none when the record cannot be read (as before: no row)."""
+    bluetooth:ldac, the unit's name); none when the record cannot be read (as before: no row), also when
+    its path, the installer's for this home (record_file), is not plain (a HOME with a "." in it)."""
     try:
-        rec = records.read(posixpath.join(home, USER_RECORD_REL))
-    except OSError, RecordFormatError:
+        rec = records.read(record_file(Owner.USER, home))
+    except OSError, RecordFormatError, ValueError:
         return ()
     if rec is None:
         return ()

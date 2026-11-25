@@ -1760,6 +1760,27 @@ class WatcherTest(SetupCase):
         self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
 
+    def test_a_home_not_written_plainly_still_plans(self) -> None:
+        # HOME as a shell or pam_env can leave it. A trailing slash: the record is read where the
+        # installer writes it (record_file), so the older copy is still shown. One with a "." in it,
+        # which the record's reader refuses: plan prints its rows, without the older copies. Before,
+        # both ended with a traceback ("not a plain absolute path").
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        r = m.run("plan", env={"HOME": m.home + "//"})
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(f"{old} {LW_STALE}\n", r.stdout)  # the label is not shortened to ~ for this HOME
+        for cmd in ("plan", "status"):
+            with self.subTest(cmd=cmd):
+                r = m.run(cmd, env={"HOME": m.home + "/."})
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertIn(f"systemd/user/{LW}", r.stdout)
+                self.assertNotIn(LW_STALE, r.stdout)
+
     def test_an_older_copy_cst_did_not_write_is_left_alone(self) -> None:
         m = self.machine(DONE, "LDAC_RATE=48000\n")
         old = os.path.join(m.home, "xdg", "systemd", "user", LW)
