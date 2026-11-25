@@ -66,6 +66,8 @@ def as_tester_bash(container: str, script: str, *, check: bool = True) -> subpro
 # tests/e2e test_13: the fakes `btrfs-degraded-boot-setup.sh` runs against
 # (sourced by every step) and the fake deployment, boot entry and overlay.
 DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
+# The rustc wrapper `cst toolchains config apply --sccache` installs for tester (component toolchains:sccache).
+RUSTC_WRAPPER = "/home/tester/.local/libexec/cst/rustc-wrapper"
 # RECORD_COMPONENT RECORD COMPONENT: the destinations a record lists under the component, sorted, then its
 # state ("-": none; no record: "- -"). RECORD_STRIP RECORD COMPONENT: the record as an install from before
 # the component was recorded left it (its lines and its state taken out).
@@ -2410,6 +2412,24 @@ echo E2E-OK
                 check=False,
             )
 
+    def _undo_sccache_after(self) -> None:
+        """Undo `cst toolchains config apply --sccache` once the test is done, every step even when one fails
+        (set +e): --no-sccache takes CST's rustc-wrapper line out of ~/.cargo/config.toml, and the wrapper,
+        which --no-sccache leaves in place by design (toolchains/README.md), is removed with its record line
+        when it was not there before the test. Left there, it made test_19 skip toolchains:sccache in the
+        same container ("already there (another test's)"). Called before the test's own addCleanup, so it
+        runs last, after the test has stopped its servers."""
+        c = self.SYSTEMD_CONTAINER
+        there = exec_bash(c, f"[[ ! -e {RUSTC_WRAPPER} ]] || echo there").stdout.strip() == "there"
+        remove = (
+            ""
+            if there
+            else "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py remove --home /home/tester "
+            "--component toolchains:sccache >/dev/null"
+        )
+        script = f"set +e\n/opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1\n{remove}\n"
+        self.addCleanup(as_tester_bash, c, script, check=False)
+
     @e2e_tags(E2ETag.TOOLCHAINS)
     def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self) -> None:
         """The real rustc wrapper, installed by `cst toolchains config apply
@@ -2424,11 +2444,11 @@ echo E2E-OK
         caller's own TMPDIR. Also the setting's cycle: plan changes
         nothing, apply writes it in, a second apply keeps it, a wrapper without
         the setting (the previous version) is rewritten, --no-sccache undoes."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             """
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/knob /home/tester/.config/cst/toolchains.conf /home/tester/.cargo/git
             """,
             check=False,
@@ -2440,7 +2460,9 @@ echo E2E-OK
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
             w=/home/tester/work/knob
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             conf=/home/tester/.config/cst/toolchains.conf
             rm -rf "$w" "$conf"
             mkdir -p "$w/bin" "$w/pathdep/src" "$w/gitdep/src" "$w/ws/app/src" "$w/ws/.cargo" \
@@ -6282,6 +6304,7 @@ EOF
         one runs on); a start that systemd refuses (a unit of that name in
         another slice) is tried once, and the server the client then starts
         is used without another try; --no-sccache undoes the cargo setting."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
@@ -6290,7 +6313,6 @@ EOF
                 [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true
             done
             systemctl --user stop 'e2e-scc-*' cst-sccache-e2ebox.scope 2>/dev/null || true
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/scc-scope /run/user/1000/cst-sccache-e2ebox.sock \
                 /run/user/1000/cst-sccache-e2ebox.sock.lock /run/user/1000/cst-sccache-e2ebox.sock.failed
             """,
@@ -6315,7 +6337,9 @@ EOF
             scc_setup
 
             "$cst" toolchains config apply --sccache >/dev/null
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
 
             build 1
@@ -6400,6 +6424,7 @@ EOF
         starts a new server in `sccache.slice`. Live upgrade: when an older server already runs in
         `app.slice/cst-sccache-host.scope` listening on the socket, a build reuses it (no start,
         no `.failed` marker), then starts in `sccache.slice` once the old server stops."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
@@ -6408,7 +6433,6 @@ EOF
                 [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true
             done
             systemctl --user stop 'e2e-scc-*' cst-sccache-host.scope 2>/dev/null || true
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/scc-host /run/user/1000/cst-sccache-host.sock \
                 /run/user/1000/cst-sccache-host.sock.lock /run/user/1000/cst-sccache-host.sock.failed
             """,
@@ -11012,12 +11036,12 @@ EOF
         real rustc wrapper, never 40G (before, the digits were read as 40G). With ASCII "40G" the same
         apply writes 40G and a second apply keeps the wrapper; removing the file and
         --no-sccache undo it."""
+        self._undo_sccache_after()
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             """
             rm -f /home/tester/.config/cst/toolchains.conf
-            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/e2e-169
             """,
             check=False,
@@ -11029,7 +11053,9 @@ EOF
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
             w=/home/tester/work/e2e-169
-            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            wrapper="""
+            + RUSTC_WRAPPER
+            + r"""
             conf=/home/tester/.config/cst/toolchains.conf
             rm -rf "$w"
             mkdir -p "$w" /home/tester/.config/cst

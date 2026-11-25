@@ -123,7 +123,9 @@ other work at the same time (another test run, a build, an agent).
   spread of 5% to 11%). With fewer workers the long units are a smaller part
   of each worker's share, so their place in the queue matters less.
 
-Conditions of these numbers: Python 3.15; 3 runs per cell, the median shown;
+Conditions of the numbers above, except the longest-first bullet's, which
+gives its own (so: the affinity numbers, the worker table, and the TMPDIR and
+`nice -n 10` bullets): Python 3.15; 3 runs per cell, the median shown;
 a shared machine, with another project's load at times (the spread was 1% to
 3% at 8 workers or more, up to 39% at 2 to 4). The tree measured was not
 `main`: it was `main` plus the verification proof-of-concept tests (3,354
@@ -257,8 +259,18 @@ would end up in every snapshot unless it is marked as a cache (below). `tests/uv
 - `RUFF_CACHE_DIR=${XDG_CACHE_HOME:-~/.cache}/cst-dev-ruff/<key>`
 
 where `<key>` is the first 12 hex digits of the SHA-1 of the checkout's
-physical path (`pwd -P`): one environment per checkout or worktree. Deleting
-these folders is safe; the next run creates them again. `.venv/` and
+physical path (`pwd -P`): one environment per checkout or worktree. The
+cache folder, here and for every dev tool (`tests/uv-dev`, `tests/run_unit.py`'s
+durations file, the mbt profiles, `cst-mutation`, `cst-quint`, the default
+folder of `invowk cmd test coverage`), follows one
+rule (`tests/xdg_cache.py`, and the same in `tests/uv-dev`'s bash): an
+absolute `XDG_CACHE_HOME`; else `.cache` under an absolute `HOME`; else
+under the home folder of the password database, when it is absolute. A relative `XDG_CACHE_HOME`
+is ignored, as the XDG spec says, and a relative or empty `HOME` is no
+home: the tools run from the top of the checkout, so either would put the
+cache inside it. With none of the three the tool stops with "no cache
+folder". The `${XDG_CACHE_HOME:-~/.cache}` in this document is the short
+form of that rule. Deleting these folders is safe; the next run creates them again. `.venv/` and
 `.ruff_cache/` are in `.gitignore` in case a tool is run some other way.
 
 An IDE can make one anyway. A JetBrains IDE (PyCharm, IntelliJ with the
@@ -306,7 +318,7 @@ repository:
 - **`[tool.ruff] per-file-target-version`**: the files CI runs on its
   ubuntu-24.04 runner's python3 (`tests/e2e/**/*.py`, `tests/__init__.py`,
   `tests/quint/cst-quint`, and what they import, such as
-  `cst_core/domain/errors.py` and `values.py`) are formatted and linted as Python 3.12 (`py312`),
+  `cst_core/domain/errors.py`, `values.py` and `tests/xdg_cache.py`) are formatted and linted as Python 3.12 (`py312`),
   not as `requires-python`'s 3.15: `ruff format` would otherwise write
   `except A, B:` (3.14) there, and `ruff check` reports it as a syntax
   error in them. `tests/test_e2e_host_python.py` finds that set from the
@@ -611,7 +623,9 @@ the same Fedora 45 image and as the same user as the fast gates, and
 uploads the reports as the `nightly-coverage-report` artifact.
 
 `--out DIR` (absolute, outside the checkout; by default a new folder under
-`${XDG_CACHE_HOME:-~/.cache}/cst-coverage/`) receives `report.txt` (per
+`cst-coverage/` in the cache folder `tests/xdg_cache.py` finds:
+`$XDG_CACHE_HOME` only when it is absolute, else `.cache` in the home
+folder; with none, the task stops) receives `report.txt` (per
 file), `coverage.json`, `html/index.html` (each file with the lines no
 test ran), `floors.txt` and coverage.py's data file. A relative folder, or
 one inside the checkout (also through a symlink), is refused before
@@ -1378,10 +1392,13 @@ test quint` when a pull request (or a push to main) changes a path under
 `tests/quint/`, `btrfs/tests/test_docker_volumes_nocow_replay.py`, the code
 the NAS spec models (`vm/application/nas.py`, `vm/application/nas_torn.py`, `vm/adapters/restic.py`,
 `vm/adapters/backup.py`, `vm/domain/backup.py`, `vm/domain/__init__.py`), its replay
-(`vm/tests/test_vm_nas_replay.py`), or what runs the job
+(`vm/tests/test_vm_nas_replay.py`), what runs the job
 (`.github/workflows/ci.yml`, `cst.invowkmod/invowkfile.cue`,
-`.github/actions/setup-invowk/`); `tests/test_quint_task.py` checks that
-list; `CI Status` accepts it
+`.github/actions/setup-invowk/`), or what `cst-quint` imports (today
+`cst_core/domain/errors.py`, `values.py`, `tests/xdg_cache.py` and their
+packages' `__init__.py`);
+`tests/test_quint_task.py` checks that list, the imports against the
+host-Python gate's closure; `CI Status` accepts it
 skipped only when none changed. It runs on the runner host, as the runner's
 non-root user, with the runner's JDK 21 and node, and fetches its tools
 afresh (about 10 s; no GitHub cache, each download checked by its SHA-256).

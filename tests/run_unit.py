@@ -133,7 +133,6 @@ import io
 import json
 import math
 import os
-import pwd
 import queue
 import shlex
 import shutil
@@ -1075,20 +1074,6 @@ def _is_unit_durations(value: object) -> TypeIs[UnitDurations]:
     return all(isinstance(key, str) and _seconds_value(val) for key, val in seconds.items())
 
 
-def _cache_base(environ: Mapping[str, str]) -> str | None:
-    """The user's cache folder: an absolute XDG_CACHE_HOME, else ~/.cache (HOME, else the password database)."""
-    base = environ.get("XDG_CACHE_HOME", "")
-    if os.path.isabs(base):
-        return base
-    home = environ.get("HOME", "")
-    if not os.path.isabs(home):
-        try:
-            home = pwd.getpwuid(os.getuid()).pw_dir
-        except KeyError:
-            return None
-    return os.path.join(home, ".cache")
-
-
 def durations_path(repo: str, environ: Mapping[str, str]) -> str | None:
     """The durations file of this checkout, outside it; None under CI, which neither reads nor writes one.
 
@@ -1096,9 +1081,13 @@ def durations_path(repo: str, environ: Mapping[str, str]) -> str | None:
     the sha1 of its physical path). A relative XDG_CACHE_HOME is ignored, as the XDG spec says: the runner
     works in the checkout, so a relative folder would be inside it.
     """
+    # Imported here, not at the top: the runner is run by its path (python3 -I -B tests/run_unit.py), so the
+    # checkout is on sys.path only once main() has put it there.
+    from tests.xdg_cache import cache_base
+
     if any(environ.get(name) for name in _CI_VARIABLES):
         return None
-    base = _cache_base(environ)
+    base = cache_base(environ)
     if base is None:
         return None
     key = hashlib.sha1(os.fsencode(os.path.realpath(repo)), usedforsecurity=False).hexdigest()

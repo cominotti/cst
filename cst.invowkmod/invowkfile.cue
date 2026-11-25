@@ -292,7 +292,12 @@ cmds: [
 			timeout: "20m"
 			script: {content: """
 				set -euo pipefail
-				out="${INVOWK_FLAG_OUT:-${XDG_CACHE_HOME:-${HOME}/.cache}/cst-coverage/$(date +%Y%m%d-%H%M%S)}"
+				out="${INVOWK_FLAG_OUT-}"
+				if [[ -z "${out}" ]]; then
+					# The cache folder every dev tool uses (tests/xdg_cache.py); -I leaves the checkout off sys.path.
+					base="$(python3 -I -B -c 'import os, sys; sys.path.insert(0, os.getcwd()); from tests.xdg_cache import NO_CACHE_BASE, cache_base; base = cache_base(os.environ); print(base) if base else sys.exit(f"test coverage: {NO_CACHE_BASE}")')"
+					out="${base}/cst-coverage/$(date +%Y%m%d-%H%M%S)"
+				fi
 				if [[ "${out}" != /* ]]; then
 					echo "test coverage: --out must be an absolute path (outside the checkout)" >&2
 					exit 2

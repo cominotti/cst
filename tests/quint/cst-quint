@@ -23,8 +23,8 @@ Options:
     --traces          write the checked-in traces again (simulator and Apalache), then run the replay
     --keep            keep the work folder (it names it at the end)
 
-The tools are pinned and fetched into ${XDG_CACHE_HOME:-~/.cache}/cst-quint, never into the
-checkout: quint (npm ci --ignore-scripts from tests/quint/package-lock.json, which pins every package
+The tools are pinned and fetched into ${XDG_CACHE_HOME:-~/.cache}/cst-quint (a relative
+XDG_CACHE_HOME is ignored: tests/xdg_cache.py), never into the checkout: quint (npm ci --ignore-scripts from tests/quint/package-lock.json, which pins every package
 with its hash), and the two programs quint would otherwise download unchecked on first use,
 Apalache (whose jar also runs TLC) and the Rust evaluator, each checked against its SHA-256 before it
 is unpacked into QUINT_HOME. A tool is used as it is only when the stamp beside it records the
@@ -64,6 +64,7 @@ if _CHECKOUT not in sys.path:
 
 from cst_core.domain.errors import ExitStatus
 from cst_core.domain.values import format_bytes_human
+from tests.xdg_cache import NO_CACHE_BASE, cache_base
 
 QUINT_VERSION: Final = "0.33.1"
 JVM_ARGS: Final = "-Xmx4g"
@@ -590,9 +591,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def cache_root(env: Mapping[str, str]) -> str:
-    base = env.get("XDG_CACHE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "cst-quint")
+def cache_root(env: Mapping[str, str]) -> str | None:
+    """The tool's folder under the user's cache folder (tests/xdg_cache.py), or None when there is none."""
+    base = cache_base(env)
+    return None if base is None else os.path.join(base, "cst-quint")
 
 
 def checkout_root() -> str:
@@ -640,7 +642,11 @@ def main(argv: Sequence[str], seams: Seams | None = None) -> int:
     if problem is not None:
         out(problem)
         return EX_USAGE
-    session = Session(checkout or checkout_root(), cache_root(env), run, env, out)
+    cache = cache_root(env)
+    if cache is None:
+        out(f"cst-quint: {NO_CACHE_BASE}")
+        return EX_USAGE
+    session = Session(checkout or checkout_root(), cache, run, env, out)
     os.makedirs(os.path.join(session.cache, "work"), exist_ok=True)
     work = tempfile.mkdtemp(prefix="run-", dir=os.path.join(session.cache, "work"))
     try:

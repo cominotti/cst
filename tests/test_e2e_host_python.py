@@ -39,6 +39,7 @@ _READ_FILES = (
     "tests/e2e/suites/suite_tier1_systemd.py",
     "tests/e2e/suites/suite_tier2_storage_cpu.py",
     "tests/quint/cst-quint",
+    "tests/xdg_cache.py",
 )
 
 
@@ -64,6 +65,7 @@ class CheckoutTest(unittest.TestCase):
                 "tests/e2e/suites/suite_tier1_systemd.py",
                 "tests/e2e/suites/suite_tier2_storage_cpu.py",
                 "tests/quint/cst-quint",
+                "tests/xdg_cache.py",
             ],
         )
 
@@ -436,6 +438,53 @@ class PlantedTest(unittest.TestCase):
                 self.setUp()
                 self.replace(action, old, old + extra)
                 self.assert_one_problem("prep-e2e-runner/action.yml", "a program the gate cannot name")
+
+    def test_a_program_named_at_run_time_in_a_shell_s_dash_c_is_reported(self) -> None:
+        # The argument of a shell's -c was quoted text to the gate, so a program named there at run time
+        # went unchecked; it is a command line of its own, read by the inner shell's rules.
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for form in (
+            'bash -c "python3 $tool"',
+            "sh -c 'python3 \"$tool\"'",
+            'bash -euo pipefail -c "python3 -I -B ${tool}"',
+            "bash -ec 'cd x && python3 $tool'",
+            'runuser -u ci -- bash -c "python3 $tool"',
+            "/bin/sh -c 'python3 $tool'",
+            "bash -c \"sh -c 'python3 \\$tool'\"",
+            'bash -c "python3 \\"$tool\\""',
+        ):
+            with self.subTest(form=form):
+                self.setUp()
+                self.replace(action, old, f"{old}; {form}")
+                self.assert_one_problem("prep-e2e-runner/action.yml", "a program the gate cannot name", "tool")
+
+    def test_a_file_in_escaped_quotes_of_a_shell_s_dash_c_is_named(self) -> None:
+        # Inside a double-quoted -c argument, python3 \"FILE\" gave the program word "\": the file went unchecked.
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        self.replace(action, old, f'{old}; bash -c "python3 \\"tests/e2e/new.py\\""')
+        self.assert_one_problem("prep-e2e-runner/action.yml", "tests/e2e/new.py", "HOST_ENTRIES")
+
+    def test_python3_as_text_inside_or_beside_a_shell_s_dash_c_is_no_program(self) -> None:
+        # Inside a -c argument the inner shell's echo and quotes are text again; a quote that is no -c
+        # argument (grep -c, an echo, a script's argument) stays text.
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for form in (
+            'bash -c "echo python3 $tool"',
+            "bash -c \"echo 'python3 $tool'\"",
+            "sh -c 'echo \"python3 $tool\"'",
+            'grep -c "python3 $v" log',
+            'echo "bash -c python3 $x"',
+            'echo bash -c "python3 $x"',
+            'bash script.sh "python3 $x"',
+        ):
+            with self.subTest(form=form):
+                self.setUp()
+                self.replace(action, old, f"{old}; {form}")
+                self.assertEqual(gate.problems(self.repo), [])
 
     def test_a_new_python_file_an_action_runs_is_reported(self) -> None:
         self.replace(
