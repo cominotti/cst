@@ -620,8 +620,11 @@ restic forgot it. A stop that ends restic after restic saved its snapshot
 ID from restic's last lines: the snapshot counts as torn and is recorded
 (what tore it: "stopped"), and the stop is raised right after the record.
 After a stop nothing is forgotten (the next NAS backup forgets it), so the
-stop stays short for the merge back. A stop that comes when restic has
-just ended on its own is raised once the check of a shut-off VM is done.
+stop stays short for the merge back. Once restic has answered with a
+snapshot, a stop waits (the stops are held: the staged files' removal, the
+check of a shut-off VM after the read) until a torn snapshot is recorded,
+or, for a backup, until that check is done; so does a stop that comes when
+restic has just ended on its own.
 The one instant not covered: restic ended between saving its snapshot and
 printing its ID. When the forget fails, the message
 adds "recorded in /var/lib/cst/vm-nas-torn.json: the next NAS backup of VM
@@ -1088,7 +1091,11 @@ record that cannot be written or updated is said, a stop while forget waits
 or while the record waits for its lock leaves the entry, a stop after a
 record that failed names the snapshot left, a stop that ends restic after
 it printed its snapshot leaves that snapshot recorded and forgets nothing
-(or names it when the record fails); the next run forgets a recorded snapshot restic lists with
+(or names it when the record fails), and a stop while the check of a
+shut-off VM started during the read waits for virsh is raised once its
+snapshot is recorded (`NasStopHeldFromAnswerTest` adds the staged files'
+removal and the check of a VM still shut off, in-process; `ResticBackupAnsweredTest`
+the call that starts the hold, once restic exited with its snapshot); the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
 when that forget fails, a listing fails, an ID is ambiguous or its listed
 snapshot lacks a tag, drops one restic no longer lists without forgetting

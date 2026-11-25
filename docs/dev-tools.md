@@ -1244,14 +1244,16 @@ about 1.5 minutes and under 2 GB (`nas_live1`: 6.2 million, 44 s).
   names a snapshot in the repository.
 
 **Known gaps.** A torn snapshot restic committed can stay in the repository,
-neither recorded nor named: after a kill before its record (nothing more
-runs), and after a stop between restic's answer and `forget_torn`'s held
-record (the staging folder's removal, the shut-off VM's check). A stop that
-ended restic once it had committed carries the snapshot's id
-(`StopAfterSnapshot`: `Restic.backup` reads it from restic's last lines),
-so the snapshot is recorded; assumed, not modelled: restic ended between
-saving its snapshot and printing its summary. `tornHandled` and `goodKept`
-state these gaps; `tornHandledFull` and `goodKeptFull` in the spec (not
+neither recorded nor named, after a kill before its record (nothing more
+runs). A stop that ended restic once it had committed carries the
+snapshot's id (`StopAfterSnapshot`: `Restic.backup` reads it from restic's
+last lines), so the snapshot is recorded; assumed, not modelled: restic
+ended between saving its snapshot and printing its summary. From restic's
+answer with a snapshot on, the stops are held (`_ResticAnswer`: the
+staging folder's removal, the shut-off VM's check) until a torn snapshot's
+record is written or the check is done: the spec has no stop between two
+steps there, only the held stop of `after` and `record`. `tornHandled` and
+`goodKept` state the gaps (a stop's gap, `lostStop`, is no longer set); `tornHandledFull` and `goodKeptFull` in the spec (not
 checked by `cst-quint`) allow the kill only, and TLC shows their
 counterexamples (`--invariant tornHandledFull` on `nas_shutoff`, through
 quint by hand, as `cst-quint` runs it). The instance `nas_partial` (not
@@ -1287,8 +1289,13 @@ libvirt and restic do on their own (which disks a snapshot switched, a
 pivot that leaves the definition on the overlay, which snapshots the
 retention forgets) is the spec's state after that step. A stop between two
 steps is raised by the code's next port call; one that came in a held block
-(the snapshot call and its poll, the torn record) at the block's end; one
-during the merge back is dropped. A kill makes that call and every later
+(the snapshot call and its poll, the torn record, the hold from restic's
+answer on) at the end of the outermost one (the fakes count the blocks
+entered); one during the merge back is dropped. The hold from restic's
+answer on holds only the stops, so the environment still acts at each port
+call in it; the snapshot's and the record's blocks freeze it. A stop that
+ended restic after its snapshot (`StopAfterSnapshot`) is carried and
+raised after the record or the check, as the code does. A kill makes that call and every later
 one raise, so the World stays as the kill left it; the guest and a late
 switch of libvirt change the World where the trace has them. After each run
 the calls must be the spec's, in its order, the run's end (done, refused,

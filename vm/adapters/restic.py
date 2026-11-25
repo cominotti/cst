@@ -173,7 +173,13 @@ class Restic:
         return self._run(["restic", *args], timeout, env)
 
     def backup(
-        self, env: Mapping[str, str], args: Sequence[str], timeout: int, out: ResticOutput
+        self,
+        env: Mapping[str, str],
+        args: Sequence[str],
+        timeout: int,
+        out: ResticOutput,
+        *,
+        answered: Callable[[], None] | None = None,
     ) -> tuple[int, ResticSummary]:
         """restic backup --json: stderr goes through, the status lines become a
         progress line every minute, the summary is kept. (rc, summary or {}).
@@ -181,7 +187,11 @@ class Restic:
         A stop (Stop) while restic runs ends restic. When restic had written its snapshot by then (its
         summary, kept or still in the pipe, names it), StopAfterSnapshot carries restic's exit status
         and the summary, so the caller can record the snapshot; else the stop is raised as it came.
-        Assumed, not covered: restic ended between saving its snapshot and printing its summary."""
+        Assumed, not covered: restic ended between saving its snapshot and printing its summary.
+
+        answered is called once restic has exited, when its summary names its snapshot: the caller
+        holds the stops from there (restic is never waited for with the stops held); a stop it raises
+        is carried as one that came after the snapshot."""
         try:
             # Unbuffered: each read takes what restic wrote so far (_Output's chunks).
             p = subprocess.Popen(
@@ -207,6 +217,8 @@ class Restic:
                     break
                 output.fill()
             rc = p.wait()
+            if answered is not None and "snapshot_id" in summary:
+                answered()
         except Stop as e:
             # The stops are ignored from here on (on_signal): the reading of the last lines is not cut.
             rc = _ended(p)

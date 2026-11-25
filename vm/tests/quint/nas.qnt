@@ -39,12 +39,14 @@
 // stop is the read's failure. Assumed, not modelled: restic ended between saving its snapshot and
 // printing its summary (the id is then unknown to the code).
 //
+// From restic's answer with a snapshot on, the stops are held (_ResticAnswer: the staging folder's
+// removal, the shut-off VM's check) until the torn snapshot's record is written or the check is done:
+// a stop there comes as the held stopIn of "after" and "record", never between two steps.
+//
 // Known gaps, stated in the properties: a torn snapshot restic committed is in the repository,
 // neither recorded nor named, after a kill before its record (SIGKILL, power loss: nothing more
-// runs), and after a stop between restic's answer and forget_torn's held record (H2: the staging
-// folder's removal, the shut-off VM's check). tornHandled and goodKept allow these;
-// tornHandledFull and goodKeptFull (not in cst-quint's checks) allow the kill only, and TLC shows
-// their counterexamples (docs/dev-tools.md).
+// runs). tornHandled and goodKept allow it and a stop's gap (lostStop, which nothing sets any more);
+// tornHandledFull and goodKeptFull (not in cst-quint's checks) allow the kill only.
 module nas {
   const TARGETS: List[str]
   const RUNS: int
@@ -108,7 +110,7 @@ module nas {
     alerted: Set[(str, int, str)], // the alert named the overlay with this recovery kind
     told: Set[int],            // a torn snapshot a message gave the user to forget by hand
     lostKill: Set[int],        // a torn snapshot left unrecorded by a kill
-    lostStop: Set[int],        // a torn snapshot left unrecorded by a stop
+    lostStop: Set[int],        // a torn snapshot left unrecorded by a stop (no longer set: the stops are held)
     gap: int,                  // this run's torn snapshot not yet recorded or named (0: none)
     killed: Set[int],          // the runs that were killed
     started: bool,             // shut-off run: the VM was started since its sources were read
@@ -136,7 +138,7 @@ module nas {
   pure val PRE = Set("preflight", "ready")
   pure val READ = Set("snapshot", "drop", "backup", "after", "record", "forget", "drop_torn")
   pure val MERGE = Set("merge", "domstate", "commit", "check", "remove", "alert")
-  pure val H2_WINDOW = Set("after", "record")
+  pure val ANSWERED = Set("after", "record") // the stops held since restic's answer (_ResticAnswer)
   pure val POST = Set("retry", "retry_forget", "retry_drop", "retention", "index", "write")
 
   pure def lbl(name: str, target: str, outcome: str): Label = { name: name, target: target, id: 0, outcome: outcome, stop: false, ctx: "" }
@@ -322,11 +324,21 @@ module nas {
   }
 
   // _nas_check_after_read, shut-off VM: started meanwhile, or a source changed: its snapshot through
-  // forget_torn; else a stop held since restic's answer is the read's failure.
+  // forget_torn; else a stop held since restic's answer is the read's failure. A stop during the check
+  // (stopIn) waits, held since restic's answer: for the record when the check says changed, else for
+  // the check's end.
   action after = all {
     s.pc == "after",
-    if (s.started) all { s' = { ...s, pc: "record" }, step' = lbl("check_after", "", "changed") }
-    else all { s' = toMerge(s, if (s.heldStop) "stop" else "none"), step' = lbl("check_after", "", "same") },
+    nondet stopIn = Set(false, true).oneOf()
+    val st = if (stopIn) { ...s, stopped: true, stops: s.stops + 1, heldStop: true } else s
+    all {
+      not(stopIn) or (not(s.stopped) and s.stops < MAX_STOPS),
+      if (s.started) all { s' = { ...st, pc: "record" }, step' = { ...lbl("check_after", "", "changed"), stop: stopIn } }
+      else all {
+        s' = toMerge(st, if (st.heldStop) "stop" else "none"),
+        step' = { ...lbl("check_after", "", "same"), stop: stopIn },
+      },
+    }
   }
 
   // forget_torn: the record first (the stops held: a stop then waits for it), restic forget of the
@@ -562,22 +574,20 @@ module nas {
   }
 
   // ---- the environment ---------------------------------------------------------------------------
-  // A stop (SIGTERM, SIGINT, SIGHUP) between two steps, outside a held block.
+  // A stop (SIGTERM, SIGINT, SIGHUP) between two steps, outside a held block: not in the merge back
+  // (the stops ignored) nor from restic's answer on (held: the stopIn of "after" and "record").
   action stop = all {
     running(s),
     not(s.stopped),
     s.stops < MAX_STOPS,
     not(MERGE.contains(s.pc)), // PS5
+    not(ANSWERED.contains(s.pc)),
     val st = { ...s, stopped: true, stops: s.stops + 1 }
-    // H2: a stop after restic's answer (the staging folder's removal, the shut-off VM's check) and
-    // before forget_torn's held record leaves a torn snapshot neither recorded nor named
-    val h2 = H2_WINDOW.contains(s.pc) and s.gap != 0
     all {
       s' = if (READ.contains(s.pc)) {
              // forget_torn's "except Stop": a snapshot it could not record is named
              val named = s.pc == "forget" and s.unrecorded
-             val st2 = if (h2) { ...st, lostStop: st.lostStop.union(Set(s.gap)), gap: 0 } else st
-             toMerge(if (named) { ...st2, told: st2.told.union(Set(s.snap)), gap: 0 } else st2, "stop")
+             toMerge(if (named) { ...st, told: st.told.union(Set(s.snap)), gap: 0 } else st, "stop")
            }
            else finish(st, "stopped"),
       step' = lbl("~stop", "", s.pc),
@@ -714,9 +724,11 @@ module nas {
   val wLiveListingUnreadable = step.name == "domblklist" and step.outcome == "live_unreadable"
   val wInactiveListingUnreadable = step.name == "domblklist" and step.outcome == "inactive_unreadable"
   val wRemoveFailed = step.name == "remove_overlay" and step.outcome == "fail"
+  val wOverlayRemoved = step.name == "remove_overlay" and step.outcome == "ok"
   val wStopAfterCommit = step.name == "restic_backup" and step.outcome == "stopped_after_commit"
   val wStopAfterCommitRecorded = step.name == "record_torn" and step.ctx == "stop" and step.outcome == "ok"
   val wStopAnswered = step.name == "restic_backup" and step.outcome == "stopped_answered"
+  val wStopHeldCheck = step.name == "check_after" and step.stop
   val wRetentionFailed = step.name == "retention" and step.outcome == "fail"
   val wTornForgetFailed = step.name == "forget" and step.outcome == "fail" and step.target == ""
   val wTornDropFailed = step.name == "drop_torn" and step.outcome == "fail" and step.target == ""
@@ -743,9 +755,11 @@ module nas {
   val neverLiveListingUnreadable = not(wLiveListingUnreadable)
   val neverInactiveListingUnreadable = not(wInactiveListingUnreadable)
   val neverRemoveFailed = not(wRemoveFailed)
+  val neverOverlayRemoved = not(wOverlayRemoved)
   val neverStopAfterCommit = not(wStopAfterCommit)
   val neverStopAfterCommitRecorded = not(wStopAfterCommitRecorded)
   val neverStopAnswered = not(wStopAnswered)
+  val neverStopHeldCheck = not(wStopHeldCheck)
   val neverRetentionFailed = not(wRetentionFailed)
   val neverTornForgetFailed = not(wTornForgetFailed)
   val neverTornDropFailed = not(wTornDropFailed)

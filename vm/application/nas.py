@@ -4,6 +4,7 @@ merged back (blockcommit) whatever happens, and its retention. Moved from vm/cli
 reaches the machine through the ports of vm/ports.py (NasBackup)."""
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 import os.path
 
@@ -366,28 +367,57 @@ def _nas_read(
 
 
 def _nas_restic_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, manifest: Manifest) -> _ResticAnswer:
-    """restic's read of the sources (with manifest staged) and the check after it: restic's answer. A
-    stop that ended restic once restic had written its snapshot (StopAfterSnapshot) is raised once that
-    snapshot is recorded as torn (forget_torn, before its forget) or, when it is a backup, once the check
-    after the read is done."""
-    answer = _ResticAnswer()
-    _nas_restic_backup(cfg, p, run, nas, manifest, answer=answer)
-    _nas_check_after_read(cfg, p, run, nas, answer)
+    """restic's read of the sources (with manifest staged) and the check after it: restic's answer. Once
+    restic answered with a snapshot, a stop waits (the stops held: the stage's removal, the check after
+    the read) until the snapshot is recorded as torn (forget_torn, before its forget) or, when it is a
+    backup, the check is done; so does a stop that ended restic once it had written its snapshot
+    (StopAfterSnapshot)."""
+    answer = _ResticAnswer(p.signals)
+    try:
+        _nas_restic_backup(cfg, p, run, nas, manifest, answer=answer)
+        _nas_check_after_read(cfg, p, run, nas, answer)
+    except BaseException as e:
+        answer.end_hold(e)
+        raise
     answer.release()
     return answer
 
 
 @dataclass(slots=True)
 class _ResticAnswer:
-    """restic's answer to the backup: its snapshot ("" none) and summary, and a stop that ended restic
-    after it had written the snapshot (carried), raised by release once the snapshot is recorded or
-    checked."""
+    """restic's answer to the backup: its snapshot ("" none) and summary; from the answer on, the stops
+    held (hold) until release, so that a stop never lands between restic's answer and the record of a
+    torn snapshot (or the end of the check after the read); and a stop that ended restic after it had
+    written the snapshot (carried), raised by release after the one that waited, if any."""
 
+    signals: SignalsPort
     snap: str = ""
     summary: ResticSummary = field(default_factory=ResticSummary)
     carried: Stop | None = None
+    hold: AbstractContextManager[object] | None = None
+
+    def answered(self) -> None:
+        """restic answered with a snapshot: the stops wait from now on (restic.backup's answered). A stop
+        whose handler runs between the mask and the keeping of the hold leaves the stops blocked:
+        harmless, as on_signal ignores them after a stop, and the merge back runs with them ignored."""
+        hold = self.signals.held()
+        hold.__enter__()
+        self.hold = hold
+
+    def end_hold(self, failure: BaseException | None = None) -> None:
+        """The stops let in again, as a with block ends: a stop that waited is raised here, unless failure
+        (the exception that ends the hold) is given."""
+        hold, self.hold = self.hold, None
+        if hold is None:
+            return
+        if failure is None:
+            hold.__exit__(None, None, None)
+        else:
+            hold.__exit__(type(failure), failure, failure.__traceback__)
 
     def release(self) -> None:
+        """The stops let in again (a stop that waited is raised here), then a carried stop raised."""
+        self.end_hold()
         if self.carried is not None:
             stop, self.carried = self.carried, None
             raise stop
@@ -416,6 +446,7 @@ def _nas_restic_backup(
             ["backup", "--json", "--host", nas["host"], "--tag", tags, "--retry-lock", RETRY_LOCK, *paths],
             timeout,
             out,
+            answered=answer.answered,
         )
     except StopAfterSnapshot as e:
         rc, answer.summary, answer.carried = e.rc, e.summary, e
