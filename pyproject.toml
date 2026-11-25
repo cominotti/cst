@@ -298,6 +298,12 @@ typing-extensions = false
 # SIGHUP when the terminal closes, which no Popen option does.
 "cst_core/adapters/runner.py" = ["PLW1509"]
 "vm/tests/test_vm_nas.py" = ["PLW1509"]
+# vm/adapters/restic.py: restic's Popen runs with the stops held, and its
+# preexec_fn puts the stops back at their default and restores the signal
+# mask in the child (the blocked mask passes through fork and exec); no other
+# thread runs then (the timeout timer starts after Popen, and the NAS backup
+# starts no other thread).
+"vm/adapters/restic.py" = ["PLW1509"]
 
 [tool.ruff.lint.mccabe]
 # For C901, which is not selected above: tests/ruff_budget.py counts the

@@ -4581,20 +4581,23 @@ class ResticBackupStartStopTest(unittest.TestCase):
 
         unmasks: list[int] = []
 
-        class _StopAtFirstUnmask(contextlib.AbstractContextManager[object]):
+        class _StopAtTheTimersUnmask(contextlib.AbstractContextManager[object]):
             # signals_held: a stop that came while the stops were held is raised at the unmask (once: the
-            # stops are ignored after it, on_signal).
+            # stops are ignored after it, on_signal). The first hold is the one around Popen; the second,
+            # the timer's start.
+            old: frozenset[int] = frozenset()
+
             @override
             def __exit__(self, *_: object) -> None:
                 unmasks.append(1)
-                if len(unmasks) == 1:
+                if len(unmasks) == 2:
                     raise vm_domain_backup.Stop("stopped by signal SIGTERM")
 
         child = self._Child()
         with (
             mock.patch.object(vm_adapters_restic.subprocess, "Popen", return_value=child),
             mock.patch.object(vm_adapters_restic.threading, "Timer", timer),
-            mock.patch.object(vm_adapters_restic, "signals_held", _StopAtFirstUnmask),
+            mock.patch.object(vm_adapters_restic, "signals_held", _StopAtTheTimersUnmask),
             self.assertRaises(vm_domain_backup.Stop) as ctx,
         ):
             vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, self._Out())

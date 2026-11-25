@@ -4,7 +4,7 @@
 /home NAS backup can use it as it is); the caller gives the repository's variables at each call.
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import os
 import select
 import signal
@@ -17,7 +17,7 @@ from cst_core.adapters.runner import c_locale
 from cst_core.domain.errors import ExitStatus
 from cst_core.domain.shapes import json_object, number_or_none, parse_json
 from cst_core.domain.values import MINUTE, format_bytes_gib_mib
-from vm.adapters.backup import signals_held
+from vm.adapters.backup import STOP_SIGNALS, signals_held
 from vm.domain.backup import ResticMessage, ResticSummary, Stop, StopAfterSnapshot, is_restic_summary
 
 # Seconds restic has to end once a stop asks it to (then it is killed), and the most the reading of the
@@ -156,6 +156,19 @@ class _Output:
                 return {}
 
 
+def _child_signals(mask: Iterable[int]) -> Callable[[], None]:
+    """What restic's child does between fork and exec (Popen's preexec_fn): the stops back at their
+    default, so this process's handler (on_signal) never runs in it, then the signal mask it had before
+    the hold around Popen (mask), so restic gets the stops again."""
+
+    def preexec() -> None:
+        for sig in STOP_SIGNALS:
+            signal.signal(sig, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+
+    return preexec
+
+
 def _end_timer(timer: threading.Timer | None) -> None:
     """The timeout timer cancelled and, once started, joined (None: a stop came before it was made)."""
     if timer is None:
@@ -202,7 +215,8 @@ class Restic:
         """restic backup --json: stderr goes through, the status lines become a
         progress line every minute, the summary is kept. (rc, summary or {}).
 
-        A stop (Stop) while restic runs ends restic. When restic had written its snapshot by then (its
+        A stop (Stop) while restic runs ends restic; one that comes while restic starts waits until Popen
+        has returned (the stops held), then ends it. When restic had written its snapshot by then (its
         summary, kept or still in the pipe, names it), StopAfterSnapshot carries restic's exit status
         and the summary, so the caller can record the snapshot; else the stop is raised as it came.
         Assumed, not covered: restic ended between saving its snapshot and printing its summary.
@@ -214,17 +228,33 @@ class Restic:
         shown = 0.0
         output: _Output | None = None
         timer: threading.Timer | None = None
+        # The stops wait while restic starts: a stop between fork and exec would raise Stop inside Popen,
+        # before p is bound, and leave restic running unreaped while the overlay is merged back. The hold
+        # ends on every outcome of Popen: a stop that waited is raised once p is bound (it ends restic), or
+        # with no child.
+        hold = signals_held()
+        hold.__enter__()
         try:
             # Unbuffered: each read takes what restic wrote so far (_Output's chunks).
             p = subprocess.Popen(
-                ["restic", *args], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=0, env=restic_env(env)
+                ["restic", *args],
+                stdout=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                bufsize=0,
+                env=restic_env(env),
+                preexec_fn=_child_signals(hold.old),
             )
         except FileNotFoundError:
+            hold.__exit__()
             return ExitStatus.NOT_FOUND, {}
-        # Once Popen has returned, every stop ends restic and the timer: also one that waited while the timer
-        # started and is raised when the stops are let in again. A stop inside Popen itself (between fork and
-        # exec) is not covered: see the out-of-scope notes of fv-r22.
+        except BaseException:
+            hold.__exit__()
+            raise
+        # Once Popen has returned, every stop ends restic and the timer: one that waited while restic started
+        # (raised as the hold ends, here), and one that waited while the timer started and is raised when the
+        # stops are let in again.
         try:
+            hold.__exit__()
             assert p.stdout is not None
             output = _Output(p.stdout)
             timer = threading.Timer(timeout, p.kill)

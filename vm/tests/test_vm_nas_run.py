@@ -7,19 +7,23 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import fcntl
+import io
 import json
 from dataclasses import dataclass, field, replace
 import os
+import signal
 import stat
 import tempfile
 import threading
 from typing import override
 import unittest
+from unittest import mock
 
 from cst_core.domain.errors import Refused
 from vm import domain as vm_domain, wiring as vm_wiring
 from vm.adapters import conf_number
-from vm.adapters.backup import describe_entry, read_index, update_index
+from vm.adapters import restic as vm_adapters_restic
+from vm.adapters.backup import StopSignals, describe_entry, read_index, update_index
 from vm.application.backup import index_local_backup
 from vm.application import nas as vm_app_nas
 from vm.domain import backup as vm_domain_backup
@@ -426,6 +430,82 @@ class IndexLockTest(unittest.TestCase):
         }
         self.assertIsNone(index_local_backup(store, manifest, "/b/win-1"))
         self.assertEqual((store.updates, [[e.get("path") for e in w] for w in store.written]), (1, [["/b/win-1"]]))
+
+
+class _Out:
+    def say(self, text: str, *, flush: bool = False) -> None:
+        del text, flush
+
+    def warn(self, text: str) -> None:
+        del text
+
+
+class ResticStartStopTest(unittest.TestCase):
+    """A stop that comes while restic starts (between fork and exec, inside Popen) waits until Popen has
+    returned, then ends restic: before, it was raised inside Popen, p was never bound, and restic ran on
+    unreaped while the overlay was merged back."""
+
+    def _stops_caught(self) -> None:
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            self.addCleanup(signal.signal, sig, signal.getsignal(sig))
+        self.addCleanup(signal.pthread_sigmask, signal.SIG_SETMASK, signal.pthread_sigmask(signal.SIG_BLOCK, []))
+        StopSignals().catch_stops()
+
+    def test_a_stop_while_restic_starts_ends_restic(self) -> None:
+        self._stops_caught()
+
+        class _Child:
+            stdout = io.BytesIO(b"")
+            terminated = waited = False
+
+            def poll(self) -> int | None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.waited = True
+                return -signal.SIGTERM
+
+            def kill(self) -> None:
+                pass
+
+        child = _Child()
+
+        def popen(*_args: object, **_kwargs: object) -> _Child:
+            # Directed at this (the main) thread: a stop that comes between fork and exec.
+            signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
+            return child
+
+        with (
+            mock.patch.object(vm_adapters_restic.subprocess, "Popen", side_effect=popen),
+            self.assertRaises(vm_domain_backup.Stop),
+        ):
+            vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, _Out())
+        self.assertEqual((child.terminated, child.waited), (True, True), "restic was not ended")
+        self.assertNotIn(signal.SIGTERM, signal.pthread_sigmask(signal.SIG_BLOCK, []), "the main thread's mask is back")
+
+    def test_restic_gets_the_stops_unblocked(self) -> None:
+        # The hold around Popen blocks them in this thread; the child gets the mask from before it back.
+        with tempfile.TemporaryDirectory() as tmp:
+            stub, seen = os.path.join(tmp, "restic"), os.path.join(tmp, "sigblk")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    f"grep '^SigBlk:' /proc/self/status >'{seen}'\n"
+                    'echo \'{"message_type": "summary", "snapshot_id": "abc"}\'\n'
+                )
+            os.chmod(stub, 0o755)
+            path = f"{tmp}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                rc, summary = vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, _Out())
+            with open(seen, encoding="utf-8") as f:
+                blocked = int(f.read().split()[1], 16)
+        self.assertEqual((rc, summary.get("snapshot_id")), (0, "abc"))
+        stops = sum(1 << (int(s) - 1) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT))
+        self.assertEqual(blocked & stops, 0, f"restic started with the stops blocked: {blocked:#x}")
 
 
 if __name__ == "__main__":

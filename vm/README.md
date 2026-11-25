@@ -570,6 +570,9 @@ backup is stopped (Ctrl-C, a closed terminal, `systemctl stop`, the time
 limit): the program catches the stop, ends restic, and merges first. Some
 details keep a stop from cutting the merge short:
 
+- A stop that comes while restic starts waits until restic has started,
+  then ends it: restic never runs on unwatched while the overlay is merged
+  back. restic itself starts with the stops at their default and unblocked.
 - After the first stop, further ones are ignored, and every command of the
   merge runs in its own session. A second Ctrl-C or a terminal that closes
   cannot reach `virsh blockcommit` (virsh cancels the merge on Ctrl-C).
@@ -1182,7 +1185,8 @@ removed backups leave the index, and `list` and `status`.
 
 For the NAS backup (`test_vm_nas.py`; `ResticBackupStopTest`: a stop while
 restic runs keeps the snapshot's ID from restic's lines, kept or still in
-the pipe): virsh and restic are stateful fakes
+the pipe; `ResticStartStopTest` in `test_vm_nas_run.py`: a stop while restic
+starts ends it, and restic gets the stops unblocked): virsh and restic are stateful fakes
 (the VM's disk sources live in a JSON file, so `domblklist` shows what the
 snapshot and the merge did). The tests check the snapshot's arguments, the
 quiesce attempt and its fallback (agent missing, disconnected, failing,

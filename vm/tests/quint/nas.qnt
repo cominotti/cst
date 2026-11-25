@@ -15,7 +15,8 @@
 // change of order in nas.py changes this spec and its traces in the same commit.
 //
 // How a stop reaches the code (vm/adapters/backup.py, StopSignals): before the read it ends the run;
-// during the read (snapshot, restic, the check after it, forget_torn) it is the read's failure, and
+// during the read (snapshot, restic, the check after it, forget_torn) it is the read's failure (one
+// that comes while restic starts waits until Popen has returned, so restic is ended too), and
 // the overlays are merged back first; inside signals_held (the snapshot call, the torn record) it
 // waits for the block's end; during the merge back the stops are ignored; after it (retention,
 // index) it ends the run, once the good read's snapshot is indexed (index_stop). A kill (SIGKILL, power loss) ends the run where it is: nothing more is
