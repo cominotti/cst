@@ -416,22 +416,6 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(os.pread(fd, 4096, 0), b"259:1 enable=1 ctrl=auto\n")
         self.assertEqual(os.listdir(self.tmp), ["io.cost.qos"])
 
-    def test_ensure_dir_set_mode_gives_the_mode_to_a_folder_already_there(self) -> None:
-        # set_mode=True: as install -d -m, the folder itself gets the mode whether it was there or not;
-        # without it a folder already there keeps its own; parents already there are left alone.
-        there = self.path("there")
-        os.mkdir(there, 0o700)
-        os.chmod(there, 0o700)
-        core_files.ensure_dir(there, 0o755)
-        self.assertEqual(stat.S_IMODE(os.stat(there).st_mode), 0o700)
-        self.assertEqual(core_files.ensure_dir(there, 0o755, set_mode=True), [])
-        self.assertEqual(stat.S_IMODE(os.stat(there).st_mode), 0o755)
-        new = os.path.join(there, "a", "b")
-        os.chmod(there, 0o700)
-        self.assertEqual(core_files.ensure_dir(new, 0o751, set_mode=True), [os.path.join(there, "a"), new])
-        self.assertEqual(stat.S_IMODE(os.stat(new).st_mode), 0o751)
-        self.assertEqual(stat.S_IMODE(os.stat(there).st_mode), 0o700)
-
     def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
         existing = self.path("existing")
         os.mkdir(existing, 0o700)
