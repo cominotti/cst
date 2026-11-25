@@ -288,6 +288,11 @@ again and must equal the old one plus this one key; otherwise (for example
 `build.jobs = 4` written as a dotted key) `config` prints the line to add by
 hand. If `rustc-wrapper` is already set to something else, it is yours:
 `config` says so and changes nothing (not even with `--no-sccache`).
+Adding or removing the line rewrites the file (a new file renamed into
+place, then its folder synced). If that fails, `config apply` exits 1 with
+`cannot write ...: left as it is` when the file is as it was, or with
+`...: written, but its folder could not be synced (...): the change may not
+survive a power loss` when only the sync failed and the new text is there.
 
 What the wrapper does for each compiler call (`rustc-wrapper <compiler>
 <arguments>`, as cargo runs it):

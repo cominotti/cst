@@ -61,6 +61,7 @@ from toolchains.domain.config import (
     SCCACHE_SIZE_LINE,
     SCCACHE_WORKSPACE_LINE,
     WRAPPER_NAME,
+    SettingsRewrite,
     WrapperValues,
     wrapper_path,
 )
@@ -258,8 +259,10 @@ def read_cfg(path: str) -> str | None:
         return None
 
 
-def write_cfg(path: str, text: str) -> str:
-    """Replace a config file's text (atomic, same mode). '' or the error."""
+def write_cfg(path: str, text: str) -> SettingsRewrite:
+    """Replace a config file's text (atomic, same mode). On an error, whether the new text is in place
+    all the same: write_atomic renames the new file into place before it syncs the folder, and only
+    that sync can fail after the rename (the file is read back to tell)."""
     real = os.path.realpath(path)
     try:
         mode = stat.S_IMODE(os.stat(real).st_mode)
@@ -268,8 +271,8 @@ def write_cfg(path: str, text: str) -> str:
     try:
         write_atomic(real, text, mode=mode)
     except OSError as e:
-        return str(e.strerror or e)
-    return ""
+        return SettingsRewrite(str(e.strerror or e), replaced=read_cfg(real) == text)
+    return SettingsRewrite()
 
 
 def append_text(path: str, text: str) -> str:
@@ -428,7 +431,7 @@ class HomeFiles:
     def append(self, path: str, text: str) -> str:
         return append_text(path, text)
 
-    def rewrite(self, path: str, text: str) -> str:
+    def rewrite(self, path: str, text: str) -> SettingsRewrite:
         return write_cfg(path, text)
 
     def build_dir_is_csts(self) -> bool:

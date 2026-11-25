@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from cst_core.domain.files import UnitFileState, WholeFileState
     from toolchains.domain.auto import TimerFacts
     from toolchains.domain.build import BuildTreeResult, CargoCache, Folder, Workspaces
-    from toolchains.domain.config import WrapperValues
+    from toolchains.domain.config import SettingsRewrite, WrapperValues
     from toolchains.domain.prune import RunRecord, SavedRun
     from toolchains.domain.uv import UvCacheKind
 
@@ -279,9 +279,9 @@ class HomeFilesPort(Protocol):
         does not end in one). '' or the error."""
         ...
 
-    def rewrite(self, path: str, text: str) -> str:
-        """Replace the settings file's text (atomic, same mode; a link is followed). '' or
-        the error."""
+    def rewrite(self, path: str, text: str) -> SettingsRewrite:
+        """Replace the settings file's text (atomic, same mode; a link is followed): its error ('' when
+        it worked) and whether the new text is in place all the same."""
         ...
 
     def build_dir_is_csts(self) -> bool:

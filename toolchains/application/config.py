@@ -340,6 +340,24 @@ class ToolConfig:
         )
         return 0
 
+    def _rewrite_failed(self, path: str, text: str) -> bool:
+        """Rewrite the settings file PATH with TEXT; True, after its message, when that failed. The
+        message says whether the new text is in place (only the sync of its folder failed) or the file
+        is as it was."""
+        done = self.files.rewrite(path, text)
+        if not done.error:
+            return False
+        if done.replaced:
+            self.out.say(
+                f"{NAME}: {path}: written, but its folder could not be synced ({done.error}): "
+                "the change may not survive a power loss",
+                3,
+                err=True,
+            )
+        else:
+            self.out.say(f"{NAME}: cannot write {path}: {done.error}: left as it is", 3, err=True)
+        return True
+
     def sccache_apply(self, settings: Settings | None, flag: bool | None) -> int:
         home = self.home
         want, why = sccache_wanted(settings, flag)
@@ -360,9 +378,7 @@ class ToolConfig:
                     err=True,
                 )
                 return 0
-            err = self.files.rewrite(path, st["remove"])
-            if err:
-                self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+            if self._rewrite_failed(path, st["remove"]):
                 return 1
             self.out.say(f"removed:   {path} (CST's rustc-wrapper line, {why}; ~/{WRAPPER_REL} stays, unused)")
             return 0
@@ -390,9 +406,7 @@ class ToolConfig:
             )
             self.out.say(f"      rustc-wrapper = {json.dumps(wrapper_path(home))}", 5, err=True)
             return 0
-        err = self.files.rewrite(path, st["add"])
-        if err:
-            self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+        if self._rewrite_failed(path, st["add"]):
             return 1
         self.out.say(f"written:   {path} (rustc-wrapper, {why}: rustc goes through sccache where it is on PATH)")
         return 0

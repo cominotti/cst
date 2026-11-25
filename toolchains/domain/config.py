@@ -301,6 +301,15 @@ def server_place(env_id: str, cgroup_text: str | None, sock: str, facts: ScopeFa
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class SettingsRewrite:
+    """What a rewrite of a tool's settings file did: error is '' when it worked. replaced: the new text
+    is in place although the write failed (it failed after the rename, at the sync of its folder)."""
+
+    error: str = ""
+    replaced: bool = False
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class WrapperValues:
     """The settings `config apply` writes into the installed wrapper."""
 
