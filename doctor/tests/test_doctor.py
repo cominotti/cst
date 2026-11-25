@@ -107,7 +107,7 @@ exit 1
 # systemctl show: prints $FIX_SHOW/<sys|usr>/<unit> (K=V lines), or fails
 # when that file is missing; a show with no --state= prints
 # $FIX_SHOW/<sys|usr>/<unit>.active instead when that file is there (what a
-# glob lists without --state=loaded: the active units only); everything else
+# glob lists without --state=loaded: not the inactive units); everything else
 # is the failed-units list.
 SYSTEMCTL = """#!/bin/sh
 echo "systemctl $*" >>"$STUB_LOG"
@@ -1674,7 +1674,7 @@ class BtrfsCacheDoctorTest(Scratch):
         )
         base = "Id=var-mnt-cache.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload={}\nWhere=/var/mnt/cache\n"
         bind = "Id=var-home-danilo-.cache.mount\nLoadState=loaded\nSourcePath={}\nNeedDaemonReload=no\nWhere=/var/home/danilo/.cache\n"
-        # active: what a glob without --state=loaded lists (the active units only); None: the same as the
+        # active: what a glob without --state=loaded lists (not the inactive units); None: the same as the
         # whole answer. The inactive cases are the base not mounted: a question without --state=loaded
         # does not see its unit.
         for name, answer, active, warned in (

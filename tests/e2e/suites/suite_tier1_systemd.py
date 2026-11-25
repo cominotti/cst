@@ -9589,7 +9589,7 @@ EOF
         A detach killed at its daemon-reload after it took u1's lines out, the binds unmounted since: the
         old lines' units stay loaded, inactive and flagged; the next detach reloads once and leaves no mount
         unit of ~/.cache; a third has nothing to do. Before, status and doctor said nothing, and attach and
-        detach said "nothing to do" without a reload, since only active units were asked."""
+        detach said "nothing to do" without a reload, since a glob alone hides inactive units."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-201"
         self.addCleanup(exec_bash, c, cache_reload_cleanup(w), check=False)

@@ -729,10 +729,10 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
 def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Result]:
     """WARN when systemd has not loaded /etc/fstab as it is on disk (fstab_lines_unread over the mount units
     it has loaded, active or not, one `systemctl show --state=loaded '*.mount'`: a glob without
-    --state=loaded lists only the active ones): an edit, or a cache attach or detach that stopped between
-    its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked. Asked only
-    where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a machine without
-    one is no warning of the cache's."""
+    --state=loaded hides the inactive ones with no job queued): an edit, or a cache attach or detach that
+    stopped between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked.
+    Asked only where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a
+    machine without one is no warning of the cache's."""
     rc, out, _ = host.run(show_units_argv(["systemctl"], "*.mount", MOUNT_UNIT_PROPS), timeout=20, locale_c=True)
     if rc != 0:
         return

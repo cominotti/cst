@@ -601,8 +601,8 @@ class AdaptersTest(unittest.TestCase):
             ],
         )
         argv, options = seen[0]
-        # --state=loaded: every loaded unit the glob names, active or not (a glob alone lists only the
-        # active ones).
+        # --state=loaded: every loaded unit the glob names, active or not (a glob alone hides the
+        # inactive ones that have no job queued).
         self.assertEqual(
             argv,
             [

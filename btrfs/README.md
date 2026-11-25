@@ -1759,8 +1759,8 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   `detach` again finds nothing to write, so before it says "nothing to do"
   it asks systemd, with one `systemctl show --state=loaded '*.mount'`
   (which lists every mount unit systemd has loaded, mounted or not, and
-  loads none; a glob without `--state=loaded` would list only the mounted
-  ones), whether it is behind: a unit
+  loads none; a glob without `--state=loaded` would leave out the inactive
+  ones, unmounted with no job queued), whether it is behind: a unit
   loaded from `/etc/fstab` that says `NeedDaemonReload=yes`, or a bind of
   the run mounted, with its line in `/etc/fstab`, whose unit systemd still
   took from the mount table (`/proc/self/mountinfo`, not `/etc/fstab`), or

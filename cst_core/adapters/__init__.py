@@ -152,12 +152,12 @@ class SystemctlAdapter:
         return self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
 
     def show_units(self, pattern: str, props: Sequence[str]) -> list[dict[str, str]] | None:
-        """`systemctl show --state=loaded -p PROP... PATTERN`: one {prop: value} per unit the manager has
-        loaded (active or not: without --state=loaded a glob lists only the active ones) whose name matches
-        the glob (a glob loads no unit on demand, as a unit name or a path would; ask for `Id` to know which
-        unit each is), in systemctl's order; [] when it lists none; None when systemctl fails or cannot
-        start (no answer). As show: on the host from a toolbox unless the adapter's on_host is LOCAL, the C
-        locale, 20 s at most or the adapter's timeout."""
+        """`systemctl show --state=loaded -p PROP... PATTERN` (show_units_argv): one {prop: value} per unit
+        the manager has loaded (active or not: without --state=loaded a glob hides the inactive units with no
+        job queued) whose name matches the glob (a glob loads no unit on demand, as a unit name or a path
+        would; ask for `Id` to know which unit each is), in systemctl's order; [] when it lists none; None
+        when systemctl fails or cannot start (no answer). As show: on the host from a toolbox unless the
+        adapter's on_host is LOCAL, the C locale, 20 s at most or the adapter's timeout."""
         res = self._show(show_units_argv(self._head, pattern, props))
         if res.returncode != 0:
             return None

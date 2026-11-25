@@ -618,7 +618,7 @@ and what this CST folder would install now.
   `systemctl show --state=loaded -p Id -p LoadState -p NeedDaemonReload '*'`
   per manager, asked only when the record names a unit file or drop-in of
   it: `--state=loaded` lists every loaded unit, active or inactive (without
-  it a glob lists only active units, and would miss a timer's service
+  it a glob hides the inactive units with no job queued, and would miss a timer's service
   between its runs), and loads none (a unit's own name would load it). Left
   out: a unit systemd has not loaded (it reads the files as they are when
   it loads it: nothing is stale); a file CST removed (an uninstall that

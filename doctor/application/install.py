@@ -304,8 +304,8 @@ def _recorded_units(host: DoctorHostPort, installed: InstalledFilesPort) -> dict
 def _units_not_loaded(host: DoctorHostPort, scope: UnitScope) -> list[str]:
     """The Ids of the units the manager has loaded and not loaded again since one of their files changed
     (NeedDaemonReload yes), sorted. One `systemctl show --state=loaded '*'`: every loaded unit, active or
-    inactive, and it loads none (a literal name would load it; a glob without --state=loaded lists only the
-    active ones). [] when the manager cannot be asked."""
+    inactive, and it loads none (a literal name would load it; a glob without --state=loaded hides the
+    inactive ones with no job queued). [] when the manager cannot be asked."""
     user = ["--user"] if scope == UnitScope.USER else []
     rc, out, _ = host.run(show_units_argv(["systemctl", *user], "*", LOADED_UNIT_PROPS), timeout=20, locale_c=True)
     if rc != 0:

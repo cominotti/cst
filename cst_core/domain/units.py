@@ -39,8 +39,9 @@ def parse_show_units(text: str) -> list[dict[str, str]]:
 def show_units_argv(head: Sequence[str], pattern: str, props: Sequence[str]) -> list[str]:
     """`HEAD... show --state=loaded -p PROP... PATTERN` (HEAD: `systemctl`, or `systemctl --user`): every
     unit the manager has loaded whose name matches the glob, active or not (without --state=loaded a glob
-    hides the inactive units), and it loads none. SystemctlAdapter.show_units runs it; a caller that runs
-    systemctl through another runner (cst doctor's host) builds it here, so both ask the same question."""
+    hides the inactive units that have no job queued), and it loads none. SystemctlAdapter.show_units runs
+    it; a caller that runs systemctl through another runner (cst doctor's host) builds it here, so both ask
+    the same question."""
     return [*head, "show", f"--state={LoadState.LOADED}", *(a for p in props for a in ("-p", p)), pattern]
 
 

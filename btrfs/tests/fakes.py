@@ -574,7 +574,10 @@ class FakeMountRunner:
         of the loaded /etc/fstab (SourcePath=/etc/fstab, NeedDaemonReload=yes once the file changed since),
         mounted or not, and of each other mount (SourcePath=/proc/self/mountinfo, as systemd loads a mount
         it did not start). As the real systemctl: only with every_loaded (--state=loaded or --all) does a
-        glob list the inactive units too; without it, only the units whose Where is mounted."""
+        glob list the inactive units too; without it systemctl hides the inactive units that have no job
+        queued (a failed or activating one is still listed). This fake has no job and no failed or
+        activating unit: its inactive units are those whose Where is not mounted, so without it the fake
+        lists only the units whose Where is mounted."""
         if self.show_fails:
             return CommandResult(1, "", "Failed to connect to bus")
         if not self.units_visible:
