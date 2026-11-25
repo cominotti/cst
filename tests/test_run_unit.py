@@ -10,15 +10,18 @@ import os
 import pwd
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import Final, override
 import unittest
 from unittest import mock
 
+from tests.probes import CallBlocked, time_bound
 from tests.repo_files import REPO, repo_files
 import tests.run_unit as run_unit_module
 from tests.run_unit import (
@@ -1676,6 +1679,30 @@ class LongestFirstTest(unittest.TestCase):
         tmp = self._probe_tree()
         self._run_tree(tmp, ci=True)
         self.assertFalse(os.path.exists(os.path.join(tmp, "cache")))
+
+
+class TimeBoundTest(unittest.TestCase):
+    """tests/probes.py's time_bound: a call that blocks in its block ends with CallBlocked, and leaving
+    the block, also through that error, stops the timer and puts SIGALRM's disposition back, so the
+    test's cleanups never run with the timer armed."""
+
+    def assert_disarmed(self, handler: object) -> None:
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0), "the timer is still armed")
+        self.assertIs(signal.getsignal(signal.SIGALRM), handler)
+
+    def test_a_call_that_blocks_ends_and_nothing_stays_armed(self) -> None:
+        before = signal.getsignal(signal.SIGALRM)
+        with self.assertRaises(CallBlocked), time_bound(0.05):
+            time.sleep(10)
+        self.assert_disarmed(before)
+
+    def test_leaving_the_block_stops_the_timer_before_the_cleanups(self) -> None:
+        # Before, the timer ran on until a cleanup registered by time_bound itself: every cleanup the test
+        # added after it ran first, with SIGALRM still due every second.
+        before = signal.getsignal(signal.SIGALRM)
+        with time_bound(5):
+            self.assertNotEqual(signal.getitimer(signal.ITIMER_REAL)[0], 0.0)
+        self.assert_disarmed(before)
 
 
 if __name__ == "__main__":

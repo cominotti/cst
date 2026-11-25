@@ -81,7 +81,7 @@ from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
-from tests.probes import bytes_program
+from tests.probes import bytes_program, time_bound
 from vm.adapters import images as vm_images
 from vm.wiring import vm_settings
 
@@ -2158,14 +2158,14 @@ class SwapSettingsDoctorTest(Scratch):
         self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
         host = doc_adapters.Host(dict(self.env))
         conf = os.path.join(self.root, "etc/cst/swap.conf")
-        opened = host.open_text
+        opened = host.open_regular_text
 
-        def open_text(path: str) -> TextIO:
+        def open_regular_text(path: str) -> TextIO:
             if path == conf:
                 raise OSError(errno.EIO, "Input/output error", path)
             return opened(doc_domain.ViewPath(path))
 
-        with mock.patch.object(host, "open_text", open_text):
+        with mock.patch.object(host, "open_regular_text", open_regular_text):
             rows = list(doc_swap.check_swap_settings(host))
         self.assertEqual(
             rows,
@@ -2198,6 +2198,49 @@ class SwapSettingsDoctorTest(Scratch):
         os.symlink("nowhere", folder)
         self.write("etc/fstab", SWAP_FSTAB)
         self.assertEqual(self.lines(self.run_tool().stdout), [not_a_file])
+
+    def test_a_fifo_or_a_link_to_a_device_at_swap_conf_is_not_a_regular_file(self) -> None:
+        # As cst swap takes it (REFUSE "not a regular file"). Before, a link to /dev/null read as an empty
+        # file ("not configured": add SWAP_PARTUUID to it), and a FIFO's open waited for a writer for ever
+        # (bounded here: CallBlocked).
+        conf = os.path.join(self.root, "etc/cst/swap.conf")
+        os.makedirs(os.path.dirname(conf))
+        not_a_file = Result(
+            "WARN", "swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed"
+        )
+        for kind, make in (("fifo", os.mkfifo), ("link to /dev/null", lambda p: os.symlink(os.devnull, p))):
+            with self.subTest(kind=kind), time_bound(5):
+                make(conf)
+                try:
+                    rows = list(doc_swap.check_swap_settings(doc_adapters.Host(dict(self.env))))
+                finally:
+                    os.remove(conf)
+                self.assertEqual(rows, [not_a_file])
+
+    def test_a_fifo_at_crypttab_or_fstab_is_one_it_cannot_read_and_nothing_blocks(self) -> None:
+        # No swap.conf: the migration path reads crypttab and fstab, as cst swap reads them (regular_only:
+        # an empty text). Before, the FIFO's open waited for a writer for ever (bounded here: CallBlocked).
+        # crypttab: resolve_settings reads it, and zswap.conf says swap is set up, so "not configured".
+        # fstab: without zswap.conf doctor reads it for an older CST's marked line; an empty text has none.
+        not_configured = Result(
+            "WARN",
+            "swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
+            " refuses (swap/README.md, section 2.3)",
+        )
+        zswap = os.path.join(self.root, "etc", "tmpfiles.d", "zswap.conf")
+        for name, set_up, want in (("crypttab", True, [not_configured]), ("fstab", False, [])):
+            path = os.path.join(self.root, "etc", name)
+            with self.subTest(name=name), time_bound(5):
+                if set_up:
+                    self.write("etc/tmpfiles.d/zswap.conf", "")
+                os.mkfifo(path)
+                try:
+                    rows = list(doc_swap.check_swap_settings(doc_adapters.Host(dict(self.env))))
+                finally:
+                    os.remove(path)
+                    if set_up:
+                        os.remove(zswap)
+                self.assertEqual(rows, want)
 
     def test_installed_but_not_configured(self) -> None:
         self.write("etc/tmpfiles.d/zswap.conf", "")
@@ -2361,6 +2404,72 @@ class DockerNocowPostponedTest(Scratch):
         os.mkdir(os.path.join(self.root, "var", "lib", "docker-volumes-nocow", "postponed"))
         r = self.run_tool()
         self.assertIn("info   Docker volumes NOCOW: cannot read", r.stdout)
+
+    def test_a_file_in_place_of_its_folder_is_no_record(self) -> None:
+        # As the helper reads it: no record can be there (before, "cannot read" at every run).
+        d = os.path.join(self.root, "var", "lib", "docker-volumes-nocow")
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        with open(d, "w") as f:
+            f.write("in the way\n")
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [])
+
+    def test_a_record_of_a_newer_format_is_named(self) -> None:
+        self.record(json.dumps({"v": 99, "reason": "r", "boots": 3, "first": NOW, "last": NOW, "boot_id": "b"}))
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                (
+                    "  info   Docker volumes NOCOW: /var/lib/docker-volumes-nocow/postponed is format 99 of the "
+                    "docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST"
+                )
+            ],
+        )
+
+    def test_a_version_that_is_no_whole_number_cannot_be_read(self) -> None:
+        for v in ("x", True, -1, 1.0):
+            with self.subTest(v=v):
+                self.record(json.dumps({"v": v, "reason": "r", "boots": 1, "first": NOW, "last": NOW, "boot_id": "b"}))
+                r = self.run_tool()
+                self.assertEqual(
+                    self.lines(r.stdout),
+                    ["  info   Docker volumes NOCOW: cannot read /var/lib/docker-volumes-nocow/postponed"],
+                )
+
+    def test_format_1_and_format_0_read_alike(self) -> None:
+        for extra in ({"v": 1}, {}):
+            with self.subTest(extra=extra):
+                rec = {**extra, "reason": "Docker is running", "boots": 1, "first": NOW, "last": NOW, "boot_id": "b"}
+                self.record(json.dumps(rec))
+                r = self.run_tool()
+                self.assertEqual(
+                    self.lines(r.stdout),
+                    [
+                        (
+                            "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a "
+                            "row, last 2026-11-05 17:33: Docker is running; tried again at the next boot"
+                        )
+                    ],
+                )
+
+    def test_a_time_no_clock_can_show_is_unknown(self) -> None:
+        # localtime's OverflowError, OSError EOVERFLOW, and strftime's failure on a year past a C int:
+        # the check failed as a whole.
+        for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
+            with self.subTest(last=last):
+                self.record(json.dumps({"v": 1, "reason": "r", "boots": 1, "first": NOW, "last": last, "boot_id": "b"}))
+                r = self.run_tool()
+                self.assertNotIn("the check itself failed", r.stdout)
+                self.assertEqual(
+                    self.lines(r.stdout),
+                    [
+                        (
+                            "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a "
+                            "row, last at an unknown time: r; tried again at the next boot"
+                        )
+                    ],
+                )
 
 
 class DockerNocowOutcomeTest(Scratch):
@@ -2702,10 +2811,10 @@ class GameProfileTest(Scratch):
     def test_the_user_game_state_names_is_asked_not_a_changed_target_user(self) -> None:
         # 'on' acted for the user whose user@UID.service it recorded first; TARGET_USER names another
         # user now (results() sets tester). The profile's tick and 'state' ask the user game.state
-        # names, and so does the doctor; a uid that names no account leaves TARGET_USER's.
+        # names, and so does the doctor.
         me = pwd.getpwuid(os.getuid()).pw_name
         state = os.path.join(self.run_dir, "game.state")
-        for uid, asked in ((os.getuid(), me), (999999, "tester")):
+        for uid, asked in ((os.getuid(), me),):
             with self.subTest(uid=uid):
                 self.profile_on()
                 with open(state, "w") as f:
@@ -2720,6 +2829,25 @@ class GameProfileTest(Scratch):
                 calls = self.calls()[before:]
                 self.assertIn(f"systemctl --user -M {asked}@ show -p LoadState -p CPUWeight user.slice", calls)
                 self.assertEqual([c for c in calls if " -M " in c and f"-M {asked}@" not in c], [])
+
+    def test_the_user_manager_of_a_recorded_uid_with_no_account_is_not_compared(self) -> None:
+        # No account has the uid game.state records, and TARGET_USER names another user (tester): the tick leaves
+        # that uid's user manager alone and 'state' compares no drift of it, so the doctor compares none either,
+        # and says why. The old doctor compared game.intended's records with tester's manager, and warned of a
+        # drift the tick never repairs.
+        self.profile_on()
+        with open(os.path.join(self.run_dir, "game.state"), "w") as f:
+            f.write("prop sys user@999999.service MemoryLow new -\n")
+        self.show("usr", "user.slice", CPUWeight="30")  # tester's: not the user 'on' acted for
+        before = len(self.calls())
+        res = self.results()
+        self.assertEqual([c for c in self.calls()[before:] if "--user" in c], [])
+        self.assertEqual([r.status for r in res], [doc_domain.OK, doc_domain.INFO], res)
+        self.assertIn("the 7 settings it made still hold", res[0].message)
+        self.assertEqual(
+            res[1].message,
+            "game profile: drift not checked for user.slice (no account has uid 999999, the user 'on' acted for)",
+        )
 
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()
@@ -2780,6 +2908,22 @@ class GameProfileTest(Scratch):
         self.assertEqual(
             self.leftovers_results(),
             [Result(doc_domain.WARN, message + ". The profile is on: the next 'off' retries them")],
+        )
+
+    def test_a_format_2_file_names_its_reloads_due(self) -> None:
+        # game.leftovers format 2 (G2-G5): a user line before every entry, and the daemon-reloads due.
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write(
+                "cst-game-leftovers 2\nuser -\nprop sys machine.slice CPUWeight existed 70\nreload sys\n"
+                "user 1000\nreload usr\n"
+            )
+        res = self.leftovers_results()
+        self.assertEqual([r[0] for r in res], [doc_domain.WARN])
+        self.assertIn(
+            "3 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight, daemon-reload of the"
+            " system manager, daemon-reload of uid 1000's user manager (kept in",
+            res[0].message,
         )
 
     def test_no_settings_off_could_not_undo_say_nothing(self) -> None:
@@ -2878,10 +3022,11 @@ class GameProfileTest(Scratch):
         self.assertEqual(self.results(), [Result(doc_domain.INFO, "game profile: ON, no recorded setting to compare")])
 
     def test_a_cgroup_record_without_a_shown_value_is_not_compared(self) -> None:
-        # The file is there and holds another value, but the record names nothing to compare with.
+        # The file is there and holds another value, but the record names nothing to compare with. It is the
+        # file's last record, which wins (G1): the earlier record of the same file is not counted either.
         self.intended += "cgw /sys/fs/cgroup/inner/cpuset.cpus 1-2 ''\n"
         self.profile_on()
-        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 8 settings it made still hold")])
+        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 7 settings it made still hold")])
 
 
 class UserManagerBoxesTest(Scratch):

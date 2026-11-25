@@ -116,11 +116,12 @@ class _HostSettingsFacts:
 
     def _read(self, path: HostPath) -> str | OSError:
         """The file's first SETTINGS_READ_LIMIT characters (undecodable bytes replaced), or the OSError of
-        its read; read once."""
+        its read; read once. Anything but a regular file (a FIFO, a device, or a link to one) is one it
+        cannot read, opened without waiting, as cst swap's readers take it (regular_only)."""
         known = self._reads.get(path)
         if known is None:
             try:
-                with self._host.open_text(self._host.path(path)) as f:
+                with self._host.open_regular_text(self._host.path(path)) as f:
                     known = f.read(SETTINGS_READ_LIMIT)
             except OSError as e:
                 known = e

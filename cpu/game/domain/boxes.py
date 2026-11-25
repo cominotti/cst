@@ -65,8 +65,9 @@ def setting_holds(prop: str, value: str, now: str) -> bool | None:
     return None if got is None else got == want
 
 
-def _shown_form(prop: str, value: str) -> str:
-    """The value the profile sets, as systemd shows it (16G in bytes, a CPU list with blanks), for the journal."""
+def shown_form(prop: str, value: str) -> str:
+    """The value the profile sets, as systemd shows it (16G in bytes, a CPU list with blanks): for the journal,
+    and for the record of game.intended written before its set-property."""
     match enum_member(BoxProp, prop):
         case BoxProp.MEMORY_LOW:
             size = ByteSize.parse(value)
@@ -102,7 +103,7 @@ def unset_settings(settings: Sequence[str], now: Mapping[str, str]) -> list[Unse
 
 def set_again_text(unit: str, unset: Sequence[Unset], *, ok: bool) -> tuple[int, str]:
     """The journal line (priority, text) for a box the tick set again (ok) or could not (unset_settings)."""
-    what = "; ".join(f"{u.prop} is '{u.now}', not '{_shown_form(u.prop, u.value)}'" for u in unset)
+    what = "; ".join(f"{u.prop} is '{u.now}', not '{shown_form(u.prop, u.value)}'" for u in unset)
     settings = " ".join(f"{u.prop}={u.value}" for u in unset)
     if ok:
         return 5, f"{unit}: {what} (its set failed, or something undid it): set {settings} again"

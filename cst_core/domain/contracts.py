@@ -42,6 +42,7 @@ class StateFormatKey(StrEnum):
     GAME_INTENDED = "game-intended"
     GAME_LEFTOVERS = "game-leftovers"
     DOCKER_NOCOW_OUTCOME = "docker-nocow-outcome"
+    DOCKER_NOCOW_POSTPONED = "docker-nocow-postponed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,10 +138,22 @@ def version_of(data: object, field: str) -> int | None:
 #   sysfs file that refused the write), kept for the next 'off' and the
 #   watchdog's tick while the profile is off. game.state alone keeps meaning
 #   "on": 'off' removes it whatever it could undo. An older CST never reads
-#   or writes this file.
+#   or writes this file. Format 2 adds the reloads due ("reload MGR") and a
+#   user line before every entry ("user -" for none); this version still
+#   reads format 1, and a CST that reads only format 1 leaves a format 2 file
+#   alone.
 # docker-nocow-outcome: why docker-volumes-nocow left no migration scheduled
 #   (it gave up, or an install could not schedule it), for its status and cst
 #   doctor; written and removed best effort, read by no decision of the helper.
+# docker-nocow-postponed: the boots at which docker-volumes-nocow's boot run
+#   had to wait (Docker running, a daemon.json it cannot read), for its status
+#   and cst doctor. Written by the boot run; removed by the first boot not held
+#   back and by unmark, and, when Docker or dockerd held the boot back, by a
+#   boot with no volumes folder and by one with nothing to do (no flag, and the
+#   folder has +C already), whatever its version (the removal ends the record).
+#   A boot held back by daemon.json is always recorded. A boot run that finds a
+#   newer format and would count itself leaves it as it is and does not count
+#   itself in it.
 _TABLE: Final = r"""
 alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/pending_alerts/domain.py doctor/application/alerts.py | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/adapters/monitor.py | btrfs/stall_report/domain/window.py                | "v" of each record
@@ -153,8 +166,9 @@ vm-nas-torn        | /var/lib/cst/vm-nas-torn.json              | 1 | vm/adapter
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py cpu/cli.py cpu/power/adapters.py doctor/application/cpu.py | none (its existence is the contract)
 game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py doctor/application/cpu.py | first line "cst-game-intended 1" (none: 0)
-game-leftovers     | /run/cpu-setup/game.leftovers              | 1 | cpu/game/adapters/leftovers.py   | cpu/game/adapters/leftovers.py cpu/game/adapters/report.py doctor/application/cpu.py | first line "cst-game-leftovers 1" (none: 0)
+game-leftovers     | /run/cpu-setup/game.leftovers              | 2 | cpu/game/adapters/leftovers.py   | cpu/game/adapters/leftovers.py cpu/game/adapters/report.py doctor/application/cpu.py | first line "cst-game-leftovers 2" (none: 0)
 docker-nocow-outcome | /var/lib/docker-volumes-nocow/outcome    | 1 | btrfs/docker_volumes_nocow/adapters.py | btrfs/docker_volumes_nocow/adapters.py doctor/application/docker_nocow.py | "v" (none: 0)
+docker-nocow-postponed | /var/lib/docker-volumes-nocow/postponed | 1 | btrfs/docker_volumes_nocow/adapters.py | btrfs/docker_volumes_nocow/adapters.py doctor/application/docker_nocow.py | "v" (none: 0)
 """
 
 

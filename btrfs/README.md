@@ -851,7 +851,16 @@ docker volume rm <name>         # or one volume by name
   as below, and a later `install` starts afresh). One gap is left: a
   container that writes into a volume during the few milliseconds between
   mark's two looks at the volumes is asked for after `+C` (still flushed),
-  so a kill exactly there can lose that request.
+  so a kill exactly there can lose that request. When that second look
+  fails (an error reading a volume), `mark` writes the request all the
+  same and exits 2, with a journal line `... the migration is requested:
+  the next boot looks at the volumes again`: what a container wrote in
+  between is unknown, and no boot asks for a folder that has `+C`. A
+  migration with nothing to copy just removes its flag at the next boot.
+  When that request cannot be written either, it is recorded as
+  `not-scheduled` as above. If the same error comes back at the boots, the
+  request ends as any other that does not finish: two boots, then the
+  give-up alert and its record.
   When no volume holds copy-on-write data, `mark` removes an old counter
   instead; if that fails (a folder in its place, a read-only `/var`), it
   sets no `+C`, exits 2 and the journal names the file (the next boot sets
@@ -895,8 +904,16 @@ docker volume rm <name>         # or one volume by name
   it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
-  The first boot that is not held back removes the record, and so does a
-  boot that finds no volumes folder (Docker removed, `data-root` moved). To run the
+  The first boot that is not held back removes the record. When Docker or
+  another `dockerd` held the boot back, so do a boot that finds no volumes
+  folder (Docker removed, `data-root` moved) and one with nothing to do (no
+  migration scheduled, and the folder has `+C` already), whatever its format;
+  a boot held back by `daemon.json` is always recorded. The record is format 1 (its `"v"`); one without it,
+  as an older CST wrote it, is format 0 and is read and counted on. A record
+  of a newer format (a newer CST wrote it, and an older one runs now) is left
+  as it is by a held-back boot that would count itself, which is not counted in it
+  and says so in the journal, and `status` and `cst doctor` name it. A time no clock can show
+  (a damaged record) is printed as `?`, and the rest of the line stays. To run the
   migration by hand once nothing uses the volumes:
   `sudo systemctl stop docker.socket docker.service`, then
   `sudo systemctl start docker-volumes-nocow.service`, and when it is done
@@ -911,7 +928,12 @@ docker volume rm <name>         # or one volume by name
   from two boots on), and the first boot after the file is fixed runs it. `mark`
   (what `install` runs) sets no `+C` then and exits 2, but writes the request
   (an old count reset, then the flag, each flushed to disk), so that boot runs
-  the migration. Another dockerd whose config file cannot be read that way
+  the migration. Its journal line says so: `/etc/docker/daemon.json: not
+  JSON: the migration is requested, and mark sets no +C on the volumes
+  folder: fix the file, and the first boot after that runs it` (the folder
+  keeps the `+C` an earlier install may have set). When the request
+  cannot be written, the line before it says why, and mark's own line is
+  `... mark sets no +C on the volumes folder`. Another dockerd whose config file cannot be read that way
   counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
@@ -2753,6 +2775,12 @@ journalctl -b -u docker-volumes-nocow
 Remove the cause, or run the migration by hand once nothing uses the volumes
 (section 4.10).
 
+`/var/lib/docker-volumes-nocow/postponed is format N of the
+docker-nocow-postponed (this CST reads format 1 and older): written by a newer
+CST` instead means an older helper runs beside the record a newer one wrote (a
+downgrade): it does not count its boots in it. Install the newer CST again, or
+remove the record; the first boot that is not held back removes it too.
+
 ### No desktop alerts arrive
 
 Run `cst btrfs test-alert` in a terminal of your desktop. It goes
@@ -2859,7 +2887,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain/args.py` (the command line: `CompressCommand`, `CompressArgs`, `parse_compress_args`); `domain/__init__.py` (`CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, which fstab lines and mounts are the root filesystem's, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
 | `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`). |
 | `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs cache`: manages per-user `/var/mnt/cache/<user>` -> `~/.cache` and `/var/mnt/scratchpad/<user>` -> `~/Scratchpad` bind mounts, `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_CACHE_ROOT`: a test root for every path it reads and writes). |
-| `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox. |
+| `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox (section 9.2). `domain.py` (the command line, the disks and what udev says of them (`BlockDisk`, `UdevProperties`), reading `io.cost.qos`, the apply and revert plans, the status and plan lines; no I/O); `ports.py` (the eight boundaries the use cases go through: `io.cost.qos`, the managed-devices file, sysfs, udev, systemd, the installer, the in-process removal of `btrfs:iocost` and the two locks); `application.py` (`Iocost`: `status`, `plan`, `apply` and `revert`, live-only or not: the order of the steps, the managed devices saved before their lines are written, the component marked done last and pending first, which lock each step holds, and the error line of each failure; no I/O); `adapters.py` (the ports over the files and commands as the host sees them, `/run/host` from a toolbox for `status` and `plan`: `io.cost.qos` and sysfs, the managed-devices file through cst_core's `ensure_dir` and `write_atomic`, `udevadm`, systemctl through `SystemctlAdapter`, the installer, `InstallService` and the lock files through `take_lock`; and where they are, `IocostPaths`); `wiring.py` (the composition root: the use cases built over the real adapters, `status`/`plan`/`apply`/`revert` from the command line, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
 | `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `ports.py` (the four boundaries the use cases go through: `snapshots.conf`, the drop-in, systemd, sysfs); `application.py` (`ScrubLimit`: `status`, `plan` and `set`/`off`: `snapshots.conf`, then the drop-in, then `daemon-reload` when this run changed the drop-in or systemd has not loaded it as it is on disk (`NeedDaemonReload`, which `status` and `plan` also ask), and the rollback of both files on a failure; no I/O); `adapters.py` (the ports over the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`: `snapshots.conf` written by cst_core's `ensure_dir` and `write_atomic`, the drop-in through the installer without changing `btrfs:core`'s state in the install record, systemctl through `SystemctlAdapter`, on the host from a toolbox for `NeedDaemonReload`, and sysfs); `wiring.py` (the composition root: the use case built over the real adapters, `status`/`plan`/`set`/`off` from the command line, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |

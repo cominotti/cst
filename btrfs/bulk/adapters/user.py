@@ -264,9 +264,8 @@ class UserFiles:
         return as_user(self.pw, self.home, is_bool, self.u_create_bulk, bulk)
 
     def u_relabel(self, path: str) -> bool:
-        """A new subvolume root has no SELinux label (unlabeled_t), and files
-        created in it would inherit that: give it the policy's label (as the
-        user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
+        """A new subvolume root has no SELinux label (unlabeled_t), and files created in it would inherit that:
+        give it the policy's label (as the user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
         with contextlib.suppress(OSError):
             self.machine.run(["restorecon", path])
         return True
@@ -594,12 +593,12 @@ class UserFiles:
         return n
 
     def u_steam_prepare(self, parts: Sequence[SteamPart], idle: bool = False) -> int:
-        """Copy every part to its .bulk-new name and check it: a reflink clone,
-        or (mode 'copy': NOCOW data) a real copy whose every byte is compared
-        afterwards. Returns the ctime stamp (ns) taken before the copy. idle:
-        this is a child process of its own (as_user): it lowers its own
-        priority for the copy and the comparison."""
+        """Copy every part to its .bulk-new name and check it: a reflink clone, or (mode 'copy': NOCOW data)
+        a real copy whose every byte is compared afterwards. Returns the ctime stamp (ns) taken before the
+        copy. idle: this is a child process of its own (as_user): it lowers its own priority for the copy
+        and the comparison."""
         for p in parts:
+            self.drop_marked(p["new"])  # what a cut u_drop left, without its journal (as u_prepare)
             for x in (p["new"], p["dst"]):
                 if kind(x) != LstatKind.ABSENT:
                     raise Unexpected(f"{x} exists already: remove it or move it back")
@@ -698,11 +697,12 @@ class UserFiles:
         return as_user(self.pw, self.home, is_bool, self.u_steam_new_written, j)
 
     def u_steam_rollback(self, j: SteamJournal) -> bool:
-        """Undo a switch, or what an interruption left of one: the manifest
-        leaves the new library first, the game comes back first. If a source
-        path was created again meanwhile, nothing is deleted (Unexpected)."""
+        """Undo a switch, or what an interruption left of one: the manifest leaves the new library
+        first, the game comes back first; a copy a cut u_drop left (marked) goes first, unchecked. If
+        a source path was created again meanwhile, nothing is deleted (Unexpected)."""
         parts = j["parts"]
         for p in parts:
+            self.drop_marked(p["new"])
             if kind(p["old"]) != LstatKind.ABSENT and kind(p["src"]) != LstatKind.ABSENT:
                 raise Unexpected(
                     f"{p['src']} was created again while the data waited in {p['old']}: move what you "
@@ -720,7 +720,7 @@ class UserFiles:
         return True
 
     def drop_steam_copies(self, j: SteamJournal) -> None:
-        """u_steam_rollback's last step: the copies go, unless one was written to."""
+        """u_steam_rollback's last step: the copies go (u_drop), unless one was written to."""
         for p in j["parts"]:
             if kind(p["new"]) != LstatKind.ABSENT:
                 if "stamp2" in j and self.written_since(p["new"], j["stamp2"]):
@@ -728,14 +728,14 @@ class UserFiles:
                         f"the data is back at {p['src']}, but the copy {p['new']} was written to as well: "
                         f"copy what you need from it, delete it, then run 'bulk steam apply' again"
                     )
-                self.u_rmtree(p["new"])
+                self.u_drop(p["new"])
 
     def steam_rollback(self, j: SteamJournal) -> bool:
         return as_user(self.pw, self.home, is_bool, self.u_steam_rollback, j)
 
     def u_steam_finish(self, j: SteamJournal) -> bool:
-        for p in j["parts"]:
-            for x in (p["old"], p["new"]):
+        for p in j["parts"]:  # the old copies, and a copy still there (marked or not)
+            for x in (p["old"], p["new"], p["new"] + DROP_MARK):
                 if kind(x) != LstatKind.ABSENT:
                     self.u_rmtree(x)
         return True

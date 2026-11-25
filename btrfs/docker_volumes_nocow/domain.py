@@ -119,7 +119,7 @@ class NocowPaths:
     attempts: str = "/var/lib/docker-volumes-nocow/attempts"
     # The boots at which migrate had to wait (JSON, world-readable): shown by
     # status and by `cst doctor`, removed at the first boot that is not held back.
-    postponed: str = "/var/lib/docker-volumes-nocow/postponed"
+    postponed: str = state_format(StateFormatKey.DOCKER_NOCOW_POSTPONED).path
     # Why no migration is scheduled, when the helper knows (JSON, world-readable): status shows it.
     outcome: str = state_format(StateFormatKey.DOCKER_NOCOW_OUTCOME).path
     notify: str = NOTIFY_PROGRAM
@@ -222,10 +222,17 @@ def daemon_args(args: Sequence[str]) -> DaemonArgs:
     return DaemonArgs(root, config)
 
 
-class PostponedRecord(TypedDict):
-    """The postponed file (JSON) as this helper writes it: the latest reason, the boots in a row
-    (counted once per boot id), the first and the last of them (epoch seconds), the last boot's id."""
+# ---- the postponed record: the boots at which the migration had to wait -------------------------
+POSTPONED_FORMAT: Final = state_format(StateFormatKey.DOCKER_NOCOW_POSTPONED)
+POSTPONED_VERSION: Final = "v"  # the record's key that holds its format version (none: format 0)
 
+
+class PostponedRecord(TypedDict):
+    """The postponed file (JSON) as this helper writes it: its format version, the latest reason, the
+    boots in a row (counted once per boot id), the first and the last of them (epoch seconds), the last
+    boot's id."""
+
+    v: int
     reason: str
     boots: int
     first: int
@@ -237,6 +244,7 @@ class StoredPostponed(TypedDict, total=False):
     """The postponed file as read back: PostponedRecord's keys, none of them checked (a file this
     helper did not write may hold anything); next_postponed and postponed_line check what they use."""
 
+    v: object
     reason: object
     boots: object
     first: object
@@ -251,14 +259,34 @@ def is_stored_postponed(value: object) -> TypeIs[StoredPostponed]:
 
 def next_postponed(rec: StoredPostponed | None, *, why: str, boot: str, now: int) -> PostponedRecord:
     """The record after one more postponed run: boots counted once per boot (by the kernel's
-    boot id), the latest reason kept. A record this helper did not write starts afresh."""
+    boot id), the latest reason kept. A record this helper did not write (odd fields, or a version
+    that is no whole number) starts afresh; one of format 0 (no version) is counted on. The caller
+    never passes one of a newer format (postponed_newer: it is left as it is)."""
     old = rec or {}
     boots, first = old.get("boots"), old.get("first")
-    if type(boots) is not int or type(first) is not int or boots < 1:
+    if (
+        not POSTPONED_FORMAT.readable(old, POSTPONED_VERSION)
+        or type(boots) is not int
+        or type(first) is not int
+        or boots < 1
+    ):
         boots, first = 0, now  # no record, or one this helper did not write
     if not boots or old.get("boot_id") != boot:
         boots += 1
-    return {"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}
+    return {"v": POSTPONED_FORMAT.version, "reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}
+
+
+def postponed_newer(rec: object, path: str) -> str | None:
+    """What a reader says of a postponed record (rec: the file's JSON, None for none) of a newer format
+    than this checkout reads (path: its file), or None for any other record."""
+    found = POSTPONED_FORMAT.newer(rec, POSTPONED_VERSION)
+    return None if found is None else POSTPONED_FORMAT.newer_text(path, found)
+
+
+def postponed_time(last: object) -> str | None:
+    """A postponed record's "last" as status and cst doctor show it (LOCAL_TIME_FORMAT), or None when it
+    is no integer (a bool is none) or a time the C library cannot show (the outcome record's guard)."""
+    return _local_time(last) if type(last) is int else None
 
 
 # ---- the outcome record: why no migration is scheduled -----------------------------------------
@@ -313,15 +341,23 @@ def outcome_unreadable(path: str) -> OutcomeRead:
     return OutcomeRead(problem=f"cannot read {path}")
 
 
+LOCAL_TIME_FORMAT: Final = "%Y-%m-%d %H:%M"  # how status and cst doctor show a time of the helper's records
+
+
+def _local_time(at: int) -> str | None:
+    """at (epoch seconds) as status and cst doctor show it (LOCAL_TIME_FORMAT), or None when the C library
+    cannot show it: time.localtime raises past its range, and time.strftime raises on some times
+    localtime accepts (a year past what a C int holds)."""
+    try:
+        return time.strftime(LOCAL_TIME_FORMAT, time.localtime(at))
+    except OverflowError, OSError, ValueError:
+        return None
+
+
 def _is_local_time(at: int) -> bool:
     """at (epoch seconds) is a time the C library can show: the readers' own call (status's outcome_line,
-    cst doctor's check) works. time.localtime raises past its range, and time.strftime raises on some
-    times localtime accepts (a year past what a C int holds)."""
-    try:
-        time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
-    except OverflowError, OSError, ValueError:
-        return False
-    return True
+    cst doctor's check) works."""
+    return _local_time(at) is not None
 
 
 def parse_outcome(text: str | None, path: str) -> OutcomeRead:
@@ -351,7 +387,7 @@ def outcome_line(read: OutcomeRead) -> str:
         return f"  {read.problem}"
     if read.record is None or read.outcome is None:
         return ""
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(read.record["at"]))
+    when = time.strftime(LOCAL_TIME_FORMAT, time.localtime(read.record["at"]))
     match read.outcome:
         case NocowOutcome.GAVE_UP:
             return f"  migration gave up {when}: {read.record['reason']}; run cst btrfs install to try again"
@@ -362,10 +398,16 @@ def outcome_line(read: OutcomeRead) -> str:
             )
 
 
-def postponed_line(rec: StoredPostponed | None) -> str:
-    """The status line of a postponed migration, or ""."""
+def postponed_line(rec: StoredPostponed | None, path: str) -> str:
+    """The status line of a postponed migration (path: its record's file), or "": no record, an empty
+    one or one whose version is no whole number (as a record that is not an object). A record of a newer
+    format is named so; a time no clock can show reads as "?", the rest of the line kept."""
     if rec is None or len(rec) == 0:
         return ""
-    last = rec.get("last")
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "?"
+    newer = postponed_newer(rec, path)
+    if newer is not None:
+        return f"  {newer}"
+    if not POSTPONED_FORMAT.readable(rec, POSTPONED_VERSION):
+        return ""
+    when = postponed_time(rec.get("last")) or "?"
     return f"  migration postponed at {rec.get('boots', '?')} boot(s) in a row, last {when}: {rec.get('reason', '?')}"
