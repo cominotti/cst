@@ -750,8 +750,8 @@ not derive from it.
 - `mbt_cache_rollback.py`: `cst btrfs cache` attach and detach for two
   users and the three kind selections, over the in-memory fakes of its
   ports (`CacheWorld` in `btrfs/tests/fakes.py`: /etc/fstab, the mount
-  table and what systemd has loaded of /etc/fstab), with a bind mount
-  or the daemon-reload failing: `/etc/fstab` names exactly the mounted
+  table and what systemd has loaded of /etc/fstab), with a bind mount,
+  an umount or the daemon-reload failing: `/etc/fstab` names exactly the mounted
   binds, a failed command leaves `/etc/fstab` and the mounts as they were,
   and the same command with no fault exits 0.
 - `mbt_scrub_rollback.py`: `cst btrfs scrub-limit` set and off from four

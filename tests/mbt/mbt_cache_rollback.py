@@ -7,7 +7,7 @@ parsed as the command line parses it) over in-memory port fakes
 has loaded of /etc/fstab, the folders and the accounts; test_cache_ports.py
 keeps them equal to the real adapters), for two users, through any sequence
 of attach and detach of the cache, the scratchpad or both, where one bind
-mount or the daemon-reload fails.
+mount, one umount (of a detach) or the daemon-reload fails.
 
 After every step: /etc/fstab's managed lines name exactly the binds mounted
 under /var/home (no line waits for the next boot without its mount, and no
@@ -19,22 +19,25 @@ after one killed between its /etc/fstab write and its daemon-reload reloads.
 
 Each step: a step killed at its daemon-reload (the fault KILLED_AT_RELOAD:
 CacheWorld's before_reload raises Killed, after the /etc/fstab write)
-has no exit to check. A step whose fault fired (the command ran the mount or the reload
-that was made to fail) exits non-zero with an ERROR line, never ROLLBACK
+has no exit to check. A step whose fault fired (the command ran the mount, the umount or the
+reload that was made to fail) exits non-zero with an ERROR line, never ROLLBACK
 INCOMPLETE (nothing here can make the undo fail), and left /etc/fstab's text
 and the mounts as they were (the folders and the CACHEDIR.TAG it made may
 stay, as btrfs/README.md says). A step with no fault, or whose fault did not
 fire (the bind was already mounted, /etc/fstab did not change so no reload
 ran), exits 0: the same command converges from every state.
 
-Not modelled: a failed umount, a failed write of /etc/fstab, a findmnt that
+Not modelled: a failed write of /etc/fstab, a findmnt that
 fails, a mount CST did not make, kills elsewhere than at the daemon-reload
 (btrfs/tests/test_cache_faults.py kills at every point of one run), and a fault that fails only some of
 the calls it matches: a reload fault fails the step's one daemon-reload
-(its undo runs none), and a mount fault fails an attach's bind, never the
-undo's mount again of a detach. So the undo never fails here; the
-ROLLBACK INCOMPLETE paths are covered by btrfs/tests/test_cache.py (an
-/etc/fstab that cannot be put back, a bind not mounted again).
+(its undo runs none), a mount fault fails an attach's bind, never the
+undo's mount again of a detach, and an umount fault fails a detach's
+umount, never an attach's undo. So the undo never fails here (a detach's
+failed umount mounts again what it unmounted, writes the lines back and
+reloads); the ROLLBACK INCOMPLETE paths are covered by
+btrfs/tests/test_cache_faults.py (an /etc/fstab that cannot be put back,
+a bind not mounted again).
 """
 
 from enum import StrEnum
@@ -81,12 +84,14 @@ SELECTION_FLAGS: Final = {
 
 
 class CacheStepFault(StrEnum):
-    """What fails in one step: nothing, the cache's or the scratchpad's mount --bind, or daemon-reload; or the
-    run is killed at its daemon-reload."""
+    """What fails in one step: nothing, the cache's or the scratchpad's mount --bind or umount, or
+    daemon-reload; or the run is killed at its daemon-reload."""
 
     NONE = "none"
     CACHE_MOUNT = "cache-mount"
     SCRATCHPAD_MOUNT = "scratchpad-mount"
+    CACHE_UMOUNT = "cache-umount"
+    SCRATCHPAD_UMOUNT = "scratchpad-umount"
     RELOAD = "daemon-reload"
     KILLED_AT_RELOAD = "killed-at-daemon-reload"
 
@@ -96,11 +101,31 @@ MOUNT_FAULT: Final = {
     CacheStepFault.CACHE_MOUNT: CacheMountKind.CACHE,
     CacheStepFault.SCRATCHPAD_MOUNT: CacheMountKind.SCRATCHPAD,
 }
+# The bind whose umount each umount fault fails ("target is busy").
+UMOUNT_FAULT: Final = {
+    CacheStepFault.CACHE_UMOUNT: CacheMountKind.CACHE,
+    CacheStepFault.SCRATCHPAD_UMOUNT: CacheMountKind.SCRATCHPAD,
+}
+ATTACH_FAULTS: Final = (
+    CacheStepFault.NONE,
+    CacheStepFault.CACHE_MOUNT,
+    CacheStepFault.SCRATCHPAD_MOUNT,
+    CacheStepFault.RELOAD,
+    CacheStepFault.KILLED_AT_RELOAD,
+)
+DETACH_FAULTS: Final = (
+    CacheStepFault.NONE,
+    CacheStepFault.RELOAD,
+    CacheStepFault.KILLED_AT_RELOAD,
+    CacheStepFault.CACHE_UMOUNT,
+    CacheStepFault.SCRATCHPAD_UMOUNT,
+)
 
 type Mounts = list[tuple[str, str, str]]
 
 # What a failed mount --bind or daemon-reload answers (the error's text is the reason the line gives).
 MOUNT_FAILED: Final = OSError(errno.EPERM, "mount: permission denied")
+UMOUNT_FAILED: Final = OSError(errno.EBUSY, "umount: target is busy")
 RELOAD_FAILED: Final = OSError(errno.EIO, "Failed to reload daemon")
 
 
@@ -147,10 +172,15 @@ class CacheMachine(RuleBasedStateMachine):
         if fault == CacheStepFault.KILLED_AT_RELOAD:
             self.world.before_reload = _kill
             return ""
+        # The binding as build_user_bindings makes it: BASE/USER -> HOME/REL.
+        kind = UMOUNT_FAULT.get(fault)
+        if kind is not None:
+            point = f"umount /var/home/{user}/{REL_FOR_KIND[kind]}"
+            self.world.fail(point, UMOUNT_FAILED)
+            return point
         kind = MOUNT_FAULT.get(fault)
         if kind is None:
             return ""
-        # The binding as build_user_bindings makes it: BASE/USER -> HOME/REL.
         point = f"mount --bind {BASE_FOR_KIND[kind]}/{user} /var/home/{user}/{REL_FOR_KIND[kind]}"
         self.world.fail(point, MOUNT_FAILED)
         return point
@@ -185,7 +215,7 @@ class CacheMachine(RuleBasedStateMachine):
     @rule(
         user=st.sampled_from(sorted(USERS)),
         selection=st.sampled_from(CacheSelection),
-        fault=st.sampled_from(CacheStepFault),
+        fault=st.sampled_from(ATTACH_FAULTS),
     )
     def attach(self, user: str, selection: CacheSelection, fault: CacheStepFault) -> None:
         self._step("attach", user, selection, fault)
@@ -193,7 +223,7 @@ class CacheMachine(RuleBasedStateMachine):
     @rule(
         user=st.sampled_from(sorted(USERS)),
         selection=st.sampled_from(CacheSelection),
-        fault=st.sampled_from([CacheStepFault.NONE, CacheStepFault.RELOAD, CacheStepFault.KILLED_AT_RELOAD]),
+        fault=st.sampled_from(DETACH_FAULTS),
     )
     def detach(self, user: str, selection: CacheSelection, fault: CacheStepFault) -> None:
         self._step("detach", user, selection, fault)
