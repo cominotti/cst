@@ -213,7 +213,8 @@ read as python3 reads its options: a repository file, with or without
 `.py`, also under `${{ github.workspace }}/`, or `-m` of a repository
 module; one named by a variable fails, unless that `python3` is text: in
 quotes, a word of `echo` or `printf`, or a YAML key's value other than
-`run:`) is one of its entries and that each such runner's python3 is recorded, then
+`run:`; the argument of a shell's `-c`, `bash -c "..."` or `sh -c '...'`,
+is a command line, not text, escaped quotes inside it included) is one of its entries and that each such runner's python3 is recorded, then
 parses each file with 3.12's grammar and looks for a table of newer
 standard-library names. The table holds the known, cheap cases only: a new
 method or keyword argument passes it, and CI stays the real check. A use behind
