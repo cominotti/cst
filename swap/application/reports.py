@@ -91,6 +91,16 @@ _RECORD_ROW: Final = "install record"
 _RECORD_REFUSAL_OUTCOME: Final = "apply stops before it writes anything"
 
 
+def tmpfiles_compressor(text: str) -> str:
+    """The compressor zswap.conf sets (its first compressor line); "" when it sets none."""
+    return next((val for name, val in parse_tmpfiles_params(text) if name == "compressor"), "")
+
+
+def _not_regular(fs: FileSystemPort, path: str) -> bool:
+    """Whether path is there (a link that leads nowhere too) and is not a regular file after links."""
+    return fs.lexists(path) and not fs.is_file(path)
+
+
 def _root_note(env: SwapEnvironment, state: ManagedState, swap_name: str, verb: str, *, cannot_read: str) -> str:
     """The note of a row of plan and status: state_note's, except a file that cannot be read when the
     reader already runs as the host's root (env.host_root; root in a toolbox is not): cannot_read, with
@@ -148,7 +158,7 @@ class _FileSettingsFacts:
         return self._fs.exists(self._env.crypttab) and not self._fs.is_readable(self._env.crypttab)
 
     def crypttab_not_regular(self) -> bool:
-        return self._fs.lexists(self._env.crypttab) and not self._fs.is_file(self._env.crypttab)
+        return _not_regular(self._fs, self._env.crypttab)
 
     def crypttab_text(self) -> str:
         return self._fs.read_text(self._env.crypttab, "", regular_only=True) or ""
@@ -206,6 +216,12 @@ class SwapReports:
     def _read_first(self, path: str, default: str) -> str:
         text = self._fs.read_first_line(path)
         return default if text is None else text
+
+    def _in_proc_crypto(self, algorithm: str) -> bool:
+        """Whether /proc/crypto lists algorithm now (none listed when it cannot be read)."""
+        return crypto_has_algorithm(
+            self._fs.read_text(posixpath.join(self._env.proc_dir, "crypto"), "") or "", algorithm
+        )
 
     def _inspect_marked(self, path: str, spec: MarkedLineSpec) -> ManagedState:
         exists = self._fs.exists(path)
@@ -339,7 +355,7 @@ class SwapReports:
             (f_state, env.fstab, f"fstab: {spec.mapper_path} line"),
         )
         for state, path, row in rows:
-            if state == OwnedState.UNREADABLE and self._fs.lexists(path) and not self._fs.is_file(path):
+            if state == OwnedState.UNREADABLE and _not_regular(self._fs, path):
                 # Root cannot help: no --root advice.
                 note = f"{NOT_REGULAR_NOTE}: apply refuses; put a regular file there"
             else:
@@ -367,16 +383,8 @@ class SwapReports:
     def _compressor_item(self) -> PlanItem | None:
         """apply's compressor check without its modprobe (plan loads nothing): "?" when the compressor of
         swap/tmpfiles is not in /proc/crypto now."""
-        comp = next(
-            (
-                val
-                for name, val in parse_tmpfiles_params(self._desired_text(self._env.src_tmpfiles))
-                if name == "compressor"
-            ),
-            "",
-        )
-        crypto_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "crypto"), "") or ""
-        if not comp or crypto_has_algorithm(crypto_text, comp):
+        comp = tmpfiles_compressor(self._desired_text(self._env.src_tmpfiles))
+        if not comp or self._in_proc_crypto(comp):
             return None
         return PlanItem(
             "?",

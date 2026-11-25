@@ -20,7 +20,7 @@ from swap.application.memory_tuning import (
     wait_for_uresourced_floor,
 )
 from swap.application.environment import DROPIN_ENTRY, OLD_DROPIN_ENTRY, SYSCTL_ENTRY, TMPFILES_ENTRY
-from swap.application.reports import SLICE_DROPIN_NOT_REGULAR, SwapReports
+from swap.application.reports import SLICE_DROPIN_NOT_REGULAR, SwapReports, tmpfiles_compressor
 from swap.domain import (
     SETTING_STATE_WIDTH,
     WSF_EXPERIMENT,
@@ -30,7 +30,6 @@ from swap.domain import (
     SwapApplyResult,
     SwapHardwareSpec,
     SwapSpecState,
-    crypto_has_algorithm,
     find_swap_used_kib,
     is_safe_partition_type,
     killed_text,
@@ -98,13 +97,12 @@ class SwapApplicationService(SwapReports):
             fail(f"zswap is not built into this kernel (no {env.zswap_params_dir}).")
             return None
         tmpfiles_text = self._desired_text(env.src_tmpfiles)
-        comp = next((val for name, val in parse_tmpfiles_params(tmpfiles_text) if name == "compressor"), "")
+        comp = tmpfiles_compressor(tmpfiles_text)
         if not comp:
             fail(f"no compressor line in {env.src_tmpfiles}.")
             return None
         self._system.modprobe(comp)
-        crypto_text = self._fs.read_text(posixpath.join(env.proc_dir, "crypto"), "") or ""
-        if not crypto_has_algorithm(crypto_text, comp):
+        if not self._in_proc_crypto(comp):
             fail(f"Compressor '{comp}' is not available in /proc/crypto.")
             return None
         if not self._fs.is_block_device(spec.device_path):
