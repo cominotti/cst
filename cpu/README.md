@@ -952,7 +952,9 @@ from `off` nor from the ticks that retry it. It writes its record
 to `/run/cpu-setup/game.leftovers`, then names the failed step in the journal
 (`<4>off: could not undo machine.slice CPUWeight=70: kept in
 /run/cpu-setup/game.leftovers for the next off and tick`), and ends with `..., except N setting(s)
-kept in /run/cpu-setup/game.leftovers`. The next `off` and every watchdog
+kept in /run/cpu-setup/game.leftovers`; a `daemon-reload` that failed is
+counted apart (`..., except 2 setting(s) and 1 daemon-reload(s) kept in
+/run/cpu-setup/game.leftovers`). The next `off` and every watchdog
 `tick` while the profile is off undo the kept records again and keep only
 those that fail again; the file is removed when none is left. An `off` with
 no `game.state` and the tick log `<5>undid ..., kept in
@@ -1017,7 +1019,9 @@ cgroup, sysfs or EPP file whose folder is gone (a cgroup that ended, a CPU
 taken offline), so a folder made again later (the next login's cgroup) never
 gets the old session's value. A fixed unit's override outlives the unit, so
 it stays kept. `cst cpu game state` lists the
-kept settings (`leftovers: N setting(s) 'off' could not undo, ...`), and
+kept settings (`leftovers: N setting(s) 'off' could not undo, ...`; with a
+`daemon-reload` among them `leftovers: N setting(s) and M daemon-reload(s)
+'off' could not finish, ...`), and
 `cst doctor` warns about them, by name
 ([doctor/README.md, section 8.4](../doctor/README.md#84-settings-off-could-not-undo)). When
 `game.leftovers` cannot be written (`/run` full), the old file is left as
@@ -1030,7 +1034,8 @@ kept (`<3>off: could not keep ... in /run/cpu-setup/game.leftovers: not
 undone`, without `off:` from the tick); `off` then ends with `..., except N
 setting(s) not undone` (`..., except N setting(s): K kept in
 /run/cpu-setup/game.leftovers, M not undone` when the old file still holds
-some of them). The file is format 2 (`cst-game-leftovers 2` on its first line); format 1
+some of them; `not done` instead of `not undone` when a `daemon-reload` is
+among them). The file is format 2 (`cst-game-leftovers 2` on its first line); format 1
 files, which have a `user UID` line only where the user changes (so an entry
 of no user written after one of a uid reads as that uid's), are still read,
 and every write is format 2. A CST that reads only format 1 leaves a format

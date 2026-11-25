@@ -526,7 +526,7 @@ class GameProfileSteps:
         for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
                 self.ports.state.remove(f)
-        self.log(5, off_text(len(failed), p.leftovers, kept=held))
+        self.log(5, off_text(failed, p.leftovers, kept=held))
         return 0
 
     def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> bool:

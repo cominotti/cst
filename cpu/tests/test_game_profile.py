@@ -66,8 +66,11 @@ from cpu.game.domain.boxes import (
     unset_settings,
 )
 from cpu.game.domain.leftovers import (
+    Entry,
     entry_key,
+    kept_count_text,
     leftover_entries,
+    leftovers_line,
     leftovers_text,
     merged_entries,
     newer_leftovers,
@@ -2796,12 +2799,48 @@ class LeftoversFormatTest(unittest.TestCase):
         )
         self.assertEqual(undo_text(("epp", "3", "balance_power"), epp), "/cpu3/epp = balance_power")
         self.assertEqual(undo_text(("cgw", "/cg/cpuset.cpus", ""), epp, short=True), "/cg/cpuset.cpus")
+        prop: Entry = (None, ("prop", "sys", "m.slice", "CPUWeight", "existed", "70"))
+        sysfs: Entry = (None, ("sysfs", "/x", "0"))
+        reload_sys: Entry = (None, ("reload", "sys"))
+        reload_usr: Entry = ("1000", ("reload", "usr"))
         self.assertEqual(
-            off_text(0, "/l", kept=0), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
+            off_text([], "/l", kept=0), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
         )
-        self.assertTrue(off_text(2, "/l", kept=2).endswith("restored, except 2 setting(s) kept in /l"))
-        self.assertTrue(off_text(2, "/l", kept=0).endswith("restored, except 2 setting(s) not undone"))
-        self.assertTrue(off_text(3, "/l", kept=2).endswith("restored, except 3 setting(s): 2 kept in /l, 1 not undone"))
+        # Settings only: the words as before.
+        self.assertTrue(off_text([prop, sysfs], "/l", kept=2).endswith("restored, except 2 setting(s) kept in /l"))
+        self.assertTrue(off_text([prop, sysfs], "/l", kept=0).endswith("restored, except 2 setting(s) not undone"))
+        self.assertTrue(
+            off_text([prop, sysfs, prop], "/l", kept=2).endswith(
+                "restored, except 3 setting(s): 2 kept in /l, 1 not undone"
+            )
+        )
+        # r26.6: a daemon-reload is counted apart, and one not kept is "not done".
+        self.assertTrue(off_text([reload_sys], "/l", kept=1).endswith("restored, except 1 daemon-reload(s) kept in /l"))
+        self.assertTrue(
+            off_text([reload_sys, reload_usr], "/l", kept=0).endswith("restored, except 2 daemon-reload(s) not done")
+        )
+        self.assertTrue(
+            off_text([prop, sysfs, reload_sys], "/l", kept=3).endswith(
+                "restored, except 2 setting(s) and 1 daemon-reload(s) kept in /l"
+            )
+        )
+        self.assertTrue(
+            off_text([prop, sysfs, reload_sys], "/l", kept=2).endswith(
+                "restored, except 2 setting(s) and 1 daemon-reload(s): 2 kept in /l, 1 not done"
+            )
+        )
+        self.assertEqual(kept_count_text([prop]), "1 setting(s)")
+        self.assertEqual(kept_count_text([reload_usr]), "1 daemon-reload(s)")
+        self.assertEqual(kept_count_text([reload_sys, prop, reload_usr]), "1 setting(s) and 2 daemon-reload(s)")
+        self.assertEqual(
+            leftovers_line([prop], epp),
+            "  leftovers: 1 setting(s) 'off' could not undo, retried by the next off and tick: m.slice CPUWeight",
+        )
+        self.assertEqual(
+            leftovers_line([prop, reload_usr], epp),
+            "  leftovers: 1 setting(s) and 1 daemon-reload(s) 'off' could not finish, retried by the next off and"
+            " tick: m.slice CPUWeight, daemon-reload of uid 1000's user manager",
+        )
 
 
 class LeftoversTest(GameProfileCase):
@@ -3483,9 +3522,13 @@ class LeftoversTest(GameProfileCase):
             " and tick\n",
             out,
         )
-        self.assertTrue(out.endswith(f"restored, except 1 setting(s) kept in {left}\n"), out)
+        self.assertTrue(out.endswith(f"restored, except 1 daemon-reload(s) kept in {left}\n"), out)
         out, _ = self.run_profile("state")
-        self.assertIn("retried by the next off and tick: daemon-reload of the system manager\n", out)
+        self.assertIn(
+            "  leftovers: 1 daemon-reload(s) 'off' could not finish, retried by the next off and tick: daemon-reload"
+            " of the system manager\n",
+            out,
+        )
         self.no_game()
         out, actions = self.run_profile("tick")
         self.assertEqual(actions, [f"{SYS} daemon-reload"])
@@ -3572,7 +3615,7 @@ class LeftoversTest(GameProfileCase):
             f"<3>game-profile: off: could not keep the daemon-reload of the system manager in {left}: not done\n", out
         )
         self.assertNotIn("kept in", out)
-        self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)
+        self.assertTrue(out.endswith("restored, except 1 daemon-reload(s) not done\n"), out)
         self.assertFalse(os.path.exists(left))
 
     def test_state_names_them(self) -> None:

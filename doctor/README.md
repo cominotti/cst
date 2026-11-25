@@ -621,7 +621,9 @@ A reload due (a `daemon-reload` that failed in `off`, or that an `off`
 killed after its removals never ran) is named in the same list
 (`daemon-reload of the system manager`, `daemon-reload of uid UID's user
 manager`): until it runs, systemd still shows the game's values of what that
-`off` removed.
+`off` removed. It is counted apart from the settings, and the line then
+says what `off` could not finish (`game profile: 1 setting(s) and 1
+daemon-reload(s) 'off' could not finish keep the game's value: ...`).
 
 The fix runs `off` once more, which retries them and names in the journal
 why each one still fails. While the profile is on there is no fix line: the

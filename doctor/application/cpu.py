@@ -7,7 +7,7 @@ from typing import Final
 
 from cst_core.domain.units import LoadState, user_manager_head
 from cpu.game.domain import GamePaths, GameRecordKind, Record, intended_records, newer_intended, records, state_uid
-from cpu.game.domain.leftovers import leftover_entries, newer_leftovers, undo_text
+from cpu.game.domain.leftovers import leftover_entries, leftovers_words, newer_leftovers, undo_text
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
@@ -280,7 +280,7 @@ def check_game_leftovers(host: DoctorHostPort) -> Iterator[Result]:
     epp = GamePaths().epp
     what = ", ".join(undo_text(rec, epp, short=True, uid=uid) for uid, rec in entries)
     message = (
-        f"game profile: {len(entries)} setting(s) 'off' could not undo keep the game's value: {what} (kept in "
+        f"game profile: {leftovers_words(entries)} keep the game's value: {what} (kept in "
         f"{GAME_LEFTOVERS}). The next 'off' and the watchdog's tick while the profile is off "
         "(cpu-game-watchdog.timer, every 30 s) undo them again; the journal of 'off' names why each one failed"
     )

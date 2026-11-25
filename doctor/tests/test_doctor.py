@@ -2984,8 +2984,9 @@ class GameProfileTest(Scratch):
         res = self.leftovers_results()
         self.assertEqual([r[0] for r in res], [doc_domain.WARN])
         self.assertIn(
-            "3 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight, daemon-reload of the"
-            " system manager, daemon-reload of uid 1000's user manager (kept in",
+            "game profile: 1 setting(s) and 2 daemon-reload(s) 'off' could not finish keep the game's value:"
+            " machine.slice CPUWeight, daemon-reload of the system manager, daemon-reload of uid 1000's user manager"
+            " (kept in",
             res[0].message,
         )
 

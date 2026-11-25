@@ -179,20 +179,46 @@ def undo_text(rec: Record, epp: Callable[[str], str], *, short: bool = False, ui
             return " ".join(rec)
 
 
-def off_text(failed: int, path: str, *, kept: int) -> str:
-    """The journal line at the end of 'off' (failed: the settings it could not undo; kept: how many of them
-    path holds now, fewer when it could not be written or is of a format this CST does not read)."""
+def kept_count_text(entries: Sequence[Entry]) -> str:
+    """How many entries there are, settings and daemon-reloads apart (a reload due is no setting): "2 setting(s)",
+    "1 daemon-reload(s)", "2 setting(s) and 1 daemon-reload(s)"."""
+    reloads = sum(1 for _uid, rec in entries if reload_of(rec) is not None)
+    settings = len(entries) - reloads
+    parts = [f"{settings} setting(s)"] if settings or not reloads else []
+    if reloads:
+        parts.append(f"{reloads} daemon-reload(s)")
+    return " and ".join(parts)
+
+
+def _has_reload(entries: Sequence[Entry]) -> bool:
+    return any(reload_of(rec) is not None for _uid, rec in entries)
+
+
+def off_text(failed: Sequence[Entry], path: str, *, kept: int) -> str:
+    """The journal line at the end of 'off' (failed: the entries it could not undo or run, settings and
+    daemon-reloads counted apart: kept_count_text; kept: how many of them path holds now, fewer when it could
+    not be written or is of a format this CST does not read). What is neither kept nor done is "not undone",
+    or "not done" when a daemon-reload is among the entries."""
     done = "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
     if not failed:
         return done
-    if kept == failed:
-        return f"{done}, except {failed} setting(s) kept in {path}"
+    what = kept_count_text(failed)
+    lost = "not done" if _has_reload(failed) else "not undone"
+    if kept == len(failed):
+        return f"{done}, except {what} kept in {path}"
     if not kept:
-        return f"{done}, except {failed} setting(s) not undone"
-    return f"{done}, except {failed} setting(s): {kept} kept in {path}, {failed - kept} not undone"
+        return f"{done}, except {what} {lost}"
+    return f"{done}, except {what}: {kept} kept in {path}, {len(failed) - kept} {lost}"
+
+
+def leftovers_words(entries: Sequence[Entry]) -> str:
+    """The kept entries' count and what 'off' did not do with them: "2 setting(s) 'off' could not undo", or with
+    a daemon-reload among them "2 setting(s) and 1 daemon-reload(s) 'off' could not finish" ('state', doctor)."""
+    verb = "could not finish" if _has_reload(entries) else "could not undo"
+    return f"{kept_count_text(entries)} 'off' {verb}"
 
 
 def leftovers_line(entries: Sequence[Entry], epp: Callable[[str], str]) -> str:
     """The line of 'state' for the kept entries."""
     what = ", ".join(undo_text(rec, epp, short=True, uid=uid) for uid, rec in entries)
-    return f"  leftovers: {len(entries)} setting(s) 'off' could not undo, retried by the next off and tick: {what}"
+    return f"  leftovers: {leftovers_words(entries)}, retried by the next off and tick: {what}"

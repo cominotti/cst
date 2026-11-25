@@ -8935,7 +8935,7 @@ echo E2E-OK
                 || { echo "off: $got" >&2; exit 1; }
             grep -qF "off: the daemon-reload of uid $tuid's user manager failed: kept in $lo for the next off and tick" <<<"$got" \
                 || { echo "off: $got" >&2; exit 1; }
-            gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: daemon-reload of the system manager, daemon-reload of uid $tuid's user manager" \
+            gp state | grep -qF "leftovers: 2 daemon-reload(s) 'off' could not finish, retried by the next off and tick: daemon-reload of the system manager, daemon-reload of uid $tuid's user manager" \
                 || { gp state >&2; exit 1; }
             # The next tick, with the real systemctl, runs both reloads.
             gp tick >/dev/null
