@@ -251,21 +251,23 @@ unless the line has an `||` list operator (one in quotes, in `[[ ... ]]` or in
 parentheses handles nothing) or is a one-line function. It does not see a check
 chained to a function (`[[ ... ]] && unchanged`): write those on two lines too.
 
-### Cleanups of /etc/fstab
+### Cleanups of the container's files
 
-A tier 1 test that writes the container's `/etc/fstab` registers its cleanup
-before its script runs, so the cleanup also runs after a script that stopped
-early. The script records the file right after it makes its work folder `w`,
-before any other step: `w/fstab.bak` when there is one, `w/no-fstab` when
-there is none. The cleanup puts the copy back, removes `/etc/fstab` only with
-`no-fstab`, and with neither leaves it alone: the script stopped before it
-wrote the file. `rm -rf w` and `mkdir -p w/...` go on two lines, so a work
-folder that cannot be emptied (a mount still under it) stops the script
-instead of leaving the old content in place. `fstab_saved(w)` and
-`fstab_put_back(w)` in `suites/suite_tier1_systemd.py` give the two lines;
-`cache_reload_scaffold` and `cache_reload_cleanup` (test_177, test_201,
-test_202), test_157, test_159 and test_160 use them. The rule covers `/etc/fstab` only: those cleanups still
-remove other files they found no backup of.
+A tier 1 test that writes one of the container's own files (`/etc/fstab`,
+`/etc/crypttab`, the install record `/var/lib/cst/installed.json`,
+`/run/ostree-booted`) registers its cleanup before its script runs, so the
+cleanup also runs after a script that stopped early. The script records each
+such file right after it makes its work folder `w`, before any other step:
+`w/NAME.bak` when there is one, `w/no-NAME` when there is none. The cleanup
+puts the copy back, removes the file only with `no-NAME`, and with neither
+leaves it alone: the script stopped before it wrote the file. `rm -rf w` and
+`mkdir -p w/...` go on two lines, so a work folder that cannot be emptied (a
+mount still under it) stops the script instead of leaving the old content in
+place. `file_saved(path, w, name)` and `file_put_back(path, w, name)` in
+`suites/suite_tier1_systemd.py` give the two lines (`fstab_saved(w)` and
+`fstab_put_back(w)` for `/etc/fstab`); `cache_reload_scaffold` and
+`cache_reload_cleanup` (test_177, test_201, test_202), test_157, test_159 and
+test_160 use them.
 
 ## Mixed-version tests
 

@@ -1124,20 +1124,30 @@ else:
 """
 
 
+def file_saved(path: str, w: str, name: str) -> str:
+    """The bash line a tier 1 script that writes the container's file path runs right after it makes its work
+    folder w: the file copied to w/NAME.bak, or w/no-NAME when there is none (tests/e2e/README.md, "Cleanups
+    of the container's files")."""
+    return f"if [[ -f {path} ]]; then cp -a {path} {w}/{name}.bak; else touch {w}/no-{name}; fi"
+
+
+def file_put_back(path: str, w: str, name: str) -> str:
+    """The bash line of the cleanup of file_saved(path, w, name): the copy put back, path removed only with
+    w/no-NAME, and left alone with neither (the script stopped before it wrote the file)."""
+    return (
+        f"if [[ -f {w}/{name}.bak ]]; then cp -a {w}/{name}.bak {path}; "
+        f"elif [[ -f {w}/no-{name} ]]; then rm -f {path}; fi"
+    )
+
+
 def fstab_saved(w: str) -> str:
-    """The bash line a tier 1 script that writes /etc/fstab runs right after it makes its work folder w: the
-    file copied to w/fstab.bak, or w/no-fstab when there is none (tests/e2e/README.md, "Cleanups of
-    /etc/fstab")."""
-    return f"if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi"
+    """file_saved for /etc/fstab: w/fstab.bak or w/no-fstab."""
+    return file_saved("/etc/fstab", w, "fstab")
 
 
 def fstab_put_back(w: str) -> str:
-    """The bash line of the cleanup of fstab_saved(w): the copy put back, /etc/fstab removed only with
-    w/no-fstab, and left alone with neither (the script stopped before it wrote the file)."""
-    return (
-        f"if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; "
-        f"elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi"
-    )
+    """The cleanup of fstab_saved(w)."""
+    return file_put_back("/etc/fstab", w, "fstab")
 
 
 def cache_reload_cleanup(w: str) -> str:
@@ -8942,14 +8952,8 @@ echo E2E-OK
             c,
             f"""
             {fstab_put_back(w)}
-            if [[ -f {w}/installed.json.bak ]]; then
-                cp -a {w}/installed.json.bak /var/lib/cst/installed.json
-            else
-                rm -f /var/lib/cst/installed.json
-            fi
-            if [[ ! -f {w}/had-ostree-booted ]]; then
-                rm -f /run/ostree-booted
-            fi
+            {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_put_back("/run/ostree-booted", w, "ostree-booted")}
             rm -f {shlex.quote(f"/etc/systemd/system/{top_unit}")} {shlex.quote(f"/etc/systemd/system/{auto_unit}")}
             systemctl daemon-reload || true
             rm -rf {w}
@@ -8963,9 +8967,9 @@ echo E2E-OK
             rm -rf {w}
             mkdir -p {w}/bin {w}/proc
             {fstab_saved(w)}
-            [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
+            {file_saved("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_saved("/run/ostree-booted", w, "ostree-booted")}
             touch /run/ostree-booted
-            [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
             printf '# test fstab\\nUUID={uuid} / btrfs subvol=root,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
             printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
             printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
@@ -9159,8 +9163,8 @@ EOF
             c,
             f"""
             {fstab_put_back(w)}
-            if [[ -f {w}/installed.json.bak ]]; then cp -a {w}/installed.json.bak /var/lib/cst/installed.json; else rm -f /var/lib/cst/installed.json; fi
-            if [[ ! -f {w}/had-ostree-booted ]]; then rm -f /run/ostree-booted; fi
+            {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_put_back("/run/ostree-booted", w, "ostree-booted")}
             rm -f {shlex.quote(f"/etc/systemd/system/{top_unit}")} {shlex.quote(f"/etc/systemd/system/{auto_unit}")}
             rm -f {journald_dest} && rmdir /etc/systemd/journald.conf.d 2>/dev/null || true
             systemctl daemon-reload || true
@@ -9176,9 +9180,9 @@ EOF
             rm -rf {w}
             mkdir -p {w}/bin {w}/proc
             {fstab_saved(w)}
-            [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
+            {file_saved("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_saved("/run/ostree-booted", w, "ostree-booted")}
             touch /run/ostree-booted
-            [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
             printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
             printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
             printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
@@ -9415,7 +9419,7 @@ EOF
             c,
             f"""
             {fstab_put_back(w)}
-            if [[ -f {w}/crypttab.bak ]]; then cp -a {w}/crypttab.bak /etc/crypttab; else rm -f /etc/crypttab; fi
+            {file_put_back("/etc/crypttab", w, "crypttab")}
             systemctl daemon-reload || true
             rm -rf {w}
             """,
@@ -9428,9 +9432,9 @@ EOF
             rm -rf {w}
             mkdir -p {w}/bin {w}/fail {w}/fail2 {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
             {fstab_saved(w)}
+            {file_saved("/etc/crypttab", w, "crypttab")}
             for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do mkdir -p {w}/var/home/$u; done
             mkdir -p "{w}/var/home/u four"
-            [[ ! -f /etc/crypttab ]] || cp -a /etc/crypttab {w}/crypttab.bak
             {{
                 echo "root:x:0:0:root:/root:/bin/bash"
                 n=1000
