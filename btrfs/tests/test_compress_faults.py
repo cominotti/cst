@@ -492,7 +492,6 @@ type Layers = tuple[tuple[str, ...], str | None, tuple[str, ...], str | None]
 def start_world(s: Start) -> CompressWorld:
     """The machine a start state describes."""
     opts = _compress_opts if s.tool == Tool.COMPRESS else _commit_opts
-    live = _compress_opts if s.tool == Tool.COMPRESS else _commit_opts
     w = CompressWorld(is_ostree=s.kargs is not None, root_uuid=UUID)
     home_fstab = (
         f"UUID={HOME_UUID} /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0\n"
@@ -511,7 +510,7 @@ def start_world(s: Start) -> CompressWorld:
         w.kargs = f"ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={UUID} rw rootflags={opts(s.kargs)} log_buf_len=4M\n"
         w.cmdline = w.kargs
     live_opts = (
-        live(s.live)
+        opts(s.live)
         .replace("subvol=root,degraded,", "rw,seclabel,noatime,degraded,")
         .replace(",noatime,flushoncommit", ",ssd,flushoncommit")
     )
