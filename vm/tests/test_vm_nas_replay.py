@@ -395,6 +395,10 @@ class Signals(FakeNasSignals):
 
     @override
     def held(self) -> contextlib.AbstractContextManager[object]:
+        # A held block starts a step of its own (the snapshot, the record): the shut-off VM's check after the
+        # read, the spec's one step before the record, ends here, so the environment acts before the hold
+        # (a kill between the check and the record), not inside it.
+        self.rec.checking = False
         self.rec.port()
         return _Held(self.rec, freezes=not self.rec.answering)
 
