@@ -9843,6 +9843,98 @@ echo test_217-ok
         self.assertIn("test_217-ok", out)
 
     @e2e_tags(E2ETag.BTRFS)
+    def test_227_a_nas_run_skipped_for_the_lock_ends_in_success_naming_no_unreadable_number(self) -> None:
+        """btrfs-snapshot, its runtime and btrfs-snapshot-nas.service as install writes them, the unit run
+        by the real systemd (systemctl start; a runtime drop-in only puts a fake sftp, which answers as an
+        unreachable NAS, first on PATH), with NAS_PRUNE_EVERY_DAYS='1 x' in a complete NAS configuration.
+        While this shell holds /run/btrfs-snapshot-nas.lock, the run is skipped: Result success, the skip
+        line in its journal and no line naming the setting. Before, the skip named it and the unit failed.
+        Without the lock holder, the same unit goes on: its journal names the setting and its value with
+        "this NAS run ends with an error", and the unit fails (Result exit-code; cannot bite otherwise).
+        A fake cannot show the unit's result, which is what systemctl, the health check and cst doctor see."""
+        d = "/var/tmp/e2e-nas-lock"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        pw = "/etc/btrfs-setup/restic-password"
+        unit = "btrfs-snapshot-nas.service"
+        dropin = f"/run/systemd/system/{unit}.d"
+        inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        files = f"btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot btrfs/units/{unit}"
+        notify = "/usr/local/sbin/btrfs-notify"
+        pending = "/var/lib/cst-alerts/pending"
+        found = exec_bash(self.SYSTEMD_CONTAINER, f"[ ! -e /etc/systemd/system/{unit} ]", check=False)
+        self.assertEqual(found.returncode, 0, f"a {unit} is already installed {found.stderr}")
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"{inst} remove {files} >/dev/null 2>&1; rm -rf {dropin}; systemctl daemon-reload; "
+            f"systemctl reset-failed {unit}; "
+            f"if [ -e {d}/notify.bak ]; then mv -f {d}/notify.bak {notify}; fi; "
+            f"if [ -e {d}/pending.bak ]; then rm -rf {pending}; mv {d}/pending.bak {pending}; "
+            f"elif [ -e {d}/made-pending ]; then rm -rf {pending}; fi; "
+            f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot /run/btrfs-snapshot-nas.lock; "
+            f"if [ -e {d}/pw.bak ]; then mv -f {d}/pw.bak {pw}; else rm -f {pw}; fi; "
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_227 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf} pw={pw} unit={unit} dropin={dropin} notify={notify} pending={pending}
+lock=/run/btrfs-snapshot-nas.lock
+rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot "$lock"
+install -d -m 0755 "$d" "$d/bin" /etc/btrfs-setup "$dropin"
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+if [ -e "$pw" ]; then cp -a "$pw" "$d/pw.bak"; fi
+if [ -e "$notify" ]; then mv "$notify" "$d/notify.bak"; fi
+if [ -e "$pending" ]; then mv "$pending" "$d/pending.bak"; else touch "$d/made-pending"; fi
+{inst} install {files} >/dev/null
+# The NAS is never reached: a fake sftp answers as an unreachable one (ssh's 255).
+printf '%s
+' '#!/bin/bash' 'exit 255' >"$d/bin/sftp"
+chmod 0755 "$d/bin/sftp"
+printf '%s
+' '[Service]' "Environment=PATH=$d/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"     >"$dropin/50-e2e-path.conf"
+systemctl daemon-reload
+printf '%s
+' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" "NAS_ENABLED=1"     "NAS_PATH=/volume1/restic" "NAS_PRUNE_EVERY_DAYS='1 x'" >"$conf"
+printf 'e2e-secret-pass' >"$pw"
+chmod 0600 "$pw"
+# journal_of: the unit's journal (both runs once the second ran; the first named nothing).
+journal_of() {{
+    journalctl --sync
+    journalctl -q --no-pager -o cat -u "$unit" || true
+}}
+
+# 1. Another run holds the NAS lock (this shell, fd 7): the run is skipped, names nothing, succeeds.
+exec 7>"$lock"
+flock -n 7
+rc=0; systemctl start "$unit" || rc=$?
+journal_of >"$d/held.log"
+cat "$d/held.log"
+[ "$(systemctl show -p Result --value "$unit")" = success ]
+[ "$rc" = 0 ]
+grep -qF "another NAS run is active; skipped" "$d/held.log"
+if grep -qF "NAS_PRUNE_EVERY_DAYS='1 x'" "$d/held.log"; then exit 1; fi
+flock -u 7
+exec 7>&-
+
+# 2. No lock holder: the run goes on, names the setting and its value, and the unit fails.
+rc=0; systemctl start "$unit" || rc=$?
+journal_of >"$d/free.log"
+cat "$d/free.log"
+[ "$rc" != 0 ]
+[ "$(systemctl show -p Result --value "$unit")" = exit-code ]
+systemctl reset-failed "$unit"
+grep -qF "NAS_PRUNE_EVERY_DAYS='1 x' in $conf: not a number CST's arithmetic reads: no prune (forget runs without --prune) until it is fixed; this NAS run ends with an error" "$d/free.log"
+grep -qF "unreachable (ssh btrfs-setup-nas); skipping this run" "$d/free.log"
+echo test_227-ok
+""",
+        ).stdout
+        self.assertIn("test_227-ok", out)
+
+    @e2e_tags(E2ETag.BTRFS)
     def test_111_snapshots_status_reads_snapshots_conf_through_settings_lines(self) -> None:
         """cst btrfs snapshots status as root on the container's root, with a snapshots.conf that has
         a command line and a $(...) value next to plain settings: it reads the file through
