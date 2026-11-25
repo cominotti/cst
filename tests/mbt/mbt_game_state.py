@@ -12,10 +12,12 @@ its files in a scratch folder of its own (cpu/tests/test_game_profile.py game_sc
 Checked:
 - Q1, our writer, our reader: records appended with GameProfile.append_state and read with
   records(state_text()), what 'off' reads, give back each field, in order, and no line is
-  unreadable. A field that is valid UTF-8 comes back exactly. Named gap (O5): a field with bytes
-  that are not UTF-8 is written with its bytes but read back as b.decode("utf-8", "replace")
-  (read_text decodes so), so a cgroup folder whose name is not UTF-8 never matches its record;
-  Q1 asserts exactly that. A fix that reads game.state byte for byte flips this assertion.
+  unreadable. A field that is valid UTF-8 comes back exactly. A known limit of the reader: a field
+  with bytes that are not UTF-8 is written with its bytes but read back as
+  b.decode("utf-8", "replace") (read_text decodes so); Q1 asserts exactly that. No writer is left
+  for such a field: the profile leaves a cgroup folder whose name is no unit name alone (O5,
+  escaped_unit), and the names of Docker and Steam scopes come from systemd. A reader that reads
+  game.state byte for byte would flip this assertion.
 - Q2, an older bash copy reads ours: bash's eval of each line of that game.state gives the
   original bytes of every field, exactly (bytes that are not UTF-8 included).
 - Q3, the line is bash's own: record_line of the fields equals bash's `printf %q` of the same
@@ -107,7 +109,7 @@ def line_bytes(fields: Sequence[bytes]) -> bytes:
 def state_record(draw: st.DrawFn) -> tuple[bytes, ...]:
     """One record of game.state that 'off' can read (state_undo): a prop record of six fields, or a
     cgw, epp or sysfs record of three; every field after the kind generated."""
-    kind = draw(st.sampled_from(list(GameRecordKind)))
+    kind = draw(st.sampled_from([k for k in GameRecordKind if k != GameRecordKind.USER]))  # user: game.leftovers'
     count = 5 if kind == GameRecordKind.PROP else 2
     return (kind.value.encode(), *draw(st.lists(FIELD_BYTES, min_size=count, max_size=count)))
 
@@ -176,7 +178,7 @@ class GameStateFilesTest(profiles.MbtTestCase):
         with self._profile() as profile:
             self._append_all(profile, recs)
             text = profile.state_text()
-            # Valid UTF-8 exactly; other bytes as "replace" decodes them (the O5 gap, the docstring).
+            # Valid UTF-8 exactly; other bytes as "replace" decodes them (the reader's limit, the docstring).
             self.assertEqual(records(text), [tuple(as_read(f) for f in rec) for rec in recs])
             self.assertEqual(unreadable_lines(text, intended=False), [])
 
