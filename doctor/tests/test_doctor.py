@@ -2362,6 +2362,72 @@ class DockerNocowPostponedTest(Scratch):
         r = self.run_tool()
         self.assertIn("info   Docker volumes NOCOW: cannot read", r.stdout)
 
+    def test_a_file_in_place_of_its_folder_is_no_record(self) -> None:
+        # As the helper reads it: no record can be there (before, "cannot read" at every run).
+        d = os.path.join(self.root, "var", "lib", "docker-volumes-nocow")
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        with open(d, "w") as f:
+            f.write("in the way\n")
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [])
+
+    def test_a_record_of_a_newer_format_is_named(self) -> None:
+        self.record(json.dumps({"v": 99, "reason": "r", "boots": 3, "first": NOW, "last": NOW, "boot_id": "b"}))
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                (
+                    "  info   Docker volumes NOCOW: /var/lib/docker-volumes-nocow/postponed is format 99 of the "
+                    "docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST"
+                )
+            ],
+        )
+
+    def test_a_version_that_is_no_whole_number_cannot_be_read(self) -> None:
+        for v in ("x", True, -1, 1.0):
+            with self.subTest(v=v):
+                self.record(json.dumps({"v": v, "reason": "r", "boots": 1, "first": NOW, "last": NOW, "boot_id": "b"}))
+                r = self.run_tool()
+                self.assertEqual(
+                    self.lines(r.stdout),
+                    ["  info   Docker volumes NOCOW: cannot read /var/lib/docker-volumes-nocow/postponed"],
+                )
+
+    def test_format_1_and_format_0_read_alike(self) -> None:
+        for extra in ({"v": 1}, {}):
+            with self.subTest(extra=extra):
+                rec = {**extra, "reason": "Docker is running", "boots": 1, "first": NOW, "last": NOW, "boot_id": "b"}
+                self.record(json.dumps(rec))
+                r = self.run_tool()
+                self.assertEqual(
+                    self.lines(r.stdout),
+                    [
+                        (
+                            "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a "
+                            "row, last 2026-11-05 17:33: Docker is running; tried again at the next boot"
+                        )
+                    ],
+                )
+
+    def test_a_time_no_clock_can_show_is_unknown(self) -> None:
+        # localtime's OverflowError, OSError EOVERFLOW, and strftime's failure on a year past a C int:
+        # the check failed as a whole.
+        for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
+            with self.subTest(last=last):
+                self.record(json.dumps({"v": 1, "reason": "r", "boots": 1, "first": NOW, "last": last, "boot_id": "b"}))
+                r = self.run_tool()
+                self.assertNotIn("the check itself failed", r.stdout)
+                self.assertEqual(
+                    self.lines(r.stdout),
+                    [
+                        (
+                            "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a "
+                            "row, last at an unknown time: r; tried again at the next boot"
+                        )
+                    ],
+                )
+
 
 class DockerNocowOutcomeTest(Scratch):
     """check_docker_nocow_outcome: a Docker volumes migration no boot will ask for, read from what

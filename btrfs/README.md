@@ -896,7 +896,13 @@ docker volume rm <name>         # or one volume by name
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
   The first boot that is not held back removes the record, and so does a
-  boot that finds no volumes folder (Docker removed, `data-root` moved). To run the
+  boot that finds no volumes folder (Docker removed, `data-root` moved),
+  whatever its format. The record is format 1 (its `"v"`); one without it,
+  as an older CST wrote it, is format 0 and is read and counted on. A record
+  of a newer format (a newer CST wrote it, and an older one runs now) is left
+  as it is: a held-back boot is not counted in it and says so in the
+  journal, and `status` and `cst doctor` name it. A time no clock can show
+  (a damaged record) is printed as `?`, and the rest of the line stays. To run the
   migration by hand once nothing uses the volumes:
   `sudo systemctl stop docker.socket docker.service`, then
   `sudo systemctl start docker-volumes-nocow.service`, and when it is done
@@ -2752,6 +2758,12 @@ journalctl -b -u docker-volumes-nocow
 
 Remove the cause, or run the migration by hand once nothing uses the volumes
 (section 4.10).
+
+`/var/lib/docker-volumes-nocow/postponed is format N of the
+docker-nocow-postponed (this CST reads format 1 and older): written by a newer
+CST` instead means an older helper runs beside the record a newer one wrote (a
+downgrade): it does not count its boots in it. Install the newer CST again, or
+remove the record; the first boot that is not held back removes it too.
 
 ### No desktop alerts arrive
 

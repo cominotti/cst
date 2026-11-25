@@ -25,6 +25,7 @@ from btrfs.docker_volumes_nocow.domain import (
     outcome_line,
     outcome_record,
     postponed_line,
+    postponed_newer,
     recovery,
 )
 from btrfs.docker_volumes_nocow.ports import DockerDaemonPort, NocowOutputPort, NocowStatePort, VolumeTreePort
@@ -224,9 +225,16 @@ class DockerVolumesNocow:
             self.out.log(4, f"cannot remove the outcome record {self.paths.outcome}: {e}")
 
     def note_postponed(self, why: str) -> None:
-        """Count this boot as postponed (once per boot) and keep the latest reason."""
+        """Count this boot as postponed (once per boot) and keep the latest reason. A record of a newer
+        format (a newer CST wrote it) is left as it is: this boot is not counted in it, and the journal
+        says so."""
+        old = self.state.read_postponed()
+        newer = postponed_newer(old, self.paths.postponed)
+        if newer is not None:
+            self.out.log(4, f"{newer}: left as it is, and this boot is not counted in it")
+            return
         boot = self.state.boot_id()
-        record = next_postponed(self.state.read_postponed(), why=why, boot=boot, now=int(self.clock.now()))
+        record = next_postponed(old, why=why, boot=boot, now=int(self.clock.now()))
         self.state.write_postponed(record)
 
     def postpone(self, busy: str, *, always: bool = False) -> None:
@@ -400,6 +408,6 @@ class DockerVolumesNocow:
                 self.out.say("  no boot asks for it: run cst btrfs install")
         if recorded:
             self.out.say(recorded)
-        line = postponed_line(self.state.read_postponed())
+        line = postponed_line(self.state.read_postponed(), self.paths.postponed)
         if line:
             self.out.say(line)

@@ -355,7 +355,11 @@ wait forever without a word. The helper records it instead, in
 `/var/lib/docker-volumes-nocow/postponed`: the reason of the last boot, its
 time, and how many boots were held back (once per boot). The first boot
 that is not held back removes the record, and so does a boot that finds no
-volumes folder (Docker removed, or its `data-root` moved).
+volumes folder (Docker removed, or its `data-root` moved). A file in place
+of `/var/lib/docker-volumes-nocow` is no record (nothing is shown), as the
+helper reads it. A record of a newer format (a newer CST wrote it) is an
+`info` that names it; a time the record holds that no clock can show reads
+`at an unknown time`.
 
 One boot is `info`: it can happen once (Docker started by hand early, for
 example). From two boots on it is a `WARN`: something holds the migration

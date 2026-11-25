@@ -1998,7 +1998,7 @@ class PostponedRecordTest(PostponeBase):
         self.boot("b1", 1000)
         self.assertEqual(
             self.record(),
-            {"reason": "Docker is running", "boots": 1, "first": 1000, "last": 1000, "boot_id": "b1"},
+            {"v": 1, "reason": "Docker is running", "boots": 1, "first": 1000, "last": 1000, "boot_id": "b1"},
         )
         self.assertEqual(stat.S_IMODE(os.stat(self.postponed).st_mode), 0o644)  # cst doctor reads it as the user
         # Run again in the same boot, for another reason: still one boot.
@@ -2014,7 +2014,7 @@ class PostponedRecordTest(PostponeBase):
         self.boot("b3", 3000)
         self.assertEqual(
             self.record(),
-            {"reason": "Docker is running", "boots": 3, "first": 1000, "last": 3000, "boot_id": "b3"},
+            {"v": 1, "reason": "Docker is running", "boots": 3, "first": 1000, "last": 3000, "boot_id": "b3"},
         )
         self.assertEqual(sorted(os.listdir(os.path.dirname(self.postponed))), ["attempts", "postponed"])  # no .new
         self.assertEqual(read_attempts(self), "1")
@@ -2078,6 +2078,84 @@ class PostponedRecordTest(PostponeBase):
                 assert rec is not None
                 self.assertEqual((rec["boots"], rec["first"]), (1, 1000))
                 self.assertIn("postponed at 1 boot(s) in a row", self.call(self.cli.status)[1])
+
+    def plant(self, text: str) -> None:
+        os.makedirs(os.path.dirname(self.postponed), exist_ok=True)
+        with open(self.postponed, "w") as f:
+            f.write(text)
+
+    def test_a_record_of_format_0_is_counted_on_and_written_as_format_1(self) -> None:
+        # The record an older CST wrote (no "v"): read as format 0, counted on, rewritten as format 1.
+        self.fs.docker_state = "active"
+        self.plant('{"reason": "Docker is running", "boots": 2, "first": 500, "last": 600, "boot_id": "old"}\n')
+        self.boot("b1", 1000)
+        self.assertEqual(
+            self.record(),
+            {"v": 1, "reason": "Docker is running", "boots": 3, "first": 500, "last": 1000, "boot_id": "b1"},
+        )
+
+    def test_a_record_of_a_newer_format_is_left_as_it_is(self) -> None:
+        # A newer CST wrote it: this boot is not counted in it, and nothing writes over it.
+        self.fs.docker_state = "active"
+        text = '{"v": 99, "reason": "r", "boots": 5, "first": 1, "last": 2, "boot_id": "b0", "new": [1]}\n'
+        self.plant(text)
+        os.utime(self.postponed, (1000, 1000))
+        newer = (
+            f"{self.postponed} is format 99 of the docker-nocow-postponed (this CST reads format 1 and older): "
+            "written by a newer CST"
+        )
+        _rc, out = self.boot("b1", 2000)
+        self.assertEqual(
+            out,
+            f"<4>{TAG}: Docker is running: migration left for the next boot\n"
+            f"<4>{TAG}: {newer}: left as it is, and this boot is not counted in it\n",
+        )
+        with open(self.postponed) as f:
+            self.assertEqual(f.read(), text)
+        self.assertEqual(os.stat(self.postponed).st_mtime, 1000)
+        _rc, out = self.call(self.cli.status)
+        self.assertTrue(out.endswith(f"\n  {newer}\n"), out)
+        self.assertNotIn("migration postponed at", out)
+        # A boot not held back removes it all the same: the removal ends the record, whatever its format.
+        self.fs.docker_state = "inactive"
+        _rc, out = self.boot("b2", 3000)
+        self.assert_migrated(out)
+        self.assertIsNone(self.record())
+
+    def test_a_version_that_is_no_whole_number_starts_afresh(self) -> None:
+        # Not a record this helper wrote: status shows no line for it, and the next boot starts afresh.
+        self.fs.docker_state = "active"
+        for version in ('"x"', "true", "-1", "1.0"):
+            with self.subTest(version=version):
+                self.plant(f'{{"v": {version}, "reason": "r", "boots": 2, "first": 500, "last": 600, "boot_id": "o"}}')
+                rc, out = self.call(self.cli.status)
+                self.assertEqual(rc, 0)
+                self.assertNotIn("postponed", out)
+                self.assertNotIn(self.postponed, out)
+                self.boot("b1", 1000)
+                self.assertEqual(
+                    self.record(),
+                    {"v": 1, "reason": "Docker is running", "boots": 1, "first": 1000, "last": 1000, "boot_id": "b1"},
+                )
+
+    def test_a_time_no_clock_can_show_reads_as_unknown(self) -> None:
+        # localtime raises OverflowError past its range and OSError EOVERFLOW below it, and strftime
+        # fails on a time localtime accepts (a year past a C int): status stopped with a traceback, or
+        # with "[Errno 75]" and exit 2. The rest of the line stays.
+        for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
+            with self.subTest(last=last):
+                self.plant(json.dumps({"v": 1, "reason": "r", "boots": 2, "first": 1, "last": last, "boot_id": "b"}))
+                rc, out, err = self.main("status")
+                self.assertEqual((rc, err), (0, ""))
+                self.assertTrue(out.endswith("\n  migration postponed at 2 boot(s) in a row, last ?: r\n"), out)
+
+    def test_a_file_in_place_of_the_state_folder_is_no_record(self) -> None:
+        shutil.rmtree(os.path.dirname(self.postponed))
+        with open(os.path.dirname(self.postponed), "w") as f:
+            f.write("in the way\n")
+        rc, out, err = self.main("status")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertNotIn("postponed", out)
 
     def test_without_a_boot_id(self) -> None:
         # No boot id to read: the first postponement is still recorded.
@@ -2673,16 +2751,34 @@ class PostponedLineTest(unittest.TestCase):
     def test_last_must_be_an_integer(self) -> None:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
         self.assertEqual(
-            postponed_line({"boots": 2, "last": 3000, "reason": "r"}),
+            postponed_line({"boots": 2, "last": 3000, "reason": "r"}, "/p"),
             f"  migration postponed at 2 boot(s) in a row, last {when}: r",
         )
         # A bool is no time (next_postponed and cst doctor refuse it too); before, True read as 1970.
         for last in (True, False, "3000", None):
             with self.subTest(last=last):
                 self.assertEqual(
-                    postponed_line({"boots": 2, "last": last, "reason": "r"}),
+                    postponed_line({"boots": 2, "last": last, "reason": "r"}, "/p"),
                     "  migration postponed at 2 boot(s) in a row, last ?: r",
                 )
+
+    def test_a_time_no_clock_can_show_reads_as_unknown(self) -> None:
+        # Past localtime's range (OverflowError), EOVERFLOW (OSError), and a year past a C int (strftime).
+        for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
+            with self.subTest(last=last):
+                self.assertEqual(
+                    postponed_line({"v": 1, "boots": 2, "last": last, "reason": "r"}, "/p"),
+                    "  migration postponed at 2 boot(s) in a row, last ?: r",
+                )
+
+    def test_a_newer_format_is_named_and_a_broken_version_shows_nothing(self) -> None:
+        self.assertEqual(
+            postponed_line({"v": 2, "boots": 2, "last": 3000, "reason": "r"}, "/p"),
+            "  /p is format 2 of the docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST",
+        )
+        for v in ("1", True, -1, 1.0, None):
+            with self.subTest(v=v):
+                self.assertEqual(postponed_line({"v": v, "boots": 2, "last": 3000, "reason": "r"}, "/p"), "")
 
 
 if __name__ == "__main__":

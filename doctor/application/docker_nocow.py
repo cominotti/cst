@@ -10,10 +10,14 @@ from btrfs.docker_volumes_nocow.domain import (
     DAEMON_JSON,
     NocowOutcome,
     OutcomeRead,
+    POSTPONED_FORMAT,
+    POSTPONED_VERSION,
     is_config_reason,
     is_stored_postponed,
     outcome_unreadable,
     parse_outcome,
+    postponed_newer,
+    postponed_time,
 )
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import count_text
@@ -35,17 +39,21 @@ def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
     try:
         with host.open_text(host.path(NOCOW_POSTPONED)) as f:
             rec = parse_json(f.read(65536))
-    except FileNotFoundError:
-        return  # never postponed, or not set up
+    except FileNotFoundError, NotADirectoryError:
+        return  # never postponed, or not set up (its folder may be a file), as the helper reads it
     except OSError, ValueError:
         rec = None
-    if not is_stored_postponed(rec):
+    newer = postponed_newer(rec, NOCOW_POSTPONED)
+    if newer is not None:
+        yield Result(INFO, f"Docker volumes NOCOW: {newer}")
+        return
+    if not is_stored_postponed(rec) or not POSTPONED_FORMAT.readable(rec, POSTPONED_VERSION):
         yield Result(INFO, f"Docker volumes NOCOW: cannot read {NOCOW_POSTPONED}")
         return
-    boots, last = rec.get("boots"), rec.get("last")
+    boots = rec.get("boots")
     if type(boots) is not int or boots < 1:
         boots = 1
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "at an unknown time"
+    when = postponed_time(rec.get("last")) or "at an unknown time"
     reason = str(rec.get("reason") or "no reason recorded")
     msg = f"Docker volumes NOCOW: the boot-time migration was postponed at {boots} boot(s) in a row, last {when}: {reason}"
     if boots >= NOCOW_WARN_BOOTS and is_config_reason(reason):
