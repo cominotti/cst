@@ -7,7 +7,7 @@ import sys
 
 from bluetooth.setup import wiring
 from bluetooth.setup.application.change import ReRun
-from bluetooth.setup.application.survey import read_bluetooth_settings
+from bluetooth.setup.application.inputs import read_bluetooth_settings
 from bluetooth.setup.domain import Exit, bt_timeout, changes_machine, parse_command_line, resolve
 
 

@@ -27,7 +27,8 @@ from bluetooth.domain import (
     settings_set,
 )
 from bluetooth.setup.application.checks import Checks
-from bluetooth.setup.application.survey import StepFailed, is_cst_rule
+from bluetooth.setup.application.inputs import is_cst_rule
+from bluetooth.setup.application.survey import StepFailed
 from bluetooth.setup.domain import (
     A2DP_SINK_UUID,
     BACKUP_NAME_TRIES,
