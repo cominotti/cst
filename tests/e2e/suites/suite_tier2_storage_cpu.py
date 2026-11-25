@@ -3285,9 +3285,10 @@ assert d["samples"] >= 1, d["samples"]
         /etc/btrfs-setup/bulk-keep holding the line iso<NBSP> (the real bytes C2 A0) and ~/Downloads there,
         so a normal apply would link ~/Downloads/iso into ~/Bulk: apply exits non-zero, says NEEDS A LOOK
         with "has a line it cannot read" naming the line and the no-break space, and makes no link. Before,
-        the line read as iso and nothing said it was not plain. With the line removed, the same apply makes
-        the link (cannot bite otherwise). The keep file and ~/Downloads are put back after. A fake cannot
-        show the installed reader on the real bytes, after the real ~/Bulk subvolume check that comes first."""
+        the line read as iso and nothing said it was not plain. With only the iso line left out (every other
+        item kept, so it acts on iso alone), the same apply makes the link (cannot bite otherwise). The keep
+        file, ~/Downloads and ~/Bulk/iso are put back after. A fake cannot show the installed reader on the
+        real bytes, after the real ~/Bulk subvolume check that comes first."""
         out = exec_bash(
             self.PRIV_CONTAINER,
             r"""
@@ -3296,11 +3297,13 @@ assert d["samples"] >= 1, d["samples"]
             w=/var/tmp/e2e-24
             rm -rf "$w" && mkdir -p "$w"
             if [[ -e "$keep" ]]; then cp -a "$keep" "$w/keep.bak"; fi
-            made_downloads=0
+            made_downloads=0 made_bulk_iso=0
             [[ -e /home/tester/Downloads ]] || made_downloads=1
+            [[ -e /home/tester/Bulk/iso ]] || made_bulk_iso=1
             restore() {
                 if [[ -L /home/tester/Downloads/iso ]]; then rm -f /home/tester/Downloads/iso; fi
                 if (( made_downloads )); then rmdir /home/tester/Downloads 2>/dev/null || true; fi
+                if (( made_bulk_iso )); then rmdir /home/tester/Bulk/iso 2>/dev/null || true; fi
                 rm -f "$keep"
                 if [[ -e "$w/keep.bak" ]]; then mv "$w/keep.bak" "$keep"; fi
                 rm -rf "$w"
@@ -3318,8 +3321,12 @@ assert d["samples"] >= 1, d["samples"]
             grep -qF "a no-break space (U+00A0) at the end of the value" <<<"$out"
             [[ ! -L /home/tester/Downloads/iso ]]
             cmp "$w/keep.before" "$keep"
-            # The line removed: the same apply makes the link.
-            : >"$keep"
+            # Only the iso line left out (every other item kept): the same apply acts on iso alone and
+            # makes the link.
+            py='import sys; sys.path.insert(0, "/opt/cst-rw"); from btrfs.bulk.domain import ITEMS'
+            python3 -I -B -c "$py"'; print("\n".join(i.id for i in ITEMS if i.id != "iso"))' >"$keep"
+            grep -qx steam "$keep"
+            if grep -q '^iso' "$keep"; then exit 1; fi
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk apply >/dev/null
             [[ -L /home/tester/Downloads/iso ]]
             echo E2E-BULK-KEEP-OK
