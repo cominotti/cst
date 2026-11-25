@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from typing import override
 
 from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFiles, GameUnitFiles
@@ -314,6 +315,17 @@ class PinTest(Case):
         self.put(os.path.join(cg, "file.slice"), b"")
         got = GameKernelFiles().boxes(cg, "*.slice")
         self.assertEqual(sorted(got), sorted(os.path.join(cg, n) for n in ("b.slice", "a.slice", odd, "a b.slice")))
+
+    def test_the_boxes_go_in_the_order_of_the_locale_s_collation(self) -> None:
+        # bash's glob lists them by the locale's collation; a key that reverses the code-point order stands in
+        # for one (the C locale's order would be the code-point order itself).
+        cg = self.path("cg")
+        names = ["a.slice", "b.slice", "c.slice"]
+        for name in names:
+            os.makedirs(os.path.join(cg, name))
+        with unittest.mock.patch("locale.strxfrm", lambda s: "".join(chr(0x10FFFF - ord(c)) for c in s)):
+            got = GameKernelFiles().boxes(cg, "*.slice")
+        self.assertEqual(got, [os.path.join(cg, n) for n in reversed(names)])
 
     def test_procs_texts_stop_at_the_depth_and_read_lazily(self) -> None:
         d = self.path("box")
