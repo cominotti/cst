@@ -156,7 +156,8 @@ class DockerVolumesNocow:
         flag is there already. False, with a log line, when that fails. install (mark's own
         request): when that fails on a volumes folder with +C already and no flag of an earlier
         request, no boot asks again; the line says so and the outcome record keeps it for status
-        and cst doctor. With that flag there the next boot runs the migration (from the old count)."""
+        and cst doctor. With that flag there the next boot runs the migration from the old count, or
+        gives up without a try when that count is GIVE_UP_AFTER already; the line says which."""
         try:
             if (renew or not self.state.flag_exists()) and self.state.attempts():
                 # A count of boots without its flag is not this request's (an older helper removed the
@@ -168,13 +169,28 @@ class DockerVolumesNocow:
         except OSError as e:
             vols = self.paths.volumes
             # Probed after the failure (a probe before it could stop a mark that goes on today).
-            if install and self.has_nocow(vols) and not self.state.flag_exists():
+            nocow = install and self.has_nocow(vols)
+            earlier = install and self.state.flag_exists()
+            if nocow and not earlier:
                 self.out.log(
                     3,
                     f"cannot schedule the migration ({e}); {vols} has +C already, so no boot asks again: "
                     "fix that, then run cst btrfs install",
                 )
                 self.record_outcome(NocowOutcome.NOT_SCHEDULED, f"cannot schedule the migration: {e}")
+            elif earlier and (attempts := self.state.attempts()) >= GIVE_UP_AFTER:
+                # The earlier request's count was not reset: the next boot gives up at once (migrate).
+                self.out.log(
+                    3,
+                    f"cannot schedule the migration ({e}); an earlier request is there with {attempts} boot(s) "
+                    "counted, so the next boot gives up without a try: fix that, then run cst btrfs install",
+                )
+            elif nocow:
+                self.out.log(
+                    3,
+                    f"cannot schedule the migration ({e}); {vols} has +C and its volumes keep copy-on-write "
+                    "data, and the earlier request stays: the next boot tries again",
+                )
             else:
                 self.out.log(
                     3, f"cannot schedule the migration ({e}); {vols} keeps copy-on-write, the next boot tries again"

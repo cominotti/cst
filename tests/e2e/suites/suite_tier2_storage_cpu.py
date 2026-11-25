@@ -455,7 +455,7 @@ mount -o remount,bind,ro "$attempts"
 rc=0; out="$("$helper" mark 2>&1)" || rc=$?
 printf '%s\n' "$out" | sed 's/^/E2E-NOCOW part 8: /'
 [[ "$rc" == 2 ]]
-grep -qF "$vols keeps copy-on-write, the next boot tries again" <<<"$out"
+grep -qF "$vols has +C and its volumes keep copy-on-write data, and the earlier request stays: the next boot tries again" <<<"$out"
 if grep -qF "no boot asks again" <<<"$out"; then echo "mark says no boot asks beside the flag" >&2; exit 1; fi
 test -f "$flag"
 test ! -e "$outcome"

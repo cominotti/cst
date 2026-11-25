@@ -63,6 +63,7 @@ from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import (
+    GIVE_UP_AFTER,
     NocowCommand,
     NocowPaths,
     TreeScan,
@@ -663,12 +664,41 @@ class MarkUnmarkTest(Base):
         self.assertEqual(rc, 2)
         self.assertEqual(
             out,
-            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} keeps "
-            "copy-on-write, the next boot tries again\n",
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} has +C and "
+            "its volumes keep copy-on-write data, and the earlier request stays: the next boot tries again\n",
         )
         self.assertTrue(os.path.exists(self.flag))
         self.assertEqual(read_attempts(self), "1")
         self.assertFalse(os.path.exists(self.outcome))
+
+    def test_mark_beside_an_earlier_flag_whose_count_is_at_the_limit_says_the_next_boot_gives_up(self) -> None:
+        # Two boots' copies failed (the flag and a count of GIVE_UP_AFTER) on a folder with +C, and the
+        # install's reset of that count fails: the next boot gives up without a try. The line said it
+        # tries again, and that the folder keeps copy-on-write.
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts(str(GIVE_UP_AFTER))
+        with mock.patch.object(
+            nocow_adapters.NocowStateFiles, "save_attempts", side_effect=OSError(errno.EIO, "Input/output error")
+        ):
+            rc, out, _err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); an earlier request is "
+            f"there with {GIVE_UP_AFTER} boot(s) counted, so the next boot gives up without a try: fix that, "
+            "then run cst btrfs install\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), str(GIVE_UP_AFTER))
+        self.assertFalse(os.path.exists(self.outcome))
+        # And so it does: no copy, the flag removed, a gave-up record.
+        _rc, out, _err = self.main("migrate")
+        self.assertEqual(self.fs.commands("cp"), [])
+        self.assertFalse(os.path.exists(self.flag))
+        with open(self.outcome) as f:
+            self.assertEqual(object_of(parse_json(f.read()))["outcome"], "gave-up")
 
     def test_mark_on_a_folder_with_nocow_already_that_cannot_write_the_flag_says_no_boot_asks(self) -> None:
         shutil.rmtree(os.path.dirname(self.flag))
