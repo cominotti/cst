@@ -21,7 +21,6 @@ from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
 from cst_core.domain.text import SettingsProblem, describe_problems
-from cst_core.domain.units import LoadState
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters.host import (
     holds,
@@ -32,7 +31,7 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
-from cpu.game.adapters.drift import repair_drift
+from cpu.game.adapters.drift import repair_drift, settings_drift
 from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_entries, unit_gone, user_side
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
@@ -60,20 +59,16 @@ from cpu.game.domain import (
     ctl_file,
     cut_tail,
     drift_lines,
-    drifted,
     dropin_text,
     escaped_unit,
     has_prop_record,
     intended_header,
-    intended_props,
-    intended_records,
     newer_intended,
     on_text,
     PropUndo,
     record_line,
     records,
     unreadable_lines,
-    show_values,
     state_uid,
     state_undo,
     shown,
@@ -621,19 +616,8 @@ class GameProfile:
                 return True
 
     def drift(self, text: str, *, user_manager: bool = True) -> list[Drift]:
-        """The settings in game.intended (its text) that no longer hold (one systemctl show per unit); without
-        user_manager, none of the user manager's (no account has the uid 'on' acted for: foreign_refusal)."""
-        recs = [r for r in intended_records(text) if user_manager or r[:2] != (GameRecordKind.PROP, "usr")]
-        now: dict[tuple[str, str], dict[str, str]] = {}
-        for (mgr, unit), props in intended_props(recs).items():
-            args = ["show", "-p", "LoadState"] + [a for prop in props for a in ("-p", prop)] + [unit]
-            res = self.ask(mgr, *args)
-            if res.returncode != 0:
-                continue
-            vals = show_values(res.stdout)
-            if vals.get("LoadState") == LoadState.LOADED:
-                now[mgr, unit] = vals
-        return drifted(recs, now, lambda f: (read_stripped(f) or "") if os.path.exists(f) else None)
+        """The settings in game.intended (its text) that no longer hold (settings_drift)."""
+        return settings_drift(self, text, user_manager=user_manager)
 
     def say_unheld(self, skipped: Sequence[Drift]) -> None:
         """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
