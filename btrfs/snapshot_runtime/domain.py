@@ -178,6 +178,22 @@ def guard_number(text: str) -> int | GuardError:
     return n
 
 
+def guard_limit(text: str) -> int:
+    """A space guard setting (GiB) as a limit the hourly run can hold at: guard_number's value; 0 (no
+    limit) for one it cannot compare (BAD_NUMBER: its test is false; NOT_A_NUMBER: the run stops
+    first) and for a negative one, which never holds."""
+    n = guard_number(text)
+    return n if isinstance(n, int) and n > 0 else 0
+
+
+def snapshots_resume_above(guard: Mapping[str, int]) -> int:
+    """Where btrfs-snapshot's paused /home snapshots come back, in the unit of GUARD's numbers
+    (snapshot_guard()'s bytes, guard_limit's GiB): its hourly run stays paused while free <=
+    SKIP_AT_OR_BELOW_GIB or (paused and free <= RESUME_ABOVE_GIB), so they resume only above the
+    larger of the two (a limit read as 0 never holds them)."""
+    return max(guard["resume"], guard["pause"])
+
+
 class AlertKind(StrEnum):
     """The kinds of alert, each at most once a day (STATE/alerted-KIND)."""
 

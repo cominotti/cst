@@ -7267,6 +7267,61 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS)
+    def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
+        """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose
+        undo was deleting the copy when it was cut: the data is back at ~/Programs (a real folder),
+        and what is left of the copy is a partly deleted folder under the name the undo gives a
+        checked copy before it deletes it (<new>.bulk-drop). The unit runs, undoes the move, deletes
+        the marked folder without the "written to" check and drops the journal (an older btrfs-bulk
+        dropped the journal and left the folder). The same with the copy under its own name (what an
+        older CST left; its times are after the journal's stamp2): "NEEDS A LOOK ... was written to as
+        well", and the journal and the copy stay. The journal's paths are under ~/Store, with no
+        ~/Bulk: the container has no btrfs, and a plain ~/Bulk folder makes a run wait for
+        btrfs-snapshot's conversion before any repair; with ~/Bulk absent the repair runs first, on
+        the journal's paths, and the run then stops at the creation of ~/Bulk (exit 1, a success of
+        the unit)."""
+        out = self.bulk_boot(
+            r"""
+h=/var/tmp/cst-e2e-bulk-home
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+install -d -m 0755 /var/lib/btrfs-bulk
+j=/var/lib/btrfs-bulk/journal-apps.json
+# plant NAME: ~/Programs holding a and sub/b, ~/Store/NAME holding sub/b only, the journal of the move.
+plant() {
+    rm -rf "$h/Programs" "$h/Store" "$h/Bulk"
+    mkdir -p "$h/Programs/sub" "$h/Store/$1/sub"
+    printf a >"$h/Programs/a"
+    printf b >"$h/Programs/sub/b"
+    printf b >"$h/Store/$1/sub/b"
+    chown -R cste2ebulk: "$h/Programs" "$h/Store"
+    printf '{"kind": "copy", "src": "%s/Programs", "target": "%s/Store/apps", "new": "%s/Store/apps.bulk-new", "old": "%s/Programs.bulk-old-1", "stamp": 1, "stamp2": 2, "link": "%s/Programs", "v": 1}' \
+        "$h" "$h" "$h" "$h" "$h" >"$j"
+}
+plant apps.bulk-new.bulk-drop
+boot_unit
+unit_log_has "recovering an interrupted move"
+unit_log_has "apps: undid an interrupted move (the data is back at ~/Programs)"
+[ ! -e "$j" ]
+[ ! -e "$h/Store/apps.bulk-new.bulk-drop" ] || { echo "the marked copy is left" >&2; exit 1; }
+[ ! -e "$h/Store/apps.bulk-new" ]
+[ ! -L "$h/Programs" ]
+[ "$(cat "$h/Programs/a") $(cat "$h/Programs/sub/b")" = "a b" ]
+journalctl --sync 2>/dev/null || true
+if journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" | grep -qF "was written to as well"; then
+    echo "the marked copy was taken for a write" >&2; exit 1
+fi
+plant apps.bulk-new
+boot_unit
+unit_log_has "NEEDS A LOOK: apps: an interrupted move: the data is back at $h/Programs, but the copy $h/Store/apps.bulk-new was written to as well"
+[ -e "$j" ]
+[ "$(cat "$h/Store/apps.bulk-new/sub/b")" = b ]
+[ "$(cat "$h/Programs/a") $(cat "$h/Programs/sub/b")" = "a b" ]
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
         """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
         checkout's docker-gc, under a name of its own; a stub docker.service when the container has
@@ -7566,7 +7621,9 @@ echo test_109-ok
         the spool's format) and sets the day's stamp, so the next run keeps no second copy. Then
         convert-planned --lock-held against the real /run lock (/proc/self/fdinfo): an fd that holds
         the flock is taken; another open of the lock file while that one holds it, an fd of another
-        file and an fd whose lock was released are refused (exit 2, nothing converted)."""
+        file and an fd whose lock was released are refused (exit 2, nothing converted). Last, paused
+        with RESUME_ABOVE_GIB below SKIP_AT_OR_BELOW_GIB: the kept alert says the snapshots resume
+        above the larger of the two (the installed runtime's snapshots_resume_above)."""
         d = "/var/tmp/e2e-snapshot-unit"
         conf = "/etc/btrfs-setup/snapshots.conf"
         inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
@@ -7667,6 +7724,19 @@ rc=0; "$S" convert-planned --lock-held 9 >"$d/out" 2>&1 || rc=$?
 [ "$rc" = 2 ]
 refused 9
 exec 9>&- 8<&- 7<&-
+
+# 5. Paused (200 GiB free, SKIP 250, RESUME 100): the alert names the larger limit, where snapshots resume.
+printf '%s\n' '#!/bin/bash' 'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     214748364800      (min: 214748364800)"; fi' 'exit 0' \
+    >"$d/bin/btrfs"
+printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" "SKIP_AT_OR_BELOW_GIB=250" "RESUME_ABOVE_GIB=100" >"$conf"
+rm -f /var/lib/btrfs-snapshot/emergency
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 0 ]
+body="200 GiB free; hourly snapshots resume above 250 GiB. Older snapshots still expire normally."
+grep -qxF "<4>btrfs-snapshot: Snapshots paused: low space: $body" "$d/out"
+paused="$(grep -lxF "title=Snapshots paused: low space" "$pending"/*.alert)"
+grep -qxF "$body" "$paused"
 echo test_110-ok
 """,
         ).stdout

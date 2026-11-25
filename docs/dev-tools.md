@@ -223,18 +223,18 @@ tests, such as tier 1's `test_161` for scrub-limit's reload).
 **btrfs-bulk.** `btrfs/tests/test_btrfs_bulk_faults.py` runs the
 program over the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`
 `BulkHome`: the real moves, cp included, with fakes only for subvolumes,
-+C, the busy check, flatpak and btrfs-snapshot's convert), from eight start
++C, the busy check, flatpak and btrfs-snapshot's convert), from nine start
 states (a plain move, the in-place +C rewrite, a +C copy out of /home, an
 old subvolume, a stale cache, an empty folder, a late write into the old
-tree, and writes on both sides). `arm_points` makes the user adapter's
+tree, a write into the source during its copy, and writes on both sides). `arm_points` makes the user adapter's
 `os` calls (`FaultyOs`), the state files' writes and removals, cp
 (`FaultyRunner`), +C on a folder, the creation of `~/Bulk` and each
 tree's deletion (torn in two) points of the plan, which is dead after a kill. After a kill every mode is tried again
-inside the repair; after a failure or a full disk, only a kill. One known
-gap is let through by name and counted per class: a fault that cuts the
-deletion of the copy (`<target>.bulk-new`) while a rollback deletes it
-leaves a journal that every later repair keeps ("the copy ... was written
-to as well"), with the data back in /home.
+inside the repair; after a failure or a full disk, only a kill. No gap is
+let through: a fault that cuts the deletion of a checked copy (a rollback's,
+or the switch's when the source changed) must converge too, because the
+copy is renamed to `<target>.bulk-new.bulk-drop` before it is deleted and a
+repair deletes a marked copy without the "written to" check.
 
 **Cost.** The eight modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
@@ -245,7 +245,7 @@ together: 4.3 to 4.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
 -I -B tests/run_unit.py --jobs 4` on the eight, 3 runs, on a workstation
 whose load average was 20 on 16 CPUs; the seven before bulk's took 2.7 s
 there, and 2.3 to 2.4 s unloaded). btrfs-bulk's alone is about 10 s of CPU
-in 24 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
+in 27 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
 the times are about the same on tmpfs and on a btrfs home.
 
 ## Where the virtual environment lives

@@ -565,14 +565,6 @@ def lf_place_app(tree: Vdf, appid: str, lib_path: str, size: str, resolve: Calla
     return new
 
 
-def snapshots_resume_above(guard: Mapping[str, int]) -> int:
-    """Where btrfs-snapshot's paused /home snapshots come back, in bytes, from snapshot_guard()'s
-    numbers: its hourly run stays paused while free <= SKIP_AT_OR_BELOW_GIB or (paused and free <=
-    RESUME_ABOVE_GIB), so they resume only above the larger of the two (a limit snapshot_guard read as
-    0 never holds them)."""
-    return max(guard["resume"], guard["pause"])
-
-
 def lf_apps(tree: Vdf, idx: str) -> Vdf:
     """The apps block of library IDX of a checked tree."""
     return vdf_block(vdf_block(lf_libraries(tree).get(idx), f"library {idx}").get("apps"), f"library {idx}: 'apps'")
