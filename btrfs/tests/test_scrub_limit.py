@@ -16,7 +16,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
-from btrfs.scrub_limit.adapters import ScrubPaths
+from btrfs.scrub_limit.adapters import ScrubDropinInstaller, ScrubPaths, ScrubSystemd
 from btrfs.scrub_limit.cli import ScrubCliDeps, run_scrub_limit_cli
 from btrfs.scrub_limit.domain import (
     DEFAULT_SCRUB_LIMIT,
@@ -30,9 +30,10 @@ from btrfs.scrub_limit.domain import (
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
-from btrfs.scrub_limit.wiring import scrub_limit_apply, scrub_limit_plan, scrub_limit_status
+from btrfs.scrub_limit.wiring import build_scrub_limit, scrub_limit_apply, scrub_limit_plan, scrub_limit_status
 from btrfs.tests.fakes import RecordingInstallerRunner, ScrubFakeRunner, ScrubWorld, core_text
 from cst_core.adapters.install import JsonInstallRecord
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.domain.record import (
@@ -609,6 +610,17 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                     rc, lines = scrub_limit_apply(self.paths, limit, runner=applied)
                     self.assertEqual(rc, 0, lines)
                     self.assertEqual(["systemctl", "daemon-reload"] in applied.calls, want is not None)
+
+    def test_with_no_runner_the_commands_run_through_a_subprocess_runner(self) -> None:
+        # What status, plan and set|off get when no runner is passed (the real command line's case): the
+        # installer and systemctl through a SubprocessCommandRunner, never None.
+        for read_only in (True, False):
+            with self.subTest(read_only=read_only):
+                service = build_scrub_limit(self.paths, None, read_only=read_only)
+                dropin, systemd = service.dropin, service.systemd
+                assert isinstance(dropin, ScrubDropinInstaller) and isinstance(systemd, ScrubSystemd)
+                self.assertIsInstance(dropin.runner, SubprocessCommandRunner)
+                self.assertIsInstance(systemd.runner, SubprocessCommandRunner)
 
     def test_status_says_systemd_has_not_loaded_the_drop_in(self) -> None:
         self._as_asked("500M")
