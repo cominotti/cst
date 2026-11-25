@@ -1742,7 +1742,9 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
 - Spaces periodic btrfs transaction commits from the 30 s default to **60 s**
   (allowed range `15..300` s) across all four layers (`/etc/fstab`, next-boot
   `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
-  partial error. Like `compress-force`, it changes only the root filesystem's
+  partial error. A step that fails stops the run before the later layers are
+  touched (the top-mount unit is not changed after one), and the layers it
+  changed are put back in reverse (section 9.1). Like `compress-force`, it changes only the root filesystem's
   fstab lines and mounts: a separate btrfs `/home` or `/var/home` is never
   touched (section 9.1, "Only the root filesystem"). In `btrfs:top-mount` only
   the `commit=` of the unit's own `Options=` changes.

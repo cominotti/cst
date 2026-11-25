@@ -197,12 +197,15 @@ def execute_commit_change(
 
     undo: list[Callable[[], str | None]] = []
     msgs: list[str] = []
-    for err in (
-        _step_fstab(host, snap, plan, msgs, undo),
-        _step_kargs(host, plan, msgs, undo),
-        _step_remount(host, snap, plan, msgs, undo),
-        _step_top_mount(host, snap, plan, msgs),
-    ):
+    # Each step runs only after the one before it worked: a failed step stops the run before the later layers.
+    steps: tuple[Callable[[], str | None], ...] = (
+        lambda: _step_fstab(host, snap, plan, msgs, undo),
+        lambda: _step_kargs(host, plan, msgs, undo),
+        lambda: _step_remount(host, snap, plan, msgs, undo),
+        lambda: _step_top_mount(host, snap, plan, msgs),
+    )
+    for step in steps:
+        err = step()
         if err is not None:
             rollback = _unwind_rollback(undo)
             return 1, [*lines, *msgs, f"ERROR: {err}; {rollback}"]

@@ -421,6 +421,30 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             self.assertNotIn("commit=60", bad_host.s.proc_mounts or "")
             self.assertIn("previous configuration restored", "\n".join(out_b))
 
+    def test_a_failed_step_stops_the_run_before_the_later_layers(self) -> None:
+        # A failed kargs step runs no remount; no failure is followed by a top-mount update; every earlier layer
+        # is put back, in reverse.
+        cases = (
+            (_FakeState(fail_kargs="busy"), ["write_fstab", "update_kargs", "write_fstab"]),
+            (
+                _FakeState(fail_remount="mount failed"),
+                ["write_fstab", "update_kargs", "remount", "update_kargs", "write_fstab"],
+            ),
+            (
+                _FakeState(fake_remount_effect=False),  # the verification after the remount fails
+                ["write_fstab", "update_kargs", "remount", "remount", "update_kargs", "write_fstab"],
+            ),
+        )
+        for state, calls in cases:
+            with self.subTest(calls=calls):
+                host = _FakeHost(state)
+                top_before = host.s.top_mount
+                rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+                self.assertEqual(rc, 1, out)
+                self.assertEqual([c.split(":", 1)[0] for c in host.calls], calls)
+                self.assertEqual(host.s.top_mount, top_before)
+                self.assertTrue(out[-1].endswith("; previous configuration restored."), out[-1])
+
     def test_a_separate_btrfs_home_is_left_alone(self) -> None:
         # /var/home is another btrfs filesystem (dm-1, its own UUID): apply and revert change only the root's.
         home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /home btrfs subvol=home,compress=zstd:3,noatime 0 0\n"

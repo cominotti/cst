@@ -10756,6 +10756,96 @@ EOF
         ).stdout
         self.assertIn("E2E-COMMIT-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_240_btrfs_commit_interval_stops_at_a_failed_kargs_step(self) -> None:
+        """`cst btrfs commit-interval apply` with an rpm-ostree whose `kargs --delete... --append...` fails: the
+        run exits 1 saying the previous configuration was restored, /etc/fstab is back at its bytes, no remount
+        runs, and the top-mount unit, really installed, verified and recorded in installed.json and loaded by
+        PID 1, keeps its bytes, as installed.json does (B0: the run used to remount and to write commit=60 into
+        the unit after the failure, and never undo the unit)."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-commit-b0"
+        top_unit = r"var-mnt-btrfs\x2dtop.mount"
+        auto_unit = r"var-mnt-btrfs\x2dtop.automount"
+        uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        units = " ".join(shlex.quote(f"/etc/systemd/system/{u}") for u in (top_unit, auto_unit))
+        if exec_bash(c, f"for u in {units}; do [[ ! -e $u ]] || echo $u; done").stdout.strip():
+            self.skipTest("the btrfs top-mount unit or automount already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            set +e
+            {fstab_put_back(w)}
+            {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_put_back("/run/ostree-booted", w, "ostree-booted")}
+            rm -f {units}
+            systemctl daemon-reload
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            rm -rf {w}
+            mkdir -p {w}/bin {w}/proc
+            {fstab_saved(w)}
+            {file_saved("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_saved("/run/ostree-booted", w, "ostree-booted")}
+            touch /run/ostree-booted
+            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
+            cp {w}/kargs {w}/proc/cmdline
+
+            # rpm-ostree: kargs reads answer; every change fails with no effect.
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+echo "error: Transaction in progress" >&2
+exit 1
+EOF
+            cat >{w}/bin/findmnt <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then echo "{uuid}"; exit 0; fi
+if [[ " $* " == *"OPTIONS"* ]]; then
+    while read -r src tgt _ opts _; do printf '%s %s %s\\n' "$src" "$tgt" "$opts"; done <{w}/proc/mounts
+    exit 0
+fi
+exec /usr/bin/findmnt "$@"
+EOF
+            # mount: every call written down, nothing changed.
+            cat >{w}/bin/mount <<'EOF'
+#!/usr/bin/env bash
+echo "mount $*" >>{w}/calls
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            . /opt/cst-rw/cst-install.bash
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit" --component btrfs:top-mount
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+            systemctl show -p LoadState --value {shlex.quote(top_unit)} | grep -qxF loaded
+            cp "/etc/systemd/system/{top_unit}" {w}/unit.before
+            cp /var/lib/cst/installed.json {w}/record.before
+            cp /etc/fstab {w}/fstab.before
+
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            if apply_out="$(/opt/cst-rw/cst btrfs commit-interval apply --yes 2>&1)"; then
+                echo "apply exited 0: $apply_out" >&2; exit 1
+            fi
+            grep -qF "Failed to update rpm-ostree kargs: error: Transaction in progress; previous configuration restored." <<<"$apply_out"
+            cmp -s /etc/fstab {w}/fstab.before
+            cmp -s "/etc/systemd/system/{top_unit}" {w}/unit.before
+            cmp -s /var/lib/cst/installed.json {w}/record.before
+            if [[ -e {w}/calls ]]; then echo "a remount ran: $(cat {w}/calls)" >&2; exit 1; fi
+            echo E2E-COMMIT-B0-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-COMMIT-B0-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
     def test_160_btrfs_cache_attach_detach_and_doctor(self) -> None:
         """`cst btrfs cache` per user, under a test root (CST_BTRFS_CACHE_ROOT), with real systemd and `cst doctor`.
