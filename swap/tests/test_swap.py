@@ -31,10 +31,17 @@ from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import ArtifactKind, Owner
 from cst_core.domain.plan import PlanItem
+from cst_core.domain.values import GIB, MIB
 from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
 from tests.probes import NoUnitQueries, time_bound
 from swap.application.apply import SwapApplicationService
-from swap.application.memory_tuning import MM_TMPFILES_ENTRY, URESOURCED_ENTRY, effective_uresourced_memory_min
+from swap.application.memory_tuning import (
+    MM_TMPFILES_ENTRY,
+    URESOURCED_ENTRY,
+    effective_uresourced_memory_min,
+    parse_uresourced_max_memory_min,
+    parse_uresourced_memory_min,
+)
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
@@ -4037,18 +4044,67 @@ class Phase1MemoryTuningTest(_SwapScratch):
             ("[Global]\n#MaxMemoryMin=1%\n[ActiveUser]\nMaxMemoryMin=1%\nMemoryMin=1G\n", 64 * one_g, (one_g, False)),
             ("[Global]\nMaxMemoryMin=1%\n", 64 * one_g, (None, False)),
             # ASCII digits only, as uresourced reads them: Arabic-Indic "2G" was 2 GiB, and "512M" a cap of 512 MiB.
-            ("[ActiveUser]\nMemoryMin=\N{ARABIC-INDIC DIGIT TWO}G\n", 64 * one_g, (None, False)),
+            # uresourced reads a value with no number as 0 (its "Could not parse memory key"), so the floor is 0.
+            ("[ActiveUser]\nMemoryMin=\N{ARABIC-INDIC DIGIT TWO}G\n", 64 * one_g, (0, False)),
             (
                 (
                     "[Global]\nMaxMemoryMin=\N{ARABIC-INDIC DIGIT FIVE}\N{ARABIC-INDIC DIGIT ONE}"
                     "\N{ARABIC-INDIC DIGIT TWO}M\n[ActiveUser]\nMemoryMin=1G\n"
                 ),
                 64 * one_g,
-                (one_g, False),
+                (0, False),
             ),
         ):
             with self.subTest(text=text, total=total):
                 self.assertEqual(effective_uresourced_memory_min(text, total), want)
+
+    def test_uresourced_conf_is_read_as_gkeyfile_and_uresourced_read_it(self) -> None:
+        # uresourced reads its file with GLib's GKeyFile (ASCII blanks only, "#" comments only, the last
+        # key counts) and a memory value with g_ascii_strtoll, then only the one character after the
+        # number: K, M, G, T, % or none; any other character is an error, which it reads as 0 bytes.
+        # Before, CST stripped Unicode blanks, took ";" lines as comments and read the value with
+        # systemd's size rules: "4<NBSP>G" was 4 bytes, "<NBSP>MemoryMin=4G" and "4Gx" other answers.
+        g, nbsp = GIB, "\N{NO-BREAK SPACE}"
+        for line, want in (
+            (f"MemoryMin=4{nbsp}G", 0),
+            (f"{nbsp}MemoryMin=4G", None),
+            (f"MemoryMin=4G{nbsp}", 4 * g),
+            (";MemoryMin=1G", None),
+            ("#MemoryMin=1G", None),
+            ("  #MemoryMin=1G", None),
+            ("MemoryMin=4Gx", 4 * g),
+            ("MemoryMin=  4G", 4 * g),
+            ("  MemoryMin \t=\t4G", 4 * g),
+            ("MemoryMin=4", 4),
+            ("MemoryMin=4 ", 0),
+            ("MemoryMin=4 G", 0),
+            ("MemoryMin=", 0),
+            ("MemoryMin=G", 0),
+            ("MemoryMin=4G\r", 4 * g),
+            ("MemoryMin=4\r\r", 0),
+            ("MemoryMin=\\s4G", 4 * g),
+            ("MemoryMin=4G\\x", 0),
+            ("MemoryMin=50%", None),
+            ("MemoryMin=-1", 2**64 - 1),
+            ("MemoryMin=99999999999999999999K", (2**63 - 1) * 1024 % 2**64),
+            ("MemoryMin=1G\nMemoryMin=2G", 2 * g),
+            ("MemoryMin=1G\n[Global]\nMemoryMin=5G\n[ActiveUser] \t\nMemoryMin=3G", 3 * g),
+            ("MemoryMin\N{FULLWIDTH EQUALS SIGN}1G", None),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(parse_uresourced_memory_min(f"[ActiveUser]\n{line}\n"), want)
+        for line, want in (
+            ("MaxMemoryMin=10%", (10, None)),
+            ("MaxMemoryMin=150%", (100, None)),
+            ("MaxMemoryMin=-5%", (100, None)),
+            ("MaxMemoryMin=512M", (None, 512 * MIB)),
+            ("MaxMemoryMin=10 %", (None, 0)),
+            (f"MaxMemoryMin=10%{nbsp}", (10, None)),
+            (f"{nbsp}MaxMemoryMin=10%", (None, None)),
+            (";MaxMemoryMin=10%", (None, None)),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(parse_uresourced_max_memory_min(f"[Global]\n{line}\n"), want)
 
     def test_uresourced_floor_is_capped_by_max_memory_min(self) -> None:
         # 8 GiB of RAM: [Global] MaxMemoryMin=10% caps MemoryMin=1G to 10% of MemTotal, in whole pages.

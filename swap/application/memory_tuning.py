@@ -8,8 +8,8 @@ import re
 from typing import Final
 
 from cst_core.domain.install import InstallEntry, manifest_by_src
-from cst_core.domain.text import group
-from cst_core.domain.values import format_bytes_human as human, parse_whole_number
+from cst_core.domain.text import file_lines, group
+from cst_core.domain.values import ASCII_BLANKS, GIB, MIB, format_bytes_human as human, parse_whole_number
 from cst_core.ports import CommandResult, FileSystemPort, SystemdPort, UnitName
 from perf.domain.models import HUMAN_UID_MIN, PerfPathKey, PerfRootKind, perf_path_spec
 from perf.domain.parsers import parse_bracket_choice, parse_sysfs_tmpfiles_writes
@@ -21,7 +21,6 @@ from swap.domain import (
     PAGE,
     SettingState,
     parse_meminfo,
-    parse_size,
 )
 
 _MANIFEST: Final = manifest_by_src()
@@ -35,13 +34,25 @@ _URESOURCED_WAIT_STEPS: Final[int] = 20
 _URESOURCED_WAIT_STEP_S: Final[float] = 0.1
 
 _SYS_PREFIX: Final = "/sys/"
-_GLOBAL_SECTION: Final = "[Global]"
-_ACTIVE_USER_SECTION: Final = "[ActiveUser]"
+_GLOBAL_SECTION: Final = "Global"
+_ACTIVE_USER_SECTION: Final = "ActiveUser"
+_MEMORY_MIN_KEY: Final = "MemoryMin"
+_MAX_MEMORY_MIN_KEY: Final = "MaxMemoryMin"
 _USER_SLICE_ROW: Final = "user.slice memory.min"
-_MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MemoryMin\s*=\s*(\S+)")
-_MAX_MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MaxMemoryMin\s*=\s*(\S+)")
-_PERCENT_RE: Final = re.compile(r"^(\d+)%$", re.ASCII)
 _PERCENT: Final = 100
+# GKeyFile (GLib), which uresourced reads its file with: a group line is "[NAME]" with only spaces or
+# tabs after it; the escapes g_key_file_get_string turns into a character (any other is an error).
+_KEYFILE_GROUP_RE: Final = re.compile(r"\[([^\]]*)\][ \t]*")
+_KEYFILE_ESCAPES: Final[dict[str, str]] = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+# uresourced's config_get_memory (src/r-manager.c): g_ascii_strtoll's number (C blanks before it, a
+# sign, ASCII digits; clamped to a 64-bit signed number, then taken as unsigned), and the one
+# character after it: K, M, G or T (powers of 1024), % (a share, at most 100), or none (bytes).
+_STRTOLL_RE: Final = re.compile(f"[{re.escape(ASCII_BLANKS)}]*([+-]?[0-9]+)", re.ASCII)
+_INT64_MIN: Final = -(1 << 63)
+_INT64_MAX: Final = (1 << 63) - 1
+_UINT64_SPAN: Final = 1 << 64
+_UNIT_FACTORS: Final[dict[str, int]] = {"K": 1 << 10, "M": MIB, "G": GIB, "T": GIB << 10}
+_PERCENT_SIGN: Final = "%"
 # logind's seat files (/run/systemd/seats/SEAT): ACTIVE= names the seat's foreground session, if any,
 # and ACTIVE_UID= its user.
 _SEAT_ACTIVE_KEY: Final = "ACTIVE"
@@ -97,21 +108,68 @@ class SwapPerfReader:
         return target is not None and self._fs.is_dir(target)
 
 
+def _keyfile_value(text: str, section: str, key: str) -> str | None:
+    """The value GKeyFile gives KEY in [SECTION] of TEXT, or None when it has none. Only a newline ends a
+    line (one carriage return before it is dropped); the ASCII blanks that start a line, end the key and
+    start the value are dropped, not those that end the value; a line that starts with "#" is a comment
+    (";" starts a key); the last of two such keys counts, and a group named twice is one group."""
+    current = ""
+    value: str | None = None
+    for raw in file_lines(text):
+        line = raw.removesuffix("\r").lstrip(ASCII_BLANKS)
+        if not line or line.startswith("#"):
+            continue
+        if (head := _KEYFILE_GROUP_RE.fullmatch(line)) is not None:
+            current = group(head, 1)
+        elif current == section and "=" in line:
+            name, _, rest = line.partition("=")
+            if name.rstrip(ASCII_BLANKS) == key:
+                value = rest.lstrip(ASCII_BLANKS)
+    return value
+
+
+def _keyfile_unescape(value: str) -> str | None:
+    """VALUE as g_key_file_get_string gives it (\\s, \\n, \\t, \\r and \\\\ turned into their
+    character), or None for an escape it refuses."""
+    out: list[str] = []
+    chars = iter(value)
+    for ch in chars:
+        if ch != "\\":
+            out.append(ch)
+            continue
+        plain = _KEYFILE_ESCAPES.get(next(chars, ""))
+        if plain is None:
+            return None
+        out.append(plain)
+    return "".join(out)
+
+
+def _uresourced_memory(value: str) -> tuple[int, bool]:
+    """`(amount, percent)`: a memory value as uresourced's config_get_memory reads it, bytes or (percent
+    True) a share of RAM. A value with no number, an escape GKeyFile refuses or another character after
+    the number ("4 G", "4\N{NO-BREAK SPACE}G") is an error, which uresourced reads as 0 bytes."""
+    text = _keyfile_unescape(value)
+    number = _STRTOLL_RE.match(text) if text is not None else None
+    if text is None or number is None:
+        return 0, False
+    amount = min(max(int(group(number, 1)), _INT64_MIN), _INT64_MAX) % _UINT64_SPAN
+    unit = text[number.end() : number.end() + 1]
+    if not unit:
+        return amount, False
+    if unit == _PERCENT_SIGN:
+        return min(_PERCENT, amount), True
+    factor = _UNIT_FACTORS.get(unit)
+    return (amount * factor % _UINT64_SPAN, False) if factor is not None else (0, False)
+
+
 def parse_uresourced_memory_min(text: str) -> int | None:
-    """Extract `[ActiveUser] MemoryMin=` in bytes from an `uresourced.conf` file."""
-    in_active_user = False
-    for raw_line in text.splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith(("#", ";")):
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_active_user = stripped == _ACTIVE_USER_SECTION
-            continue
-        if in_active_user:
-            match = _MEMORY_MIN_LINE_RE.match(stripped)
-            if match is not None:
-                return parse_size(group(match, 1))
-    return None
+    """`[ActiveUser] MemoryMin=` of an `uresourced.conf` file in bytes, as uresourced reads it (GKeyFile,
+    then config_get_memory). None: no such key, or a share of RAM (a % value)."""
+    value = _keyfile_value(text, _ACTIVE_USER_SECTION, _MEMORY_MIN_KEY)
+    if value is None:
+        return None
+    amount, percent = _uresourced_memory(value)
+    return None if percent else amount
 
 
 def mm_knob_label(sysfs_path: str) -> str:
@@ -159,15 +217,13 @@ def mm_settings_rows(
 
 
 def parse_uresourced_max_memory_min(text: str) -> tuple[int | None, int | None]:
-    """`[Global] MaxMemoryMin=` of a uresourced.conf as `(percent, bytes)` (None for the form it is not)."""
-    section = ""
-    for line in (raw.strip() for raw in text.splitlines()):
-        if line.startswith("[") and line.endswith("]"):
-            section = line
-        elif section == _GLOBAL_SECTION and (found := _MAX_MEMORY_MIN_LINE_RE.match(line)) is not None:
-            pct = _PERCENT_RE.match(group(found, 1))
-            return (int(group(pct, 1)), None) if pct is not None else (None, parse_size(group(found, 1)))
-    return None, None
+    """`[Global] MaxMemoryMin=` of a uresourced.conf as `(percent, bytes)` (None for the form it is not;
+    both None when there is no such key), read as uresourced reads it (GKeyFile, then config_get_memory)."""
+    value = _keyfile_value(text, _GLOBAL_SECTION, _MAX_MEMORY_MIN_KEY)
+    if value is None:
+        return None, None
+    amount, percent = _uresourced_memory(value)
+    return (amount, None) if percent else (None, amount)
 
 
 def effective_uresourced_memory_min(

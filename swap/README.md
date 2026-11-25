@@ -267,6 +267,15 @@ drop-in to a live `session.slice`. What the file asks is `[ActiveUser]
 MemoryMin` for each user with a session in a seat's foreground (logind's
 `/run/systemd/seats`, `ACTIVE_UID`; one user in front of two seats counts
 once), capped in total by `[Global] MaxMemoryMin`, as uresourced computes it.
+The file is read as uresourced reads it (GLib's GKeyFile, then its own
+reading of a memory value): only ASCII blanks are trimmed, around the key and
+before the value but not after it; only `#` starts a comment (a `;` line is a
+key of another name); the last of two keys counts. A value is a whole number
+(ASCII digits) and only the one character after it decides: `K`, `M`, `G`, `T`
+(powers of 1024), `%` (`MaxMemoryMin`'s share of RAM, at most 100) or none
+(bytes); any other character (a blank too, as in `4 G` or `4 ` with a
+trailing blank, or a no-break space) or no number at all makes uresourced read
+0, and so does CST.
 A greeter (the login screen, a uid below 1000) is no such user; an
 `ACTIVE_UID` of other than ASCII digits (0-9) is no uid, so it counts as a user,
 as a seat without one does. A cgroup value (`memory.min`, `memory.low`,
