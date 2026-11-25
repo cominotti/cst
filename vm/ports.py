@@ -224,9 +224,18 @@ class ResticPort(Protocol):
         ...
 
     def backup(
-        self, env: Mapping[str, str], args: Sequence[str], timeout: int, out: ProgressPort
+        self,
+        env: Mapping[str, str],
+        args: Sequence[str],
+        timeout: int,
+        out: ProgressPort,
+        *,
+        answered: Callable[[], None] | None = None,
     ) -> tuple[int, ResticSummary]:
-        """restic ARGS (a backup --json): its progress to out as it runs; (exit status, its summary)."""
+        """restic ARGS (a backup --json): its progress to out as it runs; (exit status, its summary).
+        answered: called once restic has exited with a summary that names its snapshot, before the
+        rest of the backup's own work (a stop raised by it, or after restic exited, comes as
+        StopAfterSnapshot)."""
         ...
 
 

@@ -571,6 +571,12 @@ details keep a stop from cutting the merge short:
   alert. That alert names every overlay file there is also when a stop
   came while virsh was waited for (the refusal then gives the stop as the
   backup's own failure), and when the merge back of another disk failed.
+- A snapshot that switched only some disks (which `--atomic` should never
+  let happen) is no backup: the overlay files of the disks not switched
+  are removed, the switched disks merged back, and the backup fails, with
+  no second attempt. The files of the disks a settled answer did not
+  switch are removed before a stop that came while virsh was waited for
+  ends the read.
 - The merge has its own time limit: 4 hours for all disks together
   (`virsh blockcommit --timeout`). If it hits that limit, virsh cancels the
   merge cleanly: the disk stays on the overlay, with no job half done, and
@@ -615,7 +621,18 @@ forget, its ID goes into `/var/lib/cst/vm-nas-torn.json` (0644, with the
 VM, the repository, the host, the time and what tore it; a stop waits until
 the record is written, so a stop then or while `restic forget` waits for
 the repository's lock leaves it there), and it leaves the record once
-restic forgot it. When the forget fails, the message
+restic forgot it. A stop that ends restic after restic saved its snapshot
+(it printed the snapshot's ID, but had not ended on its own) still gets the
+ID from restic's last lines: the snapshot counts as torn and is recorded
+(what tore it: "stopped"), and the stop is raised right after the record.
+After a stop nothing is forgotten (the next NAS backup forgets it), so the
+stop stays short for the merge back. Once restic has answered with a
+snapshot, a stop waits (the stops are held: the staged files' removal, the
+check of a shut-off VM after the read) until a torn snapshot is recorded,
+or, for a backup, until that check is done; so does a stop that comes when
+restic has just ended on its own.
+The one instant not covered: restic ended between saving its snapshot and
+printing its ID. When the forget fails, the message
 adds "recorded in /var/lib/cst/vm-nas-torn.json: the next NAS backup of VM
 forgets it before its retention". If the record cannot be written either,
 the message says so (a stop's message too): then forget it by hand before
@@ -1046,7 +1063,9 @@ disks, qcow2 overlays, no space for `--full`, reflink not possible), the
 modes of the folders and files, that the index holds no secrets, that
 removed backups leave the index, and `list` and `status`.
 
-For the NAS backup (`test_vm_nas.py`): virsh and restic are stateful fakes
+For the NAS backup (`test_vm_nas.py`; `ResticBackupStopTest`: a stop while
+restic runs keeps the snapshot's ID from restic's lines, kept or still in
+the pipe): virsh and restic are stateful fakes
 (the VM's disk sources live in a JSON file, so `domblklist` shows what the
 snapshot and the merge did). The tests check the snapshot's arguments, the
 quiesce attempt and its fallback (agent missing, disconnected, failing,
@@ -1065,7 +1084,10 @@ alert nor the refusal short, a second Ctrl-C does not reach the merging virsh
 (the fake cancels on SIGINT as the real one does), a VM paused at merge time
 is merged, a `snapshot-create-as` that does not answer (snapshot in place
 later: the backup goes on; never in place: the files are kept and an alert
-is sent), a stop held through a quiesced call that timed out or failed with
+is sent), a settled snapshot that switched only some disks (refused, the
+others' files removed, no second attempt: `NasMergeBackAndStrayTest`), the
+files of the disks a settled answer did not switch removed before a stop
+held through the call (`NasHeldStopDropTest`), a stop held through a quiesced call that timed out or failed with
 the snapshot in place (the guest is thawed before the stop ends the read),
 the recovery text per case (a definition still on a stale overlay:
 `virsh edit`, never `qemu-img commit`; no commands for a disk the merge back
@@ -1076,13 +1098,21 @@ scratch file through `CST_VM_TORN`): a torn snapshot restic does not forget
 is recorded (once, 0644, atomically), one it forgets leaves no entry, a
 record that cannot be written or updated is said, a stop while forget waits
 or while the record waits for its lock leaves the entry, a stop after a
-record that failed names the snapshot left; the next run forgets a recorded snapshot restic lists with
+record that failed names the snapshot left, a stop that ends restic after
+it printed its snapshot leaves that snapshot recorded and forgets nothing
+(or names it when the record fails), and a stop while the check of a
+shut-off VM started during the read waits for virsh is raised once its
+snapshot is recorded (`NasStopHeldFromAnswerTest` adds the staged files'
+removal and the check of a VM still shut off, in-process; `ResticBackupAnsweredTest`
+the call that starts the hold, once restic exited with its snapshot); the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
 when that forget fails, a listing fails, an ID is ambiguous or its listed
 snapshot lacks a tag, drops one restic no longer lists without forgetting
 it, keeps the entries of other VMs, repositories and
 newer formats, refuses a newer or unreadable record before anything, and
-the record's lock gives up after its timeout. Tier 1's `test_151` runs the
+the record's lock gives up after its timeout. Tier 1's `test_200` stops a
+real restic read once restic printed its snapshot (the snapshot is recorded
+and named, and the next retry forgets it), and `test_151` runs the
 torn-snapshot retry, the retention after it and `forget_torn` against the
 real restic over SFTP to its NAS container (restic's own `snapshots --json`,
 a short recorded ID, the record and its lock as root). No E2E test runs a
@@ -1097,12 +1127,14 @@ properties: each disk is merged back or the alert names its overlay
 holding writes (`noOverlayLost`); a stale definition is never named for
 `qemu-img commit` (`staleNamed`); an unreachable NAS leaves no overlay
 (`unreachableNoOverlay`); a leftover overlay is refused, never stacked
-(`noStacking`); a torn snapshot is recorded or named (`tornHandled`, with
-its known gaps); the index holds no torn snapshot and loses an entry only
-on a listing it read (`indexClean`, `indexInRepo`); the retention never
-lets a torn snapshot take a good one's place and keeps the kept ones
-(`goodKept`, `keepKept`); only a consistent read is indexed
-(`consistentRead`). Its traces are replayed against the real code
+(`noStacking`); a torn snapshot is recorded or named (`tornHandledFull`:
+the gaps left are a kill before its record, and restic ended between
+saving its snapshot and printing its summary); the index holds no torn
+snapshot and loses an entry only on a listing it read (`indexClean`,
+`indexInRepo`); the retention never lets a torn snapshot take a good
+one's place and keeps the kept ones (`goodKeptFull`, `keepKept`); only a
+consistent read is indexed (`consistentRead`), also without `--atomic`
+(five instances, `nas_partial` among them). Its traces are replayed against the real code
 (`vm/tests/test_vm_nas_replay.py`, in the unit suite), so a change of order
 in `nas.py` fails the unit tests until the spec follows it. What it models,
 its gaps and its numbers:

@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 import json
 import os
 import re
+import signal
 from typing import Final, override
 import unittest
 
@@ -79,6 +80,9 @@ KINDS: Final = (
 )
 # The outcome of the merge back's check: (the live listing fails, the --inactive one fails).
 UNREADABLE: Final = {"unreadable": (True, True), "live_unreadable": (True, False), "inactive_unreadable": (False, True)}
+# restic's exit status of each outcome of restic_backup that a stop ended once restic had written its
+# snapshot: terminated by the stop, or exited 0 just before it.
+STOPPED_AFTER_SNAPSHOT: Final = {"stopped_after_commit": -signal.SIGTERM, "stopped_answered": 0}
 # Every (label, outcome) of a recorded call in the spec's checked instances: the checked-in traces
 # replay each at least once.
 SPEC_CALLS: Final = frozenset(
@@ -88,8 +92,9 @@ SPEC_CALLS: Final = frozenset(
         ("restic_ready", OK),
         ("restic_ready", FAIL),
         *(("snapshot", o) for o in ("ok", "fail_none", "fail_in_place", "timeout_all", "timeout_some")),
+        *(("snapshot", o) for o in ("ok_some", "fail_some")),  # nas_partial's (without --atomic): refused
         ("drop_overlay", ""),
-        *(("restic_backup", o) for o in ("ok", "incomplete", FAIL, "stopped_after_commit")),
+        *(("restic_backup", o) for o in ("ok", "incomplete", FAIL, "stopped_after_commit", "stopped_answered")),
         ("check_after", "same"),
         ("check_after", "changed"),
         *(
@@ -278,7 +283,9 @@ class Recorder:
         self.pos = 0
         self.calls: list[tuple[str, str, int, str]] = []
         self.started = False
-        self.holding = False
+        self.holding = False  # in a held block that freezes the environment (the snapshot's, the record's)
+        self.depth = 0  # held blocks entered: a stop that came in them is raised at the outermost one's end
+        self.answering = False  # restic's answered (the hold from restic's answer on) is being called
         self.pending_stop = False
         self.held_stop = False
         self.killed = False
@@ -315,7 +322,9 @@ class Recorder:
             raise Crash("killed")
         if self.pending_stop:
             self.pending_stop = False
-            if not self.ignored:  # during the merge back a stop is dropped (signals_ignored)
+            if self.depth:  # the hold from restic's answer on: the stop waits for its end
+                self.held_stop = True
+            elif not self.ignored:  # during the merge back a stop is dropped (signals_ignored)
                 raise vm_domain_backup.Stop("stopped by signal SIGTERM")
 
     def call(self, name: str, target: str = "", ident: int = 0) -> Step:
@@ -350,7 +359,9 @@ class Recorder:
 
 
 class Signals(FakeNasSignals):
-    """The stop signals: a stop that came in a held block is raised at its end (signals_held)."""
+    """The stop signals: a stop that came in a held block is raised at the end of the outermost one
+    (signals_held). The hold from restic's answer on (entered while restic's answered is called) lets the
+    environment act at each port call, as it holds only the stops; the snapshot's and the record's freeze it."""
 
     def __init__(self, rec: Recorder) -> None:
         super().__init__()
@@ -364,7 +375,7 @@ class Signals(FakeNasSignals):
     @override
     def held(self) -> contextlib.AbstractContextManager[object]:
         self.rec.port()
-        return _Held(self.rec)
+        return _Held(self.rec, freezes=not self.rec.answering)
 
     @override
     @contextlib.contextmanager
@@ -379,18 +390,24 @@ class Signals(FakeNasSignals):
 
 
 class _Held(contextlib.AbstractContextManager[object]):
-    def __init__(self, rec: Recorder) -> None:
+    def __init__(self, rec: Recorder, *, freezes: bool) -> None:
         self.rec = rec
+        self.freezes = freezes
+        self.was = False
 
     @override
     def __enter__(self) -> object:
-        self.rec.holding = True
+        self.rec.depth += 1
+        if self.freezes:
+            self.was, self.rec.holding = self.rec.holding, True
         return self
 
     @override
     def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
-        self.rec.holding = False
-        if self.rec.held_stop and exc_type is None:
+        self.rec.depth -= 1
+        if self.freezes:
+            self.rec.holding = self.was
+        if self.rec.depth == 0 and self.rec.held_stop and exc_type is None:
             self.rec.held_stop = False
             raise vm_domain_backup.Stop("stopped by signal SIGTERM")
 
@@ -522,7 +539,13 @@ class Restic(FakeNasRestic):
 
     @override
     def backup(
-        self, env: Mapping[str, str], args: Sequence[str], timeout: int, out: object
+        self,
+        env: Mapping[str, str],
+        args: Sequence[str],
+        timeout: int,
+        out: object,
+        *,
+        answered: Callable[[], None] | None = None,
     ) -> tuple[int, vm_domain_backup.ResticSummary]:
         del env, timeout, out
         outcome = self.rec.call("restic_backup").outcome
@@ -531,13 +554,22 @@ class Restic(FakeNasRestic):
         if outcome == FAIL:
             return 1, {}
         self.world.repo[self.run_number] = vm_domain.KEEP_TAG in tags
-        if outcome == "stopped_after_commit":
-            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
         summary: vm_domain_backup.ResticSummary = {
             "snapshot_id": snap_id(self.run_number),
             "total_bytes_processed": 1024,
             "data_added": 512,
         }
+        if outcome in STOPPED_AFTER_SNAPSHOT:
+            # The stop ended restic once it had written its snapshot: Restic.backup carries the id.
+            raise vm_domain_backup.StopAfterSnapshot(
+                "stopped by signal SIGTERM", STOPPED_AFTER_SNAPSHOT[outcome], summary
+            )
+        if answered is not None:
+            self.rec.answering = True
+            try:
+                answered()
+            finally:
+                self.rec.answering = False
         return (3 if outcome == "incomplete" else 0), summary
 
 
