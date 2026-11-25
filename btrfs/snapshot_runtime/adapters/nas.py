@@ -18,12 +18,12 @@ import signal
 import sys
 from typing import Final, TextIO
 
-from btrfs.health_check.domain import bash_wrap
+from btrfs.health_check.domain import bash_int, bash_wrap
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
 from cst_core.domain.contracts import NAS_SSH_ALIAS, Urgency
-from cst_core.domain.values import DAY, parse_whole_number
+from cst_core.domain.values import DAY
 from btrfs.snapshot_runtime.domain import (
     CHECK_FAILURES_ALERTED,
     EXIT_STOPPED,
@@ -481,8 +481,11 @@ class Nas:
         if last_text is None:
             made = m.mtime(f"{m.state}/nas-repo-id")
             last_text = str(made) if made is not None else str(m.now())
-        parsed = parse_whole_number(last_text)  # ASCII digits within int()'s limit, else now
-        last = m.now() if parsed is None else parsed
+        # The old [[ last =~ ^[0-9]+$ ]] || last=now, then bash arithmetic (bash_int: a leading 0 octal, a value
+        # past 2**63 - 1 wrapping), as due() reads the same file. Digits bash cannot read (08) do not get here:
+        # due() found such a file not due, so no check ran.
+        n = bash_int(last_text) if last_text.isascii() and last_text.isdigit() else None
+        last = m.now() if n is None else n
         age_d = self.days_since(last)
         every = self.number("NAS_CHECK_EVERY_DAYS")
         if every is not None and age_d >= 2 * every:

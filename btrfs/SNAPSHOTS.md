@@ -1343,6 +1343,9 @@ Rules the script follows about the password:
    octal (`08` is no number and is skipped), a value past 2**63 - 1 wraps
    around (a negative one is skipped), and the age in days and the count of
    failed checks (`nas-check-failures`) are 64-bit and wrap the same way.
+   `nas-last-check` (the last completed repository check) is read the same
+   way, for when the check is due and for the alert about a check that
+   keeps not completing.
 2. Opens the repository with the password. What
    `/var/lib/btrfs-snapshot` records about it (which snapshots it has, the
    last prune and check) belongs to that repository's id

@@ -23,7 +23,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from typing import override
+from typing import Final, override
 import unittest
 from unittest import mock
 
@@ -38,6 +38,12 @@ REPO_ID = "ab" * 32
 SNAP = "home.20261118T0905"
 DAY = 86400
 PAST_64_BITS = "a number past 2**63 - 1 (bash would wrap it): not wrapped; ignored"
+NOT_CHECKED_60_DAYS: Final = [
+    [
+        "NAS backup: repository not checked for 60 days",
+        "restic check did not complete at the last attempts; see journalctl -u btrfs-snapshot-nas.",
+    ]
+]
 
 
 class Base(RuntimeTest):
@@ -841,6 +847,20 @@ class MaintenanceTest(Base):
                 ]
             ],
         )
+
+    def stale_check_alert(self, last_check: str) -> list[list[object]]:
+        """The alerts of a run whose check does not complete (rc 11), with LAST_CHECK in nas-last-check."""
+        self.known_repository()
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic")
+        self.write(self.state_file("nas-last-check"), f"{last_check}\n")
+        self.restic(check={"rc": 11})
+        self.nas()
+        return [a[4:] for a in self.notified()]
+
+    def test_a_last_check_is_read_as_bash_arithmetic_for_the_stale_alert(self) -> None:
+        # The old nas_check_stale computed $(( NOW - last )) as due() reads the file: a leading 0 is octal.
+        # Read as a decimal number, the octal text of the epoch 60 days back was in the future: no alert.
+        self.assertEqual(self.stale_check_alert(f"0{int(time.time() - 60 * DAY):o}"), NOT_CHECKED_60_DAYS)
 
     def test_a_last_prune_bash_cannot_read_is_not_due_before_its_interval_is_read(self) -> None:
         # bash failed on NOW - 08 first, so a name in NAS_PRUNE_EVERY_DAYS was never read: no prune, and
