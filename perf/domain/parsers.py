@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 import re
 from typing import Final
 
-from cst_core.domain.text import enum_member, group
+from cst_core.domain.text import enum_member, group, strip_ascii_blanks
 from cst_core.domain.values import CpuSet, parse_integer, parse_whole_number
 from perf.domain.models import (
     ALL_PERF_AXES,
@@ -93,7 +93,7 @@ def parse_perf_args(argv: Sequence[str]) -> PerfCliOptions:
 def _parse_axis_list(spec: str) -> list[PerfAxis]:
     axes: list[PerfAxis] = []
     for raw in spec.split(","):
-        token = raw.strip().lower()
+        token = strip_ascii_blanks(raw).lower()  # a no-break space is part of the word
         if not token:
             continue
         parsed = enum_member(PerfAxis, token)

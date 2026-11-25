@@ -93,6 +93,12 @@ class PerfParserTest(unittest.TestCase):
             parse_perf_args(["--axis"])
         with self.assertRaises(PerfCliError):
             parse_perf_args(["--axis", "network"])
+        # ASCII blanks around an axis are dropped; a no-break space is part of the word (str.strip()
+        # used to drop it).
+        self.assertEqual(parse_perf_args(["--axis", "cpu, memory\t"]).axes, (PerfAxis.CPU, PerfAxis.MEMORY))
+        for spec in ("cpu,\N{NO-BREAK SPACE}memory", "cpu\N{IDEOGRAPHIC SPACE}"):
+            with self.subTest(spec=spec), self.assertRaisesRegex(PerfCliError, "^unknown axis"):
+                parse_perf_args(["--axis", spec])
         with self.assertRaises(PerfCliError):
             parse_perf_args(["--bogus"])
 
@@ -326,6 +332,9 @@ class PerfEvaluatorTest(unittest.TestCase):
             ("acpi_idle", "", (c1, c3, c6), None),
             ("intel_idle", "junk", (c1, c3), "C3 enabled (350 µs >= 200 µs"),
             (None, " 300 ", (c1, c3), "C3 enabled (350 µs >= 300 µs"),
+            # A setting of a no-break space is set (bash keeps it): cpu-power's 200 us, also with
+            # acpi_idle (str.strip() made it "not set": no cap there, no finding).
+            ("acpi_idle", "\N{NO-BREAK SPACE}", (c1, c3), "C3 enabled (350 µs >= 200 µs"),
         )
         for driver, setting, states, summary in cases:
             with self.subTest(driver=driver, setting=setting):
