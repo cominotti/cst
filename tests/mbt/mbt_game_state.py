@@ -34,7 +34,8 @@ Checked:
   unit, with systemd showing a generated value right after the set (valid Unicode: systemctl's
   output reaches the profile decoded with U+FFFD), read with intended_records: the six fields
   exactly, the last record of each setting (setp writes the predicted one before the set, and a
-  second when systemd shows another form), the format line no record, every line readable,
+  second when systemd shows another form; an empty answer, a show that failed, adds none, so the
+  predicted one stays last), the format line no record, every line readable,
   newer_intended None.
 """
 
@@ -62,6 +63,7 @@ from cpu.game.domain import (
     records,
     unreadable_lines,
 )
+from cpu.game.domain.boxes import shown_form
 from cpu.tests.test_game_profile import UID, FakeSystemd, game_scratch
 from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
@@ -255,7 +257,7 @@ class GameStateFilesTest(profiles.MbtTestCase):
             last: dict[tuple[str, str, str], tuple[str, ...]] = {}
             for m, u, p, v in settings:  # the last record of a setting wins, at its own place
                 last.pop((m, u, p), None)
-                last[m, u, p] = (GameRecordKind.PROP.value, m, u, p, v, shown_value)
+                last[m, u, p] = (GameRecordKind.PROP.value, m, u, p, v, shown_value or shown_form(p, v))
             self.assertEqual(intended_records(text), list(last.values()))
             self.assertEqual(unreadable_lines(text, intended=True), [])
             self.assertIsNone(newer_intended(profile.paths.intended, text))
