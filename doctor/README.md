@@ -363,10 +363,13 @@ and what to do are in
 A boot asks for the migration only when the volumes folder has no `+C`.
 When `install` finds the folder with `+C` already (a give-up removed the
 flag and kept `+C`, or an older install stopped between its `+C` and its
-flag) and cannot write the request, no boot asks again; `install` then records it in `/var/lib/docker-volumes-nocow/outcome`
+flag) and cannot write the request, no boot asks again; `install`
+then records it in `/var/lib/docker-volumes-nocow/outcome`
 (`not-scheduled`, with its time and reason). A count of boots left in
 `/var/lib/docker-volumes-nocow/attempts` with no flag means an install or a
-boot could not reset it, and the next request may give up at once
+boot could not reset it. A request resets such a count before it writes its
+flag, and fails while it cannot, so no migration is asked for until the
+count can be reset
 ([btrfs/README.md, section 4.10](../btrfs/README.md#410-docker-volumes-without-copy-on-write-nocow)).
 The doctor cannot look at `+C` itself (Docker's folders are root's only),
 so it reads what the helper leaves on disk, with the helper installed and no
