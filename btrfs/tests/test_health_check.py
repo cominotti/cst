@@ -486,6 +486,41 @@ class HealthCheckTest(unittest.TestCase):
             "unallocated): writes may fail with ENOSPC soon",
         )
 
+    def test_metadata_reserve_wraps_as_bash_arithmetic(self) -> None:
+        # The old bash's (( meta_free < 2 * rsv )) doubles the reserve in 64-bit arithmetic and wraps: a
+        # reserve of 2**63 + 5 is -2**63 + 5 there and its double is 10 (fires with no room left); one of
+        # 2**62 doubles to -2**63 (silent). The old bash fragment (git show b819032f^:btrfs/btrfs-health-check,
+        # lines 151-154) is the oracle for each reserve.
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        room = str(20 * GIB)
+        reserves = [str(2**63 + 5), str(2**62)]
+        script = (
+            "total=$1 used=$2 min_unalloc=$3; shift 3; for rsv; do meta_free=$(( total - used )); "
+            "if (( meta_free < 2 * rsv && min_unalloc < 2 * 1024 ** 3 )); then "
+            'echo "$(( meta_free / 1024 ** 2 )) $(( min_unalloc / 1024 ** 2 ))"; else echo silent; fi; done'
+        )
+        want = run_bash(script, room, room, str(GIB), *reserves)
+        self.assertEqual(want[1], "silent")  # both outcomes are covered
+        self.assertNotEqual(want[0], "silent")
+        self.write(f"{alloc}/metadata/total_bytes", f"{room}\n")
+        self.write(f"{alloc}/metadata/bytes_used", f"{room}\n")
+        self.fs["device_usage"] = device_usage(GIB, 800 * GIB)
+        for reserve, bash in zip(reserves, want, strict=True):
+            with self.subTest(reserve=reserve, bash=bash):
+                self.write(f"{alloc}/global_rsv_size", f"{reserve}\n")
+                r = self.run_check()
+                self.assertEqual(r.returncode, 1, r.stderr)
+                got = [line for line in r.stderr.splitlines() if "metadata almost full" in line]
+                if bash == "silent":
+                    self.assertEqual(got, [])
+                else:
+                    free_mib, least_mib = bash.split()
+                    line = (
+                        f"<2>{TAG}: btrfs /var: CRITICAL: metadata almost full ({free_mib} MiB free in metadata "
+                        f"chunks, {least_mib} MiB unallocated): writes may fail with ENOSPC soon"
+                    )
+                    self.assertEqual(got, [line])
+
     def test_reclaim(self) -> None:
         alloc = f"sys/fs/btrfs/{UUID}/allocation"
         conf = self.path("etc/tmpfiles.d/btrfs-automatic-reclaim.conf")

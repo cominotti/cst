@@ -220,7 +220,8 @@ def unallocated_problems(mnt: str, rows: Sequence[tuple[str, str]]) -> tuple[lis
 def metadata_problem(mnt: str, meta_free: int, reserve: int, least: int | None) -> str | None:
     """Metadata ENOSPC proper: little room left in metadata chunks (less than twice the global
     reserve) and almost nothing to allocate more."""
-    if least is None or not (meta_free < 2 * reserve and least < 2 * GIB):
+    # bash's (( meta_free < 2 * rsv )): the double wraps at 64 bits, as reserve does when bash_int read it.
+    if least is None or not (meta_free < bash_wrap(2 * reserve) and least < 2 * GIB):
         return None
     return (
         f"btrfs {mnt}: CRITICAL: metadata almost full ({bash_div(meta_free, MIB)} MiB free in metadata chunks, "
