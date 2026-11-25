@@ -16,19 +16,20 @@ if TYPE_CHECKING:
     from cpu.game.adapters.profile import GameProfile
 
 
-def repair_drift(profile: GameProfile) -> None:
+def repair_drift(profile: GameProfile, *, user_manager: bool = True) -> None:
     """Set again what drift() lists, straight with set-property: not with setp, which would add
     a second record to game.state and make 'off' restore the profile's own value. A game.intended
     of a newer CST is not read (its records may mean something else), and a setting game.state holds
     no record of is not set again ('off' could not undo it): each said in the journal once per boot
     (again when the text changes, and when it comes back after a tick that had nothing to say:
-    GameProfile.say_unheld)."""
+    GameProfile.say_unheld). Without user_manager, the user manager's settings are left alone (see
+    GameProfile.drift)."""
     text, newer = profile.intended()
     if newer is not None:
         said = f"drift not repaired: {newer}"
         profile.say_once(profile.paths.drift_warned, said, lambda: profile.log(4, said))
         return
-    drifts = profile.drift(text)
+    drifts = profile.drift(text, user_manager=user_manager)
     skipped = unheld(drifts, records(profile.state_text()))
     profile.say_unheld(skipped)
     for d in drifts:

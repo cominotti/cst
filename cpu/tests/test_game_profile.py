@@ -1579,6 +1579,68 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.state))
 
 
+class TickForARecordedUidWithoutAccountTest(GameProfileCase):
+    """G7, the tick and 'state': with game.state of a uid no account has now and a TARGET_USER that names another
+    account, the user manager's side is left alone: no setting and no record in TARGET_USER's manager (it is
+    another user's), no drift compared there; said once per boot. The system manager's side still runs."""
+
+    STEAM = "app-flatpak-com.valvesoftware.Steam-7.scope"
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.run_profile("on")  # for USER, uid UID
+        self.write(self.manual, "")
+        self.systemd.units["usr"] = [self.STEAM]  # a game started after 'on'
+        self.set_now("usr", "user.slice", CPUWeight="30")  # drifted: game.intended holds idle
+        self.systemd.units["sys"] = ["docker-1.scope"]  # a container started after 'on'
+        self.set_now("sys", "docker-1.scope", Slice="system.slice", AllowedCPUs="0-23")
+
+    def other_profile(self) -> tuple[GameProfile, io.StringIO]:
+        """TARGET_USER other (uid 1001, an account); no account has UID, the uid 'on' acted for, now."""
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            dataclasses.replace(self.settings, target_user="other"),
+            self.systemd,
+            uid_of=lambda u: {"other": "1001"}.get(u, ""),
+            name_of=lambda uid: {"1001": "other"}.get(uid, ""),
+            out=out,
+        )
+        self.systemd.actions = []
+        return p, out
+
+    def test_the_tick_sets_nothing_in_another_user_s_manager_and_says_why_once(self) -> None:
+        state = self.read(self.state)
+        said: list[str] = []
+        for _ in range(2):
+            p, out = self.other_profile()
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(p.tick(), 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual([a for a in self.sets(self.systemd.actions) if "--user" in a], [])
+            said.append(out.getvalue())
+        self.assertEqual(self.now("usr", "user.slice", "CPUWeight"), "30")
+        self.assertNotIn(self.STEAM, self.read(self.state))
+        self.assertIn("prop sys docker-1.scope AllowedCPUs new -\n", self.read(self.state))  # system side
+        self.assertEqual(self.read(self.state).replace("prop sys docker-1.scope AllowedCPUs new -\n", ""), state)
+        self.assertIn(
+            "<4>game-profile: profile on, its user manager's side not handled: no account has uid"
+            f" {UID}, the user 'on' acted for (fix it; said once per boot)\n",
+            said[0],
+        )
+        self.assertNotIn("not handled", said[1])  # said once per boot
+        self.assertNotIn("drift: user.slice", said[0] + said[1])
+
+    def test_state_compares_no_drift_in_another_user_s_manager(self) -> None:
+        p, out = self.other_profile()
+        self.assertEqual(p.state(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "--user" in a and "LoadState" in a], [])
+        self.assertNotIn("DRIFT: user.slice", out.getvalue())
+        self.assertIn("  drift: none (every setting the profile made still holds)\n", out.getvalue())
+
+
 class OnTargetUserWithoutAccountTest(GameProfileCase):
     """'on' with a TARGET_USER that names no account: refused before it changes anything (it would set
     user@.service and user-.slice, and the user manager of no one)."""

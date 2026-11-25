@@ -859,7 +859,14 @@ uid, never in another user's (`TARGET_USER`'s):
   manager is gone. Versions before 2026-11 dropped them as if undone.
 
 With no such record (an `on` that died before its first record), the user
-manager's side is `TARGET_USER`'s, as before. When the line
+manager's side is `TARGET_USER`'s, as before. While the profile is on and no
+account has the recorded uid, the watchdog's `tick` leaves the user
+manager's side alone (no Steam scope, no box next to the game, no drift of
+the user manager set in `TARGET_USER`'s manager, which is another user's)
+and says why once per boot (`<4>profile on, its user manager's side not
+handled: no account has uid UID, the user 'on' acted for (fix it; said once
+per boot)`); `cst cpu game state` compares no drift of it either. It still
+pins Docker, the GPU and the system manager's settings. When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to
 /run/cpu-setup/game.state`; it carries on with the rest and still exits 0,

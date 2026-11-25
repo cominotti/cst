@@ -514,6 +514,16 @@ class GameProfile:
             return f"TARGET_USER names no account: {name} (in {conf})"
         return None
 
+    def foreign_refusal(self) -> str | None:
+        """Why the tick leaves the user manager's side alone while the profile is on: no account has the uid
+        game.state records (the user 'on' acted for), so no name reaches that uid's manager, and TARGET_USER's
+        is another user's (G7). None when game.state records no uid, or an account has it."""
+        uid = state_uid(records(self.state_text()))
+        target = self.s.target_user
+        if uid is None or (target and self._lookup_uid(target, say=False) == uid) or self._name_of(uid):
+            return None
+        return f"no account has uid {uid}, the user 'on' acted for"
+
     def off(self) -> int:
         """Exact revert: the overrides 'on' created go (then daemon-reload), the ones that existed
         before get their old value back; the MemoryLow drop-ins go also without a game.state. What it
@@ -610,9 +620,10 @@ class GameProfile:
             case None:
                 return True
 
-    def drift(self, text: str) -> list[Drift]:
-        """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
-        recs = intended_records(text)  # as cst doctor reads it
+    def drift(self, text: str, *, user_manager: bool = True) -> list[Drift]:
+        """The settings in game.intended (its text) that no longer hold (one systemctl show per unit); without
+        user_manager, none of the user manager's (no account has the uid 'on' acted for: foreign_refusal)."""
+        recs = [r for r in intended_records(text) if user_manager or r[:2] != (GameRecordKind.PROP, "usr")]
         now: dict[tuple[str, str], dict[str, str]] = {}
         for (mgr, unit), props in intended_props(recs).items():
             args = ["show", "-p", "LoadState"] + [a for prop in props for a in ("-p", prop)] + [unit]
@@ -654,16 +665,17 @@ class GameProfile:
         if self.problems:
             self.warn_once("tick changes nothing")
             return 0
-        self.user_from_state(records(self.state_text()), say=False)  # the user 'off' undoes for
+        owned = self.user_from_state(records(self.state_text()), say=False)  # the user 'off' undoes for
         self.pin_docker()  # containers started meanwhile
-        why = self.target_refusal()  # no account for the user acted for: no user manager to change
+        # No account for the user acted for, or for the uid 'on' acted for: no user manager to change.
+        why = self.target_refusal() or (None if owned else self.foreign_refusal())
         if why is None:
             self.protect_steam()  # the game's own scope, started after 'on'
             self.demote_escapes()  # boxes next to the game that appeared after 'on'
         else:
             self._say_refusal("profile on, its user manager's side not handled", why)
         apply_game_gpu(self)
-        repair_drift(self)  # settings a daemon-reload or uresourced undid
+        repair_drift(self, user_manager=owned)  # settings a daemon-reload or uresourced undid
         return 0
 
     def _tick_while_off(self) -> None:
@@ -699,9 +711,9 @@ class GameProfile:
         mark = self.paths.settings_warned
         said = read_text(mark)
         if said is not None:
-            why = self.target_refusal()
-            if why is not None and said.endswith(f": {why}{_ONCE}"):
-                return
+            for why in (self.target_refusal(), self.foreign_refusal()):
+                if why is not None and said.endswith(f": {why}{_ONCE}"):
+                    return
         with contextlib.suppress(OSError):
             os.unlink(mark)
 
@@ -742,13 +754,20 @@ class GameProfile:
         return show_state(self)
 
     def drift_report(
-        self, state_recs: Sequence[Record], intended_text: str | None, newer: str | None, *, manual: bool
+        self,
+        state_recs: Sequence[Record],
+        intended_text: str | None,
+        newer: str | None,
+        *,
+        manual: bool,
+        user_manager: bool = True,
     ) -> list[str]:
         """The drift part of 'state' from its snapshot (game.state's records, game.intended's text or None, why
-        it cannot be compared, the by-hand mark): each setting that no longer holds, or that none drifted."""
+        it cannot be compared, the by-hand mark; user_manager: see drift): each setting that no longer holds,
+        or that none drifted."""
         if intended_text is None:
             return drift_lines(None, manual=manual)
-        drifts = self.drift(intended_text) if newer is None else None
+        drifts = self.drift(intended_text, user_manager=user_manager) if newer is None else None
         not_held = [] if drifts is None else unheld(drifts, state_recs)
         return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held)
 

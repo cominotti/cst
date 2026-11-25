@@ -8068,13 +8068,16 @@ echo E2E-OK
         The old 'off' ran set-property and daemon-reload into the stopped manager. (b) 'on' for e2e205b, whose
         account is then removed while its user manager still runs: 'off' keeps its records in game.leftovers
         under its uid, never undone in tester's manager (the old 'off' dropped them as undone); a tick keeps
-        them, and once that manager is stopped the next tick drops them."""
+        them, and once that manager is stopped the next tick drops them. (c) With that game.state still there, a
+        tick sets nothing in tester's manager (a Steam-named scope there gets no MemoryLow and no record) and
+        says why once; the old tick acted in tester's manager."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
             """
             printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
             python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            systemctl --user -M tester@ stop app-flatpak-com.valvesoftware.Steam-e2e205.scope e2e205-steam-launch.service 2>/dev/null || true
             for u in $(cat /tmp/e2e-205-uids 2>/dev/null); do
                 systemctl stop "user@$u.service" "user-runtime-dir@$u.service" 2>/dev/null || true
             done
@@ -8106,6 +8109,7 @@ echo E2E-OK
             runuser -u tester -- mkdir -p "$(dirname "$tov")"
             runuser -u tester -- sh -c 'printf "[Slice]\nCPUWeight=%s\n" "$1" >"$2"' sh "$tw" "$tov"
             tsum=$(sha256sum "$tov")
+            steam=app-flatpak-com.valvesoftware.Steam-e2e205.scope
             logout() {
                 systemctl stop "user@$1.service" "user-runtime-dir@$1.service"
                 test ! -e "/run/user/$1/systemd" || { echo "uid $1's runtime folder is still there" >&2; exit 1; }
@@ -8146,6 +8150,28 @@ echo E2E-OK
             userdel -f e2e205b
             if getent passwd "$ub" >/dev/null; then echo "uid $ub still has an account" >&2; exit 1; fi
             test -d "/run/user/$ub/systemd"
+            # (c) The tick leaves tester's manager alone for game.state of that uid: a Steam-named scope there
+            # gets no MemoryLow and no record (the old tick set it in tester's manager), said once.
+            systemd-run --user -M tester@ --quiet --unit=e2e205-steam-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$tuid/bus \
+                systemd-run --user --scope --quiet --unit="$steam" sleep 300
+            for _ in $(seq 50); do
+                [[ "$(systemctl --user -M tester@ show -P ActiveState "$steam")" == active ]] && break
+                sleep 0.1
+            done
+            [[ "$(systemctl --user -M tester@ show -P ActiveState "$steam")" == active ]]
+            steam_low=$(systemctl --user -M tester@ show -P MemoryLow "$steam")
+            ssum=$(sha256sum "$st")
+            got=$(gp tick 2>&1)
+            grep -qF "profile on, its user manager's side not handled: no account has uid $ub, the user 'on' acted for" <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P MemoryLow "$steam")" == "$steam_low" ]] \
+                || { echo "the tick set the Steam scope in tester's manager" >&2; exit 1; }
+            if grep -qF "$steam" "$st"; then echo "game.state has a record of tester's Steam scope" >&2; exit 1; fi
+            got=$(gp tick 2>&1)
+            if grep -qF "not handled" <<<"$got"; then echo "said twice: $got" >&2; exit 1; fi
+            tester_untouched "(c)"
+            systemctl --user -M tester@ stop "$steam" e2e205-steam-launch.service 2>/dev/null || true
             got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
             grep -qF "off: no account has uid $ub, the user 'on' acted for, now, and its user manager still runs" <<<"$got" \
                 || { echo "off: $got" >&2; exit 1; }
