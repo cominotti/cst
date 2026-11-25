@@ -517,7 +517,13 @@ class SwapApplicationService(SwapReports):
         dest = env.etc_path(URESOURCED_ENTRY)
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== session memory floor (uresourced)"))
         if self._uresourced_copy_due(dest, self._inspect_file(src, dest)):
-            self._fs.copy_if_absent(dest, dest + URESOURCED_BAK_SUFFIX)
+            bak = dest + URESOURCED_BAK_SUFFIX
+            if not self._fs.is_char_device(dest):
+                self._fs.copy_if_absent(dest, bak)
+            elif not self._fs.lexists(bak):
+                # A link to a character device (/dev/null: a masked vendor file) reads as an empty file; the copy
+                # reads nothing from the device (/dev/zero would never end).
+                self._fs.write_atomic(bak, "")
         written = self._apply_managed_file(URESOURCED_ENTRY, src, dest, events)
         text = self._desired_text(src)
         # A file already current can still disagree with the live floor (uresourced started before it, or

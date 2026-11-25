@@ -387,6 +387,24 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(fs.is_searchable(closed_dir), os.geteuid() == 0)
         self.assertFalse(fs.is_searchable(os.path.join(tmp, "missing")))
 
+    def test_is_char_device_tells_a_character_device_through_a_link(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
+        self.addCleanup(shutil.rmtree, tmp)
+        fs = LocalFileSystemAdapter()
+        regular, folder, fifo = (os.path.join(tmp, name) for name in ("file", "folder", "fifo"))
+        with open(regular, "w", encoding="utf-8") as f:
+            f.write("x\n")
+        os.mkdir(folder)
+        os.mkfifo(fifo)
+        to_null, dangling = os.path.join(tmp, "to-null"), os.path.join(tmp, "dangling")
+        os.symlink("/dev/null", to_null)
+        os.symlink(os.path.join(tmp, "missing"), dangling)
+        self.assertTrue(fs.is_char_device("/dev/null"))
+        self.assertTrue(fs.is_char_device(to_null))
+        for path in (regular, folder, fifo, dangling, os.path.join(tmp, "missing")):
+            with self.subTest(path=os.path.basename(path)):
+                self.assertFalse(fs.is_char_device(path))
+
     def test_local_filesystem_adapter(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
         self.addCleanup(shutil.rmtree, tmp)

@@ -2878,6 +2878,33 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertEqual(stat.S_IMODE(os.stat(mine).st_mode), 0)
         self.assertFalse(os.path.lexists(f"{dest}.pre-swap-config.bak"))
 
+    def test_a_link_at_uresourced_conf_to_dev_null_is_copied_aside_as_an_empty_file(self) -> None:
+        # A masked vendor file (a link to /dev/null, as apply masks zram-generator.conf) reads as an empty file:
+        # apply copies it aside as an empty .bak, reading nothing from the device, and writes CST's file. Before
+        # d28d7f58 it did so too; after it, plan said "?" and apply refused it as a link to anything but a file.
+        dest = self.env.etc_path(URESOURCED_ENTRY)
+        bak = f"{dest}.pre-swap-config.bak"
+        os.symlink("/dev/null", dest)
+        plan = self._plan_text(dataclasses.replace(self.env, as_root=True))
+        line = next(x for x in plan.splitlines() if " uresourced.conf " in x)
+        self.assertTrue(line.startswith("  update  "), line)
+        fs = _ReadsRecorded(self._fs().block_links, unopened=set())
+        rc, out, err, _systemd, _system = self._apply_on(fs)
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn(dest, fs.reads)
+        self.assertFalse(os.path.islink(bak))
+        self.assertTrue(os.path.isfile(bak))
+        self.assertEqual(os.path.getsize(bak), 0)
+        self.assertEqual(stat.S_IMODE(os.stat(bak).st_mode), 0o644)
+        self.assertFalse(os.path.islink(dest))
+        with open(dest, encoding="utf-8") as f, open(self.env.src_path(URESOURCED_ENTRY), encoding="utf-8") as g:
+            self.assertEqual(f.read(), g.read())
+        after = file_tree(self.tmp)
+        rc, out, err, _systemd, _system = self._apply_on(self._fs())
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("written:", out)
+        self.assertEqual(file_tree(self.tmp), after)
+
     def test_a_link_at_uresourced_conf_to_a_folder_is_replaced_once_its_copy_aside_is_there(self) -> None:
         # An earlier apply left uresourced.conf.pre-swap-config.bak: step 7 copies nothing aside, so the link
         # is no reason to refuse; the installer replaces it with CST's file.

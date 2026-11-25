@@ -324,10 +324,12 @@ What `apply` does, in order:
    step 7 copies aside first, and the `machine.slice` drop-in) can be read
    (a folder in place of one is refused with
    `<file>: cannot be read: nothing was changed`; so is a link at
-   `/etc/uresourced.conf` to anything but a file it can read, such as a
-   folder or a FIFO, while step 7 has still to copy it aside: while no
-   `/etc/uresourced.conf.pre-swap-config.bak` is there; nothing is read
-   through the link) and that no name above one of them is a file, where
+   `/etc/uresourced.conf` to anything but a file or a character device it
+   can read, such as a folder or a FIFO, while step 7 has still to copy it
+   aside: while no `/etc/uresourced.conf.pre-swap-config.bak` is there;
+   nothing is read through the link. A link to `/dev/null`, a masked
+   vendor file, counts as an empty file: step 7 copies it aside as an
+   empty `.bak`) and that no name above one of them is a file, where
    the installer could not create its folder (refused with
    `<file>: <name> is not a folder: nothing was changed`), that no folder
    is in place of `/etc/systemd/zram-generator.conf`, where step 4 puts a
@@ -372,7 +374,9 @@ What `apply` does, in order:
    MGLRU `min_ttl_ms` live (a knob this kernel lacks is skipped; THP `defrag`
    is kept while the `cpu` experiment `thp-defer` is on).
 7. **session memory floor (uresourced)**: backs up a pre-existing
-   `/etc/uresourced.conf` that is not CST's, writes CST's, and restarts
+   `/etc/uresourced.conf` that is not CST's (a link to a character device
+   such as `/dev/null` as an empty file, without reading the device),
+   writes CST's, and restarts
    `uresourced.service` when active if the file changed or the live
    `user.slice memory.min` differs (section 2.6).
 8. **machine.slice**: writes the drop-in, removes the one under its old name
