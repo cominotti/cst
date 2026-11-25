@@ -2676,6 +2676,23 @@ class LeftoversTest(GameProfileCase):
         self.assertTrue(p.undo_record(("prop", "sys", "b.slice", "CPUWeight", "new", "-"), reload))  # not there
         self.assertTrue(p.undo_record(("bogus",), reload))  # no record: nothing to undo
 
+    def test_an_override_that_cannot_be_removed_runs_no_daemon_reload(self) -> None:
+        # An 'off' kept machine.slice's IOWeight override, which cannot be removed (a non-empty folder in its
+        # place: EISDIR): the ticks that retry it keep it and reload no systemd for it (nothing was removed).
+        text = "cst-game-leftovers 1\nprop sys machine.slice IOWeight new -\n"
+        self.write(self.paths.leftovers, text)
+        os.makedirs(os.path.join(self.ctrl("sys", "machine.slice", "IOWeight"), "inside"))
+        self.no_game()
+        for _ in range(2):
+            _, actions = self.run_profile("tick")
+            self.assertNotIn(f"{SYS} daemon-reload", actions)
+            self.assertEqual(self.read(self.paths.leftovers), text)
+        # An 'off' with no game.state retries it the same way, and says it.
+        out, actions = self.run_profile("off")
+        self.assertIn("off: could not undo machine.slice IOWeight (its runtime override): kept in", out)
+        self.assertNotIn(f"{SYS} daemon-reload", actions)
+        self.assertEqual(self.read(self.paths.leftovers), text)
+
     def test_a_file_that_cannot_be_written_is_said_lost_and_game_state_still_goes(self) -> None:
         self.prior_machine_weight()
         self.run_profile("on")

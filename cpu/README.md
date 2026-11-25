@@ -897,8 +897,10 @@ and deletes `game.state` and `game.intended` (section 7.5).
 
 **An undo that fails is kept and retried.** When one step of `off` fails (a
 `set-property` that systemd refuses, a sysfs or EPP file that cannot be
-written), `off` still undoes every other record and removes `game.state`, so
-the profile is off. It names the failed step in the journal
+written, a runtime override that cannot be removed), `off` still undoes
+every other record and removes `game.state`, so the profile is off. An
+override that is still there gets no `daemon-reload` of its own, neither
+from `off` nor from the ticks that retry it. It names the failed step in the journal
 (`<4>off: could not undo machine.slice CPUWeight=70: kept in
 /run/cpu-setup/game.leftovers for the next off and tick`), writes its record
 to `/run/cpu-setup/game.leftovers`, and ends with `..., except N setting(s)

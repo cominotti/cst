@@ -582,17 +582,16 @@ class GameProfile:
             case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
                 if mode == "new":
                     f = self.ctl_file(mgr, unit, prop, say=True)
-                    ok = True
                     try:
                         os.unlink(f)
                     except FileNotFoundError:
                         pass
                     except OSError:
-                        ok = False
+                        return False  # the override is still there: no daemon-reload for it
                     with contextlib.suppress(OSError):
                         os.rmdir(os.path.dirname(f))
                     reload[mgr] = True
-                    return ok
+                    return True
                 rc = self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
                 return rc == 0 or unit_gone(self, mgr, unit)
             case None:

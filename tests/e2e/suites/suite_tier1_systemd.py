@@ -7146,7 +7146,8 @@ PY
         with both records in it and kept nothing. With TARGET_USER unset and a GameMode client running, a tick
         tries a kept record of tester's user manager for tester and still does not start cpu-game.service (a
         stub): the old tick then acted for tester and started it. A kept record of a uid with no account is
-        never set in tester's manager: kept while that uid's runtime folder is there, done once it is gone."""
+        never set in tester's manager: kept while that uid's runtime folder is there, done once it is gone.
+        An override that cannot be removed stays kept, and the ticks that retry it run no daemon-reload."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -7160,7 +7161,9 @@ PY
             rm -f /etc/cpu-setup/cpu-setup.conf
             if [[ -e /tmp/e2e-182-conf.bak ]]; then mv /tmp/e2e-182-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rmdir /etc/cpu-setup 2>/dev/null || true
-            rm -rf /run/cpu-setup /run/e2e182 /run/user/4242
+            systemctl stop e2e182-flag.service 2>/dev/null || true
+            rm -f /run/systemd/system/e2e182-flag.service
+            rm -rf /run/cpu-setup /run/e2e182 /run/user/4242 /run/systemd/system.control/e2e182.slice.d
             systemctl daemon-reload || true
             """,
             check=False,
@@ -7261,6 +7264,30 @@ PY
             gp tick >/dev/null
             test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
             [[ "$(systemctl --user -M tester@ show -P CPUWeight app.slice)" == "$app_own" ]]
+            # An override 'off' could not remove (a non-empty folder in its place: EISDIR) stays kept, and the
+            # tick that retries it runs no daemon-reload: a loaded unit changed on disk keeps NeedDaemonReload
+            # yes. The old tick reloaded systemd at every try.
+            ovr=/run/systemd/system.control/e2e182.slice.d/50-CPUWeight.conf
+            mkdir -p "$ovr/inside"
+            flag=/run/systemd/system/e2e182-flag.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >"$flag"
+            systemctl daemon-reload
+            systemctl start e2e182-flag.service
+            printf '[Unit]\nDescription=changed on disk\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >"$flag"
+            [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
+                || { echo "the test cannot bite: NeedDaemonReload is not yes" >&2; exit 1; }
+            nrec='prop sys e2e182.slice CPUWeight new -'
+            printf 'cst-game-leftovers 1\n%s\n' "$nrec" >"$lo"
+            for n in 1 2; do
+                gp tick >/dev/null
+                [[ "$(tail -n +2 "$lo")" == "$nrec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+                [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
+                    || { echo "tick $n ran a daemon-reload" >&2; exit 1; }
+            done
+            systemctl stop e2e182-flag.service
+            rm -rf /run/systemd/system.control/e2e182.slice.d
+            rm -f "$flag" "$lo"
+            systemctl daemon-reload
             echo E2E-OK
             """,
         ).stdout
