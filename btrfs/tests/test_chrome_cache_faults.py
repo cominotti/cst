@@ -24,9 +24,12 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 from typing import ClassVar, override
 import unittest
@@ -55,6 +58,7 @@ from tests.fault_injection import (
     every_fault,
     stub_fsync,
 )
+from tests.repo_files import REPO
 
 POINTS = ("mkdir", "unlink", "open", "fchmod", "fsync", "rename")
 CHANGING = ("os.mkdir", "os.unlink", "os.fchmod", "os.rename")
@@ -134,7 +138,16 @@ class ChromeFaultBase(unittest.TestCase):
 
     @staticmethod
     def open_fds() -> set[str]:
-        return set(os.listdir("/proc/self/fd"))
+        """This process's open descriptors, without the one the listing itself holds open while it reads
+        (its link names the folder it lists)."""
+        folder = f"/proc/{os.getpid()}/fd"
+        fds: set[str] = set()
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                with contextlib.suppress(FileNotFoundError):
+                    if os.readlink(entry.path) != folder:
+                        fds.add(entry.name)
+        return fds
 
     # ---- the fixture ------------------------------------------------------
     def fresh(self) -> str:
@@ -402,3 +415,38 @@ class AlreadyOffChromeTest(ChromeFaultBase):
 
     def test_nothing_to_do_makes_no_changing_call(self) -> None:
         self.check_nothing_to_do()
+
+
+# The matrix classes of this module run in one child process; it prints its open descriptors before and after.
+_WHOLE_MODULE_CHILD = """
+import io, json, os, sys, unittest
+sys.path.insert(0, sys.argv[1])
+from btrfs.tests import test_chrome_cache_faults as m
+cases = [c for c in vars(m).values() if isinstance(c, type) and issubclass(c, m.ChromeFaultBase)]
+suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(c) for c in cases)
+before = sorted(os.listdir("/proc/self/fd"), key=int)
+result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+after = sorted(os.listdir("/proc/self/fd"), key=int)
+print(json.dumps({"tests": result.testsRun, "ok": result.wasSuccessful(), "before": before, "after": after}))
+"""
+
+
+class NoDescriptorLeftTest(unittest.TestCase):
+    """The whole matrix, run in one process, leaves no descriptor open: the ones a killed run lost are
+    closed, and every other run must give its own back (run_unit.py's ResourceWarning gate does not see a
+    raw os.open descriptor)."""
+
+    def test_the_matrix_in_one_process_closes_every_descriptor_it_opened(self) -> None:
+        done = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _WHOLE_MODULE_CHILD, REPO],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=300,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        seen = json.loads(done.stdout)
+        self.assertTrue(seen["ok"], done.stderr)
+        self.assertGreater(seen["tests"], 0)
+        self.assertEqual(seen["after"], seen["before"], "descriptors left open by the matrix")
