@@ -147,6 +147,8 @@ _BLANKS: Final = " \t"  # what bash splits words at (not \f, \v or NBSP: bash ke
 # Characters bash treats as syntax in an unquoted word; any of them makes the line a problem.
 _SHELL_SYNTAX: Final = frozenset(";&|<>()")
 _EXPANDING: Final = frozenset("$`\\")
+# In a file only Python reads, a # after ASCII blanks starts a comment (not after a no-break space).
+_COMMENT_AFTER_BLANKS: Final = re.compile(f"[{re.escape(ASCII_BLANKS)}]+#")
 # The problem of a line that is no assignment at all (no key, or no = after it).
 _NOT_AN_ASSIGNMENT: Final = "not a KEY=VALUE line"
 
@@ -208,7 +210,7 @@ def _value(raw: str, *, bash_sourced: bool, exported: bool = False) -> tuple[str
         if _EXPANDING.isdisjoint(word) and not _rest_is_comment(after, _BLANKS):
             return None, "a blank in an unquoted value: bash runs the rest as a command (quote the value)"
     else:
-        word = split(r"\s+#", raw, maxsplit=1)[0].strip()
+        word = strip_ascii_blanks(split(_COMMENT_AFTER_BLANKS, raw, maxsplit=1)[0])
     why = _unquoted_problem(word, bash_sourced=bash_sourced, exported=exported)
     return (None, why) if why else (word, "")
 
@@ -247,7 +249,7 @@ def _unquoted_problem(word: str, *, bash_sourced: bool, exported: bool) -> str:
 
 def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | None:
     """(key, value), a problem's reason, or None for a blank or comment line."""
-    s = line.lstrip(_BLANKS) if bash_sourced else line.strip()
+    s = line.lstrip(_BLANKS) if bash_sourced else strip_ascii_blanks(line)
     if not s or s.startswith("#"):
         return None
     if "\r" in line and bash_sourced:
@@ -291,11 +293,12 @@ def _bash_assignment(key: str, rest: str, *, exported: bool) -> tuple[str, str] 
 
 
 def _plain_assignment(key: str, rest: str, *, exported: bool) -> tuple[str, str] | str:
-    """_assignment of a line only Python reads, after its key (rest): blanks around = are fine."""
-    rest = rest.lstrip()
+    """_assignment of a line only Python reads, after its key (rest): ASCII blanks around = are fine (a
+    no-break space is not one)."""
+    rest = rest.lstrip(ASCII_BLANKS)
     if not rest.startswith("="):
         return _NOT_AN_ASSIGNMENT
-    value, why = _value(rest[1:].strip(), bash_sourced=False, exported=exported)
+    value, why = _value(strip_ascii_blanks(rest[1:]), bash_sourced=False, exported=exported)
     return why if value is None else (key, value)
 
 
@@ -317,8 +320,10 @@ def parse_shell_assignments(text: str, *, bash_sourced: bool = True) -> ShellAss
     bash also sources) the values are exactly bash's. bash_sourced=False is
     for files only Python reads (vm.conf, toolchains.conf, bluetooth.conf):
     it also accepts what their readers always did, blanks around = and an
-    unquoted value of several words (up to a blank and #), with blanks
-    trimmed. Lines as file_lines reads them; the last assignment wins.
+    unquoted value of several words (up to a blank and #), with ASCII blanks
+    trimmed (strip_ascii_blanks: a no-break space or another Unicode blank is
+    part of the key's line or value, as bash and systemd read it). Lines as
+    file_lines reads them; the last assignment wins.
     """
     entries: list[Assignment] = []
     problems: list[SettingsProblem] = []

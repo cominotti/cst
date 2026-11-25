@@ -313,6 +313,10 @@ class SettingsTest(Base):
             "ORPHANS=maybe\n",
             "INCREMENTAL_IDLE=1h\n",
             "INCREMENTAL_IDLE=6\n",
+            # A no-break space is part of the word, as bash and systemd read it: no off, no yes.
+            "INCREMENTAL_IDLE=\N{NO-BREAK SPACE}off\n",
+            "ORPHANS=yes\N{NO-BREAK SPACE}\n",
+            "MAX_IDLE\N{NO-BREAK SPACE}= 3d\n",
         ):
             self.write_conf(text)
             with self.assertRaises(tcd_common.ConfigError, msg=text):
@@ -330,6 +334,12 @@ class SettingsTest(Base):
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 1)
         self.assertIn("shorter than RUST_BUILD_MIN_KEEP", out)
+        self.assertTrue(self.present("aa/0123456789abcd"))
+        # An off word with a no-break space stops the run too (the reader used to trim it: the rule off).
+        self.write_conf("INCREMENTAL_IDLE=\N{NO-BREAK SPACE}off\n")
+        rc, out = self.run_main("prune", "apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("is not a duration", out)
         self.assertTrue(self.present("aa/0123456789abcd"))
 
 

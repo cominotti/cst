@@ -877,7 +877,9 @@ and a byte that is not UTF-8 (in a comment, say) no longer stops the program.
 `cpu-setup.conf` and `snapshots.conf`, which bash also sources, are read exactly
 as bash reads them (`NAS_ENABLED=1 # on` is `1`; in `snapshots.conf` also a
 value an older CST wrote with backslashes, `a\ b`). `vm.conf`, which only
-Python reads, also allows blanks around `=` (`VM_NOCOW = 0`). A line that is
+Python reads, also allows blanks around `=` (`VM_NOCOW = 0`; spaces and tabs:
+a no-break space is not a blank, so before the key or around `=` it makes
+the line a problem, and in a value it stays part of the value). A line that is
 not a plain `KEY=VALUE` (blanks around `=` in a bash file, a value with `$`,
 a backtick or a backslash outside single quotes, an unclosed quote) sets
 nothing and is named with its line number: `status` and the `plan`s print it

@@ -1649,6 +1649,28 @@ class ShellAssignmentsTest(unittest.TestCase):
         self.assertEqual(dict(got.values), {"VM_NOCOW": "0", "A": "a b", "B": "x y", "C": "1h", "D": "v"})
         self.assertEqual([p.line for p in got.problems], [6])
 
+    def test_python_only_files_trim_ascii_blanks_only(self) -> None:
+        # str.strip() and \s also took a no-break space, U+3000 and other Unicode blanks, which bash and
+        # systemd keep: around the key they make the line no assignment, around the value they stay in it.
+        nbsp, ideo = "\N{NO-BREAK SPACE}", "\N{IDEOGRAPHIC SPACE}"
+        for line, want in (
+            (f"K={nbsp}v", f"{nbsp}v"),
+            (f"K = v{ideo}", f"v{ideo}"),
+            (f"K=v{nbsp}# c", f"v{nbsp}# c"),
+            ("K = v\r", "v"),
+            ("K=v\t# c", "v"),
+            ("K=v\f\v# c", "v"),
+            ("\tK\t=\tv\t", "v"),
+        ):
+            with self.subTest(line=line):
+                got = parse_shell_assignments(line + "\n", bash_sourced=False)
+                self.assertEqual((dict(got.values), got.problems), ({"K": want}, ()))
+        for line in (f"K{nbsp}= v", f"{nbsp}K=v", f"K{ideo}=v", "\x1cK=v"):
+            with self.subTest(line=line):
+                got = parse_shell_assignments(line + "\n", bash_sourced=False)
+                self.assertEqual(dict(got.values), {})
+                self.assertEqual([(p.line, p.reason) for p in got.problems], [(1, "not a KEY=VALUE line")])
+
     # Lines an older CST's snap_conf_set wrote with printf %q, and what bash makes of them.
     OLD_WRITER_LINES = (
         "K=/volume1/My\\ Backups",
