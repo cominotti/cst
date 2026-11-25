@@ -946,6 +946,11 @@ else:
     repo = p.settings.nas_repo()
     if step == "retry":
         nas.retention_after_torn(cfg, p, vm, repo)
+    elif step == "index_step":  # nas_run's index step for the indexed snapshot argv[3]: its entry again, with the listing
+        entry = {"vm": vm, "mode": "nas", "snapshot": sys.argv[3], "repository": repo["repo"], "host": repo["host"],
+                 "epoch": 1795000000, "timestamp": "20261124T000000Z", "consistency": "shut-off", "keep": None,
+                 "versions": {}, "deployment": None}
+        print(f"index: {nas._index_nas_backup(p, vm, repo, entry)}")
     elif step == "after_read":  # nas_run's steps after a shut-off run's good read of snapshot argv[3], merged back
         from vm.domain import DomainParts
         from vm.domain.backup import NasRun, Stop, nas_index_entry
@@ -5480,7 +5485,8 @@ EOF
         """The check of the snapshots no record names (retention_after_torn) against the real restic over
         SFTP: restic's own `snapshots --json` (its time, and the "original" a real `restic tag` sets) and
         its --host filter. Snapshots of the VM's tags: "old" (made before the index: an older CST's, left
-        alone), "good" and "kept" (indexed; "kept" then retagged by hand, so restic lists it under a new ID),
+        alone), "good" and "kept" (indexed; "kept" then retagged by hand, so restic lists it under a new ID,
+        which the index's step then gives the entry: restic finds the snapshot by it only),
         one of another host, and "stray" (the newest, in neither the index nor the record). The retry names
         the stray only, with the commands that forget or adopt it, sends one alert (to a stub, never the
         container's btrfs-notify) and skips the retention, forgetting nothing; once adopted, the retention
@@ -5510,6 +5516,12 @@ EOF
             restic tag -q --add cst-keep "$kept"
             kept2="$(restic snapshots --json --no-lock | d retagged "$kept")"
             [[ ${#kept2} == 64 && "$kept2" != "$kept" ]]
+            # restic finds the retagged snapshot by its new ID only; the index's step moves the entry to it.
+            if restic ls -q --no-lock "$kept" >/dev/null 2>&1; then echo "restic found the old ID" >&2; exit 1; fi
+            d index_step e2evm "$good" >"$w/index.out"
+            grep -qx "index: None" "$w/index.out"
+            [[ "$(d indexed "$CST_VM_INDEX")" == "$(printf '%s\\n' "$good" "$kept2" | sort | xargs)" ]]
+            restic ls -q --no-lock "$kept2" >/dev/null
             before="$(all)"
             d retry e2evm >"$w/retry.out"
             cat "$w/retry.out" >&2

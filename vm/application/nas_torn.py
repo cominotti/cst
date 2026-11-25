@@ -39,11 +39,12 @@ if TYPE_CHECKING:
     from vm.application.nas import NasBackup
 
 
-def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | None:
-    """The ids of the VM's restic snapshots, each with the id it had first when its tags were changed
-    (snapshot_names), or None when not readable."""
+def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> dict[str, str] | None:
+    """Each id the VM's restic snapshots answer to (snapshot_names: its own, and the one it had first
+    when its tags were changed) with the id restic lists that snapshot under, or None when not
+    readable."""
     snaps = nas_snapshots(restic, vm, nas)
-    return None if snaps is None else {n for s in snaps for n in snapshot_names(s)}
+    return None if snaps is None else {n: s["id"] for s in snaps for n in snapshot_names(s)}
 
 
 def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = None) -> list[ResticSnapshot] | None:

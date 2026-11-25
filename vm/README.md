@@ -928,8 +928,10 @@ The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 versions and the deployment); entries whose snapshot was forgotten leave it.
 An entry stays when its snapshot's tags were changed by hand (`restic tag`,
 for example `restic tag --remove cst-keep ID` above): restic then lists the
-snapshot under a new ID, with the entry's ID as its `original`; the entry
-keeps the ID it had (`restic restore` takes either).
+snapshot under a new ID, with the entry's ID as its `original`, and finds it
+by the new ID only (`restic restore` of the old one says "no matching ID
+found"); the next NAS backup of the VM gives the entry the new ID, which
+`cst vm list` then shows.
 When `restic snapshots` cannot be read as a list of snapshots with their ids
 (another shape, an id that is not text), no entry leaves: the index keeps them
 all until a later backup reads the list.
@@ -1139,7 +1141,8 @@ overlay is removed, a failed merge (loud, alert, nothing removed), a VM shut
 down during the backup, the shut-off path and its re-check, the refused
 states, a left-over overlay, an unusable repository (no snapshot taken),
 the keep tag, `forget`'s arguments, the index entries (an entry whose snapshot
-restic lists under a new ID after `restic tag` stays: `SnapshotNamesTest`), the timer's units
+restic lists under a new ID after `restic tag` stays, under that new ID:
+`SnapshotNamesTest`), the timer's units
 (the stop budget covers the merge's limit), and that the NAS constants match
 `btrfs/btrfs-snapshot`. They also check what a manual run can meet: a closed
 terminal during restic (on a pseudo-terminal) and a pipe without a reader
@@ -1195,7 +1198,8 @@ baseline; times are compared as instants across a change of the offset; a
 listing that fails or an index or record that cannot be read makes the
 retention wait unnamed. Tier 1's `test_203` runs it against the real restic
 (its `time`, the `original` a real `restic tag` sets, the `--host`
-filter): the stray named and not counted, then quiet after it is adopted or
+filter): the index's step moves a retagged entry to its new ID (restic finds
+the snapshot by it only), the stray named and not counted, then quiet after it is adopted or
 forgotten, and no listing with the index moved aside. Tier 1's `test_200` stops a
 real restic read once restic printed its snapshot (the snapshot is recorded
 and named, and the next retry forgets it), `test_204` stops it once restic

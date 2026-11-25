@@ -4,7 +4,7 @@ the fingerprint of a source, the two ways a backup stops (Stop, Uncertain) and t
 backup run (NasRun); the NAS backup's snapshot arguments, index, torn records and last lines, and the
 lines status and backup-timer status print about them. Pure."""
 
-from collections.abc import Mapping, Sequence, Set as AbstractSet
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 import datetime
 import json
@@ -466,27 +466,49 @@ def restic_failure_why(rc: int) -> str:
     }.get(rc, f"restic exit {rc}")
 
 
-def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: AbstractSet[str] | None) -> list[IndexEntry]:
-    """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: the ids
-    of the VM's snapshots restic lists (None: not readable), without which the VM's NAS entries of
-    entry's repository leave it."""
+def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[str, str] | None) -> list[IndexEntry]:
+    """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: each id
+    the VM's snapshots restic lists answer to (snapshot_names), with the id restic lists that snapshot
+    under (None: not readable). The VM's NAS entries of entry's repository that answer to none leave
+    the index; one that answers only to the original a restic tag kept takes the listed id, the one
+    restic restores, lists and forgets the snapshot by."""
     snap = entry["snapshot"]
     out = [e for e in entries if not (e.get("mode") == BackupMode.NAS and e.get("snapshot") == snap)]
     out.append(entry)
     if alive is not None:
-        alive = alive | {snap}
-        out = [
-            e
-            for e in out
-            if not (
+        alive = {**alive, snap: snap}
+        kept: list[IndexEntry] = []
+        for e in out:
+            if (
                 e["vm"] == entry["vm"]
                 and e.get("mode") == BackupMode.NAS
                 and e.get("repository") == entry["repository"]
-                and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
-            )
-        ]
+            ):
+                now = _listed_as(e["snapshot"], alive)
+                if now is None:
+                    continue
+                if now != e["snapshot"]:
+                    moved = e.copy()  # the entry under the id restic lists it by
+                    moved["snapshot"] = now
+                    kept.append(moved)
+                    continue
+            kept.append(e)
+        out = kept
     out.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
     return out
+
+
+def _listed_as(snap: str, alive: Mapping[str, str]) -> str | None:
+    """The id restic lists the snapshot snap under (alive: nas_index's), a prefix either way as restic
+    matches a short id: snap itself when restic lists it by it, else the id of the snapshot whose
+    original it is; None when restic lists neither."""
+
+    def names(name: str) -> bool:
+        return name.startswith(snap) or snap.startswith(name)
+
+    if any(names(name) for name, now in alive.items() if name == now):
+        return snap
+    return next((now for name, now in alive.items() if name != now and names(name)), None)
 
 
 def nas_done_lines(notes: Sequence[str], snap: str, vm: str, consistency: str, keep: str | None) -> list[str]:

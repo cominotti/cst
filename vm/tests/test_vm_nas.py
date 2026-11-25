@@ -835,7 +835,7 @@ class LiveBackupTest(Nas):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
 
-    def test_an_entry_whose_snapshot_was_retagged_stays_in_the_index(self) -> None:
+    def test_an_entry_whose_snapshot_was_retagged_stays_in_the_index_under_its_new_id(self) -> None:
         # restic tag saves the snapshot again under a new id, with the first id as its original: the
         # entry left the index, although restic still lists the backup.
         os.makedirs(os.path.dirname(self.index), exist_ok=True)
@@ -850,7 +850,9 @@ class LiveBackupTest(Nas):
         self.restic_cfg(snapshots_json=json.dumps(listed))
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual([e.get("snapshot") for e in self.index_entries()], ["first1", SNAP_ID])
+        # Under the id restic lists it by now: restic restores no snapshot by its original.
+        self.assertEqual([e.get("snapshot") for e in self.index_entries()], ["second", SNAP_ID])
+        self.assertEqual(self.index_entries()[0], {**old[0], "snapshot": "second"}, "the rest of the entry kept")
 
     def test_a_snapshot_no_record_names_is_named_and_the_run_still_succeeds(self) -> None:
         # The retention counted it as a backup. The run's own snapshot is not one.
@@ -1991,7 +1993,20 @@ class SnapshotNamesTest(unittest.TestCase):
                 return 0, json.dumps([{"id": "new", "original": "old"}, {"id": SNAP_ID}]), ""
 
         got = vm_app_nas_torn.nas_snapshot_ids(Listing(), "win", _NAS_REPO)
-        self.assertEqual(got, {"new", "old", SNAP_ID})
+        self.assertEqual(got, {"new": "new", "old": "new", SNAP_ID: SNAP_ID})
+
+    def test_an_indexed_entry_named_by_an_original_takes_the_listed_id(self) -> None:
+        def nas(snap: str, vm: str = "win") -> vm_domain_backup.IndexEntry:
+            return {"vm": vm, "mode": "nas", "snapshot": snap, "repository": "/repo", "epoch": 1}
+
+        entries = [nas("first1"), nas("kept22"), nas("short"), nas("gone33"), nas("first1", vm="other")]
+        alive = {"second": "second", "first1": "second", "kept22": "kept22", "shortened": "shortened"}
+        got = vm_domain_backup.nas_index(entries, nas(SNAP_ID), alive)
+        # A short id restic lists by itself stays as it is; another VM's entry is not this listing's.
+        self.assertEqual(
+            sorted((e["vm"], e.get("snapshot")) for e in got),
+            [("other", "first1"), ("win", SNAP_ID), ("win", "kept22"), ("win", "second"), ("win", "short")],
+        )
 
 
 class ConstantsTest(unittest.TestCase):
