@@ -65,6 +65,7 @@ from bluetooth.setup.domain import (
 from bluetooth.setup.application import watcher_unit
 from bluetooth.setup.application.inputs import rule_headsets
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
+from cst_core.application.user_units import manager_unit_path
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
 from cst_core.domain.units import ActiveState, EnablementState
@@ -490,8 +491,8 @@ class Survey:
 
     @cached_property
     def lw_unit_path(self) -> str | None:
-        """The user manager's UnitPath (watcher_unit): asked once, on first use."""
-        return watcher_unit.unit_path(self.m.user_systemd_host)
+        """The user manager's UnitPath (manager_unit_path): asked once, on first use."""
+        return manager_unit_path(self.m.user_systemd_host)
 
     @cached_property
     def lw_unit_file(self) -> str:

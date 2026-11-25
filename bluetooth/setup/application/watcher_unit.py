@@ -18,15 +18,10 @@ from bluetooth.setup.domain import (
     OlderCopy,
 )
 from bluetooth.setup.ports import SetupFilesPort
-from cst_core.application.user_units import RecordedUnitCopies, manager_unit_path
+from cst_core.application.user_units import RecordedUnitCopies
 from cst_core.domain.install import Component
 from cst_core.domain.units import user_unit_dir
-from cst_core.ports import InstallRecordPort, SystemdPort
-
-
-def unit_path(user_manager: SystemdPort) -> str | None:
-    """The user manager's UnitPath (show -p UnitPath --value); None when it does not answer."""
-    return manager_unit_path(user_manager)
+from cst_core.ports import InstallRecordPort
 
 
 def unit_file(answer: str | None, home: str) -> str:
