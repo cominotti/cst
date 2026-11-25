@@ -1275,9 +1275,11 @@ class SummariseBranchesTest(unittest.TestCase):
         """The records of a window [T0, T0 + 60] after a v8 meta record, for analyse()."""
         return [meta(T0 - 100, 8), *records]
 
-    def test_a_vmstat_value_the_daemon_could_not_read_adds_nothing(self) -> None:
-        # pswpout 100, 120, null, 130: the pairs add 20, nothing, nothing (main recorded null as 0: the last
-        # pair added all 130 pages, every page since boot as a burst). A null nr_dirty gives no peak.
+    def test_a_vmstat_value_the_daemon_could_not_read_is_bridged(self) -> None:
+        # pswpout 100, 120, null, 130: the growth across the null is counted from the last sample that read
+        # it, 20 + 10 (main recorded null as 0: the last pair added all 130 pages, every page since boot as
+        # a burst; before this, the two pairs next to the null added nothing, 20). A null nr_dirty gives no
+        # peak.
         def vm(nr_dirty: int | None, pswpout: int | None) -> list[int | None]:
             return [nr_dirty, 0, 0, pswpout, 0, 0, 0]
 
@@ -1288,8 +1290,29 @@ class SummariseBranchesTest(unittest.TestCase):
             self.rec(T0 + 16, vm=vm(2, 130)),
         ]
         res, _ = load().analyse(self.window(samples), T0, T0 + 20, with_below=False, verbose=False)
-        self.assertEqual(res["vm"]["swap_out_bytes"], 20 * rp_records.PAGE)
+        self.assertEqual(res["vm"]["swap_out_bytes"], 30 * rp_records.PAGE)
         self.assertEqual(res["peak"]["dirty_bytes"], 3 * rp_records.PAGE)
+
+    def test_a_vmstat_value_held_across_nulls_is_dropped_at_a_gap(self) -> None:
+        # Two nulls in a row are bridged too (100 -> 150: 50). A gap ends the bridge: the counter may have
+        # started again (a reboot), so 400 after the gap is no growth from 150, and nothing is counted
+        # until a pair of two samples that read it (400 -> 405: 5).
+        def vm(pswpout: int | None) -> list[int | None]:
+            return [0, 0, 0, pswpout, 0, 0, 0]
+
+        gap = 100  # s, more than GAP_MAX
+        samples = [
+            self.rec(T0 + 1, vm=vm(100)),
+            self.rec(T0 + 6, vm=vm(None)),
+            self.rec(T0 + 11, vm=vm(None)),
+            self.rec(T0 + 16, vm=vm(150)),
+            self.rec(T0 + 21, vm=vm(None)),
+            self.rec(T0 + 21 + gap, vm=vm(None)),
+            self.rec(T0 + 26 + gap, vm=vm(400)),
+            self.rec(T0 + 31 + gap, vm=vm(405)),
+        ]
+        res, _ = load().analyse(self.window(samples), T0, T0 + 40 + gap, with_below=False, verbose=False)
+        self.assertEqual(res["vm"]["swap_out_bytes"], 55 * rp_records.PAGE)
 
     def test_totals_of_the_sample_pairs(self) -> None:
         fs_a = {"u": {"c": [10, 100, 0, 0, 0, 50], "err": {"1": 1, "2": 0}, "space": {"metadata": [1, 2, 0, 0, 0]}}}

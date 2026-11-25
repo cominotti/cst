@@ -578,9 +578,11 @@ kernel shows its own state as files) and in the cgroup tree.
 - A `/proc/vmstat` value the daemon cannot read (a key the kernel does not
   have, or text that is no number) is `null` in that sample's `vm` list,
   not 0, as a cgroup's unreadable pressure or `io.stat` is left out. The
-  report adds no growth across a `null` (the next pair whose two samples
-  read adds its own) and takes no peak from it; a 0 would be a counter gone
-  back, and the pair after it would count every page since boot as a burst.
+  report counts the growth across a `null` from the last sample that read
+  the key to the next one that does (a gap in the samples, such as a
+  reboot, ends that), and takes no peak from it; a 0 would be a counter
+  gone back, and the pair after it would count every page since boot as a
+  burst.
 - It is strongly sandboxed (no network, no writes outside its own folders, limited
   to 192 MiB of memory and 25% of one CPU) and runs with a higher priority, so it
   keeps sampling while everything else is stuck.

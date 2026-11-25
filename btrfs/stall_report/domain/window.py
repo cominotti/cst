@@ -176,6 +176,8 @@ class _PairTotals(TypedDict):
     sample_d: int  # most storage waits in one v8+ sample
     maint_samples: int  # v5+ samples with a btrfs maintenance task in D state
     pswpout_v7: int  # pswpout of the v7+ sample pairs (compared with zswpwb)
+    # per vmstat key, the value of the last sample that read it, while the samples after it hold null
+    vm_held: dict[str, int]
     zswap_ok: bool  # some sample pair came from a v7+ daemon (zswap counters usable)
 
 
@@ -214,12 +216,14 @@ def _pair_totals(samples: list[SampleRecord], vm_keys: list[str], v7_since: floa
         "sample_d": 0,
         "maint_samples": 0,
         "pswpout_v7": 0,
+        "vm_held": {},
         "zswap_ok": False,
     }
     for a, b in itertools.pairwise(samples):
         dt = (b["mono"] - a["mono"]) if "mono" in a and "mono" in b else (b["ts"] - a["ts"])
         if dt <= 0 or dt > GAP_MAX or b["ts"] - a["ts"] > GAP_MAX:
             t["gaps"] += 1
+            t["vm_held"].clear()  # a counter may start again after a gap (a reboot)
             continue
         t["covered"] += dt
         _add_psi(t["psi"], a, b)
@@ -283,13 +287,24 @@ def _add_peaks(t: _PairTotals, b: SampleRecord, vm_idx: dict[str, int]) -> None:
 
 
 def _add_vm(t: _PairTotals, a: SampleRecord, b: SampleRecord, vm_idx: dict[str, int], *, full_vm: bool) -> None:
-    """The vmstat counters' growth from a to b (the zswap ones only when full_vm: a v7+ pair)."""
-    vmd = t["vmd"]
+    """The vmstat counters' growth from a to b (the zswap ones only when full_vm: a v7+ pair). A value the
+    daemon could not read (null) is bridged: the growth is counted from the last sample that read the key
+    (t["vm_held"]) to the next one that does."""
+    vmd, held = t["vmd"], t["vm_held"]
     for k in vmd:
         if k in ZSWAP_KEYS and not full_vm:
+            held.pop(k, None)
             continue
-        va, vb = _vm_value(a, vm_idx, k), _vm_value(b, vm_idx, k)
-        if va is None or vb is None:  # a side the daemon could not read: no growth across it
+        va = _vm_value(a, vm_idx, k)
+        if va is None:
+            va = held.get(k)
+        vb = _vm_value(b, vm_idx, k)
+        if vb is None:
+            if va is not None:
+                held[k] = va
+            continue
+        held.pop(k, None)
+        if va is None:  # no sample before b read it
             continue
         d = vb - va
         if d > 0:
