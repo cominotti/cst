@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import NewType, TypedDict
+from typing import Final, NewType, TypedDict
 import dataclasses
 import datetime as dt
 import os
@@ -50,6 +50,9 @@ CMD_TIMEOUT = 600
 # Policy letters in btrbk's order; '*' is stored as "all".
 POLICY_UNITS = "hdwmy"
 POLICY_TOKEN = re.compile(r"(\*|\d+)([hdwmy])", re.IGNORECASE | re.ASCII)  # ASCII: \d is [0-9]
+# The blanks a policy's tokens split at (bash's default IFS), and the separators with the comma.
+_POLICY_BLANKS: Final = " \t\n"
+_POLICY_SEPARATORS: Final = re.compile(r"[ \t\n,]+")
 DAY_NAMES = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
 
 
@@ -62,10 +65,13 @@ def parse_policy(text: str) -> dict[str, int | str]:
     """'72h 7d 4w 3m' -> {'h': 72, 'd': 7, 'w': 4, 'm': 3}; '*' -> 'all'.
 
     Same tokens as btrbk's preserve matrix (case-insensitive unit, each unit at
-    most once); commas are accepted as separators too. An empty policy ("keep
-    only the latest") is refused: it is never what a caller of this tool means.
+    most once); commas are accepted as separators too. The tokens split at
+    spaces, tabs, newlines and commas only (bash's word splitting and the comma):
+    any other blank, such as a no-break space, is part of a token, which is then
+    refused. An empty policy ("keep only the latest") is refused: it is never
+    what a caller of this tool means.
     """
-    tokens = [t for t in re.split(r"[\s,]+", text.strip()) if t]
+    tokens = [t for t in _POLICY_SEPARATORS.split(text.strip(_POLICY_BLANKS)) if t]
     if not tokens:
         raise ValueError("empty retention policy")
     policy: dict[str, int | str] = {}
@@ -532,12 +538,12 @@ def parse_source(text: str, *, need_policy: bool = True) -> Source:
     if not path.startswith("/"):
         raise Usage(f"--source {text!r}: PATH must be absolute")
     policy: dict[str, int | str] = {}
-    if need_policy or policy_text.strip():
+    if need_policy or policy_text.strip(_POLICY_BLANKS):
         try:
             policy = parse_policy(policy_text)
         except ValueError as e:
             raise Usage(f"--source {text!r}: {e}") from None
-    return Source(name, os.path.normpath(path), policy, policy_text.strip())
+    return Source(name, os.path.normpath(path), policy, policy_text.strip(_POLICY_BLANKS))
 
 
 def parse_skip(text: str, names: Collection[str]) -> tuple[str, str]:

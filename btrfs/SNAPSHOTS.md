@@ -1060,6 +1060,10 @@ You can change the retention by adding `HOME_PRESERVE='...'`,
 `WS_PRESERVE='...'` or `EMERGENCY_PRESERVE='...'` (default `24h 3d`, used by
 the emergency purge of [section 16](#16-the-space-guard)) to
 `/etc/btrfs-setup/snapshots.conf`. The hourly run reads this file.
+Separate the rules with spaces, tabs or commas (`'72h 7d'`, `'72h,7d'`).
+Any other blank, such as a no-break space, is part of a rule:
+`btrfs-snapshot-core` then stops with an error that names the rule, and
+takes no snapshot.
 
 - `snapshots status` always shows the default text (`keep /home 72h 7d 4w 3m,
   ~/Workspace 48h 7d`), even after you change it. To see the retention that
