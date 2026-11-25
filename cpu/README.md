@@ -1859,11 +1859,12 @@ this is harmless.
 | `game/adapters/profile.py` | `GameProfile`: `GameProfileSteps` over the real adapters below (`machine_ports`), and `load_profile`, which reads the settings first |
 | `game/adapters/systemd.py` | `systemctl` for both managers through the command runner (`systemctl --user -M USER@` for a user's) |
 | `game/adapters/files.py` | The files in `/run`: `game.state`, `game.intended` and the marks, `game.leftovers` (read byte for byte, replaced whole, removed), systemd's runtime unit files (the overrides and the `MemoryLow` drop-ins), and the run lock |
-| `game/adapters/kernel.py` | The cgroup tree and `/proc`: the boxes, their processes, the GameMode clients, the cgroup writes |
+| `game/adapters/kernel.py` | The cgroup tree and `/proc`: the boxes, their processes, the GameMode clients, the cgroup writes; `GameSysValues`, the one-value file reads and writes the sysfs adapter (`game/adapters/power.py`) builds on |
 | `game/adapters/output.py` | The journal's lines on stdout, errors on stderr |
 | `game/wiring.py` | The composition root `cli.py` calls: Ctrl-C, the locale's collation, the paths, the command runner and the profile over the real adapters |
 | `game/domain/boxes.py` | The watchdog's check of the boxes it handled, no I/O: whether a recorded setting still holds as systemd shows it (`MemoryLow` by its bytes, `AllowedCPUs` as a set of CPUs, `CPUWeight`), and the journal's words when it sets one again |
 | `game/application/boxes.py` | `set_again`: a handled box's recorded settings read back (one `systemctl show`) and each one that does not hold set again, with no new record; no I/O |
+| `game/domain/sysfs.py` | The DRM card names, no I/O: whether a sysfs entry is a `cardN` and its number, and a name's number suffix |
 | `game/domain/leftovers.py` | The format of `game.leftovers` (7.4), no I/O: the records `off` could not undo with the user each is for, how `off` merges them with `game.state`'s, and the journal's and `state`'s words for them |
 | `game/application/drift.py` | `repair_drift`: the watchdog sets again each setting of `game.intended` that `GameProfileSteps.drift` lists as no longer holding, straight with `set-property`; no I/O |
 | `game/application/leftovers.py` | `game.leftovers`' steps, no I/O: read, undo again (the next `off`, the tick while off), write back what still fails, and whether a failed unit is gone |
