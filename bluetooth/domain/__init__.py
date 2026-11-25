@@ -22,7 +22,7 @@ from cst_core.domain.shapes import (
     object_or_empty,
     parse_json,
 )
-from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem, group, split
+from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem, group, split, strip_ascii_blanks
 from cst_core.domain.values import Json
 
 # The kernel's experimental "ISO socket" feature: needed for LE Audio
@@ -70,8 +70,9 @@ SETTINGS_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_.:-]*")
 # ---- /etc/bluetooth/main.conf -------------------------------------------------------------
 # bluetoothd reads it with GLib's key file parser: a [General] header that
 # shows up again continues the same group, the last line of a key in the group
-# wins, and '#' starts a comment line. Only [General] is touched; everything
-# else, comments included, is kept as it is.
+# wins, and '#' starts a comment line. Its blanks are ASCII ones only: a
+# no-break space is part of a key, a value or a header. Only [General] is
+# touched; everything else, comments included, is kept as it is.
 def split_lines(text: str) -> tuple[list[str], str, bool]:
     """(lines, newline, final) of TEXT: the lines without the empty string
     after the last newline, and whether TEXT ended with a newline."""
@@ -97,7 +98,7 @@ def general_ranges(lines: Sequence[str]) -> list[tuple[int, int]]:
     out: list[tuple[int, int]] = []
     start: int | None = None
     for i, line in enumerate(lines):
-        s = line.strip()
+        s = strip_ascii_blanks(line)
         if s.startswith("[") and s.endswith("]"):
             if start is not None:
                 out.append((start, i))
@@ -110,8 +111,9 @@ def general_ranges(lines: Sequence[str]) -> list[tuple[int, int]]:
 
 
 def key_pattern(key: str) -> re.Pattern[str]:
-    """Matches `KEY = value` and `#KEY = value`; group 1 is the '#'s, group 2 the value."""
-    return re.compile(r"^\s*(#*)\s*" + re.escape(key) + r"\s*=\s*(.*?)\s*$")
+    """Matches `KEY = value` and `#KEY = value` (ASCII blanks around them); group 1 is the '#'s, group 2
+    the value."""
+    return re.compile(r"^\s*(#*)\s*" + re.escape(key) + r"\s*=\s*(.*?)\s*$", re.ASCII)
 
 
 def key_lines(lines: Sequence[str], ranges: Sequence[tuple[int, int]], key: str) -> tuple[list[int], list[int]]:
@@ -128,13 +130,13 @@ def key_lines(lines: Sequence[str], ranges: Sequence[tuple[int, int]], key: str)
 
 
 def satisfied(key: str, value: str | None) -> bool:
-    """Whether VALUE already does what we want. A KernelExperimental list
-    that contains the ISO UUID among others is fine as it is."""
+    """Whether VALUE already does what we want, as bluetoothd reads it (ASCII blanks around it only). A
+    KernelExperimental list (comma separated) with the ISO UUID among its entries is fine as it is."""
     if value is None:
         return False
-    v = value.strip()
+    v = strip_ascii_blanks(value)
     if key == "KernelExperimental":
-        return ISO_UUID in v.lower()
+        return any(strip_ascii_blanks(e).lower() == ISO_UUID for e in v.split(","))
     return v == "true"
 
 

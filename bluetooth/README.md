@@ -188,7 +188,10 @@ the bearer by itself: only when `BEARER` or `--bearer` is set.
   (`#Experimental = false`) are replaced in place, so the file still reads
   like the original. bluetoothd uses the last line of a key in a section,
   and a `[General]` header that shows up again continues the same section;
-  the module reads the file the same way. Earlier active lines of the same
+  the module reads the file the same way, with GLib's blanks (ASCII ones
+  only: a no-break space after `true` or before a key's name makes it a
+  value or a key bluetoothd does not take, so `plan` shows the key as not
+  set and `apply` writes it again). Earlier active lines of the same
   key are commented out.
 - **Root only where needed.** `apply` runs as your user. It calls `sudo` by
   itself for `main.conf` and for restarting `bluetooth.service`. The
