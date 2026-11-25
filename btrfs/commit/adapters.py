@@ -23,6 +23,7 @@ from btrfs.commit.domain import (
     has_explicit_commit,
 )
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
+from btrfs.compress.application import FSTAB_RELOAD_PENDING, catch_up_reload, fstab_behind
 from btrfs.compress.domain import (
     FSTAB_PATH,
     FSTAB_UNREAD,
@@ -222,6 +223,17 @@ def _step_top_mount(run: _Run) -> str | None:
     return None
 
 
+def _not_confirmed(host: CompressHostPort, plan: CommitPlan, lines: list[str]) -> ExitAndLines | None:
+    """Ask before a change: None when confirmed, else the exit and lines of the run that stops there."""
+    try:
+        confirmed = host.confirm(f"Apply commit={plan.target_seconds}s across active layers?")
+    except Refused as exc:
+        return 1, [*lines, f"ERROR: {exc} (pass --yes to apply non-interactively)."]
+    if not confirmed:
+        return 1, [*lines, "Aborted; nothing changed."]
+    return None
+
+
 def execute_commit_change(
     host: CompressHostPort,
     parsed: CommitParsedArgs,
@@ -234,17 +246,20 @@ def execute_commit_change(
     if not kargs_ok:
         return 1, [f"ERROR: cannot inspect rpm-ostree kargs: {kargs_err}"]
     plan = build_commit_plan(snap, target_seconds=parsed.seconds, revert=parsed.revert)
-    lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc)
     if not plan.has_changes:
-        return 0, lines
-    if not parsed.yes:
-        try:
-            confirmed = host.confirm(f"Apply commit={plan.target_seconds}s across active layers?")
-        except Refused as exc:
-            return 1, [*lines, f"ERROR: {exc} (pass --yes to apply non-interactively)."]
-        if not confirmed:
-            return 1, [*lines, "Aborted; nothing changed."]
+        cause, reloaded = catch_up_reload(host, None)
+        pending = cause is not None or bool(reloaded)
+        lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc, reload_pending=pending)
+        return (1, [*lines, f"ERROR: {cause}"]) if cause is not None else (0, [*lines, *reloaded])
+    lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc)
+    refused = None if parsed.yes else _not_confirmed(host, plan, lines)
+    if refused is not None:
+        return refused
 
+    cause, reloaded = catch_up_reload(host, plan.core.new_fstab_text)
+    if cause is not None:
+        return 1, [*lines, f"ERROR: {cause}"]
+    lines.extend(reloaded)
     run = _Run(host, snap, plan)
     # Each step runs only after the one before it worked: a failed step stops the run before the later layers.
     for step in (_step_fstab, _step_kargs, _step_remount, _step_top_mount):
@@ -296,8 +311,11 @@ def format_commit_status(
     return out
 
 
-def format_commit_plan_lines(plan: CommitPlan, prog: str, *, dry_run: bool, seam_proc: str = "") -> list[str]:
-    """Render plan lines for `plan`, `apply`, and `revert`."""
+def format_commit_plan_lines(
+    plan: CommitPlan, prog: str, *, dry_run: bool, seam_proc: str = "", reload_pending: bool = False
+) -> list[str]:
+    """Render plan lines for `plan`, `apply`, and `revert`; reload_pending: the run reloads systemd first
+    (a dry run names it; a run with nothing else to do then says no "nothing to do")."""
     out: list[str] = []
     if seam_proc:
         out.append(f"test seam (CST_BTRFS_COMMIT_PROC): /proc in {seam_proc}, not the kernel's")
@@ -306,7 +324,9 @@ def format_commit_plan_lines(plan: CommitPlan, prog: str, *, dry_run: bool, seam
             f"Target root btrfs commit interval: {plan.target_seconds}s", plan.layers, plan.left_alone_notes
         )
     )
-    if not plan.has_changes:
+    if dry_run and reload_pending:
+        out.append(FSTAB_RELOAD_PENDING)
+    if not plan.has_changes and not reload_pending:
         out.append(f"Already at {plan.target_seconds}s across all active layers; nothing to do.")
         return out
     if dry_run:
@@ -324,18 +344,18 @@ def dispatch_commit_cli_action(parsed: CommitParsedArgs, env: ManagedCliEnv, *, 
         case CommitAction.STATUS:
             snap, kargs_ok, kargs_err = read_commit_snapshot(host)
             cmdline = host.read_proc_cmdline()
-            return 0, format_commit_status(
-                snap,
-                kargs_ok=kargs_ok,
-                kargs_error=kargs_err,
-                proc_cmdline=cmdline,
-                seam_proc=seam_proc,
+            lines = format_commit_status(
+                snap, kargs_ok=kargs_ok, kargs_error=kargs_err, proc_cmdline=cmdline, seam_proc=seam_proc
             )
+            if fstab_behind(host) is True:
+                lines.insert(-1, f"  {FSTAB_RELOAD_PENDING}")  # before the overall line, as compress-force says it
+            return 0, lines
         case CommitAction.PLAN:
             snap, kargs_ok, kargs_err = read_commit_snapshot(host)
             if not kargs_ok:
                 return 1, [f"ERROR: cannot inspect rpm-ostree kargs: {kargs_err}"]
             plan = build_commit_plan(snap, target_seconds=parsed.seconds, revert=parsed.revert)
-            return 0, format_commit_plan_lines(plan, prog, dry_run=True, seam_proc=seam_proc)
+            pending = plan.core.new_fstab_text is None and fstab_behind(host) is True
+            return 0, format_commit_plan_lines(plan, prog, dry_run=True, seam_proc=seam_proc, reload_pending=pending)
         case _:
             return execute_commit_change(host, parsed, prog=prog, seam_proc=seam_proc)

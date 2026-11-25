@@ -11386,6 +11386,83 @@ EOF
         self.assertIn("E2E-TORN-REMOUNT-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_253_btrfs_compress_and_commit_reload_after_a_run_killed_before_its_reload(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` killed (SIGKILL, by a systemctl stand-in) at
+        their first daemon-reload, after their /etc/fstab write: a unit systemd-fstab-generator made from /etc/fstab
+        (a nofail line) says NeedDaemonReload=yes. plan then names the reload and changes nothing; apply again says
+        "reloaded: ..." and the unit says NeedDaemonReload=no; a third apply has nothing to do and runs no
+        daemon-reload. Before the fix the second apply printed no reload."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-catch-up"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress=zstd:1")}
+            mkdir -p {w}/mnt
+            printf 'tmpfs {w}/mnt tmpfs nofail 0 0\n' >>/etc/fstab
+            systemctl daemon-reload
+            unit="$(systemd-escape -p --suffix=mount {w}/mnt)"
+            [[ "$(systemctl show -P SourcePath "$unit")" == /etc/fstab ]] \
+                || {{ echo "the test cannot bite: $unit is not loaded from /etc/fstab" >&2; exit 1; }}
+
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+{kargs_staged(w, "    ")}
+    exit 0
+fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            # systemctl: the first daemon-reload after {w}/killed is removed kills the run (its parent); every
+            # daemon-reload is counted in {w}/reloads; every call goes on to the real one.
+            cat >{w}/bin/systemctl <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" daemon-reload "* ]]; then
+    n=$(( $(cat {w}/reloads 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >{w}/reloads
+    if [[ ! -e {w}/killed ]]; then
+        touch {w}/killed
+        kill -KILL "$PPID"
+        exit 1
+    fi
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount {w}/bin/systemctl
+
+            {kargs_tool_loop_head(w, "killed", "reloads")}
+                [[ -e {w}/killed ]] || {{ echo "$tool: no daemon-reload: $run_out" >&2; exit 1; }}
+                ! cmp -s /etc/fstab {w}/fstab.before || {{ echo "$tool: /etc/fstab not written" >&2; exit 1; }}
+                [[ "$(/usr/bin/systemctl show -P NeedDaemonReload "$unit")" == yes ]] \
+                    || {{ echo "the test cannot bite: NeedDaemonReload is not yes" >&2; exit 1; }}
+                cp /etc/fstab {w}/fstab.killed
+                n="$(cat {w}/reloads)"
+                plan_out="$(/opt/cst-rw/cst btrfs "$tool" plan 2>&1)"
+                grep -qF "daemon-reload: systemd has not loaded /etc/fstab as it is on disk" <<<"$plan_out" \
+                    || {{ echo "$tool plan: $plan_out" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.killed
+                [[ "$(cat {w}/reloads)" == "$n" ]] || {{ echo "$tool plan reloaded" >&2; exit 1; }}
+                again="$(/opt/cst-rw/cst btrfs "$tool" apply --yes 2>&1)" || {{ echo "$tool again: $again" >&2; exit 1; }}
+                grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" <<<"$again" \
+                    || {{ echo "$tool again: $again" >&2; exit 1; }}
+                [[ "$(/usr/bin/systemctl show -P NeedDaemonReload "$unit")" == no ]] \
+                    || {{ echo "$tool: NeedDaemonReload still yes" >&2; exit 1; }}
+                n="$(cat {w}/reloads)"
+                /opt/cst-rw/cst btrfs "$tool" apply --yes | grep -qF "nothing to do"
+                [[ "$(cat {w}/reloads)" == "$n" ]] || {{ echo "$tool: a run with nothing to do reloaded" >&2; exit 1; }}
+                {kargs_tool_loop_tail("E2E-CATCH-UP-OK")}
+            """,
+        ).stdout
+        self.assertIn("E2E-CATCH-UP-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_244_btrfs_compress_and_commit_undo_keeps_the_old_fstab_when_its_reload_fails(self) -> None:
         """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change fails with
         no effect (later calls are honest) and a systemctl whose second daemon-reload of the run fails (the undo's):

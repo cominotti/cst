@@ -2005,6 +2005,8 @@ class LayerHostState:
     fail_remount: str | None = None
     fake_remount_effect: bool = True
     fail_top_mount: Exception | None = None
+    fstab_behind: bool | None = False  # systemd has not loaded /etc/fstab as it is on disk; None: no answer
+    reload_error: str | None = None  # what a daemon-reload answers (None: it works)
 
 
 class LayerHost(ABC):
@@ -2052,6 +2054,21 @@ class LayerHost(ABC):
 
     def read_top_mount(self) -> TopMountInfo | None:
         return self.s.top_mount
+
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """One unit of /etc/fstab's root line, NeedDaemonReload=yes when systemd is behind; None: no answer."""
+        if self.s.fstab_behind is None:
+            return None
+        need = "yes" if self.s.fstab_behind else "no"
+        return [
+            {"Id": "-.mount", "LoadState": "loaded", "SourcePath": "/etc/fstab", "NeedDaemonReload": need, "Where": "/"}
+        ]
+
+    def daemon_reload(self) -> str | None:
+        self.calls.append("daemon_reload")
+        if self.s.reload_error is None:
+            self.s.fstab_behind = False
+        return self.s.reload_error
 
     def write_fstab(self, text: str, *, put_back: bool = True) -> None:
         del put_back  # the fake puts nothing back after a failure
@@ -2132,8 +2149,10 @@ class CompressWorld(FaultPoints):
     mounts (/proc/mounts's text), the top-mount unit (TopMountInfo, None: not installed) and the answer to a
     confirmation. The world implements the port itself.
 
-    Every mutating call is one point (FaultPoints): "fstab write" (write_fstab), "kargs" (update_kargs),
-    "remount" (remount) and "top-mount" (update_top_mount). A failed fstab write or top-mount update raises the
+    Every mutating call is one point (FaultPoints): "fstab write" (write_fstab, its daemon-reload included),
+    "kargs" (update_kargs), "remount" (remount), "top-mount" (update_top_mount) and "systemctl daemon-reload"
+    (the catch-up reload of a run that writes no /etc/fstab). What systemd has loaded of /etc/fstab is an
+    FstabSystemdView: a write reloads it, a torn one leaves it behind, show_fails makes mount_units answer None. A failed fstab write or top-mount update raises the
     error with no effect, a failed kargs update or remount answers (False, the error's text) with no effect.
     The points named in torn take effect first and then fail, as the real adapter can (btrfs/tests/
     test_compress_faults.py, AdapterFailureTest): /etc/fstab renamed into place before its folder's sync
@@ -2175,6 +2194,11 @@ class CompressWorld(FaultPoints):
         self.pending_kargs: Callable[[], object] | None = None
         self.remounts: list[tuple[str, str]] = []
         self.ignored_remounts = 0  # the next ones answer (True, "") and change nothing (the verification's case)
+        # What systemd has loaded of /etc/fstab (taken at the first call, as a systemd that booted with the start
+        # text), a new identity per write: a write reloads it, a torn one leaves it behind.
+        self.systemd = FstabSystemdView()
+        self.fstab_id = 0
+        self.show_fails = False  # systemctl show gives no answer
 
     # ---- CompressHostPort: reads ---------------------------------------------------------------------
     def is_ostree(self) -> bool:
@@ -2212,6 +2236,33 @@ class CompressWorld(FaultPoints):
     def read_top_mount(self) -> TopMountInfo | None:
         return None if "top-mount" in self.unreadable else self.top
 
+    def look(self) -> None:
+        """Any call: systemd has booted with /etc/fstab as it is at the first one."""
+        self.systemd.boot(self.fstab_id, self.fstab)
+
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """The units mount_units_listing gives with --state=loaded, of the root mounts of /proc/mounts."""
+        self.look()
+        if self.show_fails:
+            return None
+        mounted = [f[1] for f in (line.split() for line in (self.mounts or "").splitlines()) if len(f) > 1]
+        listing = mount_units_listing(
+            self.systemd.text(), need_reload=not self.systemd.current(self.fstab_id), mounted=mounted, every_loaded=True
+        )
+        return [{p: unit[p] for p in MOUNT_UNIT_PROPS if p in unit} for unit in parse_show_units(listing)]
+
+    def daemon_reload(self) -> str | None:
+        """The catch-up reload: point "systemctl daemon-reload"."""
+        self.look()
+
+        def reload() -> str | None:
+            self.systemd.reloaded(self.fstab_id, self.fstab)
+            return None
+
+        return self.step(
+            "systemctl daemon-reload", reload, lambda err: f"systemctl daemon-reload failed: {err.strerror}"
+        )
+
     def confirm(self, prompt: str) -> bool:
         del prompt
         return self.confirm_answer
@@ -2225,12 +2276,17 @@ class CompressWorld(FaultPoints):
 
     def write_fstab(self, text: str, *, put_back: bool = True) -> None:
         del put_back  # a failure has no effect here and a torn one keeps it: nothing is put back
+        self.look()
+
+        def replace() -> None:
+            self.fstab, self.fstab_id = text, self.fstab_id + 1
 
         def write() -> None:
-            self.fstab = text
+            replace()
+            self.systemd.reloaded(self.fstab_id, self.fstab)
 
         def failed(err: OSError) -> None:
-            self._torn("fstab write", write)
+            self._torn("fstab write", replace)  # in place, systemd not reloaded
             raise err
 
         self.step("fstab write", write, failed)

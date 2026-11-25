@@ -21,6 +21,7 @@ from btrfs.compress.domain import (
     parse_top_mount_unit,
     transaction_running,
 )
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
 from btrfs.compress.ports import TOP_MOUNT_ERRORS
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
@@ -201,6 +202,18 @@ class LinuxCompressHostAdapter:
             if previous is not None:
                 self._fs.write_atomic(path, previous, mode=0o644)
             raise
+
+    def mount_units(self) -> list[dict[str, str]] | None:
+        """The loaded mount units, on the host from a toolbox (as cache's CacheSystemd); none with a test root
+        (CST_BTRFS_*_ROOT): no systemd loaded that root's /etc/fstab, so none of its units is behind."""
+        if self._host_root:
+            return []
+        on_host = SystemctlHost.SHOW_ONLY if self._ctx.is_container() else SystemctlHost.LOCAL
+        return SystemctlAdapter(self._runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
+
+    def daemon_reload(self) -> str | None:
+        res = self._systemctl.daemon_reload_result()
+        return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
 
     def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
         """Update `rootflags=` in a single `rpm-ostree kargs` invocation."""

@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 import errno
 import functools
+import io
 import os
 import shutil
 import sys
@@ -46,17 +47,18 @@ from typing import ClassVar, override
 import unittest
 from unittest import mock
 
-from btrfs.commit.adapters import execute_commit_change, read_commit_snapshot
+from btrfs.commit.adapters import execute_commit_change, format_commit_plan_lines, read_commit_snapshot
 from btrfs.commit.domain import (
     CommitAction,
     CommitParsedArgs,
+    build_commit_plan,
     assess_commit_coherence,
     effective_commit_seconds,
     format_commit_label,
     has_explicit_commit,
 )
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
-from btrfs.compress.application import CompressService
+from btrfs.compress.application import FSTAB_RELOAD_PENDING, CompressService
 from btrfs.compress.domain import (
     FSTAB_UNREAD,
     KARGS_SETTLE_POLL_S,
@@ -75,8 +77,9 @@ from btrfs.compress.domain import (
     transaction_running,
 )
 from btrfs.compress.domain.args import CompressArgs, CompressCommand
+from btrfs.compress.presenter import render_compress_plan
 from btrfs.compress.domain.rpm_ostree import kargs_refused
-from btrfs.tests.fakes import CompressWorld, kernel_remount_options
+from btrfs.tests.fakes import RELOAD_FAILED, CompressWorld, kernel_remount_options
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.application.install import InstallRequest, InstallService
 from cst_core.domain.install import InstallEntry
@@ -1212,6 +1215,100 @@ class SettledKargsAdapterTest(unittest.TestCase):
         for text in ("", "[]", '{"deployments": []}', "{"):
             with self.subTest(text=text):
                 self.assertIsNone(transaction_running(text))
+
+
+UNREAD = "systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)"
+NO_ANSWER = "systemctl could not say whether systemd had loaded /etc/fstab as it is on disk"
+
+
+class CatchUpReloadTest(unittest.TestCase):
+    """A run that writes no /etc/fstab reloads systemd first when systemd has not loaded /etc/fstab as it is
+    on disk (an earlier run stopped between its write and its reload), as cache's catch-up reload: both
+    tools, at their target (P1, C1 after a run) and with only the live mounts to change (C5)."""
+
+    def _behind(self, name: str, *, at_target: bool) -> tuple[Start, CompressWorld]:
+        s = BY_NAME[name]
+        w = start_world(s)
+        if at_target:
+            self.assertEqual(run_tool(s, w, s.command)[0], 0)
+        w.look()
+        w.fstab_id += 1  # /etc/fstab rewritten since systemd loaded it, with no reload after
+        w.calls.clear()
+        return s, w
+
+    def test_each_answer_of_systemd(self) -> None:
+        reload_failed = (
+            "systemctl daemon-reload failed: Failed to reload daemon; /etc/fstab is as asked, systemd has not "
+            "loaded it (run systemctl daemon-reload once it works)"
+        )
+        warning = (
+            "warning: systemctl daemon-reload failed: Failed to reload daemon; systemctl could not say whether "
+            "systemd had loaded /etc/fstab as it is on disk either (run systemctl daemon-reload once it works)"
+        )
+        # (no answer from systemctl show, the reload fails, exit, the line the run ends its output with)
+        cases = (
+            (False, False, 0, f"reloaded: {UNREAD}"),
+            (False, True, 1, reload_failed),
+            (True, False, 0, f"reloaded: {NO_ANSWER}"),
+            (True, True, 0, warning),
+        )
+        for name in ("P1", "C1"):
+            for no_answer, fails, rc, last in cases:
+                with self.subTest(start=name, no_answer=no_answer, fails=fails):
+                    s, w = self._behind(name, at_target=True)
+                    w.show_fails = no_answer
+                    if fails:
+                        w.fail("systemctl daemon-reload", RELOAD_FAILED)
+                    before = layers(s.tool, w)
+                    got_rc, out, _ = run_tool(s, w, s.command)
+                    self.assertEqual((got_rc, out.rstrip("\n").splitlines()[-1].removeprefix("ERROR: ")), (rc, last))
+                    self.assertEqual(w.calls, ["systemctl daemon-reload"])
+                    self.assertEqual(layers(s.tool, w), before)
+                    self.assertEqual(w.systemd.current(w.fstab_id), not fails)
+
+    def test_a_reload_then_nothing_more_and_the_plan_names_it(self) -> None:
+        for name in ("P1", "C1"):
+            with self.subTest(start=name):
+                s, w = self._behind(name, at_target=True)
+                if s.tool == Tool.COMPRESS:
+                    out, err = io.StringIO(), io.StringIO()
+                    render_compress_plan(
+                        CompressService(w).build_change_plan(CompressArgs(CompressCommand.PLAN)), "cst", out, err
+                    )
+                    plan = out.getvalue()
+                else:
+                    snap = read_commit_snapshot(w)[0]
+                    plan = "\n".join(
+                        format_commit_plan_lines(
+                            build_commit_plan(snap, target_seconds=60), "cst", dry_run=True, reload_pending=True
+                        )
+                    )
+                self.assertIn(FSTAB_RELOAD_PENDING, plan)
+                self.assertIn("Dry run, nothing changed.", plan)
+                self.assertNotIn("nothing to do", plan)
+                self.assertEqual(w.calls, [])
+                self.assertEqual(run_tool(s, w, s.command)[0], 0)
+                self.assertEqual(w.calls, ["systemctl daemon-reload"])
+                w.calls.clear()
+                rc, out, _ = run_tool(s, w, s.command)
+                self.assertEqual(rc, 0)
+                self.assertIn("nothing to do", out)
+                self.assertEqual(w.calls, [])
+
+    def test_the_reload_comes_before_the_other_layers(self) -> None:
+        s, w = self._behind("C5", at_target=False)
+        rc, out, _ = run_tool(s, w, s.command)
+        self.assertEqual((rc, w.calls), (0, ["systemctl daemon-reload", "remount"]))
+        self.assertLess(out.index(f"reloaded: {UNREAD}"), out.index("Remounted"))
+
+    def test_a_run_that_writes_fstab_reloads_with_its_write_only(self) -> None:
+        s = BY_NAME["P1"]
+        w = start_world(s)
+        w.look()
+        w.fstab_id += 1
+        self.assertEqual(run_tool(s, w, s.command)[0], 0)
+        self.assertNotIn("systemctl daemon-reload", w.calls)
+        self.assertTrue(w.systemd.current(w.fstab_id))
 
 
 class AlreadyAtTheTargetTest(unittest.TestCase):

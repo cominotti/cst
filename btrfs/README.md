@@ -1614,7 +1614,20 @@ layers disagreeing. The next boot still boots: every value is a valid mount
 option, and the previous deployment stays in the boot menu. `status` and
 `cst doctor` show the drift, and running the same command again (or
 `revert`) converges. `btrfs/tests/test_compress_faults.py` checks this at
-every step, for `commit-interval` (section 9.3) too.
+every step, for `commit-interval` (section 9.3) too. A run killed between
+its `/etc/fstab` write and the `systemctl daemon-reload` after it leaves
+systemd with the old text loaded (a unit made from `/etc/fstab` says
+`NeedDaemonReload=yes`). A later run that writes no `/etc/fstab` then
+reloads systemd first, as `cache` does (section 9.4): `plan` and `status`
+say `daemon-reload: systemd has not loaded /etc/fstab as it is on disk`,
+and `apply` or `revert` says `reloaded: systemd had not loaded /etc/fstab
+as it is on disk (an earlier run stopped)` (or, when `systemctl show`
+gives no answer, `reloaded: systemctl could not say ...`) before the other
+layers. A reload that fails stops the run with exit 1 and changes nothing
+else; one that fails when `systemctl show` gave no answer either is a
+`warning:` line, and the run goes on. Only the `NeedDaemonReload` of the
+units systemd loaded from `/etc/fstab` counts. `commit-interval` does the
+same.
 
 **Only the root filesystem:** `apply` and `revert` (here and in
 `commit-interval`, section 9.3) change only the root btrfs filesystem's
@@ -1779,7 +1792,10 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
   `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
   partial error. A step that fails stops the run before the later layers are
   touched (the top-mount unit is not changed after one), and the layers it
-  changed are put back in reverse (section 9.1). Like `compress-force`, it changes only the root filesystem's
+  changed are put back in reverse (section 9.1). A run after one killed
+  between its `/etc/fstab` write and its reload reloads systemd first, with
+  the same plan, status and failure words as `compress-force` (section 9.1).
+  Like `compress-force`, it changes only the root filesystem's
   fstab lines and mounts: a separate btrfs `/home` or `/var/home` is never
   touched (section 9.1, "Only the root filesystem"). In `btrfs:top-mount` only
   the `commit=` of the unit's own `Options=` changes.

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Final
 
+from btrfs.cache.domain.systemd_view import catch_up_words, fstab_lines_unread
 from btrfs.compress.domain import (
     FSTAB_PATH,
     FSTAB_UNREAD,
@@ -36,6 +38,30 @@ from cst_core.domain.errors import Refused
 from cst_core.ports import CommandFailed
 
 
+FSTAB_RELOAD_PENDING: Final = f"daemon-reload: systemd has not loaded {FSTAB_PATH} as it is on disk"
+"""What plan and status say when a run would reload systemd first (catch_up_reload)."""
+
+
+def fstab_behind(host: CompressHostPort) -> bool | None:
+    """Whether systemd has not loaded /etc/fstab as it is on disk: a unit it loaded from /etc/fstab says
+    NeedDaemonReload=yes (an earlier run stopped between its /etc/fstab write and its reload); None when
+    systemctl gives no answer. Only that rule of cache's fstab_lines_unread: compress-force and
+    commit-interval manage no bind line of their own."""
+    return fstab_lines_unread(host.mount_units(), ())
+
+
+def catch_up_reload(host: CompressHostPort, new_fstab_text: str | None) -> tuple[str | None, list[str]]:
+    """For a run that writes no /etc/fstab (new_fstab_text None; one that writes it reloads with it):
+    daemon-reload when systemd is behind /etc/fstab or systemctl cannot say, as cache's catch-up reload:
+    (why the run fails, or None; the lines to add), worded by catch_up_words."""
+    if new_fstab_text is not None:
+        return None, []
+    behind = fstab_behind(host)
+    if behind is False:
+        return None, []
+    return catch_up_words(behind=behind, reload_error=host.daemon_reload())
+
+
 @dataclass(slots=True)
 class _ApplyProgress:
     fstab_written: bool = False
@@ -55,6 +81,7 @@ class CompressPlanResult:
     plan: CompressPlan | None = None
     error: str = ""
     hint_cmd: CompressCommand = CompressCommand.APPLY
+    reload_pending: bool = False  # a run would reload systemd first (FSTAB_RELOAD_PENDING)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +180,7 @@ class CompressService:
             booted_diff=booted_diff,
             coherence=coherence,
             left_alone_notes=plan_view.left_alone_notes,
+            reload_pending=fstab_behind(self._host) is True,
         )
 
     def build_change_plan(self, args: CompressArgs) -> CompressPlanResult:
@@ -163,7 +191,8 @@ class CompressService:
             return CompressPlanResult(1, self._seam_proc, error=f"cannot inspect rpm-ostree kargs: {kargs_err}")
         target_mode = CompressMode.COMPRESS if args.revert else CompressMode.COMPRESS_FORCE
         plan = build_plan(snap, target_mode=target_mode, level_override=args.level)
-        return CompressPlanResult(0, self._seam_proc, plan=plan, hint_cmd=hint_cmd)
+        pending = plan.new_fstab_text is None and fstab_behind(self._host) is True
+        return CompressPlanResult(0, self._seam_proc, plan=plan, hint_cmd=hint_cmd, reload_pending=pending)
 
     def _apply_top_mount(
         self, snap: CompressSnapshot, plan: CompressPlan, prog: _ApplyProgress, msgs: list[str]
@@ -296,6 +325,21 @@ class CompressService:
             return tuple(msgs), f"{top_err}; {self._rollback_layers(snap, plan, prog)}"
         return tuple(msgs), None
 
+    def _not_confirmed(self, plan: CompressPlan) -> CompressChangeResult | None:
+        """Ask before a change: None when confirmed, else the result of the run that stops there."""
+        try:
+            confirmed = self._host.confirm(f"Apply {plan.target_option} across active layers?")
+        except Refused as exc:
+            return CompressChangeResult(
+                1,
+                self._seam_proc,
+                plan=plan,
+                error=f"{exc} (pass --yes to apply non-interactively).",
+            )
+        if not confirmed:
+            return CompressChangeResult(1, self._seam_proc, plan=plan, messages=("Aborted; nothing changed.",))
+        return None
+
     def execute_change(self, args: CompressArgs) -> CompressChangeResult:
         """Run `apply` or `revert` atomically across all active layers."""
         snap, kargs_ok, kargs_err = self._snapshot()
@@ -304,29 +348,27 @@ class CompressService:
         target_mode = CompressMode.COMPRESS if args.command == CompressCommand.REVERT else CompressMode.COMPRESS_FORCE
         plan = build_plan(snap, target_mode=target_mode, level_override=args.level)
         if not plan.has_changes:
+            cause, reloaded = catch_up_reload(self._host, None)
+            if cause is not None:
+                return CompressChangeResult(1, self._seam_proc, plan=plan, error=cause)
             return CompressChangeResult(
                 0,
                 self._seam_proc,
                 plan=plan,
-                messages=(f"Already at {plan.target_option} across all active layers; nothing to do.",),
+                messages=tuple(reloaded)
+                or (f"Already at {plan.target_option} across all active layers; nothing to do.",),
             )
-        if not args.yes:
-            try:
-                confirmed = self._host.confirm(f"Apply {plan.target_option} across active layers?")
-            except Refused as exc:
-                return CompressChangeResult(
-                    1,
-                    self._seam_proc,
-                    plan=plan,
-                    error=f"{exc} (pass --yes to apply non-interactively).",
-                )
-            if not confirmed:
-                return CompressChangeResult(1, self._seam_proc, plan=plan, messages=("Aborted; nothing changed.",))
+        refused = None if args.yes else self._not_confirmed(plan)
+        if refused is not None:
+            return refused
+        cause, reloaded = catch_up_reload(self._host, plan.new_fstab_text)
+        if cause is not None:
+            return CompressChangeResult(1, self._seam_proc, plan=plan, error=cause)
         msgs, err_msg = self._apply_layers(snap, plan)
         return CompressChangeResult(
             1 if err_msg is not None else 0,
             self._seam_proc,
             plan=plan,
-            messages=msgs,
+            messages=(*reloaded, *msgs),
             error=err_msg or "",
         )
