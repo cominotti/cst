@@ -408,6 +408,7 @@ def assemble_cpu_probe(
         irqbalance_banned_cpus=meta.irqbalance_banned_cpus,
         irq_lines=meta.irq_lines,
         default_smp_affinity_hex=clean_opt_str(files.get(PerfPathKey.DEFAULT_SMP_AFFINITY)),
+        settings_problems=meta.settings_problems,
     )
 
 
@@ -452,6 +453,7 @@ def assemble_io_probe(
     nonzero_slice_io_weights: Sequence[tuple[str, int]] = (),
     btrfs_commits: Sequence[BtrfsCommitSample] = (),
     btrfs_scrub_limit: str | None = None,
+    settings_problems: Sequence[str] = (),
 ) -> IoProbeSnapshot:
     """Build `IoProbeSnapshot` cleanly from raw text keyed by `PerfPathKey`."""
     qos_text = files.get(PerfPathKey.IO_COST_QOS)
@@ -478,4 +480,5 @@ def assemble_io_probe(
         btrfs_commits=tuple(btrfs_commits),
         btrfs_scrub_limit=btrfs_scrub_limit,
         btrfs_conf_present=btrfs_conf is not None,
+        settings_problems=tuple(settings_problems),
     )

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 import posixpath
 from typing import Final
 
-from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
+from cst_core.domain.text import SettingsProblem, describe_problem_lines, parse_shell_assignments, parse_snapshots_conf
 from cst_core.domain.values import parse_whole_number
 
 from perf.domain.evaluate import evaluate_perf_snapshot
@@ -173,6 +173,13 @@ def _irq_lines_with_affinity(reader: PerfFsReader, interrupts: str | None) -> tu
     )
 
 
+def _settings_problem_lines(key: PerfPathKey, problems: Sequence[SettingsProblem]) -> tuple[str, ...]:
+    """The words of each problem line of the settings file at key (describe_problem_lines, the file's
+    path on the host): ignored, or still read when bash would still set its value (kept)."""
+    words = describe_problem_lines(f"/{key.value}", tuple(problems))
+    return tuple(f"{w} ({'still read' if p.kept else 'ignored'})" for p, w in zip(problems, words, strict=True))
+
+
 def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
     """Collect cpuidle, preempt, sched_ext, ntsync, irqbalance, and IRQ counts cleanly."""
     files = _read_key_map(reader, CPU_FILE_KEYS)
@@ -182,23 +189,29 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
     build_cpus = None
     p_cores = None
     cstate_setting = ""
+    problems: list[str] = []
     if conf_text is not None:
-        assigned = parse_shell_assignments(conf_text).values
+        conf = parse_shell_assignments(conf_text)
+        problems += _settings_problem_lines(PerfPathKey.CPU_CONF, conf.problems)
+        assigned = conf.values
         build_cpus = parse_optional_cpuset(assigned.get("BUILD_CPUS"))
         p_cores = parse_optional_cpuset(assigned.get("P_CORES"))
         cstate_setting = assigned.get("CPU_CSTATE_MAX_LATENCY_US", "")
     banned_cpus = None
     cst_dropin_present = reader.exists_rel(PerfRootKind.ETC, _IRQBALANCE_CST_DROPIN)
     cst_irq_env = files.get(PerfPathKey.IRQBALANCE_CST_ENV) if cst_dropin_present else None
-    cst_assigned = parse_shell_assignments(cst_irq_env).values if cst_irq_env is not None else {}
+    cst_env = parse_shell_assignments(cst_irq_env) if cst_irq_env is not None else None
+    cst_assigned = cst_env.values if cst_env is not None else {}
+    if cst_env is not None:
+        problems += _settings_problem_lines(PerfPathKey.IRQBALANCE_CST_ENV, cst_env.problems)
     if "IRQBALANCE_BANNED_CPULIST" in cst_assigned:
         banned_cpus = parse_optional_cpuset(cst_assigned.get("IRQBALANCE_BANNED_CPULIST"))
     else:
         irq_sysconf = files.get(PerfPathKey.IRQBALANCE_SYSCONFIG)
         if irq_sysconf is not None:
-            banned_cpus = parse_optional_cpuset(
-                parse_shell_assignments(irq_sysconf).values.get("IRQBALANCE_BANNED_CPULIST")
-            )
+            sysconf = parse_shell_assignments(irq_sysconf)
+            problems += _settings_problem_lines(PerfPathKey.IRQBALANCE_SYSCONFIG, sysconf.problems)
+            banned_cpus = parse_optional_cpuset(sysconf.values.get("IRQBALANCE_BANNED_CPULIST"))
     online_cpus = parse_optional_cpuset(files.get(PerfPathKey.CPU_ONLINE))
     irqbalance_active: bool | None = None
     if reader.is_dir_rel(PerfRootKind.RUN, _SYSTEMD_UNITS_DIR):
@@ -223,6 +236,7 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
             irqbalance_active=irqbalance_active,
             irqbalance_banned_cpus=banned_cpus,
             irq_lines=_irq_lines_with_affinity(reader, files.get(PerfPathKey.INTERRUPTS)),
+            settings_problems=tuple(problems),
         ),
     )
 
@@ -265,11 +279,12 @@ def _collect_btrfs_commits(reader: PerfFsReader) -> list[BtrfsCommitSample]:
     return btrfs_commits
 
 
-def _scrub_limit_setting(btrfs_conf: str | None) -> str | None:
+def _scrub_limit_setting(btrfs_conf: str | None) -> tuple[str | None, tuple[str, ...]]:
+    """snapshots.conf's SCRUB_LIMIT, and the file's problem lines."""
     if btrfs_conf is None:
-        return None
-    raw_val = parse_snapshots_conf(btrfs_conf).values.get("SCRUB_LIMIT")
-    return clean_opt_str(raw_val)
+        return None, ()
+    conf = parse_snapshots_conf(btrfs_conf)
+    return clean_opt_str(conf.values.get("SCRUB_LIMIT")), _settings_problem_lines(PerfPathKey.BTRFS_CONF, conf.problems)
 
 
 def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
@@ -278,12 +293,14 @@ def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
     blocks = _collect_block_devices(reader)
     weights = _collect_slice_weights(reader)
     btrfs_commits = _collect_btrfs_commits(reader)
+    scrub_limit, problems = _scrub_limit_setting(files.get(PerfPathKey.BTRFS_CONF))
     return assemble_io_probe(
         files,
         block_devices=blocks,
         nonzero_slice_io_weights=weights,
         btrfs_commits=btrfs_commits,
-        btrfs_scrub_limit=_scrub_limit_setting(files.get(PerfPathKey.BTRFS_CONF)),
+        btrfs_scrub_limit=scrub_limit,
+        settings_problems=problems,
     )
 
 
@@ -332,9 +349,12 @@ def collect_gpu_from_reader(reader: PerfFsReader) -> GpuProbeSnapshot:
         game_active = reader.exists_rel(PerfRootKind.RUN, _GAME_STATE_RUN)
         game_manual = reader.exists_rel(PerfRootKind.RUN, _GAME_MANUAL_RUN)
     gpu_pm_mode: str | None = None
+    problems: tuple[str, ...] = ()
     conf_text = reader.read_key(PerfPathKey.CPU_CONF)
     if conf_text is not None:
-        raw_mode = clean_opt_str(parse_shell_assignments(conf_text).values.get("GPU_PM_MODE"))
+        conf = parse_shell_assignments(conf_text)
+        problems = _settings_problem_lines(PerfPathKey.CPU_CONF, conf.problems)
+        raw_mode = clean_opt_str(conf.values.get("GPU_PM_MODE"))
         if raw_mode is not None:
             gpu_pm_mode = raw_mode.lower()
     return GpuProbeSnapshot(
@@ -342,6 +362,7 @@ def collect_gpu_from_reader(reader: PerfFsReader) -> GpuProbeSnapshot:
         game_profile_active=game_active,
         gpu_pm_mode=gpu_pm_mode,
         game_profile_manual=game_manual,
+        settings_problems=problems,
     )
 
 

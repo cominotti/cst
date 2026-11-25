@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 # perf: Read-Only Workstation Responsiveness Telemetry
 
-`cst perf` samples live kernel, memory, CPU, IRQ, storage, and GPU settings in one read-only snapshot and produces an objective health verdict (`OPTIMIZED`, `ATTENTION`, `BOTTLENECK`, or `SKIP`) with recommended actions.
+`cst perf` samples live kernel, memory, CPU, IRQ, storage, and GPU settings in one read-only snapshot and produces an objective health verdict (`OPTIMIZED`, `ATTENTION`, `BOTTLENECK`, or `SKIP`) with recommended actions. A line of a settings file it reads (`/etc/cpu-setup/cpu-setup.conf` for the cpu and gpu sections, `/etc/cpu-setup/irqbalance.env` and `/etc/sysconfig/irqbalance` for cpu, `/etc/btrfs-setup/snapshots.conf` for io) that is no plain `KEY=VALUE` assignment sets nothing; its section shows it as a `settings line` row, `PATH line N: TEXT: REASON (ignored)` (`(still read)` for a blank beside a value that bash still reads).
 
 Nothing is written to the host and root is not required. From inside a toolbox container, `cst perf` reads the host filesystem under `/run/host` when `/run/host/proc` and `/run/host/etc` exist (and falls back to the container's own `/proc`/`/sys`/`/etc` otherwise).
 
