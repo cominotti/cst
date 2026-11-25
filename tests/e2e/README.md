@@ -261,9 +261,10 @@ there is none. The cleanup puts the copy back, removes `/etc/fstab` only with
 `no-fstab`, and with neither leaves it alone: the script stopped before it
 wrote the file. `rm -rf w` and `mkdir -p w/...` go on two lines, so a work
 folder that cannot be emptied (a mount still under it) stops the script
-instead of leaving the old content in place. `cache_reload_scaffold` and
-`cache_reload_cleanup` (test_177, test_201, test_202), test_157, test_159 and
-test_160 follow it. The rule covers `/etc/fstab` only: those cleanups still
+instead of leaving the old content in place. `fstab_saved(w)` and
+`fstab_put_back(w)` in `suites/suite_tier1_systemd.py` give the two lines;
+`cache_reload_scaffold` and `cache_reload_cleanup` (test_177, test_201,
+test_202), test_157, test_159 and test_160 use them. The rule covers `/etc/fstab` only: those cleanups still
 remove other files they found no backup of.
 
 ## Mixed-version tests

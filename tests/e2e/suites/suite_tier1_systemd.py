@@ -1124,6 +1124,22 @@ else:
 """
 
 
+def fstab_saved(w: str) -> str:
+    """The bash line a tier 1 script that writes /etc/fstab runs right after it makes its work folder w: the
+    file copied to w/fstab.bak, or w/no-fstab when there is none (tests/e2e/README.md, "Cleanups of
+    /etc/fstab")."""
+    return f"if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi"
+
+
+def fstab_put_back(w: str) -> str:
+    """The bash line of the cleanup of fstab_saved(w): the copy put back, /etc/fstab removed only with
+    w/no-fstab, and left alone with neither (the script stopped before it wrote the file)."""
+    return (
+        f"if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; "
+        f"elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi"
+    )
+
+
 def cache_reload_cleanup(w: str) -> str:
     """The cleanup of cache_reload_scaffold(w): the bases stopped, /etc/fstab put back (removed only where
     the scaffold found none, w/no-fstab; left alone where the scaffold stopped before it looked) and loaded,
@@ -1132,7 +1148,7 @@ def cache_reload_cleanup(w: str) -> str:
     return f"""
             set +e
             systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
+            {fstab_put_back(w)}
             systemctl daemon-reload
             if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
             if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
@@ -1155,7 +1171,7 @@ def cache_reload_scaffold(w: str) -> str:
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             rm -rf {w}
             mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
-            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
+            {fstab_saved(w)}
             [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
             [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
             printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\n' >{w}/etc/passwd
@@ -8925,11 +8941,7 @@ echo E2E-OK
             exec_bash,
             c,
             f"""
-            if [[ -f {w}/fstab.bak ]]; then
-                cp -a {w}/fstab.bak /etc/fstab
-            elif [[ -f {w}/no-fstab ]]; then
-                rm -f /etc/fstab
-            fi
+            {fstab_put_back(w)}
             if [[ -f {w}/installed.json.bak ]]; then
                 cp -a {w}/installed.json.bak /var/lib/cst/installed.json
             else
@@ -8950,7 +8962,7 @@ echo E2E-OK
             set -euo pipefail
             rm -rf {w}
             mkdir -p {w}/bin {w}/proc
-            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
+            {fstab_saved(w)}
             [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
             touch /run/ostree-booted
             [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
@@ -9146,7 +9158,7 @@ EOF
             exec_bash,
             c,
             f"""
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
+            {fstab_put_back(w)}
             if [[ -f {w}/installed.json.bak ]]; then cp -a {w}/installed.json.bak /var/lib/cst/installed.json; else rm -f /var/lib/cst/installed.json; fi
             if [[ ! -f {w}/had-ostree-booted ]]; then rm -f /run/ostree-booted; fi
             rm -f {shlex.quote(f"/etc/systemd/system/{top_unit}")} {shlex.quote(f"/etc/systemd/system/{auto_unit}")}
@@ -9163,7 +9175,7 @@ EOF
             absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
             rm -rf {w}
             mkdir -p {w}/bin {w}/proc
-            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
+            {fstab_saved(w)}
             [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
             touch /run/ostree-booted
             [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
@@ -9402,7 +9414,7 @@ EOF
             exec_bash,
             c,
             f"""
-            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; elif [[ -f {w}/no-fstab ]]; then rm -f /etc/fstab; fi
+            {fstab_put_back(w)}
             if [[ -f {w}/crypttab.bak ]]; then cp -a {w}/crypttab.bak /etc/crypttab; else rm -f /etc/crypttab; fi
             systemctl daemon-reload || true
             rm -rf {w}
@@ -9415,7 +9427,7 @@ EOF
             set -euo pipefail
             rm -rf {w}
             mkdir -p {w}/bin {w}/fail {w}/fail2 {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
-            if [[ -f /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else touch {w}/no-fstab; fi
+            {fstab_saved(w)}
             for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do mkdir -p {w}/var/home/$u; done
             mkdir -p "{w}/var/home/u four"
             [[ ! -f /etc/crypttab ]] || cp -a /etc/crypttab {w}/crypttab.bak
