@@ -32,9 +32,11 @@ from btrfs.health_check.domain import (
     bash_wrap,
     boot_since,
     controller,
+    days_between,
     disks_of,
     has_missing,
     kernel_problem,
+    latest_epoch,
     marker_problem,
     md_problem,
     member_paths,
@@ -47,7 +49,6 @@ from btrfs.health_check.domain import (
     parse_scrub,
     pick_mounts,
     rule_uuid,
-    scrub_age_days,
     sed_values,
     smart_problems,
     snapshots_overdue,
@@ -294,7 +295,7 @@ def scrub_problems(m: Probe, mnt: str) -> list[str]:
             f"btrfs {mnt}: last scrub (started {scrub.started}) did not finish: status {scrub.status or 'unknown'}"
         )
     elif (started := m.epoch(scrub.started)) is not None:
-        age_days = scrub_age_days(now(), started)
+        age_days = days_between(now(), started)
         if age_days > SCRUB_MAX_AGE_DAYS:
             problems.append(f"btrfs {mnt}: last scrub is {age_days} days old")
     return problems
@@ -518,11 +519,7 @@ def _log_stale_nas(m: Probe, snap: str) -> None:
     if settings.get("NAS_ENABLED", "0") != "1":
         return
     # The last success, or when the backup was turned on if later (as btrfs-snapshot).
-    nas_last = 0
-    for name in ("nas-last-ok", "nas-enabled-at"):
-        v = bash_int(m.cat(f"{snap}/{name}") or "")
-        if v is not None and v > nas_last:
-            nas_last = v
+    nas_last = latest_epoch([m.cat(f"{snap}/{name}") for name in ("nas-last-ok", "nas-enabled-at")])
     if nas_overdue(now(), nas_last):
         log(
             4,

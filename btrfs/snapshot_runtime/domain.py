@@ -511,29 +511,11 @@ CHECK_FAILURES_ALERTED: Final = 3
 SUMMARY_CHARS: Final = 300
 
 
-def days_between(now: int, last: int) -> int:
-    """Whole days from LAST to NOW: the old $(( ($(date +%s) - last) / 86400 )), 64-bit, wrapping."""
-    return bash_div(bash_wrap(now - last), DAY)
-
-
 def next_check_failures(before: int | None) -> int:
     """nas-check-failures after one more failed check: the old $(( $(cat nas-check-failures || echo 0) + 1 )),
     64-bit, wrapping (2**63 - 1 gives -2**63); BEFORE None where bash's arithmetic failed on the file (08:
     it counted from 0)."""
     return bash_wrap((0 if before is None else before) + 1)
-
-
-def latest_epoch(texts: Sequence[str | None]) -> int:
-    """The latest of the epochs in TEXTS (None: a file that is not there), as the old nas_since chose it:
-    [[ v =~ ^[0-9]+$ ]] && (( v > best )) && best=v. Each is read as bash arithmetic (bash_int: a leading 0
-    octal, 08 an error and skipped; a value past 2**63 - 1 wraps around, and a negative one is skipped);
-    0 when none is."""
-    best = 0
-    for text in texts:
-        n = None if text is None else bash_int(text)
-        if n is not None and n > best:
-            best = n
-    return best
 
 
 # Messages of restic check (0.19) that name damaged data, not a transport problem.

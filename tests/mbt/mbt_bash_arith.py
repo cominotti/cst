@@ -28,11 +28,12 @@ from btrfs.health_check.domain import (
     bash_int,
     boot_since,
     critical_warning_value,
+    days_between,
+    latest_epoch,
     nas_overdue,
-    scrub_age_days,
     snapshots_overdue,
 )
-from btrfs.snapshot_runtime.domain import days_between, latest_epoch, next_check_failures
+from btrfs.snapshot_runtime.domain import next_check_failures
 from tests.mbt import profiles
 
 profiles.load()
@@ -100,7 +101,7 @@ class HealthCheckArithmeticTest(profiles.MbtTestCase):
     @given(now=WORD, started=WIDE)
     def test_scrub_age_days(self, now: int, started: int) -> None:
         got = bash('started=$2; ( echo "$(( ( $1 - started ) / 86400 ))" ) 2>/dev/null || echo error', now, started)
-        self.assertEqual(got, [str(scrub_age_days(now, started))])
+        self.assertEqual(got, [str(days_between(now, started))])
 
     # health check line 314: boot_since=$(( $(date +%s) - $(awk '{print int($1)}' /proc/uptime) )).
     @given(now=WORD, uptime=WIDE)

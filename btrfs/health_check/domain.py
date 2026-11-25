@@ -427,9 +427,23 @@ def marker_problem(uuid: str, since_human: str, state: str) -> str:
     )
 
 
-def scrub_age_days(now: int, started: int) -> int:
-    """The last scrub's age in days: the old ( $(date +%s) - started_epoch ) / 86400, 64-bit, wrapping."""
-    return bash_div(bash_wrap(now - started), DAY)
+def days_between(now: int, last: int) -> int:
+    """Whole days from LAST to NOW, as the old bash computed them ($(( ($(date +%s) - last) / 86400 ))), 64-bit,
+    wrapping: the last scrub's age, and the NAS run's days since its last backup or check."""
+    return bash_div(bash_wrap(now - last), DAY)
+
+
+def latest_epoch(texts: Sequence[str | None]) -> int:
+    """The latest of the epochs in TEXTS (None: a file that is not there), as the old nas_since chose it:
+    [[ v =~ ^[0-9]+$ ]] && (( v > best )) && best=v. Each is read as bash arithmetic (bash_int: a leading 0
+    octal, 08 an error and skipped; a value past 2**63 - 1 wraps around, and a negative one is skipped);
+    0 when none is. The NAS run's last good backup, and the health check's."""
+    best = 0
+    for text in texts:
+        n = None if text is None else bash_int(text)
+        if n is not None and n > best:
+            best = n
+    return best
 
 
 def boot_since(now: int, uptime_s: int) -> int:

@@ -1283,7 +1283,7 @@ done < "$1"
     )
 
     def test_date_arithmetic_wraps_as_the_old_bash(self) -> None:
-        from btrfs.health_check.domain import boot_since, nas_overdue, scrub_age_days, snapshots_overdue
+        from btrfs.health_check.domain import boot_since, days_between, nas_overdue, snapshots_overdue
 
         values = [str(v) for case in self.DATE_CASES for v in case]
         with tempfile.TemporaryDirectory() as tmp:
@@ -1291,7 +1291,7 @@ done < "$1"
         self.assertEqual(len(got), len(self.DATE_CASES))
         for (now, a, b), bash in zip(self.DATE_CASES, got, strict=True):
             with self.subTest(now=now, a=a, b=b):
-                ours = (scrub_age_days(now, a), boot_since(now, a), snapshots_overdue(now, a, b), nas_overdue(now, a))
+                ours = (days_between(now, a), boot_since(now, a), snapshots_overdue(now, a, b), nas_overdue(now, a))
                 self.assertEqual(f"{ours[0]} {ours[1]} {int(ours[2])} {int(ours[3])}", bash)
 
     # The old btrfs-health-check's reclaim count (git show b819032f^:btrfs/btrfs-health-check, lines

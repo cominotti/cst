@@ -18,7 +18,7 @@ import signal
 import sys
 from typing import Final, TextIO
 
-from btrfs.health_check.domain import bash_int, bash_wrap
+from btrfs.health_check.domain import bash_int, bash_wrap, days_between, latest_epoch
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
@@ -38,11 +38,9 @@ from btrfs.snapshot_runtime.domain import (
     CoreCommand,
     GuardError,
     restic_time,
-    days_between,
     duration_s,
     features_type,
     guard_number,
-    latest_epoch,
     nas_unreadable,
     next_check_failures,
     repo_id,
