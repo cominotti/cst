@@ -2533,6 +2533,10 @@ class OutcomeRecordTest(Base):
             "[1]",
             '{"outcome": "gave-up"}',
             '{"outcome": "lost", "at": 1, "volumes": "v", "reason": "r"}',
+            # A time past what the C library can show: OverflowError, and OSError EOVERFLOW (status
+            # stopped with a traceback, or with "[Errno 75]" and exit 2).
+            '{"v": 1, "outcome": "gave-up", "at": 100000000000000000000, "volumes": "v", "reason": "r"}',
+            '{"v": 1, "outcome": "gave-up", "at": 1000000000000000000, "volumes": "v", "reason": "r"}',
         ):
             with self.subTest(text=text):
                 os.makedirs(os.path.dirname(self.outcome), exist_ok=True)

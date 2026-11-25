@@ -2457,7 +2457,13 @@ class DockerNocowOutcomeTest(Scratch):
 
     def test_a_record_it_cannot_read_or_of_a_newer_cst_is_info(self) -> None:
         path = "/var/lib/docker-volumes-nocow/outcome"
-        for text in ("not json", '{"outcome": "lost", "at": 1, "volumes": "v", "reason": "r"}'):
+        for text in (
+            "not json",
+            '{"outcome": "lost", "at": 1, "volumes": "v", "reason": "r"}',
+            # A time past what the C library can show: the check itself failed before.
+            '{"v": 1, "outcome": "not-scheduled", "at": 100000000000000000000, "volumes": "v", "reason": "r"}',
+            '{"v": 1, "outcome": "not-scheduled", "at": 1000000000000000000, "volumes": "v", "reason": "r"}',
+        ):
             with self.subTest(text=text):
                 with open(os.path.join(self.state_dir, "outcome"), "w") as f:
                     f.write(text)

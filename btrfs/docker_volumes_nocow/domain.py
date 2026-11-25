@@ -313,10 +313,19 @@ def outcome_unreadable(path: str) -> OutcomeRead:
     return OutcomeRead(problem=f"cannot read {path}")
 
 
+def _is_local_time(at: int) -> bool:
+    """at (epoch seconds) is a time the C library can show (time.localtime raises past its range)."""
+    try:
+        time.localtime(at)
+    except OverflowError, OSError, ValueError:
+        return False
+    return True
+
+
 def parse_outcome(text: str | None, path: str) -> OutcomeRead:
     """The outcome file's text (None: there is none), read as this checkout reads its format: one of a
-    newer format is named so, never taken for a broken one; an outcome word this checkout does not know
-    is unreadable."""
+    newer format is named so, never taken for a broken one; an outcome word this checkout does not know,
+    or a time no clock can show, is unreadable."""
     if text is None:
         return OutcomeRead()
     try:
@@ -329,7 +338,7 @@ def parse_outcome(text: str | None, path: str) -> OutcomeRead:
     if not OUTCOME_FORMAT.readable(data, OUTCOME_VERSION) or not is_outcome_record(data):
         return outcome_unreadable(path)
     outcome = enum_member(NocowOutcome, data["outcome"])
-    if outcome is None:
+    if outcome is None or not _is_local_time(data["at"]):
         return outcome_unreadable(path)
     return OutcomeRead(data, outcome)
 
