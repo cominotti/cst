@@ -17,7 +17,7 @@ from cst_core.application.install import InstallRefused, InstallService, Placeme
 from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.domain.text import parse_shell_assignments, strip_ascii_blanks
+from cst_core.domain.text import describe_problems, parse_shell_assignments, strip_ascii_blanks
 from cst_core.domain.units import ActiveState, EnablementState
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
@@ -95,7 +95,7 @@ def collect_irq_snapshot(
     """Collect settings, online CPUs, env/drop-in state, and systemd status for `cpu-irq`."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     settings, problems = read_settings(paths.conf)
-    warnings: list[str] = [f"{paths.conf} line {p.line}: {p.text}" for p in problems]
+    warnings: list[str] = describe_problems(paths.conf, problems).splitlines()
     build_cpus_error: str | None = (
         f"{paths.conf} has syntax errors; fix them before running apply" if problems else None
     )

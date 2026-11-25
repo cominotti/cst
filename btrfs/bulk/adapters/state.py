@@ -15,13 +15,28 @@ import os
 import re
 from typing import TypeIs
 
-from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkJournalKind, BulkPaths, ItemJournal
+from btrfs.bulk.domain import (
+    BY_ID,
+    ITEMS,
+    KEEP_HEADER,
+    BadSettings,
+    BulkJournalKind,
+    BulkPaths,
+    ItemJournal,
+    KeepLineError,
+)
 from btrfs.bulk.domain.steam import SteamJournal, SteamPhase, dec
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, parse_json
-from cst_core.domain.text import describe_problems, parse_shell_assignments
+from cst_core.domain.text import (
+    SettingsProblem,
+    blank_edge_problem,
+    describe_problems,
+    parse_shell_assignments,
+    strip_ascii_blanks,
+)
 
 # The journals of moves not finished yet (read back by any later btrfs-bulk).
 JOURNAL = state_format(StateFormatKey.BULK_JOURNAL)
@@ -194,14 +209,18 @@ class StateFiles:
     def read_keep(self) -> tuple[set[str], list[str]]:
         """(ids kept in /home by choice, unknown ids) from the keep file: one id
         per line, '#' starts a comment. Bytes that are not UTF-8 make an unknown
-        id. Raises OSError if it exists but cannot be read (a folder, say): then
-        nobody knows what is meant to stay, and apply moves nothing."""
+        id. Raises OSError if it exists but cannot be read (a folder, say), and
+        KeepLineError (an OSError) for an id with a blank other than space or tab
+        beside it (a no-break space): then nobody knows what is meant to stay,
+        and apply moves nothing. ASCII blanks around an id are trimmed."""
         known: set[str] = set()
         unknown: list[str] = []
         try:
             with open(self.paths.keep, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    ident = line.split("#", 1)[0].strip()
+                for number, line in enumerate(f, 1):
+                    ident = strip_ascii_blanks(line.split("#", 1)[0])
+                    if (why := blank_edge_problem(ident)) is not None:
+                        raise KeepLineError(SettingsProblem(number, line, why))
                     if ident in BY_ID:
                         known.add(ident)
                     elif ident:

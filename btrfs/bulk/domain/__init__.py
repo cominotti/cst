@@ -20,7 +20,7 @@ import os
 from cst_core.domain.contracts import NOTIFY_PROGRAM, SNAPSHOTS_CONF, StateFormatKey, state_format
 from cst_core.domain.errors import ExitStatus
 from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
-from cst_core.domain.text import enum_member
+from cst_core.domain.text import SettingsProblem, enum_member
 
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
 BTRFS_MAGIC = 0x9123683E
@@ -222,6 +222,15 @@ class BadSettings(Exception):
         self.lines = lines
 
 
+class KeepLineError(OSError):
+    """A line of the keep file whose id has a blank other than space or tab beside it (a no-break
+    space, U+3000: blank_edge_problem). Never trimmed: read_keep raises it, an OSError, so every
+    caller treats the file as one it cannot read and apply touches no item."""
+
+    def __init__(self, problem: SettingsProblem) -> None:
+        super().__init__(str(problem))
+
+
 class BootCountKeptError(Exception):
     """apply cannot remove the count of boot attempts a boot left: main() stops the run with exit 1 and
     the message on stderr, before anything moves (the next boot would count this request's boots
@@ -365,6 +374,12 @@ class BulkPaths:
             attempts=os.path.join(state, "boot-attempts"),
             lock=lock,
         )
+
+    def keep_unreadable(self, e: OSError) -> str:
+        """How apply, plan and the steam commands name the keep file when read_keep raised e."""
+        if isinstance(e, KeepLineError):
+            return f"{self.keep} has a line it cannot read: {e}"
+        return f"{self.keep} cannot be read ({e})"
 
 
 def present[T](value: T | None, what: str) -> T:

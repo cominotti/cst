@@ -175,6 +175,29 @@ class SettingsTest(Base):
         self.assertEqual(call[-2:], ["--source", f"home={self.top}/home:24h 2d"])
         self.assertEqual(self.call_envs("btrfs-snapshot-core"), [{}])
 
+    def test_a_blank_beside_a_value_is_kept_as_bash_reads_it_and_named(self) -> None:
+        # The file is bash's too: the line keeps the value bash gives it (the bash front's engine reads the
+        # same), and the runtime names it on stderr; it claims nothing about whether the value works.
+        self.conf("HOME_PRESERVE='24h 2d\N{NO-BREAK SPACE}'\n")
+        r = self.run_prog("list")
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stderr)),
+            (
+                0,
+                [
+                    log(
+                        4,
+                        f"{conf} line 4: HOME_PRESERVE='24h 2d\N{NO-BREAK SPACE}': a no-break space (U+00A0) at the "
+                        "end of the value: CST does not trim it (delete it); kept as bash reads it, with the blank "
+                        "(fix the line)",
+                    )
+                ],
+            ),
+        )
+        call = self.core_calls()[0]
+        self.assertEqual(call[-2:], ["--source", f"home={self.top}/home:24h 2d\N{NO-BREAK SPACE}"])
+
     def test_a_line_with_a_carriage_return_is_ignored(self) -> None:
         # A Windows line end: bash would keep the \r in the value, so the line is warned on and
         # ignored, and the line after it still counts (found by the parity harness of the port: a

@@ -7,7 +7,9 @@ corpus (btrfs/tests/fixtures/snapshots-conf-corpus.conf) alike.
 For each line (and the same line with a carriage return at its end): blank or
 comment for both; or an assignment for both, with the same key and the value
 bash gives it (the filter only decides; bash's eval of the accepted line gives
-the value); or a problem for both, with the same reason. The filter's three
+the value); or a problem for both, with the same reason. A value with a no-break space or
+another blank beside it is an assignment for both: parse_snapshots_conf keeps bash's value
+and adds a kept problem (SettingsProblem.kept), which expected() does not look at. The filter's three
 functions and its two patterns are cut out of the program for this: the
 whole-program tests of what the reader does are in test_snapshot_hourly.py
 (SettingsTest).
@@ -96,6 +98,9 @@ class CorpusTest(unittest.TestCase):
         self.assertEqual({v[0] for v in got}, {"ok", "problem", "none"})
         self.assertGreater(sum(v[0] == "ok" for v in got), 30)
         self.assertGreater(sum(v[0] == "problem" for v in got), 30)
+        # And lines whose value has a blank beside it, which both read as an assignment.
+        kept = [ln for ln in lines if any(p.kept for p in parse_snapshots_conf(ln + "\n").problems)]
+        self.assertGreaterEqual(len(kept), 4, kept)
 
 
 if __name__ == "__main__":

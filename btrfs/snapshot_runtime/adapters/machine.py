@@ -104,7 +104,7 @@ class SnapshotRun:
             got = parse_snapshots_conf(self.read_raw(self.conf))
             for problem in got.problems:
                 print(
-                    settings_problem_line(self.conf, problem.line, problem.text, problem.reason),
+                    settings_problem_line(self.conf, problem.line, problem.text, problem.reason, kept=problem.kept),
                     file=sys.stderr,
                     flush=True,
                 )

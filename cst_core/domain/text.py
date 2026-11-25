@@ -112,6 +112,33 @@ def strip_ascii_blanks(text: str) -> str:
     return text.strip(ASCII_BLANKS)
 
 
+def _blank_name(ch: str) -> str:
+    """How a reason names a blank character: its Unicode name in lower case with its code point
+    ("a no-break space (U+00A0)"), or "a control character (U+000B)" for one with no name."""
+    code = f"U+{ord(ch):04X}"
+    name = unicodedata.name(ch, "").lower()
+    if not name:
+        return f"a control character ({code})"
+    return f"{'an' if name[0] in 'aeiou' else 'a'} {name} ({code})"
+
+
+def blank_edge_problem(value: str) -> str | None:
+    """Why a settings value is a problem because a blank other than space or tab stands at its start
+    or end (after the spaces and tabs there, which bash splits at and every reader trims), or None.
+
+    Such a blank is a character str.isspace() counts: a no-break space (U+00A0), an ideographic space
+    (U+3000) and the other Unicode White_Space characters, a newline, carriage return, form feed or
+    vertical tab, and U+001C-U+001F, which str.strip() and int() drop like blanks. CST trims none of
+    them, so a value with one beside it is no value a reader takes silently ("8" with a no-break space
+    before it is no 8): the line is a problem. A blank inside the value is no problem: a folder or a
+    game name may hold one."""
+    word = value.strip(_BLANKS)
+    for ch, side in ((word[:1], "start"), (word[-1:], "end")):
+        if ch.isspace() and ch not in _BLANKS:
+            return f"{_blank_name(ch)} at the {side} of the value: CST does not trim it (delete it)"
+    return None
+
+
 # A yes/no setting's words (any case, ASCII blanks around them dropped): toolchains' settings take one of
 # each; a vm knob is off for a NO_WORDS word and on for anything else.
 YES_WORDS: Final = frozenset({"yes", "true", "on", "1"})
@@ -165,15 +192,20 @@ _NOT_AN_ASSIGNMENT: Final = "not a KEY=VALUE line"
 
 @dataclass(frozen=True, slots=True)
 class SettingsProblem:
-    """A line of a settings file that is not a plain KEY=VALUE assignment; it sets nothing."""
+    """A line of a settings file that is not a plain KEY=VALUE assignment; it sets nothing, unless kept.
+
+    kept: the line still sets its value (bash's) in a file bash also sources; only a blank beside the
+    value (blank_edge_problem) does that."""
 
     line: int
     text: str
     reason: str
+    kept: bool = False
 
     @override
     def __str__(self) -> str:
-        return f"line {self.line}: {self.text.strip()}: {self.reason}"
+        # ASCII blanks only: a no-break space at the line's end is what the reason names.
+        return f"line {self.line}: {strip_ascii_blanks(self.text)}: {self.reason}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,17 +364,29 @@ def parse_shell_assignments(text: str, *, bash_sourced: bool = True) -> ShellAss
     it also accepts what their readers always did, blanks around = and an
     unquoted value of several words (up to a blank and #), with ASCII blanks
     trimmed (strip_ascii_blanks: a no-break space or another Unicode blank is
-    part of the key's line or value, as bash and systemd read it). Lines as
-    file_lines reads them; the last assignment wins.
+    never trimmed). Lines as file_lines reads them; the last assignment wins.
+
+    In both modes a value with a blank other than space or tab at its start
+    or end (a no-break space, U+3000, a form feed; blank_edge_problem), in
+    quotes or not, is a problem too: never trimmed, never a silent default.
+    In a file only Python reads its line sets nothing, as every problem line.
+    In a file bash also sources the line keeps bash's parse: it still sets
+    the value bash gives, and its problem is kept (SettingsProblem.kept), so
+    each reader meets it where it meets the other problem lines. That is the
+    one problem line that sets something.
     """
     entries: list[Assignment] = []
     problems: list[SettingsProblem] = []
     for number, line in enumerate(file_lines(text), 1):
         got = _assignment(line, bash_sourced=bash_sourced)
-        if isinstance(got, tuple):
-            entries.append(Assignment(number, got[0], got[1]))
-        elif isinstance(got, str):
+        if isinstance(got, str):
             problems.append(SettingsProblem(number, line, got))
+        elif got is not None:
+            edge = blank_edge_problem(got[1])
+            if edge is None or bash_sourced:
+                entries.append(Assignment(number, got[0], got[1]))
+            if edge is not None:
+                problems.append(SettingsProblem(number, line, edge, kept=bash_sourced))
     return ShellAssignments(tuple(entries), tuple(problems))
 
 
@@ -516,11 +560,13 @@ def parse_snapshots_conf(text: str) -> ShellAssignments:
     entries = list(strict.entries)
     problems: list[SettingsProblem] = []
     for p in strict.problems:
-        m = _OLD_WRITER_LINE.fullmatch(p.text)
+        m = None if p.kept else _OLD_WRITER_LINE.fullmatch(p.text)
         value = _printf_q_value(m.group(2)) if m and "\\" in m.group(2) else None
         if m is None or value is None:
             problems.append(p)
-        else:
-            entries.append(Assignment(p.line, m.group(1), value))
+            continue
+        entries.append(Assignment(p.line, m.group(1), value))
+        if (edge := blank_edge_problem(value)) is not None:
+            problems.append(SettingsProblem(p.line, p.text, edge, kept=True))
     entries.sort(key=lambda a: a.line)
     return ShellAssignments(tuple(entries), tuple(problems))

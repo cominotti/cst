@@ -5697,6 +5697,63 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.VM)
+    def test_216_a_vm_conf_number_with_a_no_break_space_refuses_the_nas_backup(self) -> None:
+        """cst vm (the checkout's program, as root; its settings scratch files, CST_VM_*) with
+        VM_NAS_KEEP_WEEKLY=<NBSP>8 in vm.conf, the real bytes C2 A0: `backup e2evm --nas` and
+        `backup-timer on e2evm` exit 1 naming the line and the no-break space, before any virsh, restic
+        or systemctl call (recording stubs first on PATH) and with no unit written. Before, the line read as
+        no number: the retention's default 4 weekly backups, without a word. With VM_NAS_KEEP_WEEKLY=8 the
+        same backup passes that check and reaches the stubs (cannot bite otherwise). A fake cannot show the
+        installed reader on the real bytes under a root shell's locale (C and the default)."""
+        w = "/var/tmp/e2e-vm-nbsp"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -E
+            trap 'echo "test_216 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/bin" "$w/units" "$w/sbin"
+            for c in virsh restic systemctl rpm rpm-ostree flatpak-spawn; do
+                printf '#!/bin/sh\\necho "%s $*" >>%s/calls\\nexit 1\\n' "$c" "$w" >"$w/bin/$c"
+                chmod 0755 "$w/bin/$c"
+            done
+            printf 'NAS_ENABLED=1\\nNAS_PATH=/srv/none\\nNAS_RESTIC_HOST=e2ehost\\n' >"$w/nas.conf"
+            printf 'e2e-pass' >"$w/pw" && chmod 0600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_CONF="$w/vm.conf" CST_VM_NAS_CONF="$w/nas.conf" \\
+                CST_VM_RESTIC_PASSWORD="$w/pw" CST_VM_RESTIC_CACHE="$w/cache" CST_VM_RUN_DIR="$w/run" \\
+                CST_VM_INDEX="$w/lib/vm-backups.json" CST_VM_TORN="$w/lib/vm-nas-torn.json" \\
+                CST_VM_CPU_CONF="$w/cpu-setup.conf" CST_VM_UNIT_DIR="$w/units" CST_VM_SBIN_COPY="$w/sbin/cst-vm" \\
+                PATH="$w/bin:$PATH"
+            tool=/opt/cst-rw/vm/cst-vm
+            printf 'VM_NAS_KEEP_WEEKLY=\\302\\2408\\n' >"$w/vm.conf"
+            for locale in C C.UTF-8 ""; do
+                for args in "backup e2evm --nas" "backup-timer on e2evm"; do
+                    rc=0
+                    err="$(LC_ALL=$locale /usr/bin/python3 -I "$tool" $args 2>&1 >/dev/null)" || rc=$?
+                    echo "test_216 LC_ALL=$locale $args: rc=$rc $err" >&2
+                    [[ "$rc" == 1 ]]
+                    grep -qF "$w/vm.conf line 1: VM_NAS_KEEP_WEEKLY=" <<<"$err"
+                    grep -qF ": a no-break space (U+00A0) at the start of the value" <<<"$err"
+                    grep -qF "Fix these lines first; nothing was changed." <<<"$err"
+                    [[ ! -e "$w/calls" ]]
+                    [[ -z "$(ls -A "$w/units")" ]]
+                    [[ ! -e /etc/systemd/system/cst-vm-backup@.timer ]]
+                done
+            done
+            # The same backup with the number fixed passes that check and reaches the stubs.
+            printf 'VM_NAS_KEEP_WEEKLY=8\\n' >"$w/vm.conf"
+            rc=0; err="$(/usr/bin/python3 -I "$tool" backup e2evm --nas 2>&1 >/dev/null)" || rc=$?
+            echo "test_216 fixed: rc=$rc $err" >&2
+            if grep -qF "Fix these lines first" <<<"$err"; then exit 1; fi
+            [[ -s "$w/calls" ]]
+            cat "$w/calls" >&2
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.NAS)
     def test_155_nas_image_holds_no_ssh_host_keys(self) -> None:
         """The NAS image holds no SSH host key: the container makes its own when it starts
@@ -7315,7 +7372,7 @@ PY
             grep -q libgamemode "/proc/$(cat /tmp/e2e-86-client.pid)/maps"
             tick() { systemd-run --wait --pipe --quiet --collect --unit="e2e-86-tick-$1" python3 -I -B /opt/cst-rw/cpu/game-profile tick; }
             first=$(tick 1)   # exit 0: the unit does not fail
-            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$first"                 || { echo "first tick: $first" >&2; exit 1; }
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf is not a plain setting' <<<"$first"                 || { echo "first tick: $first" >&2; exit 1; }
             second=$(tick 2)
             [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
             sleep 1
@@ -7327,13 +7384,13 @@ PY
             # Fixed: the watchdog starts the unit again, and says nothing about the settings.
             third=$(tick 3)
             grep -q 'switching on' <<<"$third"
-            if grep -q 'sets nothing' <<<"$third"; then echo "third tick: $third" >&2; exit 1; fi
+            if grep -q 'is not a plain setting' <<<"$third"; then echo "third tick: $third" >&2; exit 1; fi
             for _ in $(seq 50); do [[ -e /tmp/e2e-86-starts ]] && break; sleep 0.1; done
             test -e /tmp/e2e-86-starts
             # Broken again after a tick found it fixed: the warning is said again.
             sed -i 's/^BUILD_CPUS=.*/BUILD_CPUS=$(nproc)/' /etc/cpu-setup/cpu-setup.conf
             fourth=$(tick 4)
-            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$fourth" \
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf is not a plain setting' <<<"$fourth" \
                 || { echo "fourth tick (broken again): $fourth" >&2; exit 1; }
             sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
             kill "$(cat /tmp/e2e-86-client.pid)"

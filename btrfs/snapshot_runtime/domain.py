@@ -11,7 +11,7 @@ from typing import Final
 
 from btrfs.health_check.domain import awk_field, bash_div, bash_int, bash_wrap
 from cst_core.domain.shapes import ShapeError, first_item, items_of, object_of, object_or_empty, parse_json
-from cst_core.domain.text import group, read_fields
+from cst_core.domain.text import group, read_fields, strip_ascii_blanks
 from cst_core.domain.values import DAY, HOUR, MINUTE
 
 TAG: Final = "btrfs-snapshot"
@@ -293,9 +293,12 @@ CORE_HINTS: Final = (
 )
 
 
-def settings_problem_line(conf: str, number: int, text: str, reason: str) -> str:
-    """The warning of a line of snapshots.conf that is not a setting (as the bash front writes it)."""
-    return f"<4>{TAG}: {conf} line {number}: {text.strip()}: {reason}; ignored"
+def settings_problem_line(conf: str, number: int, text: str, reason: str, *, kept: bool = False) -> str:
+    """The warning of a line of snapshots.conf that is not a setting (as the bash front writes it). kept:
+    a blank beside the value (SettingsProblem.kept), whose line still sets bash's value: the warning says
+    so, and claims nothing about whether that value works."""
+    what = "kept as bash reads it, with the blank (fix the line)" if kept else "ignored"
+    return f"<4>{TAG}: {conf} line {number}: {strip_ascii_blanks(text)}: {reason}; {what}"
 
 
 @dataclass(frozen=True, slots=True)

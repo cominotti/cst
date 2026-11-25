@@ -1593,7 +1593,11 @@ That file (the items you keep in /home) is a folder, or cannot be opened.
 Since the script cannot know what you want to keep, it moves **no** item
 until it is fixed. Delete it (`sudo rm -r /etc/btrfs-setup/bulk-keep`) and
 run `bulk keep ID` again for each item you keep. (Odd characters in the file
-are fine: such a line shows up as an `unknown item` and is ignored.)
+are fine: such a line shows up as an `unknown item` and is ignored.) An id with
+a no-break space or another Unicode blank beside it (`apps<no-break space>`)
+says `has a line it cannot read` instead, with the line: it may mean `apps`,
+so `bulk apply`, the boot step and the Steam commands move nothing until you
+fix that line by hand (`bulk keep` and `bulk unkeep` do not repair it).
 
 **`bulk status` says `waits for the next boot (busy)`.**
 Reboot normally: the item is moved before the login screen. Or close the
@@ -1957,7 +1961,13 @@ the NAS keys), in the forms above, and a `# comment` after a value; an
 `export` in front is dropped. A line that is anything else (a command, a
 value with `$`, a backtick or a blank outside quotes) is never run: it gets
 a warning on stderr (`... snapshots.conf line N: TEXT: REASON; ignored`, in
-the journal of the unit) and the snapshot runs without it. A line for a key
+the journal of the unit) and the snapshot runs without it. A value with a
+no-break space or another Unicode blank at its start or end
+(`HOME_PRESERVE='24h<no-break space>'`) is no such line: bash reads it with
+the blank, so `btrfs-snapshot` keeps that value too and warns
+(`...; kept as bash reads it, with the blank (fix the line)`); its bash commands
+(`convert`, `settings-lines`, `snapshots status`) take the value as bash does,
+with no warning, and `cst vm`'s NAS backup and `cst doctor` name the line. A line for a key
 that is not one of its settings (`SCRUB_LIMIT`, set by `cst btrfs`) is left
 to its own reader. Before, bash sourced the whole file as root, so every line
 ran. `cst btrfs snapshots status` and `snapshots nas setup|status|enable`

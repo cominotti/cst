@@ -1549,6 +1549,42 @@ class BulkTest(BulkBase):
         self.assertIn("cannot update", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_a_keep_id_with_a_blank_beside_it_moves_nothing(self) -> None:
+        # str.strip() read "apps<NBSP>" as apps. Trimmed to ASCII blanks only it would be an unknown id, and
+        # the item the line keeps in /home would move. Now nobody knows what is kept: nothing moves.
+        self.write("Programs/a", "a")
+        self.write(".m2/repository/x.jar", "jar")
+        with open(self.paths.keep, "w", encoding="utf-8") as f:
+            f.write("m2  # c\napps\N{NO-BREAK SPACE}\n")
+        deferred, problems = self.apply()
+        self.assertEqual(problems, ["bulk-keep"], self.out)
+        self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems), 1)
+        self.assertIn(
+            f"NEEDS A LOOK: {self.paths.keep} has a line it cannot read: line 2: apps\N{NO-BREAK SPACE}: a no-break "
+            "space (U+00A0) at the end of the value",
+            self.out,
+        )
+        self.assertFalse(os.path.islink(self.H("Programs")))
+        self.assertFalse(os.path.islink(self.H(".m2/repository")))
+        self.assertEqual(os.listdir(self.paths.state) if os.path.isdir(self.paths.state) else [], [], "a journal")
+        left, text = self.report()
+        self.assertGreaterEqual(left, 1)
+        self.assertIn(f"NEEDS A LOOK: {self.paths.keep} has a line it cannot read: line 2:", text)
+        # The boot step goes through apply: the same NEEDS A LOOK, never the crash path.
+        with open(self.paths.flag, "w") as f:
+            f.write("apps\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = bulk_commands.boot(self.bulk)
+        self.assertNotEqual(rc, bulk_domain.BOOT_CRASHED_EXIT, out.getvalue())
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertIn("has a line it cannot read", out.getvalue() + self.out)
+        self.assertFalse(os.path.islink(self.H("Programs")))
+        # ASCII blanks around an id are trimmed, as before.
+        with open(self.paths.keep, "w", encoding="utf-8") as f:
+            f.write(" m2\t # c\r\n")
+        self.assertEqual(self.state.read_keep(), ({"m2"}, []))
+
     def test_npm_cache_clean_removes_link_and_apply_repairs(self) -> None:
         self.write(".npm/_cacache/content-v2/a", "a")
         self.write(".npm/_logs/debug.log", "log")

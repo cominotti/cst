@@ -180,7 +180,7 @@ def settings_file_warnings(
     for p in parsed.problems if parsed else ():
         if p in skip:
             continue
-        yield Result(WARN, f"{path} {p}. {ignored_line_text(bash)}")
+        yield Result(WARN, f"{path} {p}. {kept_line_text() if p.kept else ignored_line_text(bash)}")
 
 
 def ignored_line_text(note: str) -> str:
@@ -189,6 +189,14 @@ def ignored_line_text(note: str) -> str:
     return (
         f"CST's Python programs take nothing from the line{note}, and the cst commands that change the "
         "machine with these settings refuse to run until it is fixed"
+    )
+
+
+def kept_line_text() -> str:
+    """What a kept problem line (a blank beside the value, in a file bash also sources) means for CST."""
+    return (
+        "CST's Python programs read the value with the blank, as bash does, and the cst commands that "
+        "change the machine with these settings refuse to run until it is fixed"
     )
 
 

@@ -85,7 +85,7 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
     try:
         kept, _ = b.state.read_keep()
     except OSError as e:
-        sv["fatal"] = f"{b.paths.keep} cannot be read ({e})"
+        sv["fatal"] = b.paths.keep_unreadable(e)
         return sv
     if "steam" in kept:
         sv["fatal"] = "steam is kept out of ~/Bulk by choice: 'cst btrfs bulk unkeep steam' first"

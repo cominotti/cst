@@ -15,7 +15,7 @@ from typing import Final
 
 from cst_core.domain.contracts import StateFormat, StateFormatKey, state_format, version_of
 from cst_core.domain.errors import ExitStatus
-from cst_core.domain.text import describe_problems, parse_shell_assignments
+from cst_core.domain.text import blank_edge_problem, describe_problems, parse_shell_assignments, strip_ascii_blanks
 from cst_core.domain.values import DAY, MINUTE, format_bytes_decimal
 
 # The recorder's state and the last run's summary (the files of GcPaths).
@@ -175,8 +175,9 @@ class GcPaths:
 
 
 def protected_registries(value: str) -> tuple[str, ...]:
-    """DOCKER_GC_PROTECT (comma-separated registries) as the prefixes a reference starts with."""
-    return tuple(r.strip() + "/" for r in value.split(",") if r.strip())
+    """DOCKER_GC_PROTECT (comma-separated registries) as the prefixes a reference starts with (ASCII
+    blanks trimmed: an item with another blank beside it is a problem, item_blank_problems)."""
+    return tuple(strip_ascii_blanks(r) + "/" for r in value.split(",") if strip_ascii_blanks(r))
 
 
 # ---- inside a toolbox or container ------------------------------------------------------
@@ -253,8 +254,19 @@ class Protection:
 
 
 def registries_of(value: str) -> tuple[str, ...]:
-    """DOCKER_GC_PROTECT's registries, blanks and empty items dropped, in order."""
-    return tuple(r.strip().removesuffix("/") for r in value.split(",") if r.strip())
+    """DOCKER_GC_PROTECT's registries, ASCII blanks and empty items dropped, in order."""
+    return tuple(strip_ascii_blanks(r).removesuffix("/") for r in value.split(",") if strip_ascii_blanks(r))
+
+
+def item_blank_problems(value: str) -> list[str]:
+    """For each item of DOCKER_GC_PROTECT with a blank other than space or tab beside it (a no-break
+    space, U+3000: blank_edge_problem), why it is a problem and the item. Such an item is never
+    trimmed: as written it matches no image, so the registry it means would lose its protection."""
+    return [
+        f"{why} (item {item!r})"
+        for item in map(strip_ascii_blanks, value.split(","))
+        if (why := blank_edge_problem(item)) is not None
+    ]
 
 
 def parse_settings_file(path: str, text: str) -> tuple[str, ...]:
@@ -266,6 +278,8 @@ def parse_settings_file(path: str, text: str) -> tuple[str, ...]:
     for a in parsed.entries:
         if a.key not in SETTINGS_KEYS:
             problems.append(f"{path} line {a.line}: {a.key}: unknown setting (known: {', '.join(SETTINGS_KEYS)})")
+        elif blanks := item_blank_problems(a.value):
+            problems.extend(f"{path} line {a.line}: {a.key}: {why}" for why in blanks)
         elif bad := [r for r in registries_of(a.value) if not REGISTRY_RE.fullmatch(r)]:
             problems.append(f"{path} line {a.line}: {a.key}: not a registry: {', '.join(bad)}")
     if problems:
@@ -376,6 +390,11 @@ def resolve_protection(
         )
     if env is None:
         return base
+    if blanks := item_blank_problems(env):
+        raise UnknownProtection(
+            "\n".join(f"DOCKER_GC_PROTECT in the environment: {why}" for why in blanks)
+            + "\nnothing is removed until it is fixed"
+        )
     return Protection(registries_of(env), "DOCKER_GC_PROTECT in the environment", to_write=base.to_write)
 
 

@@ -2338,9 +2338,13 @@ Empty (the default) protects no registry: images in use, or used in the last
 `KEY=VALUE`, an unknown key or a value that is not a list of registries
 makes every run, `status` and `cleanup-now` stop with exit 78 and one line
 per problem, before they ask Docker anything (nothing is guessed, nothing is
-removed). The recorder does not read it. `DOCKER_GC_PROTECT` in docker-gc's
+removed). An item with a no-break space or another Unicode blank beside it
+(`a.io,<no-break space>b.io`) is such a problem too: it is never trimmed, since
+as written it would match no image and leave its registry unprotected. The
+recorder does not read it. `DOCKER_GC_PROTECT` in docker-gc's
 environment (a drop-in of the unit) wins over the file's list (the file is
-still read: a line it cannot read stops it the same way).
+still read: a line it cannot read stops it the same way); an item there with
+such a blank beside it stops it the same way too (exit 78, nothing removed).
 
 **Upgrade from an older CST.** Older versions had one registry built into the
 program and no file. While the file is missing, docker-gc reads the

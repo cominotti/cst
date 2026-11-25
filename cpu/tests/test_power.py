@@ -300,6 +300,16 @@ class CpuPowerLifecycleTest(unittest.TestCase):
                 self._write(self.paths.conf, conf)
                 self.assertEqual(collect_power_snapshot(self.paths).cstate_limit_us, want)
 
+    def test_a_problem_line_warns_with_its_reason(self) -> None:
+        # The line alone hid a no-break space at its end: the warning names what is wrong with it.
+        self._write(self.paths.conf, "GPU_PM_MODE='always'\nCPU_CSTATE_MAX_LATENCY_US='50\N{NO-BREAK SPACE}'\n")
+        warnings = collect_power_snapshot(self.paths).config_warnings
+        self.assertIn(
+            f"{self.paths.conf} line 2: CPU_CSTATE_MAX_LATENCY_US='50\N{NO-BREAK SPACE}': a no-break space (U+00A0) "
+            "at the end of the value: CST does not trim it (delete it)",
+            warnings,
+        )
+
     def test_apply_and_revert_wait_for_the_run_lock(self) -> None:
         # cpu-game-profile holds /run/cpu-setup/lock while it switches; apply and revert wait for it
         # and change nothing when it stays held. status and plan never wait.

@@ -468,7 +468,7 @@ def apply(b: Bulk) -> tuple[list[str], list[str]]:
         except OSError as e:
             problems.append("bulk-keep")
             log(
-                f"NEEDS A LOOK: {b.paths.keep} cannot be read ({e}): no item touched, since what you keep in "
+                f"NEEDS A LOOK: {b.paths.keep_unreadable(e)}: no item touched, since what you keep in "
                 "/home is unknown (fix or delete that file, then run bulk apply again)"
             )
             return deferred, problems
@@ -657,7 +657,7 @@ def report(b: Bulk, mode: str) -> int:
     except OSError as e:
         left += 1
         kept, unknown = set(), []
-        say(f"  NEEDS A LOOK: {b.paths.keep} cannot be read ({e}): apply touches no item until it is fixed")
+        say(f"  NEEDS A LOOK: {b.paths.keep_unreadable(e)}: apply touches no item until it is fixed")
     for ident in unknown:
         say(f"  {b.paths.keep}: unknown item '{ident}' (ignored)")
     # Before ~/Bulk exists nothing waits for anything.

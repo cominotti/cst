@@ -422,6 +422,18 @@ class BackupTest(Base):
         _rc, lines, _ = self.nas()
         self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
 
+    def test_a_time_budget_with_a_blank_beside_it_is_named_and_reads_as_bash_reads_it(self) -> None:
+        # The line keeps bash's value ("1m" and a no-break space), which is no duration: the 6 hours, as
+        # for any value it cannot read, but after a warning that names the line.
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT="1m\N{NO-BREAK SPACE}")
+        _rc, lines, err = self.nas()
+        self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
+        self.assertIn(
+            "NAS_TIMEOUT='1m\N{NO-BREAK SPACE}': a no-break space (U+00A0) at the end of the value: CST does not "
+            "trim it (delete it); kept as bash reads it, with the blank (fix the line)",
+            err,
+        )
+
     def test_a_time_budget_bash_arithmetic_refuses_stops_the_run(self) -> None:
         # 08 is no number for bash (a leading 0 is octal): its run stopped there with exit 1, after
         # its exit trap had unmounted (found by the parity harness of the port; 010 is 8 seconds).

@@ -1000,6 +1000,15 @@ class SteamTest(tb.BulkBase):
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "bulk unkeep steam")
 
+    def test_a_keep_line_with_a_blank_beside_it_stops_plan_and_apply(self) -> None:
+        # "steam<NBSP>" may mean steam: the keep file cannot be read, so the steam commands stop.
+        with open(self.paths.keep, "w", encoding="utf-8") as f:
+            f.write("steam\N{NO-BREAK SPACE}\n")
+        before = self.tree()
+        self.assertUnchanged(before, self.sapply(), 1, f"{self.paths.keep} has a line it cannot read: line 1: steam")
+        sv = self.splan()
+        self.assertIn("has a line it cannot read", str(sv["fatal"]))
+
     # ---- interruptions ----
     def owners(self, name: str) -> list[object]:
         """Where the steps find NAME (a domain function: every module that imported it)."""
