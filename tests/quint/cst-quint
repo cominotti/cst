@@ -199,6 +199,7 @@ NAS_WITNESSES: Final = (
     ("inactive_listing_unreadable", "nas_mixed", "neverInactiveListingUnreadable"),
     ("remove_failed", "nas_mixed", "neverRemoveFailed"),
     ("overlay_removed", "nas_mixed", "neverOverlayRemoved"),
+    ("partial_refused", "nas_partial", "neverPartialRefused"),
     ("stop_after_commit", "nas_mixed", "neverStopAfterCommit"),
     ("retention_failed", "nas_mixed", "neverRetentionFailed"),
     ("stop_after_commit_recorded", "nas_shutoff", "neverStopAfterCommitRecorded"),

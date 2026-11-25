@@ -571,6 +571,10 @@ details keep a stop from cutting the merge short:
   alert. That alert names every overlay file there is also when a stop
   came while virsh was waited for (the refusal then gives the stop as the
   backup's own failure), and when the merge back of another disk failed.
+- A snapshot that switched only some disks (which `--atomic` should never
+  let happen) is no backup: the overlay files of the disks not switched
+  are removed, the switched disks merged back, and the backup fails, with
+  no second attempt.
 - The merge has its own time limit: 4 hours for all disks together
   (`virsh blockcommit --timeout`). If it hits that limit, virsh cancels the
   merge cleanly: the disk stays on the overlay, with no job half done, and
@@ -1078,7 +1082,8 @@ alert nor the refusal short, a second Ctrl-C does not reach the merging virsh
 (the fake cancels on SIGINT as the real one does), a VM paused at merge time
 is merged, a `snapshot-create-as` that does not answer (snapshot in place
 later: the backup goes on; never in place: the files are kept and an alert
-is sent), a stop held through a quiesced call that timed out or failed with
+is sent), a settled snapshot that switched only some disks (refused, the
+others' files removed, no second attempt: `NasMergeBackAndStrayTest`), a stop held through a quiesced call that timed out or failed with
 the snapshot in place (the guest is thawed before the stop ends the read),
 the recovery text per case (a definition still on a stale overlay:
 `virsh edit`, never `qemu-img commit`; no commands for a disk the merge back

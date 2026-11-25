@@ -2770,6 +2770,57 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         self.assertIn("list failed", alerts[0][1])
         self.assertIn("commit crashed", alerts[0][1])
 
+    def _partial(self, rc: int) -> tuple[str, FakeNasCommands, FakeNasStore, list[bool]]:
+        """nas_run of a VM with two disks whose snapshot answers rc (settled) with only vda switched;
+        (the refusal, the commands, the store, restic's backups)."""
+        disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+        backups: list[bool] = []
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] != "snapshot-create-as":
+                return None
+            store.overlays.update((overlay_a, overlay_b))  # libvirt made both files, switched vda only
+            live["vda"] = overlay_a
+            return (0, "", "") if rc == 0 else (rc, "", "error: internal error: snapshot failed")
+
+        def backup() -> tuple[int, vm_domain_backup.ResticSummary]:
+            backups.append(True)
+            return 0, {"snapshot_id": SNAP_ID}
+
+        port, commands, store, _signals, _alerts = self._make_backup(
+            [("vda", disk_a), ("vdb", disk_b)], on_virsh=hook, backup_fn=backup
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        return str(ctx.exception), commands, store, backups
+
+    def test_a_snapshot_that_switched_some_disks_only_is_no_backup(self) -> None:
+        overlay_a = f"/img/a.qcow2{vm_domain.OVERLAY_MARK}{STAMP}"
+        overlay_b = f"/img/b.qcow2{vm_domain.OVERLAY_MARK}{STAMP}"
+        for rc in (0, 1):  # virsh answered ok, or with an error
+            with self.subTest(rc=rc):
+                msg, commands, store, backups = self._partial(rc)
+                self.assertIn(
+                    "virsh snapshot-create-as win switched only some disks (switched: vda; not: vdb): no backup, "
+                    "the switched disks are merged back",
+                    msg,
+                )
+                self.assertEqual(backups, [], "restic never read it")
+                self.assertEqual(store.dropped, [overlay_b], "the file of the disk not switched")
+                self.assertEqual(store.removed, [overlay_a], "the switched disk merged back, its file removed")
+                cmds = [c[0][0] for c in commands.virsh_log]
+                self.assertEqual(cmds.count("snapshot-create-as"), 1, "no second attempt")
+                self.assertEqual([c[0][2] for c in commands.virsh_log if c[0][0] == "blockcommit"], ["vda"])
+
     def test_drop_stray_overlays_keeps_switched_disk_and_drops_unswitched(self) -> None:
         disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
         overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
@@ -2801,31 +2852,6 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         vm_app_nas._drop_stray_overlays(port, run)
         self.assertEqual(store.dropped, [overlay_b])
         self.assertTrue(store.exists(overlay_a))
-
-        # End-to-end 2-disk partial switch: snapshot-create-as fails after switching vda only; vda merges cleanly.
-        def partial_hook(
-            args: Sequence[str],
-            _cmds: FakeNasCommands,
-            _sigs: FakeNasSignals,
-            live: dict[str, str],
-            st: FakeNasStore,
-        ) -> tuple[int, str, str] | None:
-            if args[0] == "snapshot-create-as":
-                st.overlays.update((overlay_a, overlay_b))
-                live["vda"] = overlay_a
-                return 1, "", "error: vdb failed"
-            return None
-
-        port2, commands2, store2, _sig2, alerts2 = self._make_backup(
-            [("vda", disk_a), ("vdb", disk_b)], on_virsh=partial_hook
-        )
-        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
-        vm_app_nas.nas_run(self._cfg(), port2, "win", None, nas, quiesce=False, live=True)
-        self.assertEqual(alerts2, [])
-        self.assertEqual(store2.dropped, [])
-        self.assertEqual(store2.removed, [overlay_a])
-        commits = [c[0][2] for c in commands2.virsh_log if c[0][0] == "blockcommit"]
-        self.assertEqual(commits, ["vda"])
 
 
 class _HeldStop(contextlib.AbstractContextManager[object]):

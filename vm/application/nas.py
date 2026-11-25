@@ -582,6 +582,7 @@ def take_snapshot(cfg: VmSettings, p: NasBackup, run: NasRun) -> str:
     why = quiesce_skipped(run.agent, quiesce=run.quiesce)
     if not why:
         rc, err, unsure = _snapshot_attempt(cfg, p, run, quiesce=True)
+        _refuse_partial(p, run)
         if run.overlaid:
             if rc != 0 or unsure:
                 if rc != 0:  # _snapshot_attempt thawed the guest
@@ -593,6 +594,7 @@ def take_snapshot(cfg: VmSettings, p: NasBackup, run: NasRun) -> str:
         why = f"quiesce failed: {err}"
     p.out.say(f"  crash-consistent snapshot ({why})", flush=True)
     rc, err, _ = _snapshot_attempt(cfg, p, run, quiesce=False)
+    _refuse_partial(p, run)
     if not run.overlaid:
         _drop_stray_overlays(p, run)
         raise Refused(f"virsh snapshot-create-as {run.vm}: {err} (nothing changed)")
@@ -600,6 +602,21 @@ def take_snapshot(cfg: VmSettings, p: NasBackup, run: NasRun) -> str:
         run.notes.append(f"virsh reported an error but the snapshot is in place: {err}")
     run.notes.append(f"crash-consistent: {why}")
     return "crash-consistent"
+
+
+def _refuse_partial(p: NasBackup, run: NasRun) -> None:
+    """A settled answer that switched only some disks (which --atomic should never let happen) is no
+    backup: the files of the disks not switched are dropped, and Refused leaves the switched ones to the
+    merge back, with no second attempt."""
+    if not run.overlaid or len(run.overlaid) == len(run.specs):
+        return
+    _drop_stray_overlays(p, run)
+    switched = ", ".join(t for t in run.specs if t in run.overlaid)
+    not_switched = ", ".join(t for t in run.specs if t not in run.overlaid)
+    raise Refused(
+        f"virsh snapshot-create-as {run.vm} switched only some disks (switched: {switched}; not: {not_switched}): "
+        "no backup, the switched disks are merged back"
+    )
 
 
 def _snapshot_attempt(cfg: VmSettings, p: NasBackup, run: NasRun, *, quiesce: bool) -> tuple[int, str, bool]:

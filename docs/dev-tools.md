@@ -1258,7 +1258,10 @@ checked by `cst-quint`) allow the kill only, and TLC shows their
 counterexamples (`--invariant tornHandledFull` on `nas_shutoff`, through
 quint by hand, as `cst-quint` runs it). The instance `nas_partial` (not
 checked either) drops the `--atomic` assumption: a settled answer that
-switched only some disks goes on as a backup, and `consistentRead` fails.
+switched only some disks is refused (`_refuse_partial`: the others' files
+dropped, the switched ones merged back), so `consistentRead` holds there;
+a stop held through such an answer still leaves the stray files
+(`mergedOrAlerted`, `noOverlayLost`).
 
 **What the checker found.** Two paths lost the alert of a snapshot whose
 outcome stayed unclear (fixed with the spec, in the same pull request): a

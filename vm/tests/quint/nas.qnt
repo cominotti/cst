@@ -24,7 +24,8 @@
 // persistent one); an overlay file is (target, run). Snapshot ids are run numbers. Assumed, not
 // modelled: a virsh snapshot-create-as that answered (not a timeout) switched every disk or none
 // (--atomic), and never switches later; the instance nas_partial (not in cst-quint's checks) drops
-// that assumption. Not modelled: two VMs at once and the record's lock (TORN_LOCK: unit tests), several
+// that assumption: a settled answer that switched some disks only is refused (_refuse_partial: the
+// files of the others dropped, the switched ones merged back, no second attempt). Not modelled: two VMs at once and the record's lock (TORN_LOCK: unit tests), several
 // hosts or a changed NAS_RESTIC_HOST, the /home job's prune holding the repository's lock (a call that
 // fails), the notes and the words of the messages, the manifest and the staged files, the UEFI and
 // TPM files read live (notes only), the clock (each timeout is an outcome), libvirt crashing, other
@@ -66,7 +67,7 @@ module nas {
   pure val SHUTOFF = "shutoff"
   pure val GOOD = "good"       // a snapshot that is a backup
   pure val TORN = "torn"       // incomplete, or of a shut-off VM started during the read
-  pure val MIXED = "mixed"     // a live read with a disk not on its overlay (nas_partial only)
+  pure val MIXED = "mixed"     // a live read with a disk not on its overlay (never: a partial switch is refused)
 
   type Snap = { id: int, kind: str, keep: bool }
   // ctx: the read's failure at a step of the merge back (for the witnesses; the replay does not read it)
@@ -238,8 +239,10 @@ module nas {
   // take_snapshot, one _snapshot_attempt: virsh snapshot-create-as with the stops held, then
   // domblklist (polled until the settle window ends when virsh timed out). The outcome: every disk
   // switched (ok; a settled error with every disk in place, fail_in_place; a timeout, timeout_all),
-  // none (fail_none: a settled error), or a timeout with some not switched (timeout_some: Uncertain).
-  // A file libvirt made for a disk it did not switch stays; after a timeout libvirt may still switch to it.
+  // none (fail_none: a settled error), or a timeout with some not switched (timeout_some: Uncertain);
+  // without --atomic, a settled answer that switched some only (ok_some, fail_some: refused after the
+  // drop of the others' files). A file libvirt made for a disk it did not switch stays; after a
+  // timeout libvirt may still switch to it.
   pure val SNAP_OUTCOMES = Set("ok", "fail_none", "fail_in_place", "timeout_all", "timeout_some", "fail_some", "ok_some")
   action snapshot = all {
     s.pc == "snapshot",
@@ -279,21 +282,22 @@ module nas {
         // stop is then the backup's own failure in the refusal).
         s' = if (not(settled) and ov != TSET) toMerge(st, "uncertain") // PS6
              else if (stopIn) toMerge(st, "stop")
-             else if (ov != Set()) { ...st, pc: "backup" }
+             else if (ov == TSET) { ...st, pc: "backup" }
              else { ...st, pc: "drop", todo: TARGETS.select(t => not(ov.contains(t))), ci: 0 },
         step' = label,
       }
     }
   }
   // _drop_stray_overlays: the overlay files of the disks that did not switch (after a settled
-  // error: not in use), then the crash-consistent attempt, or the refusal after it.
+  // answer: not in use), then the crash-consistent attempt, or the refusal after it; after a partial
+  // switch (some disks overlaid) the refusal at once.
   action drop = all {
     s.pc == "drop",
     val t = s.todo[s.ci]
     val st = removeFile(s, t)
     all {
       s' = if (s.ci + 1 < s.todo.length()) { ...st, ci: s.ci + 1 }
-           else if (s.attempt == 1) { ...st, pc: "snapshot", attempt: 2 }
+           else if (s.attempt == 1 and s.overlaid == Set()) { ...st, pc: "snapshot", attempt: 2 }
            else toMerge(st, "refused"),
       step' = lbl("drop_overlay", t, ""),
     }
@@ -725,6 +729,7 @@ module nas {
   val wInactiveListingUnreadable = step.name == "domblklist" and step.outcome == "inactive_unreadable"
   val wRemoveFailed = step.name == "remove_overlay" and step.outcome == "fail"
   val wOverlayRemoved = step.name == "remove_overlay" and step.outcome == "ok"
+  val wPartialRefused = step.name == "drop_overlay" and s.overlaid != Set()
   val wStopAfterCommit = step.name == "restic_backup" and step.outcome == "stopped_after_commit"
   val wStopAfterCommitRecorded = step.name == "record_torn" and step.ctx == "stop" and step.outcome == "ok"
   val wStopAnswered = step.name == "restic_backup" and step.outcome == "stopped_answered"
@@ -756,6 +761,7 @@ module nas {
   val neverInactiveListingUnreadable = not(wInactiveListingUnreadable)
   val neverRemoveFailed = not(wRemoveFailed)
   val neverOverlayRemoved = not(wOverlayRemoved)
+  val neverPartialRefused = not(wPartialRefused)
   val neverStopAfterCommit = not(wStopAfterCommit)
   val neverStopAfterCommitRecorded = not(wStopAfterCommitRecorded)
   val neverStopAnswered = not(wStopAnswered)
@@ -788,7 +794,7 @@ module nas_mixed {
              MAX_STOPS = 1, MAX_GUEST = 1, MAX_KILLS = 1, MAX_USER = 2, ATOMIC = true, KEEP = 2, SHUTOFF_ONLY = false).*
 }
 // Not in cst-quint's checks: nas_live2 without --atomic, where a settled answer can switch some disks
-// only (consistentRead fails: the unswitched disk is read as the guest writes it).
+// only (refused: never read as a backup).
 module nas_partial {
   import nas(TARGETS = ["vda", "vdb"], RUNS = 2, START = "running", KEEPS = Set(false), QUIESCE = Set(false),
              MAX_STOPS = 1, MAX_GUEST = 1, MAX_KILLS = 1, MAX_USER = 0, ATOMIC = false, KEEP = 2, SHUTOFF_ONLY = false).*
