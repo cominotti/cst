@@ -243,7 +243,7 @@ class DockerVolumesNocow:
         """Count this boot as postponed (once per boot) and keep the latest reason. A record of a newer
         format (a newer CST wrote it) is left as it is: this boot is not counted in it, and the journal
         says so."""
-        old = self.state.read_postponed()
+        old = self.state.read_postponed().record
         newer = postponed_newer(old, self.paths.postponed)
         if newer is not None:
             self.out.log(4, f"{newer}: left as it is, and this boot is not counted in it")

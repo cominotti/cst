@@ -20,14 +20,14 @@ from btrfs.docker_volumes_nocow.domain import (
     NocowPaths,
     OutcomeRead,
     OutcomeRecord,
+    PostponedRead,
     PostponedRecord,
-    StoredPostponed,
     TreeScan,
     VolumeLeftovers,
     daemon_args,
-    is_stored_postponed,
     oldest_first,
     parse_outcome,
+    parse_postponed,
     service_wait_reason,
 )
 from cst_core.adapters.files import CounterFile, read_text, write_atomic
@@ -307,13 +307,10 @@ class NocowStateFiles:
         except OSError:
             return ""
 
-    def read_postponed(self) -> StoredPostponed | None:
-        try:
-            with open(self.paths.postponed) as f:
-                rec = parse_json(f.read())
-        except OSError, ValueError:
-            return None
-        return rec if is_stored_postponed(rec) else None
+    def read_postponed(self) -> PostponedRead:
+        # One open, as read_outcome: a file not there (or a file in place of its folder) is no record, one
+        # there that cannot be opened reads as "" (cannot read); bytes that are not UTF-8 become U+FFFD.
+        return parse_postponed(read_text(self.paths.postponed, unreadable=""), self.paths.postponed)
 
     def write_postponed(self, record: PostponedRecord) -> None:
         # write_atomic creates a missing folder 0755, whatever the umask (sudo keeps the user's).

@@ -926,7 +926,9 @@ docker volume rm <name>         # or one volume by name
   folder made for it 0755, whatever the umask the boot or a `sudo` hands on,
   so `cst doctor` reads it as the user. A file in place of the state folder
   holds no record: `migrate` and `unmark` go on as with none. `status` shows
-  it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
+  it as `migration postponed at N boot(s) in a row, last ...: <reason>` (a
+  record it cannot read as `cannot read <file> (<why>)`, as `cst doctor`
+  names one), and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
   The first boot that is not held back removes the record. When Docker or
@@ -1052,7 +1054,7 @@ Read-only. Sections:
 | `last scrub` | start, status, duration, error summary |
 | `weekly scrub speed limit (per device)` | `SCRUB_LIMIT` (section 4.3), the limit the scrub service sets (`DIFFERS from the setting (run install)` when they do not match; `INVALID` with the line for a bad setting), and `scrub_speed_max` of each device in sysfs now (0 = no limit) |
 | `last fstrim` | the last trim results |
-| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled` (then `no boot asks for it` when the folder has `+C` and no outcome is known: no record, or one it cannot read); under that folder's line, `migration gave up <time>: <why>` after a give-up; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
+| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled` (then `no boot asks for it` when the folder has `+C` and no outcome is known: no record, or one it cannot read); under that folder's line, `migration gave up <time>: <why>` after a give-up; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10), or `cannot read <file> (<why>)` when that record is not JSON, not an object or has a format version that is not a number |
 | `docker-gc` | last cleanup, or `off` |
 | `space and automatic reclaim` | unallocated space per disk, data/metadata use, reclaim switches and counters |
 | `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry either `compress=zstd[:N]` or `compress-force=zstd[:N]` plus `flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file; the journald write budget; the NVMe APST settings of `cst-nvme-apst.conf`: `nvme default_ps_latency` and one `nvmeN latency tolerance` line per controller (`ok` at 0, `DRIFT (expected 0; run install)`, or `(not managed: run install)` without the file) |

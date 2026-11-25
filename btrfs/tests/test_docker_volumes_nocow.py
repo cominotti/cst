@@ -67,11 +67,13 @@ from btrfs.docker_volumes_nocow.domain import (
     NocowCommand,
     NocowPaths,
     OutcomeRecord,
+    PostponedRead,
     TreeScan,
     VolumeLeftovers,
     old_copy_name,
     old_copy_stamp,
     oldest_first,
+    parse_postponed,
     postponed_line,
     recovery,
 )
@@ -1968,10 +1970,16 @@ class DockerdTest(PostponeBase):
         blocked = os.path.join(d, "root", "etc/docker/daemon.json")
         real_open = builtins.open
 
-        def fake_open(path: str, mode: str = "r", encoding: str | None = None) -> object:
+        def fake_open(
+            path: str,
+            mode: str = "r",
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> object:
             if path == blocked:
                 raise PermissionError(13, "Permission denied", path)
-            return real_open(path, mode, encoding=encoding)
+            return real_open(path, mode, encoding=encoding, errors=errors, newline=newline)
 
         with mock.patch.object(builtins, "open", fake_open):
             rc, out = self.call(self.cli.migrate)
@@ -2143,6 +2151,29 @@ class PostponedRecordTest(PostponeBase):
         self.assertIsNone(self.record())
         self.assertNotIn("postponed", self.call(self.cli.status)[1])
 
+    def test_status_names_a_record_it_cannot_read(self) -> None:
+        # As cst doctor's "cannot read": before, status said nothing of a damaged record, and the
+        # migration it may hold back went unseen there.
+        cases = (
+            ("not JSON", "{"),
+            ("not a JSON object", "[1, 2]\n"),
+            ("its format version is not a number", '{"v": "1", "boots": 2, "last": 3000, "reason": "r"}\n'),
+            ("empty, or it cannot be opened", None),  # a folder in place of the record
+        )
+        for why, text in cases:
+            with self.subTest(why=why):
+                if os.path.isdir(self.postponed):
+                    os.rmdir(self.postponed)
+                if text is None:
+                    os.remove(self.postponed)
+                    os.mkdir(self.postponed)
+                else:
+                    with open(self.postponed, "w") as f:
+                        f.write(text)
+                rc, out = self.call(self.cli.status)
+                self.assertEqual(rc, 0)
+                self.assertIn(f"\n  cannot read {self.postponed} ({why})\n", out)
+
     def test_a_file_in_place_of_the_state_folder_is_nothing_postponed(self) -> None:
         # A file where /var/lib/docker-volumes-nocow belongs holds no record: removing "the record" in it
         # raised NotADirectoryError, which stopped the boot's migrate before recover() and uninstall's
@@ -2249,15 +2280,16 @@ class PostponedRecordTest(PostponeBase):
         self.assertIsNone(self.record())
 
     def test_a_version_that_is_no_whole_number_starts_afresh(self) -> None:
-        # Not a record this helper wrote: status shows no line for it, and the next boot starts afresh.
+        # Not a record this helper wrote: status names it as one it cannot read (before, it showed no
+        # line for it), and the next boot starts afresh.
         self.fs.docker_state = "active"
         for version in ('"x"', "true", "-1", "1.0"):
             with self.subTest(version=version):
                 self.plant(f'{{"v": {version}, "reason": "r", "boots": 2, "first": 500, "last": 600, "boot_id": "o"}}')
                 rc, out = self.call(self.cli.status)
                 self.assertEqual(rc, 0)
-                self.assertNotIn("postponed", out)
-                self.assertNotIn(self.postponed, out)
+                self.assertNotIn("migration postponed", out)
+                self.assertIn(f"\n  cannot read {self.postponed} (its format version is not a number)\n", out)
                 self.boot("b1", 1000)
                 self.assertEqual(
                     self.record(),
@@ -2895,14 +2927,14 @@ class PostponedLineTest(unittest.TestCase):
     def test_last_must_be_an_integer(self) -> None:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
         self.assertEqual(
-            postponed_line({"boots": 2, "last": 3000, "reason": "r"}, "/p"),
+            postponed_line(PostponedRead({"boots": 2, "last": 3000, "reason": "r"}), "/p"),
             f"  migration postponed at 2 boot(s) in a row, last {when}: r",
         )
         # A bool is no time (next_postponed and cst doctor refuse it too); before, True read as 1970.
         for last in (True, False, "3000", None):
             with self.subTest(last=last):
                 self.assertEqual(
-                    postponed_line({"boots": 2, "last": last, "reason": "r"}, "/p"),
+                    postponed_line(PostponedRead({"boots": 2, "last": last, "reason": "r"}), "/p"),
                     "  migration postponed at 2 boot(s) in a row, last ?: r",
                 )
 
@@ -2911,18 +2943,36 @@ class PostponedLineTest(unittest.TestCase):
         for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
             with self.subTest(last=last):
                 self.assertEqual(
-                    postponed_line({"v": 1, "boots": 2, "last": last, "reason": "r"}, "/p"),
+                    postponed_line(PostponedRead({"v": 1, "boots": 2, "last": last, "reason": "r"}), "/p"),
                     "  migration postponed at 2 boot(s) in a row, last ?: r",
                 )
 
-    def test_a_newer_format_is_named_and_a_broken_version_shows_nothing(self) -> None:
+    def test_a_newer_format_and_a_broken_version_are_named(self) -> None:
         self.assertEqual(
-            postponed_line({"v": 2, "boots": 2, "last": 3000, "reason": "r"}, "/p"),
+            postponed_line(PostponedRead({"v": 2, "boots": 2, "last": 3000, "reason": "r"}), "/p"),
             "  /p is format 2 of the docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST",
         )
+        # Before, a record whose version is not a number, or that cannot be read at all, showed nothing.
         for v in ("1", True, -1, 1.0, None):
             with self.subTest(v=v):
-                self.assertEqual(postponed_line({"v": v, "boots": 2, "last": 3000, "reason": "r"}, "/p"), "")
+                self.assertEqual(
+                    postponed_line(PostponedRead({"v": v, "boots": 2, "last": 3000, "reason": "r"}), "/p"),
+                    "  cannot read /p (its format version is not a number)",
+                )
+
+    def test_a_record_that_cannot_be_read_is_named(self) -> None:
+        # status reads the file as cst doctor does ("cannot read"); before, each of these showed nothing.
+        cases = (
+            ("{", "not JSON"),
+            ("[1, 2]\n", "not a JSON object"),
+            ('"r"\n', "not a JSON object"),
+            ("", "empty, or it cannot be opened"),
+        )
+        for text, why in cases:
+            with self.subTest(text=text):
+                self.assertEqual(postponed_line(parse_postponed(text, "/p"), "/p"), f"  cannot read /p ({why})")
+        self.assertEqual(postponed_line(parse_postponed(None, "/p"), "/p"), "")  # no file: no record
+        self.assertEqual(postponed_line(parse_postponed("{}", "/p"), "/p"), "")  # an empty object: none either
 
 
 if __name__ == "__main__":
