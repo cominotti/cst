@@ -2,8 +2,8 @@
 """The watchdog's check of a box it handled already (a Docker or Steam scope, a box next to the game): each
 recorded setting systemd no longer shows as the profile sets it is set again, with no new record.
 
-GameProfile's protect_steam, pin_docker and demote_escapes call set_again for a box game.state holds a
-record of; cpu.game.domain.boxes judges the values and words the journal line.
+GameProfileSteps' protect_steam, pin_docker and demote_escapes call set_again for a box game.state holds a
+record of; cpu.game.domain.boxes judges the values and words the journal line. No I/O.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from cpu.game.domain import Manager, intended_records, show_values, transient_un
 from cpu.game.domain.boxes import intended_covers, set_again_text, unset_settings
 
 if TYPE_CHECKING:
-    from cpu.game.adapters.profile import GameProfile
+    from cpu.game.application.profile import GameProfileSteps
 
 
 def set_again(
-    profile: GameProfile, mgr: Manager, unit: str, settings: Sequence[str], folder: str | None = None
+    profile: GameProfileSteps, mgr: Manager, unit: str, settings: Sequence[str], folder: str | None = None
 ) -> None:
     """A box handled already (game.state holds a record of each of settings, "PROP=VALUE"): each setting
     systemd no longer shows as the profile sets it (its set-property failed, or an 'off' that was killed

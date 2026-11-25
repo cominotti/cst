@@ -788,7 +788,10 @@ not derive from it.
   Steam scopes and boxes appear (also a folder whose name is no unit name:
   no record or systemctl call ever names it), settings drift and someone
   else reloads, and
-  each call may fail or die at any of its set-property calls and file writes:
+  each call may fail or die at any of its set-property calls and file writes
+  (injected at the ports of `cpu/game/ports.py`: the `Faulty*` adapters of
+  `cpu/tests/fakes.py` over the real ones, and `FaultyRunner` over the fake
+  systemctl; no module is patched and nothing calls fsync):
   every change has its record in `game.state`, an `off` with no fault
   restores everything, `on` twice is `on` once, and a tick leaves no box
   half handled, also a box whose set-property failed (or whose process died
@@ -840,9 +843,14 @@ folder; the bulk machine too, and it runs `cp` there. The scrub-limit and
 iocost machines run over in-memory port fakes, so they cover neither how
 the adapters write their files (modes, fsync, relabel) nor the commands
 they run: the ports' contract tests (`btrfs/tests/test_scrub_limit_ports.py`,
-`btrfs/tests/test_iocost_ports.py`) do. Each machine over real files stubs fsync
+`btrfs/tests/test_iocost_ports.py`) do. The game profile's machine runs
+over its real adapters, and its contract test
+(`cpu/tests/test_game_ports.py`) checks that each failure a `Faulty*`
+adapter stages has the shape the real one gives, and pins what the real
+adapters pass on. Each other machine over real files stubs fsync
 (`tests.fault_injection.stub_fsync` in its `setUp`), so they do not
-depend on `TMPDIR` either.
+depend on `TMPDIR` either; the game profile's writes in `/run` make no
+fsync (`durable=False`).
 
 ### Writing one: typing without ignore comments
 

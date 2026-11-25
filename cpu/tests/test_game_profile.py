@@ -10,11 +10,10 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest cpu.tests.test_game_profile -v
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 import contextlib
 import dataclasses
 import errno
-import fnmatch
 import io
 import os
 import shutil
@@ -23,17 +22,17 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
-from typing import IO, TYPE_CHECKING, override
-
-if TYPE_CHECKING:
-    from _typeshed import OpenTextMode
+from typing import override
 
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters import host as game_host, power as game_power
 from cpu.game.adapters.host import read_settings, read_snapshot, user_id, user_name
-from cpu.game.adapters.profile import GameProfile, load_profile
+from cpu.game.adapters.files import GameLeftoversFile, GameRunLock, GameStateFiles, GameUnitFiles
+from cpu.game.adapters.kernel import GameKernelFiles
+from cpu.game.adapters.power import GameSysfsFiles
+from cpu.game.adapters.profile import GameProfile, load_profile, machine_ports
+from cpu.game.application.profile import GameProfileSteps
 from cst_core.adapters import files as cst_files
 from cst_core.adapters.files import read_text
 from cpu.game.domain import (
@@ -67,159 +66,7 @@ from cpu.game.domain.leftovers import (
 )
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
-
-USER = "testuser"
-UID = "999999"
-SYS = "systemctl"
-USR = f"systemctl --user -M {USER}@"
-
-
-def override_path(root: str, mgr: str, unit: str, prop: str) -> str:
-    """Where systemd keeps `set-property --runtime` (the fake's own copy of the rule)."""
-    base = os.path.join(root, "rs") if mgr == "sys" else os.path.join(root, "ru", UID, "systemd")
-    transient = fnmatch.fnmatchcase(unit, "*.scope") or fnmatch.fnmatchcase(unit, "run-*.service")
-    folder = "transient" if transient else ("system.control" if mgr == "sys" else "user.control")
-    return os.path.join(base, folder, f"{unit}.d", f"50-{prop}.conf")
-
-
-class FakeSystemd:
-    """A fake systemctl for both managers: STORE/<mgr>/<unit>/<prop> holds what `systemctl show`
-    reports (16G reads back in bytes, as in systemd); set-property also writes the runtime override
-    file, as systemd does. Every call is logged as its command line."""
-
-    def __init__(self, root: str) -> None:
-        self.root = root
-        self.store = os.path.join(root, "store")
-        self.actions: list[str] = []
-        self.fail_set: set[tuple[str, str]] = set()
-        self.not_loaded: set[tuple[str, str]] = set()
-        self.units: dict[str, list[str]] = {"sys": [], "usr": []}
-        self.active: set[str] = set()
-        self.fail_reload: set[str] = set()  # daemon-reload fails: "sys", or the name of a user's manager
-        self.fail_show: set[tuple[str, str, str]] = set()  # show -P PROP UNIT of that manager fails
-
-    def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
-        self.actions.append(" ".join(argv))
-        args = list(argv[1:])
-        mgr = "sys"
-        if args[:2] == ["--user", "-M"]:
-            mgr, args = "usr", args[3:]
-        quiet = args[:1] == ["-q"]
-        if quiet:
-            args = args[1:]
-        sub = args[0] if args else ""
-        if sub == "set-property":
-            return self._set(mgr, args[2], args[3:])
-        if sub == "show":
-            return self._show(mgr, args[1:])
-        if sub == "list-units":
-            return CommandResult(
-                0,
-                "".join(f"{n} loaded active running x\n" for n in self.units[mgr] if fnmatch.fnmatchcase(n, args[-1])),
-                "",
-            )
-        if sub == "is-active":
-            return CommandResult(0 if args[1] in self.active else 3, "", "")
-        if sub == "daemon-reload" and (argv[3].removesuffix("@") if mgr == "usr" else "sys") in self.fail_reload:
-            return CommandResult(1, "", "Failed to reload daemon")
-        return CommandResult(0, "", "")
-
-    def _set(self, mgr: str, unit: str, settings: Sequence[str]) -> CommandResult:
-        if (mgr, unit) in self.fail_set:
-            return CommandResult(1, "", f"Failed to set unit properties on {unit}")
-        for kv in settings:
-            prop, _, value = kv.partition("=")
-            self.set_now(mgr, unit, **{prop: "17179869184" if value == "16G" else value})
-            f = override_path(self.root, mgr, unit, prop)
-            os.makedirs(os.path.dirname(f), exist_ok=True)
-            with open(f, "w") as fh:
-                fh.write(f"[Slice]\n{kv}\n")
-        return CommandResult(0, "", "")
-
-    def _show(self, mgr: str, args: Sequence[str]) -> CommandResult:
-        if args[0] == "-P" and (mgr, args[2], args[1]) in self.fail_show:
-            return CommandResult(1, "", "Failed to get properties: Connection timed out")
-        if args[0] == "-P":
-            return CommandResult(0, self.now(mgr, args[2], args[1]) + "\n", "")
-        props: list[str] = []
-        i = 0
-        while args[i] == "-p":
-            props.append(args[i + 1])
-            i += 2
-        unit = args[i]
-        lines = []
-        for p in props:
-            if p == "LoadState":
-                lines.append("LoadState=" + ("not-found" if (mgr, unit) in self.not_loaded else "loaded"))
-            else:
-                lines.append(f"{p}={self.now(mgr, unit, p)}")
-        return CommandResult(0, "".join(line + "\n" for line in lines), "")
-
-    def set_now(self, mgr: str, unit: str, **props: str) -> None:
-        d = os.path.join(self.store, mgr, unit)
-        os.makedirs(d, exist_ok=True)
-        for k, v in props.items():
-            with open(os.path.join(d, k), "w") as f:
-                f.write(v + "\n")
-
-    def now(self, mgr: str, unit: str, prop: str) -> str:
-        try:
-            with open(os.path.join(self.store, mgr, unit, prop)) as f:
-                return f.read().strip()
-        except OSError:
-            return "[not set]"
-
-
-@dataclasses.dataclass
-class GameScratch:
-    """The game profile's scratch machine (game_scratch): where things are, the fake systemd with its
-    baseline, the user manager's cgroup folder and the settings of the tests."""
-
-    paths: GamePaths
-    systemd: FakeSystemd
-    ucg: str
-    settings: GameSettings
-
-
-def add_gamemode_pid(proc: str, pid: str) -> None:
-    """A process pid under the /proc folder proc with GameMode's client library loaded (the game)."""
-    d = os.path.join(proc, pid)
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, "maps"), "w") as f:
-        f.write("7f00-7f01 r-xp 00000000 00:00 0 /usr/lib64/libgamemodeauto.so.0\n")
-
-
-def game_scratch(tmp: str) -> GameScratch:
-    """A fake cgroup tree, /proc and sysfs, and a fake systemd with its baseline, in the folder tmp
-    (which the caller removes); a GameMode client runs."""
-    t = tmp
-    paths = GamePaths(
-        conf=os.path.join(t, "conf"),
-        run=os.path.join(t, "run"),
-        cgroot=os.path.join(t, "cgroup"),
-        unit_runtime=os.path.join(t, "unit-runtime"),
-        run_systemd=os.path.join(t, "rs"),
-        run_user=os.path.join(t, "ru"),
-        sys_cpu=os.path.join(t, "sys-cpu"),
-        sys_drm=os.path.join(t, "sys-drm"),
-        proc=os.path.join(t, "proc"),
-    )
-    os.makedirs(paths.run)
-    settings = GameSettings(target_user=USER, game_zswap_writeback="yes")
-    # The user manager's cgroup folder (uid 999999), as cgroupfs shows it.
-    ucg = os.path.join(paths.cgroot, "user.slice", f"user-{UID}.slice", f"user@{UID}.service")
-    os.makedirs(ucg)
-    # The user manager runs: its runtime folder is there (FakeSystemd writes its runtime overrides into it).
-    os.makedirs(os.path.join(paths.run_user, UID, "systemd"))
-    systemd = FakeSystemd(t)
-    # The baseline as systemd shows it before the profile.
-    systemd.set_now("sys", "machine.slice", CPUWeight="50", IOWeight="50")
-    for u in ("user.slice", f"user-{UID}.slice", f"user@{UID}.service"):
-        systemd.set_now("sys", u, MemoryLow="0")
-    systemd.set_now("usr", "user.slice", CPUWeight="30")
-    # A GameMode client runs (the game): pid 1 has its library loaded.
-    add_gamemode_pid(paths.proc, "1")
-    return GameScratch(paths, systemd, ucg, settings)
+from cpu.tests.fakes import SYS, UID, USER, USR, add_gamemode_pid, game_scratch, override_path
 
 
 class GameProfileCase(unittest.TestCase):
@@ -236,6 +83,7 @@ class GameProfileCase(unittest.TestCase):
         self.settings = scratch.settings
         self.ucg = scratch.ucg
         self.systemd = scratch.systemd
+        self.over: dict[str, object] = {}
 
     def gamemode_pid(self, pid: str) -> None:
         add_gamemode_pid(self.paths.proc, pid)
@@ -252,10 +100,22 @@ class GameProfileCase(unittest.TestCase):
     def ctrl(self, mgr: str, unit: str, prop: str) -> str:
         return override_path(self.tmp, mgr, unit, prop)
 
-    def profile(self, settings: GameSettings | None = None) -> tuple[GameProfile, io.StringIO]:
+    def profile(self, settings: GameSettings | None = None) -> tuple[GameProfileSteps, io.StringIO]:
+        """The profile over the real adapters (GameProfile); within ports(), with those adapters replaced."""
         out = io.StringIO()
-        p = GameProfile(self.paths, settings or self.settings, self.systemd, uid_of=lambda _u: UID, out=out)
-        return p, out
+        if not self.over:
+            return GameProfile(self.paths, settings or self.settings, self.systemd, uid_of=lambda _u: UID, out=out), out
+        real = machine_ports(self.paths, self.systemd, uid_of=lambda _u: UID, out=out)
+        return GameProfileSteps(self.paths, settings or self.settings, dataclasses.replace(real, **self.over)), out
+
+    @contextlib.contextmanager
+    def ports(self, **over: object) -> Generator[None]:
+        """The profiles made meanwhile (profile, run_profile) have these adapters (GamePorts fields) instead."""
+        self.over = over
+        try:
+            yield
+        finally:
+            self.over = {}
 
     def run_profile(self, action: str, settings: GameSettings | None = None) -> tuple[str, list[str]]:
         """One action (on, off, tick or state) with the fakes; (its output, the systemctl calls)."""
@@ -737,7 +597,9 @@ class GameProfileOnOffTest(GameProfileCase):
         self.assertNotIn("drift", out)
 
     def test_the_lock_keeps_actions_apart(self) -> None:
-        p, out = self.profile()
+        # The real lock with a short wait (the front's 60 s is pinned in test_game_ports).
+        with self.ports(lock=GameRunLock(self.paths.run, self.paths.lock, timeout=0.2)):
+            p, out = self.profile()
         self.assertEqual(p.locked("on"), 0)
         self.assertTrue(os.path.exists(self.state))
         self.assertEqual(os.stat(self.paths.lock).st_mode & 0o777, 0o644)
@@ -746,9 +608,7 @@ class GameProfileOnOffTest(GameProfileCase):
         fd = take_lock(self.paths.lock, wait=False)
         assert fd is not None
         try:
-            with unittest.mock.patch("cpu.game.adapters.profile.take_lock", return_value=None) as held:
-                self.assertEqual(p.locked("off"), 1)
-            self.assertEqual(held.call_args.kwargs["timeout"], 60)
+            self.assertEqual(p.locked("off"), 1)
         finally:
             os.close(fd)
         self.assertTrue(out.getvalue().endswith("<3>game-profile: lock busy\n"), out.getvalue())
@@ -1055,21 +915,38 @@ class StateSnapshotTest(GameProfileCase):
         self.write(self.manual, "")
         os.makedirs(os.path.join(self.ucg, "e2e.slice"))
         self.run_profile("tick")  # e2e.slice next to the game: idle, recorded in game.state
-        real = cst_files.read_text
         seen: list[str] = []
+        state, intended = self.state, self.intended
 
-        def then_off(path: str, *, unreadable: str | None = None) -> str | None:
-            text = real(path, unreadable=unreadable)
-            if path in (self.state, self.intended):
-                seen.append(path)
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(path)  # 'off' ended meanwhile: the next read would find nothing
-            return text
+        class ThenOff(GameStateFiles):
+            """Each read of game.state or game.intended noted, and the file gone after it ('off' ended meanwhile:
+            the next read would find nothing)."""
 
-        with (
-            unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=then_off),
-            unittest.mock.patch("cpu.game.adapters.profile.read_text", side_effect=then_off),
-        ):
+            def _then_off(self, path: str) -> None:
+                if path in (state, intended):
+                    seen.append(path)
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+
+            @override
+            def snapshot(self, path: str) -> str | None:
+                text = super().snapshot(path)
+                self._then_off(path)
+                return text
+
+            @override
+            def read_text(self, path: str) -> str | None:
+                text = super().read_text(path)
+                self._then_off(path)
+                return text
+
+            @override
+            def read_bytes(self, path: str) -> bytes | None:
+                data = super().read_bytes(path)
+                self._then_off(path)
+                return data
+
+        with self.ports(state=ThenOff()):
             out, _ = self.run_profile("state")
         self.assertEqual(sorted(seen), sorted([self.state, self.intended]))
         self.assertIn("game profile: ON (by hand)\n", out)
@@ -1080,15 +957,17 @@ class StateSnapshotTest(GameProfileCase):
         # The header ("ON (by hand)") and the drift line's fix command judge one reading of the mark.
         self.run_profile("on")
         self.write(self.manual, "")
-        real = os.path.exists
         asked: list[str] = []
+        manual = self.manual
 
-        def exists(path: str) -> bool:
-            if path == self.manual:
-                asked.append(path)
-            return real(path)
+        class Asked(GameStateFiles):
+            @override
+            def exists(self, path: str) -> bool:
+                if path == manual:
+                    asked.append(path)
+                return super().exists(path)
 
-        with unittest.mock.patch("cpu.game.adapters.profile.os.path.exists", side_effect=exists):
+        with self.ports(state=Asked()):
             out, _ = self.run_profile("state")
         self.assertIn("game profile: ON (by hand)\n", out)
         self.assertEqual(asked, [self.manual])
@@ -1260,12 +1139,13 @@ class UnreadableRecordTest(GameProfileCase):
     def test_a_line_cut_short_that_cannot_be_removed_stops_the_change(self) -> None:
         self.cut_and_box(self.state)
         err = io.StringIO()
-        with (
-            unittest.mock.patch(
-                "cpu.game.adapters.profile.os.truncate", side_effect=OSError(errno.EROFS, "Read-only file system")
-            ),
-            contextlib.redirect_stderr(err),
-        ):
+
+        class ReadOnly(GameStateFiles):
+            @override
+            def truncate(self, path: str, size: int) -> None:
+                raise OSError(errno.EROFS, "Read-only file system")
+
+        with self.ports(state=ReadOnly()), contextlib.redirect_stderr(err):
             out, actions = self.run_profile("tick")
         self.assertIn(f"{self.state}: Read-only file system\n", err.getvalue())
         self.assertIn(f"e2e.slice: CPUWeight=idle: not done, its record could not be written to {self.state}\n", out)
@@ -1646,16 +1526,19 @@ class OffWithoutTargetUserTest(GameProfileCase):
 
     def test_off_after_on_died_at_the_user_manager_acts_for_the_user_on_acted_for(self) -> None:
         # 'on' dies at its first call to the user manager (its user.slice): game.state names the uid already.
-        real = self.systemd.run
+        systemd = self.systemd
 
-        def dying(argv: Sequence[str], **kw: object) -> CommandResult:
-            res = real(argv, **kw)
-            if list(argv[:2]) == ["systemctl", "--user"] and "set-property" in argv:
-                raise _OnDiedError
-            return res
+        class Dying:
+            """The fake systemd, and 'on' dies right after the first set-property of the user manager."""
 
-        p, _ = self.profile()
-        with unittest.mock.patch.object(self.systemd, "run", dying), self.assertRaises(_OnDiedError):
+            def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+                res = systemd.run(argv, **kw)
+                if list(argv[:2]) == ["systemctl", "--user"] and "set-property" in argv:
+                    raise _OnDiedError
+                return res
+
+        p = GameProfile(self.paths, self.settings, Dying(), uid_of=lambda _u: UID, out=io.StringIO())
+        with self.assertRaises(_OnDiedError):
             p.on()
         user_override = self.ctrl("usr", "user.slice", "CPUWeight")
         self.assertTrue(os.path.exists(user_override))
@@ -3134,7 +3017,7 @@ class LeftoversTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
     def test_an_undo_reports_its_failure(self) -> None:
-        from cpu.game.adapters.leftovers import Reloads
+        from cpu.game.application.leftovers import Reloads
 
         p, _ = self.profile()
         reload = Reloads()
@@ -3199,8 +3082,7 @@ class LeftoversTest(GameProfileCase):
         self.prior_machine_weight()
         self.run_profile("on")
         self.systemd.fail_set.add(("sys", "machine.slice"))
-        full = OSError(errno.ENOSPC, "No space left on device")
-        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+        with self.ports(leftovers=FullLeftovers(self.paths.leftovers)):
             out, _ = self.run_profile("off")
         self.assertIn(
             f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {self.paths.leftovers}: not undone\n",
@@ -3224,8 +3106,7 @@ class LeftoversTest(GameProfileCase):
         os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)
         self.systemd.fail_set.add(("usr", "user.slice"))
         self.no_game()
-        full = OSError(errno.ENOSPC, "No space left on device")
-        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+        with self.ports(leftovers=FullLeftovers(self.paths.leftovers)):
             out, _ = self.run_profile("tick")
             self.assertEqual(
                 out,
@@ -3244,10 +3125,10 @@ class LeftoversTest(GameProfileCase):
         text = f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n"
         self.write(self.paths.leftovers, text)
         self.no_game()
-        full = OSError(errno.ENOSPC, "No space left on device")
-        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full) as writes:
+        full = FullLeftovers(self.paths.leftovers)
+        with self.ports(leftovers=full):
             out, _ = self.run_profile("tick")
-        self.assertTrue(writes.called)
+        self.assertTrue(full.writes)
         self.assertEqual(out, "")
         self.assertEqual(self.read(self.paths.leftovers), text)
         os.unlink(os.path.join(self.tmp, "plain"))  # the next tick, with room in /run: its folder is gone, done
@@ -3264,8 +3145,7 @@ class LeftoversTest(GameProfileCase):
         self.prior_machine_weight()
         self.run_profile("on")
         self.systemd.fail_set.add(("sys", "machine.slice"))
-        full = OSError(errno.ENOSPC, "No space left on device")
-        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+        with self.ports(leftovers=FullLeftovers(self.paths.leftovers)):
             out, _ = self.run_profile("off")
         left = self.paths.leftovers
         self.assertEqual(self.read(left), text)
@@ -3416,17 +3296,23 @@ class LeftoversTest(GameProfileCase):
         # and the drop-ins are there; an 'off' killed right after it removed them left their MemoryLow live with
         # no record. 'off' writes the reload due first, so the next 'off' runs it. The old one ran none.
         self.write(self.state, f"prop sys user@{UID}.service MemoryLow existed 0\n")
-        p, _ = self.profile()
+        unit_runtime = self.unit_runtime
+
+        class DyingAfterTheDropins(GameUnitFiles):
+            """'off' dies right after it removed the last drop-in (its folder)."""
+
+            @override
+            def remove_folder(self, path: str) -> None:
+                super().remove_folder(path)
+                if not self.dropins(unit_runtime, "zz-cst-game.conf"):
+                    raise _OnDiedError
+
+        with self.ports(units=DyingAfterTheDropins()):
+            p, _ = self.profile()
         p.write_game_dropins()
         dropin = os.path.join(self.unit_runtime, f"user@{UID}.service.d", "zz-cst-game.conf")
         self.assertTrue(os.path.exists(dropin))
-        real = GameProfile.remove_game_dropins
-
-        def dying(profile: GameProfile) -> bool:
-            real(profile)
-            raise _OnDiedError
-
-        with unittest.mock.patch.object(GameProfile, "remove_game_dropins", dying), self.assertRaises(_OnDiedError):
+        with self.assertRaises(_OnDiedError):
             p.off()
         self.assertFalse(os.path.exists(dropin))
         self.assertTrue(os.path.exists(self.state))
@@ -3441,8 +3327,7 @@ class LeftoversTest(GameProfileCase):
         # G6: the system manager's reload fails and /run is full: never said kept, said not done once.
         self.run_profile("on")
         self.systemd.fail_reload.add("sys")
-        full = OSError(errno.ENOSPC, "No space left on device")
-        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+        with self.ports(leftovers=FullLeftovers(self.paths.leftovers)):
             out, _ = self.run_profile("off")
         left = self.paths.leftovers
         self.assertIn(
@@ -3532,7 +3417,7 @@ class GameProfileCliTest(unittest.TestCase):
     def test_usage(self) -> None:
         for argv in ([], ["bogus"], ["--help"], [""]):
             err = io.StringIO()
-            with unittest.mock.patch("sys.stderr", err):
+            with contextlib.redirect_stderr(err):
                 self.assertEqual(game_cli.main(argv), 2)
             self.assertEqual(err.getvalue(), "usage: game-profile on|off|tick|state\n")
 
@@ -3548,21 +3433,41 @@ class GameProfileCliTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout, r.stderr), (2, "", "usage: game-profile on|off|tick|state\n"))
 
 
-def full_after(target: str, records: int, *, mode: str = "a") -> contextlib.AbstractContextManager[object]:
-    """The game profile's own writes of target in mode fail with ENOSPC after records of them."""
-    real = open
-    written = {"n": 0}
+class FullLeftovers(GameLeftoversFile):
+    """game.leftovers in a full /run: each write fails with ENOSPC (writes: how many were tried)."""
 
-    def fake_open(
-        path: str, flags: OpenTextMode = "r", *, encoding: str | None = None, errors: str | None = None
-    ) -> IO[str]:
-        if path == target and flags == mode:
-            written["n"] += 1
-            if written["n"] > records:
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.writes = 0
+
+    @override
+    def write(self, text: str) -> None:
+        self.writes += 1
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+class FullAfter(GameStateFiles):
+    """The state files in a /run that fills up: the writes of target ("a": appends, "w": creations) fail with
+    ENOSPC after records of them."""
+
+    def __init__(self, target: str, records: int, *, mode: str = "a") -> None:
+        self.target, self.records, self.mode, self.written = target, records, mode, 0
+
+    def _count(self, path: str, mode: str) -> None:
+        if path == self.target and mode == self.mode:
+            self.written += 1
+            if self.written > self.records:
                 raise OSError(errno.ENOSPC, "No space left on device", path)
-        return real(path, flags, encoding=encoding, errors=errors)
 
-    return unittest.mock.patch("cpu.game.adapters.profile.open", fake_open, create=True)
+    @override
+    def append(self, path: str, text: str) -> None:
+        self._count(path, "a")
+        super().append(path, text)
+
+    @override
+    def create(self, path: str, text: str) -> None:
+        self._count(path, "w")
+        super().create(path, text)
 
 
 class FullRunFolderTest(GameProfileCase):
@@ -3575,14 +3480,14 @@ class FullRunFolderTest(GameProfileCase):
         self, records: int, *, mode: str = "a", target: str | None = None
     ) -> contextlib.AbstractContextManager[object]:
         """The game profile's own writes of target (game.state by default) in mode fail with ENOSPC after
-        records of them."""
-        return full_after(self.state if target is None else target, records, mode=mode)
+        records of them (for the profiles made meanwhile)."""
+        return self.ports(state=FullAfter(self.state if target is None else target, records, mode=mode))
 
     def test_on_skips_what_it_cannot_record_and_still_succeeds_then_off_undoes_the_rest(self) -> None:
         self.systemd.actions = []
-        p, out = self.profile()
         err = io.StringIO()
         with self.full_after(6), contextlib.redirect_stderr(err):  # the memory chain's and machine.slice's records fit
+            p, out = self.profile()
             self.assertEqual(p.locked("on"), 0)
         log = out.getvalue()
         self.assertIn(
@@ -3612,8 +3517,8 @@ class FullRunFolderTest(GameProfileCase):
 
     def test_on_that_cannot_create_game_state_changes_nothing(self) -> None:
         self.systemd.actions = []
-        p, out = self.profile()
         with self.full_after(0, mode="w"):
+            p, out = self.profile()
             self.assertEqual(p.locked("on"), 1)
         self.assertIn(
             f"<3>game-profile: not switched on: could not write {self.state}: No space left on device\n", out.getvalue()
@@ -3623,9 +3528,9 @@ class FullRunFolderTest(GameProfileCase):
     def test_on_whose_game_intended_cannot_be_written_still_switches_on(self) -> None:
         # No drift repair then; the profile itself still works.
         self.systemd.actions = []
-        p, out = self.profile()
         err = io.StringIO()
         with self.full_after(0, mode="w", target=self.intended), contextlib.redirect_stderr(err):
+            p, out = self.profile()
             self.assertEqual(p.locked("on"), 0)
         self.assertEqual(err.getvalue(), f"{self.intended}: No space left on device\n")
         self.assertIn("<5>game-profile: on: ", out.getvalue())
@@ -3645,9 +3550,9 @@ class FullRunFolderTest(GameProfileCase):
         before_epp = [line for line in self.read(self.state).splitlines() if not line.startswith("epp ")]
         self.run_profile("off", s)
         self.assertFalse(os.path.exists(self.state))
-        p, out = self.profile(s)
         err = io.StringIO()
         with self.full_after(len(before_epp)), contextlib.redirect_stderr(err):
+            p, out = self.profile(s)
             self.assertEqual(p.locked("on"), 0)
         log = out.getvalue()
         for cpu in ("0", "1"):  # the first one does not stop the loop
@@ -3772,16 +3677,20 @@ class GameProfilePowerTest(GameProfileCase):
     def test_connected_amd_fallback_3d_fullscreen_and_strict_write_order(self) -> None:
         _, pci3 = self._setup_gpus()
         writes: list[tuple[str, str]] = []
-        orig_write = game_host.write_sysfs_line
 
-        def tracked_write(path: str, value: str) -> bool:
-            writes.append((path.rsplit("/", 1)[-1], value))
-            return orig_write(path, value)
+        class TrackedSysfs(GameSysfsFiles):
+            @override
+            def write(self, path: str, value: str) -> bool:
+                writes.append((path.rsplit("/", 1)[-1], value))
+                return super().write(path, value)
 
-        with (
-            unittest.mock.patch.object(game_power, "write_sysfs_line", side_effect=tracked_write),
-            unittest.mock.patch("cpu.game.adapters.profile.write_sysfs_line", side_effect=tracked_write),
-        ):
+        class TrackedKernel(GameKernelFiles):
+            @override
+            def write(self, path: str, value: str) -> bool:
+                writes.append((path.rsplit("/", 1)[-1], value))
+                return super().write(path, value)
+
+        with self.ports(power=TrackedSysfs(), kernel=TrackedKernel()):
             self.run_profile("on")
             self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
             self.assertEqual(self.read(os.path.join(pci3, "power_dpm_force_performance_level")), "manual\n")

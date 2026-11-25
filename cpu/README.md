@@ -1854,16 +1854,25 @@ this is harmless.
 | `setup/cli.py` | Help, cpu-watch's commands, the toolbox refusal, the sudo re-run and the root commands |
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
 | `game/domain/__init__.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
-| `game/adapters/profile.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/ports.py` | The boundaries of the game profile's protocol, one per thing on the machine: `systemctl` for both managers, `game.state`, `game.intended` and the marks, `game.leftovers`, systemd's runtime unit files (the overrides and the `MemoryLow` drop-ins), the cgroup tree and `/proc`, sysfs, the run lock, the output |
+| `game/application/profile.py` | `GameProfileSteps`: `on`, `off`, `tick` and `state` over the ports, no I/O: each change recorded before it is made, the exact revert, the watchdog |
+| `game/adapters/profile.py` | `GameProfile`: `GameProfileSteps` over the real adapters below (`machine_ports`), and `load_profile`, which reads the settings first |
+| `game/adapters/systemd.py` | `systemctl` for both managers through the command runner (`systemctl --user -M USER@` for a user's) |
+| `game/adapters/files.py` | The files in `/run`: `game.state`, `game.intended` and the marks, `game.leftovers` (read byte for byte, replaced whole, removed), systemd's runtime unit files (the overrides and the `MemoryLow` drop-ins), and the run lock |
+| `game/adapters/kernel.py` | The cgroup tree and `/proc`: the boxes, their processes, the GameMode clients, the cgroup writes; `GameSysValues`, the one-value file reads and writes the sysfs adapter (`game/adapters/power.py`) builds on |
+| `game/adapters/output.py` | The journal's lines on stdout, errors on stderr |
+| `game/wiring.py` | The composition root `cli.py` calls: Ctrl-C, the locale's collation, the paths, the command runner and the profile over the real adapters |
 | `game/domain/boxes.py` | The watchdog's check of the boxes it handled, no I/O: whether a recorded setting still holds as systemd shows it (`MemoryLow` by its bytes, `AllowedCPUs` as a set of CPUs, `CPUWeight`), and the journal's words when it sets one again |
-| `game/adapters/boxes.py` | `set_again`: a handled box's recorded settings read back (one `systemctl show`) and each one that does not hold set again, with no new record |
+| `game/application/boxes.py` | `set_again`: a handled box's recorded settings read back (one `systemctl show`) and each one that does not hold set again, with no new record; no I/O |
+| `game/domain/sysfs.py` | The DRM card names, no I/O: whether a sysfs entry is a `cardN` and its number, and a name's number suffix |
 | `game/domain/leftovers.py` | The format of `game.leftovers` (7.4), no I/O: the records `off` could not undo with the user each is for, how `off` merges them with `game.state`'s, and the journal's and `state`'s words for them |
-| `game/adapters/drift.py` | `repair_drift`: the watchdog sets again each setting of `game.intended` that `GameProfile.drift` lists as no longer holding, straight with `set-property` |
-| `game/adapters/leftovers.py` | `game.leftovers` on the machine: read, undo again (the next `off`, the tick while off), write back what still fails, and whether a failed unit is gone |
-| `game/adapters/report.py` | `state`'s report (`show_state`): what is applied now and which settings drifted, read from one snapshot of the state files, with no lock |
-| `game/adapters/power.py` | Dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`), AMD `3D_FULL_SCREEN` activation, P-core EPP, and per-game C-state caps |
+| `game/application/drift.py` | `repair_drift`: the watchdog sets again each setting of `game.intended` that `GameProfileSteps.drift` lists as no longer holding, straight with `set-property`; no I/O |
+| `game/application/leftovers.py` | `game.leftovers`' steps, no I/O: read, undo again (the next `off`, the tick while off), write back what still fails, and whether a failed unit is gone |
+| `game/application/report.py` | `state`'s report (`show_state`): what is applied now and which settings drifted, read from one snapshot of the state files, with no lock; no I/O |
+| `game/application/power.py` | AMD `3D_FULL_SCREEN` activation, P-core EPP, per-game C-state caps and the game's processes, each old value recorded first; no I/O |
+| `game/adapters/power.py` | sysfs as the power steps read and write it, and the dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`) |
 | `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, sysfs writes, the locale's collation |
-| `game/cli.py` | The command line of `cpu-game-profile` |
+| `game/cli.py` | The command line of `cpu-game-profile`: checks the action and hands it to `wiring.py` |
 | `cpu-irq` | `/usr/local/sbin/cpu-irq`: a zipapp of this entry point with `cpu.irq`, `cpu.game`, and `cst_core`; `cst cpu irq` runs the checkout's copy |
 | `irq/domain.py`, `irq/adapters.py`, `irq/cli.py` | Adaptive `irqbalance` ban-list calculation (`BUILD_CPUS` intersected with online CPUs, keeping `>= 2` unbanned CPUs), RPM handling first, then `/etc/cpu-setup/irqbalance.env` and the drop-in written in-process through `InstallService`, then the service; `cpu:irq` done last (section 6.3) |
 | `cpu-power` | `/usr/local/sbin/cpu-power`: a zipapp of this entry point with the `cpu.power`, `cpu.game`, and `cst_core` packages; `cst cpu power` runs the checkout's copy |

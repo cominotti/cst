@@ -2,7 +2,7 @@
 """A state machine over the game profile's on, tick and off, with faults inside them (Hypothesis).
 
 It runs the real GameProfile (cpu/game/adapters/profile.py) through GameProfile.locked, as the units
-run it, on the unit tests' scratch (cpu/tests/test_game_profile.py game_scratch): a fake cgroup tree,
+run it, on the unit tests' scratch (cpu/tests/fakes.py game_scratch): a fake cgroup tree,
 /proc and sysfs, and their fake systemctl for both managers (FakeSystemd), here as ReloadingSystemd:
 each property has a base (the unit file's value); a daemon-reload sets every shown value from the
 zz-cst-game.conf drop-in for the system manager's MemoryLow when there is one (it wins over a
@@ -21,11 +21,13 @@ and an outside daemon-reload runs. A tick that asks systemd to stop cpu-game.ser
 its ExecStop ('off'), one that asks to start it by 'on'.
 
 Each on, tick and off arms at most one fault (tests/fault_injection.py FaultPlan), at the k-th of the
-call's points: each set-property and daemon-reload (FaultyRunner: exit 1, no effect), each file the
-profile writes (game.state's and game.intended's appends, the sysfs, EPP and cpuidle writes: a write
-that fails with ENOSPC and no effect, or is done whole), each write_atomic (the drop-ins and
-game.leftovers), and, for a kill only, the profile's os.unlink, os.truncate, os.rmdir and os.makedirs
-and the leftovers module's os.unlink. FAIL: that call fails and the run goes on; KILL: that call
+call's points, injected at the profile's ports (the Faulty* adapters of cpu/tests/fakes.py, the real
+adapters with each mutating call one point; nothing is patched): each set-property and daemon-reload
+(FaultyRunner: exit 1, no effect), each file the profile writes (game.state's and game.intended's
+appends and creations, the cgroup, sysfs, EPP and cpuidle writes, the drop-ins, the marks and
+game.leftovers: a write that fails with ENOSPC and no effect, or is done whole), and, for a kill only,
+each removal of a file or folder, a cut line's truncate and a drop-in's folder made (os.unlink,
+os.truncate, os.rmdir, os.makedirs). FAIL: that call fails and the run goes on; KILL: that call
 takes effect and the process dies (Killed ends the call). A point past the call's end is no fault.
 
 Checked, relative to the baseline (the machine at the start: every runtime override file by the
@@ -74,22 +76,21 @@ some point on (FullRunFolderTest), and real systemd's merge of drop-ins
 
 from collections.abc import Callable, Sequence
 import contextlib
+import dataclasses
 from enum import StrEnum
 import io
 import os
 import shutil
 import tempfile
-from types import TracebackType
-from typing import Final, Self, override
+from typing import Final, override
 import unittest
-from unittest import mock
 
 from hypothesis import settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
-from cpu.game.adapters import host as game_host, leftovers as game_leftovers, profile as game_profile
-from cpu.game.adapters.profile import GameProfile
+from cpu.game.adapters.profile import machine_ports
+from cpu.game.application.profile import GameProfileSteps
 from cpu.game.domain import (
     CgroupUndo,
     EppUndo,
@@ -105,17 +106,31 @@ from cpu.game.domain import (
     unheld,
 )
 from cpu.game.domain.leftovers import leftover_entries
-from cpu.tests.test_game_profile import UID, USER, FakeSystemd, add_gamemode_pid, game_scratch, override_path
+from cpu.game.ports import GamePorts
+from cpu.tests.fakes import (
+    FaultyKernelFiles,
+    FaultyLeftoversFile,
+    FaultyStateFiles,
+    FaultySysfsFiles,
+    FaultyUnitFiles,
+    MEMORY_LOW_BYTES,
+    UID,
+    USER,
+    Key,
+    ReloadingSystemd,
+    add_gamemode_pid,
+    game_scratch,
+    override_path,
+    override_value,
+)
 from cst_core.adapters.files import read_text
-from cst_core.ports import CommandResult
-from tests.fault_injection import FaultMode, FaultPlan, FaultyOs, FaultyRunner, Killed, stub_fsync
+from tests.fault_injection import FaultMode, FaultPlan, FaultyRunner, Killed
 from tests.mbt import profiles
 
 profiles.load()
 
 SETTINGS: Final = GameSettings(target_user=USER, game_zswap_writeback="yes", p_cores="0-1")
 BUILD: Final = SETTINGS.build_cpus
-MEMORY_LOW_BYTES: Final = "17179869184"  # 16G as systemctl show gives it
 # The last point a fault is armed at: 'on' makes about 40 calls that are points, a tick or an 'off' a few.
 ON_POINTS: Final = 40
 FEW_POINTS: Final = 8
@@ -123,11 +138,6 @@ MAX_SCOPES: Final = 3
 # Folders whose name is no unit name (O5): a blank, and a byte that is not UTF-8 (as glob gives it).
 ODD_NAMES: Final = ("a b.slice", os.fsdecode(b"x\xff.slice"), os.fsdecode(b"app.slice/run-\xff.scope"))
 STEPS: Final = 30
-# The profile module's os functions that are points of a kill (never a failure: none of them fails with
-# ENOSPC, and the profile suppresses only the errors those calls give).
-KILL_ONLY_OS: Final = ("unlink", "truncate", "rmdir", "makedirs")
-
-type Key = tuple[str, str, str]  # (manager, unit, property)
 
 
 class ProfileFault(StrEnum):
@@ -136,111 +146,6 @@ class ProfileFault(StrEnum):
     NONE = "none"
     FAIL = "fail"
     KILL = "kill"
-
-
-def norm(value: str) -> str:
-    """A value as systemctl show gives it (16G in bytes)."""
-    return MEMORY_LOW_BYTES if value == "16G" else value
-
-
-def override_value(path: str) -> str:
-    """The value a runtime override file (or a drop-in) sets: its last KEY=VALUE line's VALUE."""
-    with open(path, encoding="utf-8") as fh:
-        line = [x for x in fh.read().splitlines() if "=" in x][-1]
-    return norm(line.split("=", 1)[1].strip())
-
-
-class ReloadingSystemd(FakeSystemd):
-    """FakeSystemd whose daemon-reload sets each shown value from the files, as systemd does."""
-
-    def __init__(self, root: str, unit_runtime: str) -> None:
-        super().__init__(root)
-        self.base: dict[Key, str] = {}
-        self.unit_runtime = unit_runtime
-
-    def set_base(self, mgr: str, unit: str, **props: str) -> None:
-        for prop, value in props.items():
-            self.base[mgr, unit, prop] = value
-        self.set_now(mgr, unit, **props)
-
-    @override
-    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
-        args = list(argv[1:])
-        mgr = "sys"
-        if args[:2] == ["--user", "-M"]:
-            mgr, args = "usr", args[3:]
-        if args[:1] == ["daemon-reload"]:
-            self.actions.append(" ".join(argv))
-            self.reload(mgr)
-            return CommandResult(0, "", "")
-        return super().run(argv, **kw)
-
-    def reload(self, mgr: str) -> None:
-        keys = {k for k in self.base if k[0] == mgr}
-        folder = os.path.join(self.store, mgr)
-        if os.path.isdir(folder):
-            for unit in os.listdir(folder):
-                keys.update((mgr, unit, prop) for prop in os.listdir(os.path.join(folder, unit)))
-        for m, unit, prop in sorted(keys):
-            value = self.base.get((m, unit, prop))
-            f = override_path(self.root, m, unit, prop)
-            if os.path.exists(f):
-                value = override_value(f)
-            dropin = os.path.join(self.unit_runtime, f"{unit}.d", "zz-cst-game.conf")
-            if m == "sys" and prop == "MemoryLow" and os.path.exists(dropin):
-                value = override_value(dropin)
-            if value is None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(os.path.join(self.store, m, unit, prop))
-            else:
-                self.set_now(m, unit, **{prop: norm(value)})
-
-
-class BufferedWrite:
-    """A file the profile opens to write: what it writes is kept, and written whole at the end of its
-    with block, as one point of the plan (a failure there raises ENOSPC, with no effect)."""
-
-    def __init__(self, plan: FaultPlan, path: str, mode: str, encoding: str | None, errors: str | None) -> None:
-        self._plan, self._path, self._mode = plan, path, mode
-        self._encoding, self._errors = encoding, errors
-        self._parts: list[str] = []
-
-    def __enter__(self) -> Self:
-        return self
-
-    def write(self, text: str) -> int:
-        self._parts.append(text)
-        return len(text)
-
-    def _flush(self) -> None:
-        with open(self._path, self._mode, encoding=self._encoding, errors=self._errors) as fh:
-            fh.write("".join(self._parts))
-
-    def __exit__(self, kind: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
-        if kind is None:
-            self._plan.step(f"write {self._path}", self._flush)
-
-
-def faulty_open(plan: FaultPlan) -> Callable[..., object]:
-    """open() as the profile's modules see it: a write is a BufferedWrite, a read the real open."""
-
-    def opener(path: str, mode: str = "r", *, encoding: str | None = None, errors: str | None = None) -> object:
-        if mode in {"w", "a"}:
-            return BufferedWrite(plan, path, mode, encoding, errors)
-        return open(path, mode, encoding=encoding, errors=errors)
-
-    return opener
-
-
-class FaultyAtomic:
-    """write_atomic as the profile module sees it: each call one point of the plan."""
-
-    def __init__(self, plan: FaultPlan, real: Callable[..., object]) -> None:
-        self.plan = plan
-        self.real = real
-
-    def __call__(self, path: str, *args: object, **kw: object) -> object:
-        return self.plan.step(f"write {path}", lambda: self.real(path, *args, **kw))
 
 
 def _changes(argv: Sequence[str]) -> bool:
@@ -331,15 +236,26 @@ class GameProfileMachine(RuleBasedStateMachine):
         with open(self.paths.state, encoding="utf-8", errors="replace") as fh:
             return fh.read()
 
-    def profile(self, runner: FaultyRunner | ReloadingSystemd) -> GameProfile:
-        return GameProfile(
+    def ports(self, runner: FaultyRunner | ReloadingSystemd) -> GamePorts:
+        """The real adapters over runner, with the profile's writes and removals points of the plan."""
+        real = machine_ports(
             self.paths,
-            SETTINGS,
             runner,
             uid_of=lambda u: UID if u == USER else "",
             name_of=lambda uid: USER if uid == UID else "",
             out=self.log,
         )
+        return dataclasses.replace(
+            real,
+            state=FaultyStateFiles(self.plan),
+            leftovers=FaultyLeftoversFile(self.plan, self.paths.leftovers),
+            units=FaultyUnitFiles(self.plan),
+            kernel=FaultyKernelFiles(self.plan),
+            power=FaultySysfsFiles(self.plan),
+        )
+
+    def profile(self, runner: FaultyRunner | ReloadingSystemd) -> GameProfileSteps:
+        return GameProfileSteps(self.paths, SETTINGS, self.ports(runner))
 
     def call(self, action: str, fault: ProfileFault, at: int) -> tuple[bool, str | None]:
         """One on, off or tick through locked, with the fault armed at the point at; (it was killed,
@@ -349,19 +265,7 @@ class GameProfileMachine(RuleBasedStateMachine):
         self.systemd.actions = []
         runner = FaultyRunner(self.plan, self.systemd, reads=lambda argv: not _changes(argv))
         killed, rc = False, 0
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
-            for module in (game_profile, game_host):
-                stack.enter_context(mock.patch.object(module, "open", faulty_open(self.plan), create=True))
-            stack.enter_context(
-                mock.patch.object(game_profile, "os", FaultyOs(self.plan, KILL_ONLY_OS, kill_only=True))
-            )
-            atomic = FaultyAtomic(self.plan, game_profile.write_atomic)
-            stack.enter_context(mock.patch.object(game_profile, "write_atomic", atomic))
-            stack.enter_context(mock.patch.object(game_leftovers, "write_atomic", atomic))
-            stack.enter_context(
-                mock.patch.object(game_leftovers, "os", FaultyOs(self.plan, ("unlink",), kill_only=True))
-            )
+        with contextlib.redirect_stderr(io.StringIO()):
             try:
                 rc = self.profile(runner).locked(action)
             except Killed:
@@ -707,10 +611,6 @@ def steam_scope(m: GameProfileMachine) -> None:
 class GameProfileMachineTest(profiles.MbtTestCase):
     # Not `GameProfileMachine.TestCase`: Hypothesis makes that class in hypothesis.stateful, where
     # run_unit's workers cannot load it by name, and ty takes no subclass of it (unsupported-base).
-    @override
-    def setUp(self) -> None:
-        stub_fsync(self)
-
     def test_any_sequence_of_on_tick_and_off_keeps_the_invariants(self) -> None:
         profiles.run_machine(GameProfileMachine)
 

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
-"""game.leftovers on the machine: the settings 'off' could not undo, kept for the next 'off' and the watchdog's
-tick while the profile is off, and undone again by them (cpu.game.domain.leftovers is its format).
+"""game.leftovers' steps: the settings 'off' could not undo, kept for the next 'off' and the watchdog's tick
+while the profile is off, and undone again by them (cpu.game.domain.leftovers is its format). No I/O: the file
+is the profile's leftovers port.
 
-GameProfile.off undoes game.state's records and the kept ones through undo_entries, then writes the file
+GameProfileSteps.off undoes game.state's records and the kept ones through undo_entries, then writes the file
 again with keep; retry_kept is the same for an 'off' with no game.state and for the tick with the profile off.
 """
 
@@ -14,7 +15,6 @@ import dataclasses
 import os
 from typing import TYPE_CHECKING
 
-from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.domain.units import LoadState
 from cpu.game.domain import Manager, PropUndo, Record, show_values, state_undo, transient_unit
 from cpu.game.domain.leftovers import (
@@ -32,7 +32,7 @@ from cpu.game.domain.leftovers import (
 )
 
 if TYPE_CHECKING:
-    from cpu.game.adapters.profile import GameProfile
+    from cpu.game.application.profile import GameProfileSteps
 
 
 @dataclasses.dataclass
@@ -52,14 +52,14 @@ class Reloads:
             self.users.setdefault(uid, user)
 
 
-def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
+def read_kept(profile: GameProfileSteps, *, say: bool) -> list[Entry] | None:
     """game.leftovers' entries ([] when it is not there); None for one this CST does not read (a newer
     format, or a first line that names no version) or cannot read (a folder in its place, EIO, a denied
     read), which is left alone (say: in one warning line). It is read byte for byte, as keep writes it
     back: a file there that cannot be read is never taken for a missing one."""
     path = profile.paths.leftovers
     try:
-        text = LocalFileSystemAdapter().read_existing_text(path)
+        text = profile.ports.leftovers.read()
     except OSError as e:
         if say:
             profile.log(4, f"{path}: cannot be read ({e.strerror}): left alone, neither undone nor removed")
@@ -75,14 +75,14 @@ def read_kept(profile: GameProfile, *, say: bool) -> list[Entry] | None:
 
 
 def undo_entries(
-    profile: GameProfile, entries: Sequence[Entry], reload: Reloads, *, say: bool
+    profile: GameProfileSteps, entries: Sequence[Entry], reload: Reloads, *, say: bool
 ) -> tuple[list[Entry], set[Record]]:
     """Undo the entries, the last first (a property touched twice ends at its oldest value), each record of
     the user manager for the user its entry names; the ones whose undo failed, in their order, each with the
     uid it was for (keep says them), and the records dropped undone (no_user_manager). An entry whose uid no
     account has now is never undone in another user's manager: it is done when that uid's user manager is
     gone, else kept. An entry of a uid whose user manager is not running is done: what it held went with it.
-    say: see GameProfile.undo_record ('off' says it; the tick does not). Each entry starts from the user acted
+    say: see GameProfileSteps.undo_record ('off' says it; the tick does not). Each entry starts from the user acted
     for when the pass began (an entry of no user's is that user's, whatever entry of a uid came before it), and
     the profile acts for that user again afterwards."""
     failed: list[Entry] = []
@@ -115,10 +115,10 @@ def undo_entries(
     return failed, dropped
 
 
-def no_user_manager(profile: GameProfile, rec: Record, *, say: bool) -> bool:
+def no_user_manager(profile: GameProfileSteps, rec: Record, *, say: bool) -> bool:
     """The record is a new runtime override of the user manager while TARGET_USER names no account (the entry
     names no user): no user's runtime folder holds it and no user manager can be reloaded, so it is dropped,
-    never undone (say: see GameProfile.undo_record)."""
+    never undone (say: see GameProfileSteps.undo_record)."""
     return _new_override(rec, "usr") and not profile.uid(say=say)
 
 
@@ -128,7 +128,7 @@ def _new_override(rec: Record, mgr: Manager) -> bool:
     return isinstance(undo, PropUndo) and undo.mgr == mgr and undo.mode == "new"
 
 
-def user_side(profile: GameProfile, uid: str | None, *, say: bool) -> UserSide:
+def user_side(profile: GameProfileSteps, uid: str | None, *, say: bool) -> UserSide:
     """Where game.state's records of the user manager are undone, for the uid it records (None: none, they are
     TARGET_USER's, as before): in that uid's manager when it runs and an account has the uid (the profile acts
     for that user from now on: act_for, say its line); GONE when that manager is not running (no runtime folder:
@@ -141,12 +141,12 @@ def user_side(profile: GameProfile, uid: str | None, *, say: bool) -> UserSide:
     return UserSide.OWN if profile.act_for(uid, say=say) else UserSide.ORPHAN
 
 
-def _write_leftovers(profile: GameProfile, entries: Sequence[Entry]) -> None:
+def _write_leftovers(profile: GameProfileSteps, entries: Sequence[Entry]) -> None:
     """game.leftovers holds the entries (an OSError when it cannot be written: the caller decides)."""
-    write_atomic(profile.paths.leftovers, leftovers_text(entries), mode=0o644, durable=False, relabel=False)
+    profile.ports.leftovers.write(leftovers_text(entries))
 
 
-def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | None, *, off: bool = True) -> int:
+def keep(profile: GameProfileSteps, failed: Sequence[Entry], kept: Sequence[Entry] | None, *, off: bool = True) -> int:
     """game.leftovers holds the failed entries afterwards (removed when there are none); how many of them it
     holds, each said kept in a warning line, after the write worked (off: 'off' says them; the tick does not).
     kept: the entries the file held before (None: a file this CST does not read, left as it is). When the file
@@ -157,7 +157,7 @@ def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | 
     path = profile.paths.leftovers
     if kept is not None and not failed:
         with contextlib.suppress(FileNotFoundError):
-            os.unlink(path)
+            profile.ports.leftovers.remove()
         return 0
     acting = profile.uid() or None  # what an entry of no user is for (entry_key)
     held: set[Entry] = set()
@@ -170,7 +170,7 @@ def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | 
                 held = {entry_key(e, acting) for e in kept}
             else:
                 with contextlib.suppress(OSError):
-                    os.unlink(path)
+                    profile.ports.leftovers.remove()
         else:
             held = {entry_key(e, acting) for e in failed}
     who = "off: " if off else ""
@@ -186,12 +186,12 @@ def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | 
     return sum(1 for e in failed if entry_key(e, acting) in held)
 
 
-def user_manager_gone(profile: GameProfile, uid: str) -> bool:
+def user_manager_gone(profile: GameProfileSteps, uid: str) -> bool:
     """The user manager of that uid is gone with its runtime overrides: its runtime folder is (a logout)."""
-    return not os.path.isdir(os.path.join(profile.paths.run_user, uid, "systemd"))
+    return not profile.ports.units.is_dir(os.path.join(profile.paths.run_user, uid, "systemd"))
 
 
-def unit_gone(profile: GameProfile, mgr: Manager, unit: str) -> bool:
+def unit_gone(profile: GameProfileSteps, mgr: Manager, unit: str) -> bool:
     """The unit of a set-property that failed in 'off' is gone, with its runtime overrides, so nothing is
     left to undo: the user manager's runtime folder is gone (a logout), or a transient unit (its overrides
     live beside it) is not loaded. A fixed unit's override outlives the unit: it is never gone."""
@@ -203,7 +203,7 @@ def unit_gone(profile: GameProfile, mgr: Manager, unit: str) -> bool:
     return res.returncode == 0 and show_values(res.stdout).get("LoadState", LoadState.LOADED) != LoadState.LOADED
 
 
-def _name_for(profile: GameProfile, uid: str) -> str:
+def _name_for(profile: GameProfileSteps, uid: str) -> str:
     """The name of the user with that uid that a user manager's call goes to ("" when no account has it),
     leaving the user the profile acts for as it was."""
     settings = profile.s
@@ -213,7 +213,9 @@ def _name_for(profile: GameProfile, uid: str) -> str:
         profile.s = settings
 
 
-def _premark(profile: GameProfile, kept: Sequence[Entry], todo: Sequence[Entry], *, dropins: bool, say: bool) -> None:
+def _premark(
+    profile: GameProfileSteps, kept: Sequence[Entry], todo: Sequence[Entry], *, dropins: bool, say: bool
+) -> None:
     """Before an undo pass removes a drop-in or a runtime override: game.leftovers holds the kept entries and a
     reload due in each manager it may remove a file in (the system manager for the drop-ins and its new
     overrides, the user manager of each uid with a new override to undo, when that manager runs), so a pass
@@ -241,7 +243,7 @@ def _premark(profile: GameProfile, kept: Sequence[Entry], todo: Sequence[Entry],
         _write_leftovers(profile, [*kept, *marks])
 
 
-def _run_reloads(profile: GameProfile, reload: Reloads, due: Sequence[Entry]) -> tuple[list[Entry], set[Entry]]:
+def _run_reloads(profile: GameProfileSteps, reload: Reloads, due: Sequence[Entry]) -> tuple[list[Entry], set[Entry]]:
     """daemon-reload each manager an undo removed a file in (reload) and each one a kept entry says is due
     (due): the system manager, then each user's; the reloads that failed, as reload-due entries, and the
     reload-due entries of the user managers that are not running (they need none: their entries go). One
@@ -267,7 +269,7 @@ def _run_reloads(profile: GameProfile, reload: Reloads, due: Sequence[Entry]) ->
 
 
 def undo_pass(
-    profile: GameProfile, entries: Sequence[Entry], kept: Sequence[Entry] | None, *, say: bool
+    profile: GameProfileSteps, entries: Sequence[Entry], kept: Sequence[Entry] | None, *, say: bool
 ) -> tuple[list[Entry], set[Record], set[Entry]]:
     """One pass of 'off' and of the retry: the reloads due go to game.leftovers first (_premark, when it can
     be read: kept not None), then the drop-ins are removed, the entries undone (undo_entries, which skips
@@ -285,7 +287,7 @@ def undo_pass(
     return failed + not_run, dropped, skipped
 
 
-def retry_kept(profile: GameProfile, *, say: bool) -> None:
+def retry_kept(profile: GameProfileSteps, *, say: bool) -> None:
     """With the profile off ('off' with no game.state, say: each one that fails again is said; the tick, quietly):
     leftover drop-ins go, and game.leftovers' entries are undone again, each kept record of the user manager in
     the manager of the user it names: one notice line per entry done now, then the file holds the rest (removed
