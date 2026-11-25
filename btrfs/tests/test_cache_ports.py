@@ -51,6 +51,9 @@ from btrfs.cache.ports import (
 )
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from btrfs.tests.fakes import (
+    MOUNT_DENIED,
+    RELOAD_FAILED,
+    UMOUNT_BUSY,
     CacheTestCtx,
     CacheWorld,
     FakeCacheAccounts,
@@ -68,9 +71,6 @@ USER = CacheMountUser("alice", 1000, 1000, "/var/home/alice")
 CACHE, SCRATCHPAD = build_user_bindings(USER)
 NAS_LINE = "nas:/share /var/mnt/nas nfs defaults,nofail 0 0\n"
 NOT_UTF8 = b"# caf\xe9 written by an old tool\n".decode("utf-8", "surrogateescape")
-BUSY = OSError(errno.EBUSY, "umount: target is busy")  # FakeMountRunner's answers, as the fakes word them
-DENIED = OSError(errno.EPERM, "mount: permission denied")
-RELOAD_FAILED = OSError(errno.EIO, "Failed to reload daemon")
 MOUNT_UNITS_SHOW = ["systemctl", "show", "--state=loaded", *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)), "*.mount"]
 
 
@@ -182,10 +182,10 @@ class FakeSide:
         self.world.findmnt_bad_json = True
 
     def mount_fails(self, binding: CacheMountBinding) -> None:
-        self.world.fail(f"mount --bind {binding.source} {binding.target}", DENIED)
+        self.world.fail(f"mount --bind {binding.source} {binding.target}", MOUNT_DENIED)
 
     def umount_fails(self, binding: CacheMountBinding) -> None:
-        self.world.fail(f"umount {binding.target}", BUSY)
+        self.world.fail(f"umount {binding.target}", UMOUNT_BUSY)
 
     def reload_fails(self) -> None:
         self.world.fail("systemctl daemon-reload", RELOAD_FAILED)

@@ -1383,6 +1383,17 @@ def mount_units_listing(loaded: str | None, *, need_reload: bool, mounted: Seque
     return "\n".join(blocks)
 
 
+# What FakeMountRunner answers for a refused mount --bind, a busy umount and a failed daemon-reload, and the
+# same answers as the errors a CacheWorld point fails with (the cache fakes word "WHAT failed: REASON" from the
+# error's text): the contract, the fault matrix and the machine expect the same ERROR lines.
+MOUNT_DENIED_TEXT: Final = "mount: permission denied"
+UMOUNT_BUSY_TEXT: Final = "umount: target is busy"
+RELOAD_FAILED_TEXT: Final = "Failed to reload daemon"
+MOUNT_DENIED: Final = OSError(errno.EPERM, MOUNT_DENIED_TEXT)
+UMOUNT_BUSY: Final = OSError(errno.EBUSY, UMOUNT_BUSY_TEXT)
+RELOAD_FAILED: Final = OSError(errno.EIO, RELOAD_FAILED_TEXT)
+
+
 class FakeMountRunner:
     """findmnt, mount and umount over a MountTable, and systemctl over an FstabSystemdView of the test root's
     /etc/fstab. findmnt answers `-J -l -o FINDMNT_COLUMNS` as the real one does: a bind mount's source is
@@ -1454,7 +1465,7 @@ class FakeMountRunner:
     def _bind(self, src_path: str, tgt_path: str) -> CommandResult:
         self.fstab_at_mount.append(self._fstab_now())
         if tgt_path.removeprefix(self.root) in self.mount_fails:
-            return CommandResult(32, "", "mount: permission denied")
+            return CommandResult(32, "", MOUNT_DENIED_TEXT)
         self.table.bind(src_path.removeprefix(self.root), tgt_path.removeprefix(self.root))
         return CommandResult(0, "", "")
 
@@ -1462,7 +1473,7 @@ class FakeMountRunner:
         self.fstab_at_umount.append(self._fstab_now())
         logical_tgt = tgt_path.removeprefix(self.root)
         if logical_tgt in self.umount_fails:
-            return CommandResult(32, "", "umount: target is busy")
+            return CommandResult(32, "", UMOUNT_BUSY_TEXT)
         self.table.unbind(logical_tgt)
         return CommandResult(0, "", "")
 
@@ -1504,7 +1515,7 @@ class FakeMountRunner:
         if self.reload_fails:
             if self.on_failed_reload is not None:
                 self.on_failed_reload()
-            return CommandResult(1, "", "Failed to reload daemon")
+            return CommandResult(1, "", RELOAD_FAILED_TEXT)
         if self.before_reload is not None:
             self.before_reload()
         self.systemd.reloaded(*self._fstab_file())

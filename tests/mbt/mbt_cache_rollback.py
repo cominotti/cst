@@ -41,7 +41,6 @@ a bind not mounted again).
 """
 
 from enum import StrEnum
-import errno
 from typing import Final
 import unittest
 
@@ -57,7 +56,7 @@ from btrfs.cache.domain import (
     parse_cache_mount_args,
     parse_managed_fstab_entries,
 )
-from btrfs.tests.fakes import CacheWorld
+from btrfs.tests.fakes import MOUNT_DENIED, RELOAD_FAILED, UMOUNT_BUSY, CacheWorld
 from tests.fault_injection import Killed
 from tests.mbt import profiles
 
@@ -123,11 +122,6 @@ DETACH_FAULTS: Final = (
 
 type Mounts = list[tuple[str, str, str]]
 
-# What a failed mount --bind or daemon-reload answers (the error's text is the reason the line gives).
-MOUNT_FAILED: Final = OSError(errno.EPERM, "mount: permission denied")
-UMOUNT_FAILED: Final = OSError(errno.EBUSY, "umount: target is busy")
-RELOAD_FAILED: Final = OSError(errno.EIO, "Failed to reload daemon")
-
 
 def _kill() -> None:
     raise Killed
@@ -176,13 +170,13 @@ class CacheMachine(RuleBasedStateMachine):
         kind = UMOUNT_FAULT.get(fault)
         if kind is not None:
             point = f"umount /var/home/{user}/{REL_FOR_KIND[kind]}"
-            self.world.fail(point, UMOUNT_FAILED)
+            self.world.fail(point, UMOUNT_BUSY)
             return point
         kind = MOUNT_FAULT.get(fault)
         if kind is None:
             return ""
         point = f"mount --bind {BASE_FOR_KIND[kind]}/{user} /var/home/{user}/{REL_FOR_KIND[kind]}"
-        self.world.fail(point, MOUNT_FAILED)
+        self.world.fail(point, MOUNT_DENIED)
         return point
 
     def _step(self, action: str, user: str, selection: CacheSelection, fault: CacheStepFault) -> None:
