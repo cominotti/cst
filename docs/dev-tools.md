@@ -1097,7 +1097,10 @@ npm, java (17 or later) and curl.
   finds them and fetches nothing. A tool already there is used only when the
   stamp beside it records the hash that was checked.
 
-About 240 MB in all, fetched once. quint, Apalache and TLC run from a new
+About 240 MB in all, fetched once. Each download and the `npm ci` run under
+a lock file beside it (`quint-home/.FOLDER.lock`, `.npm-HASH.lock`, flock(2),
+up to 600 s): runs that start together on an empty cache share one download,
+and a run that waited uses the copy the other one finished. quint, Apalache and TLC run from a new
 work folder under `~/.cache/cst-quint/work` (they write `_apalache-out/` in
 the folder they run in, and quint's TLC translation goes to `TMPDIR`, which
 is set to it), removed at the end. Each `quint verify` (the TLC checks and
