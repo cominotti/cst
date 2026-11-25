@@ -286,9 +286,7 @@ def postponed_newer(rec: object, path: str) -> str | None:
 def postponed_time(last: object) -> str | None:
     """A postponed record's "last" as status and cst doctor show it ("%Y-%m-%d %H:%M"), or None when it
     is no integer (a bool is none) or a time the C library cannot show (the outcome record's guard)."""
-    if type(last) is not int or not _is_local_time(last):
-        return None
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(last))
+    return _local_time(last) if type(last) is int else None
 
 
 # ---- the outcome record: why no migration is scheduled -----------------------------------------
@@ -343,15 +341,20 @@ def outcome_unreadable(path: str) -> OutcomeRead:
     return OutcomeRead(problem=f"cannot read {path}")
 
 
+def _local_time(at: int) -> str | None:
+    """at (epoch seconds) as status and cst doctor show it ("%Y-%m-%d %H:%M"), or None when the C library
+    cannot show it: time.localtime raises past its range, and time.strftime raises on some times
+    localtime accepts (a year past what a C int holds)."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+    except OverflowError, OSError, ValueError:
+        return None
+
+
 def _is_local_time(at: int) -> bool:
     """at (epoch seconds) is a time the C library can show: the readers' own call (status's outcome_line,
-    cst doctor's check) works. time.localtime raises past its range, and time.strftime raises on some
-    times localtime accepts (a year past what a C int holds)."""
-    try:
-        time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
-    except OverflowError, OSError, ValueError:
-        return False
-    return True
+    cst doctor's check) works."""
+    return _local_time(at) is not None
 
 
 def parse_outcome(text: str | None, path: str) -> OutcomeRead:
