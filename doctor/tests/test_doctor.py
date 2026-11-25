@@ -4973,6 +4973,10 @@ class DoctorDomainTest(unittest.TestCase):
             with self.subTest(value=bad[:8]):
                 self.assertIsNone(doc_domain.parse_cpu_stat_seconds(f"usage_usec {bad}\n"))
                 self.assertEqual(doc_domain.parse_cpu_stat_seconds(f"usage_usec {bad}\nusage_usec 1000000\n"), 1.0)
+        # Within int()'s limit but too large for a float (about 308 digits): no number either, not the
+        # OverflowError of the division out of cst doctor's cpu check.
+        self.assertIsNone(doc_domain.parse_cpu_stat_seconds("usage_usec " + "9" * 400 + "\n"))
+        self.assertEqual(doc_domain.parse_cpu_stat_seconds("usage_usec " + "9" * 400 + "\nusage_usec 1000000\n"), 1.0)
         feats, err = doc_domain.parse_offered_features_xml(CAPS_QEMU11)
         self.assertEqual(err, "")
         self.assertIsNotNone(feats)
