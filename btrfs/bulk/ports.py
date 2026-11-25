@@ -247,6 +247,10 @@ class HostPort(Protocol):
 
     def snapshot_guard(self) -> dict[str, int]: ...
 
+    def snapshot_guard_invalid(self) -> tuple[tuple[str, str], ...]:
+        """The space guard settings btrfs-snapshot's hourly run stops at: (setting, value) pairs."""
+        ...
+
     def alert(self, title: str, body: str) -> None: ...
 
     def now(self) -> float:

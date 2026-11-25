@@ -2709,12 +2709,20 @@ How it works, as a sequence:
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
 `RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`. Each limit is read as
 bash arithmetic reads it (64-bit: a number too large wraps around; `010` is
-8, `2#1010` is 10; blanks are spaces, tabs and newlines); a value bash cannot compute (`250GiB`, digits of
-another script) holds nothing.
+8, `2#1010` is 10; blanks are spaces, tabs and newlines). A value bash cannot
+compute (`250GiB`, `abc`, `1 x`, digits of another script, a no-break space)
+**stops the hourly run**, with exit 1 and a journal line naming the setting
+and its value (`SKIP_AT_OR_BELOW_GIB='250GiB' in /etc/btrfs-setup/snapshots.conf:
+not a number of GiB the space guard can hold at: no snapshot until it is
+fixed`), whether this hour's check would read that setting or not: no
+snapshot, no prune and no purge until it is fixed, never a run with no limit.
+The health check's `no successful hourly run for over 3 hours` alert follows.
 
 `cst btrfs bulk steam apply --copy` respects them: a real copy of a game
 needs its size plus the emergency limit plus 20 GiB free, and `plan` warns
-when the copies would pause the snapshots
+when the copies would pause the snapshots, and names a limit the hourly run
+stops at (`NOTE: btrfs-snapshot's hourly run stops at RESUME_ABOVE_GIB='abc'
+in snapshots.conf (no number)`; it then says nothing of where they resume)
 ([section 3](#steam-move-your-games-into-the-bulk-library)).
 
 Deleting snapshots frees space only for data that no other snapshot and no

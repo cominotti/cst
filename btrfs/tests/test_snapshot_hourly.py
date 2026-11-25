@@ -820,14 +820,11 @@ class SpaceGuardTest(Base):
                 self.assertIn(log(4, f"Snapshots paused: low space: {body}"), self.lines(r.stdout))
 
     def test_the_paused_alert_reads_the_resume_limit_as_the_guard_does(self) -> None:
-        # While SKIP holds, the guard never reads RESUME_ABOVE_GIB: one bash cannot compare is no
-        # error then (the run, its alert and its prune go on) and counts as no limit. A name is
-        # named as written: once SKIP no longer holds, the run stops at it (exit 1), so no number is
-        # where snapshots resume. An expression is its value.
+        # An expression is its value. (A RESUME_ABOVE_GIB bash cannot compute, abc or 1.5, no longer lets
+        # the run go on with no limit while SKIP holds: test_an_invalid_guard_setting_stops_the_hourly_run.)
         for resume, free, paused, said in (
-            ("abc", 200, False, "abc"),
-            ("1.5", 200, False, 250),
             ("2*150", 280, True, 300),
+            ("-5", 200, False, 250),  # a negative limit never holds them
         ):
             with self.subTest(resume=resume):
                 shutil.rmtree(self.state, ignore_errors=True)
@@ -843,6 +840,37 @@ class SpaceGuardTest(Base):
                     [self.alert("normal", "Snapshots paused: low space", self.paused_body(free, said))],
                 )
                 self.assertEqual(self.core_calls(), [self.prune_call()])
+
+    def test_an_invalid_guard_setting_stops_the_hourly_run(self) -> None:
+        # A space guard setting bash arithmetic cannot compute stops the run before it looks at the free
+        # space, naming the setting and its value: no snapshot, no prune, no purge and no paused mark. Before,
+        # 250GiB was bash's error line and a false test, so the run went on with no limit; abc stopped it
+        # only where the comparison read it.
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        for key in ("SKIP_AT_OR_BELOW_GIB", "RESUME_ABOVE_GIB", "EMERGENCY_AT_OR_BELOW_GIB"):
+            for value in ("250GiB", "abc", "1 x", "x y]", "~5", "1<<3", "\N{NO-BREAK SPACE}250"):
+                for free, paused in ((200, False), (300, False), (300, True)):
+                    with self.subTest(key=key, value=value, free=free, paused=paused):
+                        shutil.rmtree(self.state, ignore_errors=True)
+                        self.conf(**{key: value})
+                        if paused:
+                            self.write(self.state_file("paused"), "")
+                        self.machine(free=free * GIB)
+                        self.forget_calls()
+                        r = self.run_prog("hourly")
+                        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                        self.assertIn(
+                            log(
+                                3,
+                                f"{key}={value!r} in {conf}: not a number of GiB the space guard can hold at: no "
+                                "snapshot until it is fixed",
+                            ),
+                            self.lines(r.stdout),
+                        )
+                        self.assertEqual(self.core_calls(), [])
+                        self.assertEqual(os.path.exists(self.state_file("paused")), paused)
+                        self.assertFalse(os.path.exists(self.state_file("emergency")))
+                        self.assertEqual(self.notified(), [])
 
     def test_emergency_purge(self) -> None:
         self.machine(free=[150 * GIB, 160 * GIB])

@@ -847,6 +847,26 @@ class SteamTest(tb.BulkBase):
                     f.write(text)
                 self.assertEqual(self.host.snapshot_guard(), want)
 
+    def test_snapshot_guard_invalid_names_what_the_hourly_run_stops_at(self) -> None:
+        # The pairs btrfs-snapshot's hourly run stops at (guard_number gives no number), as it reads them.
+        three_hundred = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
+        conf = os.path.join(self.paths.etc, "snapshots.conf")
+        for text, want in (
+            ("", ()),
+            (f"SKIP_AT_OR_BELOW_GIB={three_hundred}\n", (("SKIP_AT_OR_BELOW_GIB", three_hundred),)),
+            ("EMERGENCY_AT_OR_BELOW_GIB=-5\nRESUME_ABOVE_GIB=abc\n", (("RESUME_ABOVE_GIB", "abc"),)),
+            ("SKIP_AT_OR_BELOW_GIB=010\nRESUME_ABOVE_GIB='2*30'\nEMERGENCY_AT_OR_BELOW_GIB=\n", ()),
+            ("SKIP_AT_OR_BELOW_GIB=1 2\n", ()),  # a problem line sets nothing: the default
+            (
+                "EMERGENCY_AT_OR_BELOW_GIB='250GiB'\nSKIP_AT_OR_BELOW_GIB='250\N{NO-BREAK SPACE}'\n",
+                (("SKIP_AT_OR_BELOW_GIB", "250\N{NO-BREAK SPACE}"), ("EMERGENCY_AT_OR_BELOW_GIB", "250GiB")),
+            ),
+        ):
+            with self.subTest(text=text):
+                with open(conf, "w", encoding="utf-8") as f:
+                    f.write(text)
+                self.assertEqual(self.host.snapshot_guard_invalid(), want)
+
     def test_snapshot_guard_agrees_with_btrfs_snapshot_s_hourly_test(self) -> None:
         # For every value, bulk's limit is crossed exactly where btrfs-snapshot's hourly run, which compares
         # (( free <= KEY * GIB )) through guard_number (checked against bash in test_snapshot_settings), acts.
@@ -928,6 +948,26 @@ class SteamTest(tb.BulkBase):
                 self.splan(copy=True)
                 self.assertIn("NOTE: about 200.0 GiB free after all copies", self.out)
                 self.assertIn(f"and resume above {resume} (once old snapshots expire)", self.out)
+
+    def test_the_pause_note_names_a_guard_setting_the_hourly_run_stops_at(self) -> None:
+        # RESUME_ABOVE_GIB=abc stops btrfs-snapshot's hourly run: no /home snapshot until it is fixed. Before,
+        # the NOTE said "resume above 250.0 GiB" (SKIP's value) and named no setting.
+        self.make_nocow(*self.NOCOW_PARTS)
+        self.fake(self.machine, "free_bytes", lambda path: 200 * bulk_domain.BIG)
+        with open(os.path.join(self.paths.etc, "snapshots.conf"), "w", encoding="utf-8") as f:
+            f.write("SKIP_AT_OR_BELOW_GIB=250\nRESUME_ABOVE_GIB=abc\n")
+        self.splan(copy=True)
+        self.assertIn("NOTE: about 200.0 GiB free after all copies", self.out)
+        self.assertIn(
+            "NOTE: btrfs-snapshot's hourly run stops at RESUME_ABOVE_GIB='abc' in snapshots.conf (no number): no "
+            "/home snapshots until it is fixed",
+            self.out,
+        )
+        self.assertNotIn("resume above", self.out)
+        # Plenty of space: the setting is still named.
+        self.fake(self.machine, "free_bytes", lambda path: 10**15)
+        self.splan(copy=True)
+        self.assertIn("hourly run stops at RESUME_ABOVE_GIB='abc'", self.out)
 
     def test_failed_sync_keeps_the_original(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)

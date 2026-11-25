@@ -9475,6 +9475,84 @@ echo test_110-ok
         self.assertIn("test_110-ok", out)
 
     @e2e_tags(E2ETag.BTRFS)
+    def test_217_an_invalid_space_guard_setting_stops_the_hourly_run_naming_it(self) -> None:
+        """btrfs-snapshot and its runtime as install writes them, run as real root with a fake btrfs (300
+        GiB free) and a fake btrfs-snapshot-core that writes down its arguments. SKIP_AT_OR_BELOW_GIB='250GiB'
+        in snapshots.conf, the hourly run as a systemd unit: the unit fails (Result exit-code), its journal
+        names the setting and its value, and the core is never asked for a snapshot. Before, bash's error
+        line and a false test: the snapshot was made with no limit. RESUME_ABOVE_GIB=abc, not paused, from
+        a shell: the same stop. With valid values the same run makes its snapshot (cannot bite otherwise).
+        A fake cannot show that the installed front hands hourly to the runtime under a real unit and that
+        the unit fails, which is what the health check and cst doctor see."""
+        d = "/var/tmp/e2e-snapshot-guard"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        files = "btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot"
+        core = "/usr/local/sbin/btrfs-snapshot-core"
+        found = exec_bash(self.SYSTEMD_CONTAINER, f"[ ! -e {core} ]", check=False)
+        self.assertEqual(found.returncode, 0, f"a btrfs-snapshot-core is already installed ({core}) {found.stderr}")
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"{inst} remove {files} >/dev/null 2>&1; rm -f {core}; systemctl reset-failed e2e-217-hourly.service; "
+            f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock; "
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_217 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf} core={core}
+S=/usr/local/sbin/btrfs-snapshot
+rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock
+install -d -m 0755 "$d" "$d/bin" /etc/btrfs-setup
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+{inst} install {files} >/dev/null
+# The fake core writes down what it was asked for, then succeeds.
+printf '%s\n' '#!/bin/bash' "echo \"\$*\" >>$d/core-args" 'exit 0' >"$core"
+chmod 0755 "$core"
+# The fake btrfs: 300 GiB free, above every default limit.
+printf '%s\n' '#!/bin/bash' 'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     322122547200      (min: 322122547200)"; fi' 'exit 0' \
+    >"$d/bin/btrfs"
+chmod 0755 "$d/bin/btrfs"
+P="$d/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+base() {{ printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" "$@" >"$conf"; }}
+
+# 1. As a unit, SKIP_AT_OR_BELOW_GIB='250GiB': the unit fails and its journal names the setting.
+base "SKIP_AT_OR_BELOW_GIB='250GiB'"
+rc=0; systemd-run --quiet --wait --unit=e2e-217-hourly -p Environment=PATH="$P" "$S" hourly || rc=$?
+journalctl --sync
+journalctl -q --no-pager -o cat -u e2e-217-hourly.service >"$d/unit.log" || true
+cat "$d/unit.log"
+[ "$rc" != 0 ]
+[ "$(systemctl show -p Result --value e2e-217-hourly.service)" = exit-code ]
+systemctl reset-failed e2e-217-hourly.service
+grep -qF "SKIP_AT_OR_BELOW_GIB='250GiB' in $conf: not a number of GiB the space guard can hold at" "$d/unit.log"
+if grep -q '^snapshot' "$d/core-args" 2>/dev/null; then exit 1; fi
+
+# 2. From a shell, RESUME_ABOVE_GIB=abc and not paused: the same stop.
+base "RESUME_ABOVE_GIB=abc"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: RESUME_ABOVE_GIB='abc' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+if grep -q '^snapshot' "$d/core-args" 2>/dev/null; then exit 1; fi
+[ ! -e /var/lib/btrfs-snapshot/paused ]
+
+# 3. Valid values: the same run makes its snapshot.
+base "SKIP_AT_OR_BELOW_GIB=250" "RESUME_ABOVE_GIB=270"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out" "$d/core-args"
+[ "$rc" = 0 ]
+grep -q '^snapshot' "$d/core-args"
+echo test_217-ok
+""",
+        ).stdout
+        self.assertIn("test_217-ok", out)
+
+    @e2e_tags(E2ETag.BTRFS)
     def test_111_snapshots_status_reads_snapshots_conf_through_settings_lines(self) -> None:
         """cst btrfs snapshots status as root on the container's root, with a snapshots.conf that has
         a command line and a $(...) value next to plain settings: it reads the file through
