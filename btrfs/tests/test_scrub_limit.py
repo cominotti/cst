@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Sequence
-import contextlib
-import errno
+from collections.abc import Sequence
 import hashlib
 import io
 import os
 import pwd
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -19,13 +16,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
-from btrfs.scrub_limit import adapters as scrub_adapters
-from btrfs.scrub_limit.adapters import (
-    ScrubPaths,
-    scrub_limit_apply,
-    scrub_limit_plan,
-    scrub_limit_status,
-)
+from btrfs.scrub_limit.adapters import ScrubDropinInstaller, ScrubPaths, ScrubSystemd
 from btrfs.scrub_limit.cli import ScrubCliDeps, run_scrub_limit_cli
 from btrfs.scrub_limit.domain import (
     DEFAULT_SCRUB_LIMIT,
@@ -39,8 +30,10 @@ from btrfs.scrub_limit.domain import (
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
-from btrfs.tests.fakes import RecordingInstallerRunner, ScrubFakeRunner, core_text
+from btrfs.scrub_limit.wiring import build_scrub_limit, scrub_limit_apply, scrub_limit_plan, scrub_limit_status
+from btrfs.tests.fakes import RecordingInstallerRunner, ScrubFakeRunner, ScrubWorld, core_text
 from cst_core.adapters.install import JsonInstallRecord
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.domain.record import (
@@ -54,22 +47,6 @@ from cst_core.domain.record import (
 from cst_core.ports import CommandFault, CommandResult
 from tests.fault_injection import Killed, no_space
 from tests.repo_files import REPO
-
-
-@contextlib.contextmanager
-def _folder_fsync_fails(*, times: int) -> Generator[None]:
-    """os.fsync of a folder fails with EIO the first times calls (write_atomic's, after its rename)."""
-    real = os.fsync
-    left = [times]
-
-    def fsync(fd: int) -> None:
-        if left[0] and stat.S_ISDIR(os.fstat(fd).st_mode):
-            left[0] -= 1
-            raise OSError(errno.EIO, os.strerror(errno.EIO))
-        real(fd)
-
-    with mock.patch.object(os, "fsync", fsync):
-        yield
 
 
 class _KilledAfterInstaller:
@@ -450,62 +427,6 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         self.assertEqual(rec.files[self.dropin].component, "btrfs:core")
         self.assertEqual(self._core_state(record), "done")
 
-    def test_a_full_disk_at_a_new_snapshots_conf_is_an_error_line_with_nothing_written(self) -> None:
-        for broken in ("write_atomic", "ensure_dir"):
-            with self.subTest(broken=broken):
-                runner = ScrubFakeRunner()
-                with mock.patch.object(scrub_adapters, broken, side_effect=no_space()):
-                    rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
-                self.assertEqual((rc, lines), (1, [f"ERROR: cannot write {self.conf}: No space left on device"]))
-                self.assertFalse(os.path.exists(os.path.dirname(self.conf)))  # the folder this run made: gone
-                self.assertFalse(os.path.exists(self.dropin))
-                self.assertEqual(runner.calls, [])  # no installer, no daemon-reload
-
-    def test_a_full_disk_at_an_existing_snapshots_conf_leaves_it_as_it_was(self) -> None:
-        self._write(self.conf, "NAS_ENABLED=1\n")
-        runner = ScrubFakeRunner()
-        with mock.patch.object(scrub_adapters, "write_atomic", side_effect=no_space()):
-            rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
-        self.assertEqual((rc, lines), (1, [f"ERROR: cannot write {self.conf}: No space left on device"]))
-        self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
-        self.assertEqual(runner.calls, [])
-
-    def test_a_write_that_fails_after_its_rename_puts_snapshots_conf_back(self) -> None:
-        # write_atomic's fsync of the folder runs after its rename: the new text is in place when it fails.
-        for before in ("NAS_ENABLED=1\n", None):
-            with self.subTest(before=before):
-                if before is None:
-                    shutil.rmtree(os.path.dirname(self.conf), ignore_errors=True)
-                else:
-                    self._write(self.conf, before)
-                runner = ScrubFakeRunner()
-                with _folder_fsync_fails(times=1):
-                    rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
-                self.assertEqual(rc, 1)
-                self.assertEqual(
-                    lines,
-                    [f"ERROR: cannot write {self.conf}: Input/output error; previous configuration restored."],
-                )
-                self.assertEqual(self._read(self.conf), before)
-                if before is None:
-                    self.assertFalse(os.path.exists(os.path.dirname(self.conf)))  # the folder this run made
-                self.assertFalse(os.path.exists(self.dropin))
-                self.assertEqual(runner.calls, [])
-
-    def test_a_write_that_fails_after_its_rename_and_cannot_go_back_says_so(self) -> None:
-        self._write(self.conf, "NAS_ENABLED=1\n")
-        runner = ScrubFakeRunner()
-        with _folder_fsync_fails(times=2):  # the write and the rollback's
-            rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
-        self.assertEqual(rc, 1)
-        self.assertEqual(
-            lines,
-            [
-                f"ERROR: cannot write {self.conf}: Input/output error; ROLLBACK INCOMPLETE ({self.conf}: Input/output error)"
-            ],
-        )
-        self.assertEqual(runner.calls, [])
-
     def test_the_cli_says_a_full_disk_at_snapshots_conf_with_no_traceback(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         deps = ScrubCliDeps(
@@ -516,16 +437,15 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             ctx=_FakeCtx(container=False, root=True),
             runner=ScrubFakeRunner(),
         )
-        with (
-            mock.patch.object(scrub_adapters, "scrub_paths_for", return_value=self.paths),
-            mock.patch.object(scrub_adapters, "write_atomic", side_effect=no_space()),
-        ):
-            rc = run_scrub_limit_cli(["set", "500M"], deps=deps)
+        world = ScrubWorld(conf_path=self.conf, dropin_path=self.dropin)
+        world.fail("settings replace", no_space())
+        rc = run_scrub_limit_cli(["set", "500M"], deps=deps, build=world.build())
         said = out.getvalue() + err.getvalue()
         self.assertEqual(rc, 1)
         self.assertIn(f"ERROR: cannot write {self.conf}: No space left on device", said)
         self.assertNotIn("Traceback", said)
-        self.assertIsNone(self._read(self.conf))
+        self.assertIsNone(world.conf)
+        self.assertEqual(world.built_for, [False])  # set writes
 
     def _as_asked(self, limit: str | None) -> None:
         """snapshots.conf and the drop-in as set LIMIT (off: None) writes them, as a run killed before its
@@ -691,6 +611,17 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                     self.assertEqual(rc, 0, lines)
                     self.assertEqual(["systemctl", "daemon-reload"] in applied.calls, want is not None)
 
+    def test_with_no_runner_the_commands_run_through_a_subprocess_runner(self) -> None:
+        # What status, plan and set|off get when no runner is passed (the real command line's case): the
+        # installer and systemctl through a SubprocessCommandRunner, never None.
+        for read_only in (True, False):
+            with self.subTest(read_only=read_only):
+                service = build_scrub_limit(self.paths, None, read_only=read_only)
+                dropin, systemd = service.dropin, service.systemd
+                assert isinstance(dropin, ScrubDropinInstaller) and isinstance(systemd, ScrubSystemd)
+                self.assertIsInstance(dropin.runner, SubprocessCommandRunner)
+                self.assertIsInstance(systemd.runner, SubprocessCommandRunner)
+
     def test_status_says_systemd_has_not_loaded_the_drop_in(self) -> None:
         self._as_asked("500M")
         line = (
@@ -703,9 +634,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                     runner.fail_on = {"systemctl show"}
                 else:
                     runner.need_daemon_reload = answer
-                # The runner the command makes itself (no runner keyword: code without it fails by assertion).
-                with mock.patch.object(scrub_adapters, "SubprocessCommandRunner", return_value=runner):
-                    rc, lines = scrub_limit_status(self.paths)
+                rc, lines = scrub_limit_status(self.paths, runner=runner)
                 self.assertEqual(rc, 0, lines)
                 self.assertEqual(line in lines, shown, lines)
                 self.assertNotIn(["systemctl", "daemon-reload"], runner.calls)  # status changes nothing

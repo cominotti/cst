@@ -179,11 +179,15 @@ run (recovery), and at the end (the same command again converges).
 
 - Wrap each mutating call: subclass the real adapter and send each method
   through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
+  send each mutating method of an in-memory fake of a use case's ports
+  through it (`ScrubWorld` in `btrfs/tests/fakes.py`, which
+  `btrfs/tests/test_scrub_limit_faults.py` drives; a contract test runs
+  the same body on the fake and on the real adapter, so the fake cannot
+  drift: `btrfs/tests/test_scrub_limit_ports.py`),
   patch the names an adapter module calls (`ensure_dir`, `write_atomic`:
   `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
-  `os` as it is: `btrfs/tests/test_scrub_limit_faults.py`,
-  `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
+  `os` as it is: `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
   whose errors the code does not handle: a failure armed there does not
   fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
@@ -743,9 +747,10 @@ not derive from it.
   binds, a failed command leaves `/etc/fstab` and the mounts as they were,
   and the same command with no fault exits 0.
 - `mbt_scrub_rollback.py`: `cst btrfs scrub-limit` set and off from four
-  starting `snapshots.conf` files, through the unit tests' `SystemdModel`
-  (the installer through the real `InstallService`, and what systemd has
-  loaded), with the installer or the daemon-reload failing:
+  starting `snapshots.conf` files, over the in-memory fakes of its ports
+  (`ScrubWorld` in `btrfs/tests/fakes.py`: the drop-in through the real
+  `InstallService` in memory, and what systemd has loaded), with the
+  installer or the daemon-reload failing:
   `snapshots.conf` and the drop-in agree, a failed step leaves both files
   and their folders as they were, exit 0 means systemd loaded the limit,
   and btrfs:core's state never changes.
@@ -824,8 +829,8 @@ depend on `TMPDIR`. A machine over adapters that write through
 `write_atomic` fsyncs every file, many times slower on the btrfs home
 than on tmpfs (the pilot measured about 20 times; see
 [Test performance on a workstation](#test-performance-on-a-workstation)).
-The cache and scrub-limit machines write real files under a temporary
-folder; the bulk machine too, and it runs `cp` there. The iocost machine writes only io.cost.qos, its sysfs tree and
+The cache machine writes real files under a temporary
+folder (the scrub-limit machine runs over in-memory port fakes); the bulk machine too, and it runs `cp` there. The iocost machine writes only io.cost.qos, its sysfs tree and
 the managed-devices file there: btrfs:iocost's installed files and the
 install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
 does not cover how `LocalInstallTarget` writes them (modes, fsync,
