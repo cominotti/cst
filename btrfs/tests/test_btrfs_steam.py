@@ -1003,7 +1003,7 @@ class SteamTest(tb.BulkBase):
     # ---- interruptions ----
     def owners(self, name: str) -> list[object]:
         """Where the steps find NAME (a domain function: every module that imported it)."""
-        if name.startswith("u_"):
+        if name.startswith("u_") or name == "drop_steam_copies":
             return [self.user]
         if name in ("copy_bytes", "copy_reflink"):
             return [self.machine]
@@ -1179,6 +1179,64 @@ class SteamTest(tb.BulkBase):
         with open(self.S("common/dota 2 beta/game/dota/pak01_dir.vpk")) as f:
             self.assertEqual(f.read(), "late")
         self.assertNoLeftovers()
+
+    def test_a_cut_deletion_of_a_copy_during_an_undo_converges(self) -> None:
+        # The undo deletes the game's copy; a kill after its first file is deleted. The copy was
+        # renamed to its .bulk-drop name first: the next repair deletes the rest unchecked, where
+        # the partly deleted copy under its own name read as written to (NEEDS A LOOK).
+        self.write_late()
+        self.crash_os_in("drop_steam_copies", "unlink", 1)
+        self.assertEqual(self.journals(), ["journal-steam-570.json"])
+        self.assertTrue(self.journal("steam-570")["undo"])
+        self.assertEqual(self.run_out(bulk_items.recover, self.bulk), [], self.out)
+        self.assertIn("undid an interrupted move", self.out)
+        self.assertNotIn("NEEDS A LOOK", self.out)
+        self.assertInMain()
+        with open(self.S("common/dota 2 beta/game/dota/pak01_dir.vpk")) as f:
+            self.assertEqual(f.read(), "late")  # the late write kept
+        self.assertNoLeftovers()
+        self.fake(self.user, "u_steam_late", lambda j: False)
+        self.assertEqual(self.sapply(), 0, self.out)
+        self.assertMoved()
+
+    def put_marked(self) -> list[str]:
+        """What a cut u_drop of an older run leaves, with no journal: the game's copy and the
+        manifest's under their .bulk-drop names, in the target library."""
+        marked = [
+            self.D("common/dota 2 beta.bulk-new" + bulk_domain.DROP_MARK),
+            self.D("appmanifest_570.acf.bulk-new" + bulk_domain.DROP_MARK),
+        ]
+        self.put(os.path.join(marked[0], "game/dota/pak01_dir.vpk"), "half")
+        self.put(marked[1], "half")
+        return marked
+
+    def test_a_marked_copy_left_without_a_journal_is_deleted_by_the_next_move(self) -> None:
+        marked = self.put_marked()
+        self.assertEqual(self.sapply(), 0, self.out)
+        for p in marked:
+            self.assertFalse(os.path.lexists(p), p)
+        self.assertMoved()
+
+    def test_a_marked_copy_is_deleted_when_the_move_finishes(self) -> None:
+        # A marked copy (put there after the copies were made) when the move finishes: the
+        # finishing deletes it with the old copies, also when a kill cuts it and the repair goes on.
+        marked: list[str] = []
+
+        def make(real: Callable[[steam_domain.SteamJournal], bool]) -> Callable[[steam_domain.SteamJournal], bool]:
+            def late(j: steam_domain.SteamJournal) -> bool:
+                if not marked:
+                    marked.extend(self.put_marked())
+                return real(j)
+
+            return late
+
+        self.patch("u_steam_late", make)
+        self.crash_os_in("u_steam_finish", "unlink", 1)
+        self.assertEqual(self.journal("steam-570")["phase"], "finishing")
+        self.assertEqual(self.run_out(bulk_items.recover, self.bulk), [], self.out)
+        for p in marked:
+            self.assertFalse(os.path.lexists(p), p)
+        self.assertMoved()
 
     def test_writes_on_both_sides_keep_both(self) -> None:
         self.write_late(also_new=True)

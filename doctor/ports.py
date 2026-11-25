@@ -50,6 +50,11 @@ class DoctorHostPort(Protocol):
         """Open for reading as UTF-8 (undecodable bytes replaced)."""
         ...
 
+    def open_regular_text(self, path: ViewPath) -> TextIO:
+        """open_text for a regular file (through a link, what it leads to) only: anything else (a FIFO, a
+        device, a folder) raises OSError(EINVAL), and the open never waits (a FIFO's open would)."""
+        ...
+
     def open_bytes(self, path: ViewPath) -> BinaryIO:
         """Open for reading as bytes."""
         ...

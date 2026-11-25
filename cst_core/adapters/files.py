@@ -23,7 +23,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from typing import Literal, overload
+from typing import Literal, TextIO, overload
 
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, owned_file_state
@@ -191,6 +191,21 @@ def unit_file_state_at(
     return owned_file_state_at(path, wanted, is_ours, owner=owner)
 
 
+def open_regular_text(path: str, *, errors: str = "surrogateescape", newline: str | None = "") -> TextIO:
+    """path opened for reading as UTF-8 text if it is a regular file (after links), else OSError(EINVAL);
+    the open never waits (LocalFileSystemAdapter.read_existing_text's regular_only). errors and newline
+    are open()'s: by default byte-transparent, line ends kept; cst doctor asks for errors="replace" and
+    newline=None, as its plain open of a settings file reads."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
+        return os.fdopen(fd, encoding="utf-8", errors=errors, newline=newline)
+    except BaseException:
+        os.close(fd)  # fdopen did not take it
+        raise
+
+
 class LocalFileSystemAdapter:
     """FileSystemPort operating on local files with atomic rename and SELinux restorecon."""
 
@@ -237,26 +252,38 @@ class LocalFileSystemAdapter:
         can it tell a name in it that is not there (lexists False) from one it may not see."""
         return os.access(path, os.X_OK)
 
-    def read_text(self, path: str, default: str | None = None) -> str | None:
+    def read_text(self, path: str, default: str | None = None, *, regular_only: bool = False) -> str | None:
         """Read the file as UTF-8 text, returning default on OSError.
 
         Byte-transparent, like bash's `read -r` on the shared files (fstab,
         crypttab): a byte that is not UTF-8 comes back as itself through
         write_atomic (surrogateescape), and line ends are kept as they are.
+        regular_only: a path that is there but is not a regular file gives
+        default too, without waiting (read_existing_text).
         """
         try:
-            text = self.read_existing_text(path)
+            text = self.read_existing_text(path, regular_only=regular_only)
         except OSError:
             return default
         return default if text is None else text
 
-    def read_existing_text(self, path: str) -> str | None:
+    def read_existing_text(self, path: str, *, regular_only: bool = False) -> str | None:
         """read_text's text, None only for a file that is not there (no such
         file, or a path through a file): the OSError of one there that cannot
         be read is raised, for a caller that must not take it for a missing
-        file (one that writes the file back)."""
+        file (one that writes the file back).
+
+        regular_only: a path there that is not a regular file (a FIFO, a
+        device, a folder, a socket; through a link, what it leads to) is one
+        that cannot be read: OSError(EINVAL), nothing read. It is opened
+        without waiting (O_NONBLOCK: a FIFO's open returns at once; O_NOCTTY:
+        a terminal never becomes ours) and judged by fstat on that descriptor:
+        one open, with no second look that could see another file."""
         try:
-            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
+            if not regular_only:
+                with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
+                    return fh.read()
+            with open_regular_text(path) as fh:
                 return fh.read()
         except FileNotFoundError, NotADirectoryError:
             return None
