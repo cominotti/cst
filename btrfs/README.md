@@ -2429,7 +2429,9 @@ does the same: `cst_core/installer.py install` or `remove` of
 `btrfs/docker-gc` (by name, `--component btrfs:docker-gc`, `--module btrfs`
 or `--owner root`) first writes the missing file from the installed copy
 (`installer.py plan` lists it as `would write:`), and stops before it changes
-anything when that fails. With no docker-gc installed the file gets an empty
+anything when that fails. A write whose file is in place but whose folder
+could not be synced says `written: PATH (...), but its folder could not be
+synced: ...` (exit 1), not `cannot write`. With no docker-gc installed the file gets an empty
 list. When the installed program is not one it knows, it refuses (exit 78)
 and asks you to write the file yourself.
 

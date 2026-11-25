@@ -14,6 +14,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -61,7 +62,7 @@ from btrfs.docker_gc.domain import (
 from btrfs.docker_gc.ports import EventSink
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.domain.install import manifest_by_src
-from cst_core.ports import CommandResult
+from cst_core.ports import CommandResult, ReplacedNotSynced
 from tests.probes import bytes_program
 
 sys.dont_write_bytecode = True
@@ -858,10 +859,23 @@ class SettingsUseCaseTest(unittest.TestCase):
         self.assertEqual(f.config.installed_reads, 1)
 
     def test_a_failed_write_is_one_line_and_exit_1(self) -> None:
-        f = Fixture(config=FakeConfig(None))
-        f.config.fail_write = PermissionError(13, "Permission denied")
-        self.assertEqual(f.gc.execute(GcCommand.SETTINGS, write=True), 1)
-        self.assertEqual(f.console.lines[-1], "ERR cannot write /etc/cst/docker-gc.conf: Permission denied")
+        # A write that failed after its rename (write_atomic's ReplacedNotSynced) left the new file in place.
+        cases = (
+            (PermissionError(13, "Permission denied"), "ERR cannot write /etc/cst/docker-gc.conf: Permission denied"),
+            (
+                ReplacedNotSynced(errno.EIO, "Input/output error", None, "/etc/cst/docker-gc.conf"),
+                (
+                    "ERR written: /etc/cst/docker-gc.conf (DOCKER_GC_PROTECT=), but its folder could not be synced: "
+                    "Input/output error"
+                ),
+            ),
+        )
+        for err, want in cases:
+            with self.subTest(want):
+                f = Fixture(config=FakeConfig(None))
+                f.config.fail_write = err
+                self.assertEqual(f.gc.execute(GcCommand.SETTINGS, write=True), 1)
+                self.assertEqual(f.console.lines[-1], want)
 
     def test_without_the_file_the_installed_programs_registry_stays_protected(self) -> None:
         # Between pulling this CST and the next `enable`: this checkout's cleanup-now still asks apart
