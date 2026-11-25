@@ -834,7 +834,10 @@ docker volume rm <name>         # or one volume by name
   again: fix that, then run cst btrfs install`, and records it in
   `/var/lib/docker-volumes-nocow/outcome` (`not-scheduled`), which `status`
   shows as `migration not scheduled by the install at <time> (<why>)`. The
-  next `install` that can write the request removes it. One gap is left: a container that writes into a volume during
+  next `install` that can write the request removes it. `cst doctor` warns
+  about such a record, and about a count of boots left with no flag, with
+  the fix `cst btrfs install`
+  ([../doctor/README.md, section 6.3](../doctor/README.md#63-docker-volumes-nocow-migration-that-no-boot-will-schedule)). One gap is left: a container that writes into a volume during
   the few milliseconds between mark's two looks at the volumes is asked for
   after `+C` (still flushed), so a kill exactly there can lose that request.
   When no volume holds copy-on-write data, `mark` removes an old counter

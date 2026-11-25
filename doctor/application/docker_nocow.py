@@ -6,9 +6,27 @@ list (@check), in their place among its checks: one module registers each area's
 from collections.abc import Iterator
 import time
 
-from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
+from btrfs.docker_volumes_nocow.domain import (
+    DAEMON_JSON,
+    NocowOutcome,
+    OutcomeRead,
+    is_config_reason,
+    is_stored_postponed,
+    outcome_unreadable,
+    parse_outcome,
+)
 from cst_core.domain.shapes import parse_json
-from doctor.domain import INFO, NOCOW_POSTPONED, NOCOW_WARN_BOOTS, WARN, Result
+from doctor.domain import (
+    INFO,
+    NOCOW_ATTEMPTS,
+    NOCOW_FLAG,
+    NOCOW_HELPER_HOST,
+    NOCOW_OUTCOME,
+    NOCOW_POSTPONED,
+    NOCOW_WARN_BOOTS,
+    WARN,
+    Result,
+)
 from doctor.ports import DoctorHostPort
 
 
@@ -44,3 +62,60 @@ def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
         )
     else:
         yield Result(INFO, f"{msg}; tried again at the next boot")
+
+
+def _nocow_outcome(host: DoctorHostPort) -> OutcomeRead:
+    """docker-volumes-nocow's outcome record, read as the helper reads it."""
+    try:
+        with host.open_text(host.path(NOCOW_OUTCOME)) as f:
+            text = f.read(65536)
+    except FileNotFoundError:
+        return parse_outcome(None, NOCOW_OUTCOME)
+    except OSError, ValueError:
+        return outcome_unreadable(NOCOW_OUTCOME)
+    return parse_outcome(text, NOCOW_OUTCOME)
+
+
+def _nocow_count(host: DoctorHostPort) -> int:
+    """The helper's count of boots, as CounterFile.count reads it (0: none, or no number)."""
+    try:
+        with host.open_text(host.path(NOCOW_ATTEMPTS)) as f:
+            return int(f.read(256))
+    except OSError, ValueError:
+        return 0
+
+
+def check_docker_nocow_outcome(host: DoctorHostPort) -> Iterator[Result]:
+    """A Docker volumes migration no boot will ask for, from what docker-volumes-nocow leaves on disk."""
+    if not host.exists(host.path(NOCOW_HELPER_HOST)):
+        return  # not installed: nothing of it counts
+    try:
+        host.stat(host.path(NOCOW_FLAG))
+        return  # a migration is scheduled
+    except FileNotFoundError:
+        pass
+    except OSError as e:  # "cannot stat" is no "no flag"
+        yield Result(INFO, f"Docker volumes NOCOW: cannot tell whether a migration is scheduled ({e.strerror or e})")
+        return
+    read = _nocow_outcome(host)
+    if read.problem:
+        yield Result(INFO, f"Docker volumes NOCOW: {read.problem}")
+    elif read.record is not None and read.outcome == NocowOutcome.NOT_SCHEDULED:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(read.record["at"]))
+        yield Result(
+            WARN,
+            f"Docker volumes NOCOW: {read.record['volumes']} keeps copy-on-write data and no boot will migrate it "
+            f"(an older install stopped before it scheduled the migration, or a container wrote during the "
+            f"install), and the install at {when} failed: {read.record['reason']}; fix that, then run the install",
+            "cst btrfs install",
+        )
+        return
+    count = _nocow_count(host)
+    if count > 0:
+        yield Result(
+            WARN,
+            f"Docker volumes NOCOW: a count of {count} boot(s) is left with no migration scheduled: an install or "
+            "a boot could not reset it, so a migration may not be asked for (journalctl -u docker-volumes-nocow "
+            "says why); fix that, then run the install",
+            "cst btrfs install",
+        )

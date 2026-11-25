@@ -579,6 +579,7 @@ def check_snapshots_writable(host: DoctorHostPort) -> Iterator[Result]:
 
 # The Docker volumes NOCOW checks (docker_nocow.py) come here.
 check(CHECKS, "btrfs")(docker_nocow.check_docker_nocow_postponed)
+check(CHECKS, "btrfs")(docker_nocow.check_docker_nocow_outcome)
 
 
 _COMPRESSION_LABEL: Final[str] = "root btrfs compression"

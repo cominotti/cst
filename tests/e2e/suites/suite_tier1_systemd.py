@@ -5578,6 +5578,115 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
+    def test_190_doctor_warns_when_no_boot_will_ask_for_a_docker_volumes_migration(self) -> None:
+        """cst doctor as tester on what docker-volumes-nocow (the checkout's program, as root) leaves on
+        disk; doctor never opens Docker's own folders. The helper is at its installed path (a copy the
+        test makes when there is none, removed after). Part 1, the real state through the real helper:
+        a data root of the test's own on a tmpfs holding a copy-on-write volume, no flag, and a count
+        of 2 in a read-only bind-mounted file: mark cannot reset it, and doctor warns about a count left
+        with no migration scheduled (fix: cst btrfs install). With the mount gone, mark writes the
+        request (exit 2: tmpfs refuses +C) and doctor says nothing. Part 2: the record an install leaves
+        when it finds +C and cannot write the request (planted through the helper's own writer: tmpfs
+        cannot hold +C): doctor warns with its line; beside a flag it says nothing; mark then writes the
+        request and removes the record, and doctor is quiet; without the installed helper a planted
+        record is silent too. Before, doctor said nothing in each case."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-190-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        helper = "/usr/local/sbin/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {state}/attempts || umount {state}/attempts || umount -l {state}/attempts; "
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            f"[ -e /var/tmp/e2e-190-made-helper ] && rm -f {helper} || true; "
+            "[ -e /var/tmp/e2e-190-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-190-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-190-made-helper /var/tmp/e2e-190-made-docker /var/tmp/e2e-190-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_190 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            state={state}
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            nocow_lines() {{ {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }} | grep -F "Docker volumes NOCOW" || true; }}
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-190-made-docker; }}
+            [ -d /etc/btrfs-setup ] || {{ mkdir -p /etc/btrfs-setup && touch /var/tmp/e2e-190-made-setup; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e "$state" ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            if [ ! -e {helper} ]; then
+                printf '#!/bin/bash\nexec /usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow "$@"\n' >{helper}
+                chmod 0755 {helper}
+                touch /var/tmp/e2e-190-made-helper
+            fi
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor warns before the test: $(nocow_lines)" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p "$vols/v/_data"
+            printf 'data\n' >"$vols/v/_data/file"
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            # Part 1: a count of 2 mark cannot reset (its file a read-only bind mount).
+            mkdir -p "$state"
+            printf '2\n' >"$state/attempts"
+            mount --bind "$state/attempts" "$state/attempts"
+            mount -o remount,bind,ro "$state/attempts"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_190 mark, the count read-only: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]
+            grep -qF "cannot schedule the migration (" <<<"$out"
+            [[ ! -e "$flag" ]]
+            [[ "$(cat "$state/attempts")" == 2 ]]
+            d="$(nocow_lines)"
+            echo "test_190 doctor, a count of 2 and no flag: $d" >&2
+            grep -qF "WARN   Docker volumes NOCOW: a count of 2 boot(s) is left with no migration scheduled" <<<"$d" || {{ echo "doctor did not warn about the count" >&2; exit 1; }}
+            umount "$state/attempts"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_190 mark, the mount gone: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]   # tmpfs refuses +C, after the request
+            [[ -e "$flag" ]]
+            [[ "$(cat "$state/attempts")" == 0 ]]
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor still warns after the repair: $(nocow_lines)" >&2; exit 1; }}
+            # Part 2: the record an install leaves when it finds +C and cannot write the request.
+            rm -f "$flag" "$state/attempts"
+            /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from btrfs.docker_volumes_nocow.adapters import NocowStateFiles; from btrfs.docker_volumes_nocow.domain import NocowOutcome, NocowPaths, outcome_record; NocowStateFiles(NocowPaths()).write_outcome(outcome_record(NocowOutcome.NOT_SCHEDULED, at=1700000000, volumes=sys.argv[1], reason="cannot schedule the migration: planted"))' "$vols"
+            [[ "$(stat -c %a "$state/outcome")" == 644 ]]
+            d="$(nocow_lines)"
+            echo "test_190 doctor, a not-scheduled record: $d" >&2
+            grep -qF "WARN   Docker volumes NOCOW: $vols keeps copy-on-write data and no boot will migrate it" <<<"$d"
+            grep -qF "failed: cannot schedule the migration: planted" <<<"$d"
+            touch "$flag"
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor warns beside the flag: $(nocow_lines)" >&2; exit 1; }}
+            rm -f "$flag"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_190 mark, a not-scheduled record: rc=$rc $out" >&2
+            [[ -e "$flag" ]]
+            [[ ! -e "$state/outcome" ]] || {{ echo "the request left the record" >&2; exit 1; }}
+            [[ -z "$(nocow_lines)" ]] || {{ echo "doctor still warns after the request: $(nocow_lines)" >&2; exit 1; }}
+            rm -f "$flag"
+            /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from btrfs.docker_volumes_nocow.adapters import NocowStateFiles; from btrfs.docker_volumes_nocow.domain import NocowOutcome, NocowPaths, outcome_record; NocowStateFiles(NocowPaths()).write_outcome(outcome_record(NocowOutcome.NOT_SCHEDULED, at=1700000000, volumes=sys.argv[1], reason="planted"))' "$vols"
+            if [ -e /var/tmp/e2e-190-made-helper ]; then
+                mv {helper} /var/tmp/e2e-190-helper-aside
+                d="$(nocow_lines)"
+                mv /var/tmp/e2e-190-helper-aside {helper}
+                [[ -z "$d" ]] || {{ echo "doctor warns without the helper: $d" >&2; exit 1; }}
+            fi
+            rm -f "$state/outcome"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS)
     def test_191_docker_volumes_nocow_says_what_it_cannot_reset_or_records(self) -> None:
         """docker-volumes-nocow (the checkout's program, as root in the container) on a data root of the
