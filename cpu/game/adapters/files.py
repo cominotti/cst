@@ -110,7 +110,7 @@ class GameRunLock:
 
     def __init__(self, run: str, lock: str, *, timeout: float) -> None:
         self._run, self._lock = run, lock
-        self.timeout = timeout  # how long take() waits for a lock held elsewhere, in seconds
+        self._timeout = timeout  # how long take() waits for a lock held elsewhere, in seconds
         self._fd: int | None = None
 
     def take(self) -> bool:
@@ -118,7 +118,7 @@ class GameRunLock:
         try:
             ensure_dir(self._run, 0o755)
             os.chmod(self._run, 0o755)  # install -d -m 0755 sets the mode of a folder already there too
-            self._fd = take_lock(self._lock, wait=True, mode=0o644, timeout=self.timeout)
+            self._fd = take_lock(self._lock, wait=True, mode=0o644, timeout=self._timeout)
         except OSError:
             self._fd = None
         return self._fd is not None
