@@ -3279,3 +3279,50 @@ assert d["samples"] >= 1, d["samples"]
             """,
         ).stdout
         self.assertIn("E2E-IOCOST-T2-OK", out)
+
+    def test_24_bulk_apply_moves_nothing_while_a_keep_line_has_a_no_break_space(self) -> None:
+        """`cst btrfs bulk apply` on the real btrfs ~/Bulk (test_04 made it), as root for tester, with
+        /etc/btrfs-setup/bulk-keep holding the line iso<NBSP> (the real bytes C2 A0) and ~/Downloads there,
+        so a normal apply would link ~/Downloads/iso into ~/Bulk: apply exits non-zero, says NEEDS A LOOK
+        with "has a line it cannot read" naming the line and the no-break space, and makes no link. Before,
+        the line read as iso and nothing said it was not plain. With the line removed, the same apply makes
+        the link (cannot bite otherwise). The keep file and ~/Downloads are put back after. A fake cannot
+        show the installed reader on the real bytes, after the real ~/Bulk subvolume check that comes first."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -euo pipefail
+            keep=/etc/btrfs-setup/bulk-keep
+            w=/var/tmp/e2e-24
+            rm -rf "$w" && mkdir -p "$w"
+            if [[ -e "$keep" ]]; then cp -a "$keep" "$w/keep.bak"; fi
+            made_downloads=0
+            [[ -e /home/tester/Downloads ]] || made_downloads=1
+            restore() {
+                if [[ -L /home/tester/Downloads/iso ]]; then rm -f /home/tester/Downloads/iso; fi
+                if (( made_downloads )); then rmdir /home/tester/Downloads 2>/dev/null || true; fi
+                rm -f "$keep"
+                if [[ -e "$w/keep.bak" ]]; then mv "$w/keep.bak" "$keep"; fi
+                rm -rf "$w"
+            }
+            trap restore EXIT
+            btrfs subvolume show /home/tester/Bulk >/dev/null
+            runuser -u tester -- mkdir -p /home/tester/Downloads
+            [[ ! -e /home/tester/Downloads/iso ]]
+            printf 'iso\302\240\n' >"$keep"
+            cp "$keep" "$w/keep.before"
+            rc=0; out="$(SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk apply 2>&1)" || rc=$?
+            printf 'test_24 apply: rc=%s\n%s\n' "$rc" "$out" >&2
+            [[ "$rc" != 0 ]]
+            grep -qF "NEEDS A LOOK: $keep has a line it cannot read: line 1: iso" <<<"$out"
+            grep -qF "a no-break space (U+00A0) at the end of the value" <<<"$out"
+            [[ ! -L /home/tester/Downloads/iso ]]
+            cmp "$w/keep.before" "$keep"
+            # The line removed: the same apply makes the link.
+            : >"$keep"
+            SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk apply >/dev/null
+            [[ -L /home/tester/Downloads/iso ]]
+            echo E2E-BULK-KEEP-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-BULK-KEEP-OK", out)

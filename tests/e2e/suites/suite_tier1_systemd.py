@@ -725,6 +725,99 @@ sys.exit(r.returncode)
 """
 
 
+# test_224: the checkout's docker-gc (argv[1]) with a DOCKER_GC_PROTECT item that has a no-break space
+# beside it (the real bytes C2 A0), against the fake docker and systemctl of test_103 and its scenario
+# (an old image of registry.example.com and old unprotected ones, the recorder running). In the settings
+# file, run --dry-run under LC_ALL=C and C.UTF-8; in the environment of a real systemd unit
+# (systemd-run, Environment=): both exit 78 naming the item and the blank, and docker is asked to remove
+# nothing. Without the blank the same unit holds the registry's image back (cannot bite otherwise).
+GC_PROTECT_BLANK = r"""
+import json, os, subprocess, sys, tempfile, time
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.tests import test_docker_gc_program as t
+prog = ["/usr/bin/python3", "-I", "-B", sys.argv[1]]
+tmp = tempfile.mkdtemp(prefix="e2e-gc-blank-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
+fakes = os.path.join(tmp, "bin")
+os.mkdir(fakes)
+for name, text in (("docker", t.FAKE_DOCKER), ("systemctl", t.FAKE_SYSTEMCTL)):
+    path = os.path.join(fakes, name)
+    with open(path, "w") as f:
+        f.write(text.replace("@PYTHON@", sys.executable))
+    os.chmod(path, 0o755)
+now = time.time()
+with open(os.path.join(tmp, "docker.json"), "w") as f:
+    json.dump(t.scenario(now), f)
+state = os.path.join(tmp, "state")
+os.mkdir(state)
+with open(os.path.join(state, "last-used.json"), "w") as f:
+    json.dump({"since": t.OLD + 30 * t.DAY, "images": {t.sha("8"): now - t.DAY}, "heartbeat": now}, f)
+conf = os.path.join(tmp, "docker-gc.conf")
+calls_log = os.path.join(tmp, "calls.log")
+env = {
+    "PATH": fakes + ":/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": state, "DOCKER_GC_RUNTIME": os.path.join(tmp, "run"),
+    "DOCKER_GC_CONF": conf, "DOCKER_GC_INSTALLED": sys.argv[1],
+    "FAKE_DOCKER_STATE": os.path.join(tmp, "docker.json"), "FAKE_DOCKER_LOG": calls_log,
+}
+reg = "registry.example.com"
+item = "\N{NO-BREAK SPACE}" + reg
+blank = "a no-break space (U+00A0) at the start of the value"
+
+
+def removing():
+    if not os.path.exists(calls_log):
+        return []
+    with open(calls_log) as f:
+        return [c for c in map(json.loads, f) if "rm" in c or "prune" in c]
+
+
+def write_conf(value):
+    with open(conf, "wb") as f:
+        f.write(f"DOCKER_GC_PROTECT=other.example.org,{value}\n".encode())
+
+
+def unit(protect):
+    # The dry run as a real unit, DOCKER_GC_PROTECT in its Environment=: (exit status, its journal).
+    name = "e2e-224-gc.service"
+    props = [f"--property=Environment={k}={v}" for k, v in env.items()]
+    props.append(f"--property=Environment=DOCKER_GC_PROTECT=other.example.org,{protect}")
+    start = time.time()
+    subprocess.run(["systemd-run", "--quiet", "--wait", f"--unit={name}", *props, *prog, "run", "--dry-run"],
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
+    status = subprocess.run(["systemctl", "show", "-p", "ExecMainStatus", "--value", name],
+                            capture_output=True, text=True, check=False).stdout.strip()
+    subprocess.run(["journalctl", "--sync"], check=False)
+    log = subprocess.run(["journalctl", "-q", "--no-pager", "-o", "cat", "-u", name, "--since", f"@{int(start) - 1}"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace", check=False).stdout
+    subprocess.run(["systemctl", "reset-failed", name], capture_output=True, check=False)
+    sys.stderr.write(f"test_224 unit {protect!r}: status={status}\n{log}")
+    return status, log
+
+
+# 1. The settings file: exit 78 under both locales, docker asked to remove nothing.
+write_conf(item)
+for locale in ("C", "C.UTF-8"):
+    r = subprocess.run([*prog, "run", "--dry-run"], env={**env, "LC_ALL": locale}, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, check=False, cwd="/")
+    said = r.stdout + r.stderr
+    sys.stderr.write(f"test_224 file LC_ALL={locale}: rc={r.returncode} {said}")
+    if r.returncode != 78 or blank not in said or f"{conf} line 1: DOCKER_GC_PROTECT" not in said:
+        sys.exit(f"test_224: the settings file, LC_ALL={locale}: expected exit 78 naming the line and the blank")
+if removing():
+    sys.exit(f"test_224: docker was asked to remove {removing()}")
+# 2. The environment of a real unit: the same refusal.
+write_conf(reg)
+status, log = unit(item)
+if status != "78" or f"DOCKER_GC_PROTECT in the environment: {blank}" not in log:
+    sys.exit("test_224: the unit's environment: expected exit 78 naming the blank")
+if removing():
+    sys.exit(f"test_224: docker was asked to remove {removing()}")
+# 3. Without the blank the same unit's dry run holds the registry's image back.
+status, log = unit(reg)
+if status != "0" or "protected registry" not in log:
+    sys.exit("test_224: without the blank: expected exit 0 and the protected image held back")
+print("E2E-OK")
+"""
+
 # test_145: the program at argv[1] with its settings file at argv[2] against the same fake docker and
 # scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
 # run --dry-run and status (which plan as the weekly run does), twice each, stop with "no Image;
@@ -2321,6 +2414,80 @@ echo E2E-OK
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("SETUP-RAN", r.stdout)
         self.assertEqual(exec_bash(self.SYSTEMD_CONTAINER, state).stdout, before, r.stdout + r.stderr)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_225_cpu_irq_vm_pin_and_game_profile_refuse_a_cpu_setup_line_with_a_no_break_space(self) -> None:
+        """cpu-setup.conf with BUILD_CPUS='N<NBSP>' (the real bytes C2 A0; N the last CPU), a line bash
+        reads with the blank, as root: `cst cpu irq apply --no-pkg` exits 1 naming the line and the blank
+        and writes neither irqbalance.env nor its drop-in; cpu-vm-pin apply exits 1 with the same reason and
+        "nothing changed", before any virsh call (a recording stub first on PATH); the game profile's `on`
+        exits 1, "not switched on", with no game.state. Before, the value was taken as written: an invalid
+        CPU list for irq, or a list with a blank for vm-pin and the game profile. With the line fixed, the
+        same vm-pin apply reaches virsh and the profile switches on (cannot bite otherwise). A fake cannot
+        show the installed readers on the real bytes under a root shell's locale."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-cpu-nbsp"
+        conf = "/etc/cpu-setup/cpu-setup.conf"
+        busy = exec_bash(
+            c,
+            "[[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf "
+            "&& ! -e /run/cpu-setup/game.state ]] || echo busy",
+        ).stdout.strip()
+        self.assertEqual(busy, "", "irqbalance files or a game profile are already there")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"python3 -I -B /opt/cst-rw/cpu/game-profile off >/dev/null 2>&1 || true; rm -f {conf}; "
+            f"if [[ -e {w}/conf.bak ]]; then mv {w}/conf.bak {conf}; fi; "
+            f"if [[ -e {w}/made-dir ]]; then rmdir /etc/cpu-setup 2>/dev/null; fi; "
+            f"if [[ -e {w}/made-run ]]; then rm -rf /run/cpu-setup; fi; rm -rf {w}",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_225 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            w={w} conf={conf}
+            rm -rf "$w" && mkdir -p "$w/bin"
+            [[ -d /etc/cpu-setup ]] || touch "$w/made-dir"
+            [[ -d /run/cpu-setup ]] || touch "$w/made-run"
+            if [[ -e "$conf" ]]; then cp -a "$conf" "$w/conf.bak"; fi
+            install -d -m 0755 /etc/cpu-setup /run/cpu-setup
+            printf '#!/bin/sh\necho "virsh $*" >>%s/calls\nexit 1\n' "$w" >"$w/bin/virsh"
+            chmod 0755 "$w/bin/virsh"
+            last="$(( $(nproc) - 1 ))"
+            printf "TARGET_USER='tester'\nBUILD_CPUS='%s\302\240'\n" "$last" >"$conf"
+            blank="BUILD_CPUS='$last"$'\302\240'"': a no-break space (U+00A0) at the end of the value"
+            for locale in C C.UTF-8 ""; do
+                rc=0; LC_ALL=$locale /opt/cst-rw/cst cpu irq apply --no-pkg >"$w/irq" 2>&1 || rc=$?
+                echo "test_225 irq LC_ALL=$locale: rc=$rc $(cat "$w/irq")" >&2
+                [[ "$rc" == 1 ]]
+                grep -qF "$conf line 2: $blank" "$w/irq"
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                rc=0; LC_ALL=$locale PATH="$w/bin:$PATH" python3 -I -B /opt/cst-rw/cpu/vm-pin apply e2evm >"$w/pin" 2>&1 || rc=$?
+                echo "test_225 vm-pin LC_ALL=$locale: rc=$rc $(cat "$w/pin")" >&2
+                [[ "$rc" == 1 ]]
+                grep -qF "a no-break space (U+00A0) at the end of the value" "$w/pin"
+                grep -qF "nothing changed" "$w/pin"
+                [[ ! -e "$w/calls" ]]
+                rc=0; LC_ALL=$locale python3 -I -B /opt/cst-rw/cpu/game-profile on >"$w/gp" 2>&1 || rc=$?
+                echo "test_225 game-profile LC_ALL=$locale: rc=$rc $(cat "$w/gp")" >&2
+                [[ "$rc" == 1 ]]
+                [[ ! -e /run/cpu-setup/game.state ]]
+            done
+            # The line fixed: vm-pin apply reaches virsh, the profile switches on (then off).
+            printf "TARGET_USER='tester'\nBUILD_CPUS='%s'\n" "$last" >"$conf"
+            rc=0; PATH="$w/bin:$PATH" python3 -I -B /opt/cst-rw/cpu/vm-pin apply e2evm >"$w/pin" 2>&1 || rc=$?
+            cat "$w/pin" >&2
+            [[ -s "$w/calls" ]]
+            python3 -I -B /opt/cst-rw/cpu/game-profile on
+            [[ -e /run/cpu-setup/game.state ]]
+            python3 -I -B /opt/cst-rw/cpu/game-profile off
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.CPU, E2ETag.DOCTOR)
     def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
@@ -5256,6 +5423,30 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qF "$conf is missing, and the installed $prog reads them from that file" <<<"$out"
             echo E2E-OK
             """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_224_docker_gc_refuses_a_protected_registry_with_a_no_break_space_beside_it(self) -> None:
+        """This checkout's docker-gc with DOCKER_GC_PROTECT=other.example.org,<NBSP>registry.example.com (the
+        real bytes C2 A0), against test_103's fake docker and scenario: in the settings file, run --dry-run
+        under LC_ALL=C and C.UTF-8 exits 78 naming the line and the no-break space; in the Environment= of a
+        real systemd unit (systemd-run) the dry run exits 78 too, naming the blank in the environment. Docker
+        is asked to remove nothing. Before, the item was trimmed in the file and taken as written from the
+        environment, where it matched no image, so the registry lost its protection. Without the blank the
+        same unit exits 0 and holds the registry's image back (cannot bite otherwise). A fake cannot show
+        how systemd hands the bytes of Environment= to the program, nor how Python decodes them under the
+        unit's locale."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            "systemctl reset-failed e2e-224-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-blank-*",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_BLANK)} /opt/cst-rw/btrfs/docker-gc",
         ).stdout
         self.assertIn("E2E-OK", out)
 
