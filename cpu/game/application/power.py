@@ -9,7 +9,6 @@ import os
 import re
 from typing import TYPE_CHECKING, Final
 
-from cst_core.domain.text import group
 from cpu.game.domain import (
     GameRecordKind,
     expand_cpus,
@@ -17,6 +16,7 @@ from cpu.game.domain import (
     parse_amd_profile_modes,
     parse_cstate_limit_us,
 )
+from cpu.game.domain.sysfs import card_number, suffix_number
 from cpu.power.domain import GpuPmMode, parse_gpu_pm_mode
 
 if TYPE_CHECKING:
@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
 _DEFAULT_GAME_CSTATE_US: Final = 50
 _MAX_CGROUP_WALK_DEPTH: Final = 3
-_CARD_NAME_RE: Final = re.compile(r"^card([0-9]+)$")
 _STATE_NAME_RE: Final = re.compile(r"^state([0-9]+)$")
 _GPU_PM_ON: Final = "on"
 _DPM_MANUAL: Final = "manual"
@@ -36,21 +35,6 @@ _CSTATE_DISABLE: Final = "1"
 _STEAM_CLIENT_COMMS: Final = frozenset(
     {"steam", "steamwebhelper", "fossilize_repla", "vulkandriverque", "gldriverquery", "gldriverquery64"}
 )
-
-
-def _suffix_num(name: str, pattern: re.Pattern[str]) -> int:
-    m = pattern.fullmatch(name)
-    return int(group(m, 1)) if m is not None else -1
-
-
-def card_number(name: str) -> int:
-    """N of a DRM cardN name (-1 for another name): the order cards are listed and handled in."""
-    return _suffix_num(name, _CARD_NAME_RE)
-
-
-def is_card(name: str) -> bool:
-    """The name is a DRM card's (cardN), not one of its connectors."""
-    return _CARD_NAME_RE.fullmatch(name) is not None
 
 
 def _parse_int_stripped(profile: GameProfileSteps, path: str) -> int | None:
@@ -95,7 +79,7 @@ def apply_game_cstates(profile: GameProfileSteps) -> None:
             continue
         states = sorted(
             (name for name in sysfs.list_dir(idle_dir) if _STATE_NAME_RE.fullmatch(name) is not None),
-            key=lambda n: _suffix_num(n, _STATE_NAME_RE),
+            key=lambda n: suffix_number(n, _STATE_NAME_RE),
         )
         for state_name in states:
             sdir = os.path.join(idle_dir, state_name)

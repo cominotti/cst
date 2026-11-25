@@ -9,7 +9,7 @@ from typing import Final
 from cst_core.adapters.files import read_text
 from cst_core.domain.text import group
 from cpu.game.adapters.host import read_stripped, write_sysfs_line
-from cpu.game.application.power import card_number, is_card
+from cpu.game.domain.sysfs import card_number, is_card
 
 _DRI_FD_RE: Final = re.compile(r"^/dev/dri/(renderD[0-9]+|card[0-9]+)")
 _CONNECTED_STATE: Final = "connected"
