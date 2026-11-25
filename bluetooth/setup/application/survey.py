@@ -145,6 +145,7 @@ class SetupMachine:
     container: bool
     bt_timeout: int
     lc_ctype: str  # what CST_LC_CTYPE hands the installer ("" or "=VALUE")
+    c_locale: tuple[str, ...]  # env's words for the C locale (cst_core's c_locale): a command sudo runs
     python: str  # the system Python the installer runs on
 
 

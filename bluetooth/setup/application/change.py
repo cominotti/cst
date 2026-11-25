@@ -146,7 +146,8 @@ class Change(Checks):
         name it is given only if it does not exist (O_CREAT|O_EXCL; GNU cp 9.5 or later), so a name
         another run takes between the look and the copy is not replaced either: cp fails, the name is
         there (cp says "File exists" or "not replacing"), and the next one is tried. Any other failure
-        stops the run, also one that left a part of the copy behind (a full disk)."""
+        stops the run, also one that left a part of the copy behind (a full disk). cp runs as
+        `sudo env LC_ALL=C cp ...`: it speaks the C locale whatever sudoers keeps of the caller's."""
         mc = self.p.main_conf
         base = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
         taken = self.backup_names()
@@ -154,9 +155,12 @@ class Change(Checks):
             bak = backup_name(base, n)
             if bak in taken:
                 continue
-            # cp's words are read: in the C locale (sudo keeps LC_ALL by default on Fedora; a cp that
-            # speaks another language fails the run, as any other failure does).
-            r = self.m.runner.run(["sudo", "cp", "-p", *ctx, "--update=none-fail", mc, bak], locale_c=True)
+            # cp's words are read, so cp gets the C locale from env: sudo passes LC_ALL on only when
+            # sudoers keeps it (Fedora's does; one whose env_keep and env_check drop it gave cp the
+            # caller's LANG, and a translated "File exists" stopped the run). locale_c is for sudo's own.
+            r = self.m.runner.run(
+                ["sudo", "env", *self.m.c_locale, "cp", "-p", *ctx, "--update=none-fail", mc, bak], locale_c=True
+            )
             if r.returncode == 0:
                 return bak
             taken = self.backup_names()

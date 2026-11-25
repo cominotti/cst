@@ -10683,15 +10683,20 @@ EOF
         was (content and mtime); the `revert --yes --no-restart` right after takes a name of its own
         (another -1, or -2 in the same second), leaves the planted files and apply's backup, and puts
         the vendor keys back; a second revert finds them as in the oldest backup and changes nothing.
-        The exact command apply runs, `sudo cp -p --preserve=context --update=none-fail`, onto a name
-        that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the planted file
-        of its second."""
+        The exact command apply runs, `sudo env LC_ALL=C cp -p --preserve=context --update=none-fail`,
+        onto a name that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the
+        planted file of its second. Last, with a sudoers drop-in that keeps no LC_ALL (env_keep and
+        env_check without it) and a shim cp first on sudo's secure_path that logs the LC_ALL it got:
+        `apply` with LC_ALL=C in its environment still gives cp LC_ALL=C (from env), so cp's words
+        are read in the C locale whatever sudoers keeps; before, sudo dropped it and cp got none."""
         c = self.SYSTEMD_CONTAINER
         self.addCleanup(
             exec_bash,
             c,
             """
             set +e
+            rm -f /etc/sudoers.d/zz-e2e180   # first: the sudoers of step 5 must not outlive the test
+            rm -rf /var/tmp/bt180-shim
             runuser -u tester -- env HOME=/home/tester XDG_RUNTIME_DIR=/run/user/1000 \\
                 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \\
                 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1
@@ -10768,9 +10773,34 @@ EOF
             # 4. apply's exact cp onto a name that is there: exit 1, the file left alone.
             f="$(head -n 1 "$w/planted")"
             s="$(stat -c %Y "$f") $(sha256sum <"$f")"
-            rc=0; runuser -u tester -- sudo cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
+            rc=0; runuser -u tester -- sudo env LC_ALL=C cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
             [[ $rc == 1 ]] || { echo "cp onto a backup that is there: exit $rc" >&2; cat "$w/cp.err" >&2; exit 1; }
             [[ "$(stat -c %Y "$f") $(sha256sum <"$f")" == "$s" ]]
+
+            # 5. A sudoers that keeps no LC_ALL: cp still gets the C locale (from env). The shim lives
+            # in /var/tmp: the container's /tmp is noexec, and sudo cannot run a program there.
+            shim=/var/tmp/bt180-shim
+            mkdir -p "$shim"
+            printf '%s
+' '#!/bin/bash' 'echo "LC_ALL=${LC_ALL-unset}" >>/var/tmp/bt180-shim/log' 'exec /usr/bin/cp "$@"' >"$shim/cp"
+            chmod 0755 "$shim/cp"
+            rm -f "$shim/log"
+            printf '%s
+' 'Defaults env_keep -= "LC_ALL"' 'Defaults env_check -= "LC_*"'                 "Defaults secure_path="$shim:/usr/sbin:/usr/bin"" >"$w/zz-e2e180"
+            visudo -cf "$w/zz-e2e180" >/dev/null
+            install -m 0440 -o root -g root "$w/zz-e2e180" /etc/sudoers.d/zz-e2e180
+            # Cannot bite otherwise: sudo now drops the caller's LC_ALL.
+            seen="$(runuser -u tester -- env LC_ALL=C sudo sh -c 'echo "${LC_ALL-unset}"')"
+            [[ "$seen" == unset ]] || { echo "sudo kept LC_ALL=$seen: the drop-in did not take" >&2; exit 1; }
+            rc=0; out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+            show "apply, sudoers without LC_ALL" "$out"
+            if grep -qF "stopped:" <<<"$out"; then exit 1; fi
+            b="$(backup_of "$out")"
+            [[ -n "$b" && -f "$b" ]] || { echo "no backup: $b" >&2; exit 1; }
+            show "shim" "$(cat "$shim/log")"
+            [[ -s "$shim/log" ]] || { echo "the shim cp never ran" >&2; exit 1; }
+            if grep -vqxF "LC_ALL=C" "$shim/log"; then echo "a backup copy ran without LC_ALL=C" >&2; exit 1; fi
+            rm -f /etc/sudoers.d/zz-e2e180
             echo E2E-OK
             """,
         ).stdout

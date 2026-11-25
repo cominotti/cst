@@ -134,6 +134,7 @@ def change(
         container=container,
         bt_timeout=5,
         lc_ctype="",
+        c_locale=wiring.c_locale_words(),
         python="/usr/bin/python3",
     )
     return Change(opts, cfg, paths, machine), console, clock
@@ -583,7 +584,7 @@ class InProcessCase(unittest.TestCase):
             return f.read()
 
     def sudo_cps(self, m: Machine) -> list[str]:
-        return [c for c in m.read("log").splitlines() if c.startswith("sudo cp ")]
+        return [c for c in m.read("log").splitlines() if c.startswith("sudo env LC_ALL=C cp ")]
 
 
 class BackupNameTest(InProcessCase):
@@ -600,7 +601,7 @@ class BackupNameTest(InProcessCase):
         rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
         self.assertEqual(rc, 0, out + err)
         self.assertIn(f"backup:    {base}\n", out)
-        self.assertEqual(self.sudo_cps(m), [f"sudo cp -p --update=none-fail {m.main_conf} {base}"])
+        self.assertEqual(self.sudo_cps(m), [f"sudo env LC_ALL=C cp -p --update=none-fail {m.main_conf} {base}"])
         self.assertEqual(self.text(base), VENDOR)
         rc, out, err = self.run_one(m, "revert", "--yes", "--no-restart")
         self.assertEqual(rc, 0, out + err)
@@ -625,7 +626,7 @@ class BackupNameTest(InProcessCase):
         rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
         self.assertEqual(rc, 0, out + err)
         self.assertIn(f"backup:    {base}-2\n", out)
-        self.assertEqual(self.sudo_cps(m), [f"sudo cp -p --update=none-fail {m.main_conf} {base}-2"])
+        self.assertEqual(self.sudo_cps(m), [f"sudo env LC_ALL=C cp -p --update=none-fail {m.main_conf} {base}-2"])
         self.assertEqual(self.text(base + "-2"), VENDOR)
         for path, text in planted.items():
             self.assertEqual((self.text(path), os.stat(path).st_mtime), (text, 2_000_000_000), path)
@@ -642,6 +643,43 @@ class BackupNameTest(InProcessCase):
         self.assertEqual(self.text(base + "-1"), VENDOR)
         self.assertNotIn("cp:", out + err)
         self.assertEqual(len(self.sudo_cps(m)), 2)
+
+    def test_a_name_another_run_takes_meanwhile_in_another_language(self) -> None:
+        # A sudoers that keeps no LC_ALL (env_keep and env_check without it) and a pt_BR session: cp
+        # gets the C locale from env all the same, so its "File exists" is read and the next name taken.
+        # Before, sudo cp spoke Portuguese ("Arquivo existe"), and the run stopped with exit 1.
+        m = self.machine()
+        base = self.base(m)
+        m.flag("race-backup")
+        m.flag("sudo-keeps-no-lc-all")
+        env = {**m.env(container=True), "LANG": "pt_BR.UTF-8"}
+        runner = SubprocessCommandRunner(HostExecutionContext(exists=lambda _path: True), base_env=env)
+        run, console, _ = change(m, "apply", "--yes", "--no-restart", doubles=SetupDoubles(runner=runner, now=self.NOW))
+        rc = run.run_command()
+        run.cleanup()
+        self.assertEqual(rc, 0, console.stdout + console.stderr)
+        self.assertIn(f"backup:    {base}-1\n", console.stdout)
+        self.assertEqual(self.text(base), "another run's backup\n")
+        self.assertEqual(self.text(base + "-1"), VENDOR)
+        self.assertEqual(len(self.sudo_cps(m)), 2)
+
+    def test_fakes_cp_speaks_the_session_language_without_env(self) -> None:
+        # The test above can bite: under that sudoers a plain `sudo cp` gets the caller's LANG.
+        m = self.machine()
+        m.flag("sudo-keeps-no-lc-all")
+        dst = m.main_conf + ".bak-taken"
+        m.put(dst, "taken\n")
+        env = {**m.env(container=True), "LANG": "pt_BR.UTF-8"}
+        runner = SubprocessCommandRunner(HostExecutionContext(exists=lambda _path: True), base_env=env)
+        for argv, words in (
+            (["sudo", "cp", "-p", "--update=none-fail", m.main_conf, dst], f"cp: não substituindo '{dst}'\n"),
+            (
+                ["sudo", "env", "LC_ALL=C", "cp", "-p", "--update=none-fail", m.main_conf, dst],
+                f"cp: not replacing '{dst}'\n",
+            ),
+        ):
+            r = runner.run(argv, locale_c=True)
+            self.assertEqual((r.returncode, r.stderr), (1, words), argv)
 
     def test_a_copy_that_fails_stops_the_run(self) -> None:
         m = self.machine()
@@ -667,7 +705,7 @@ class BackupNameTest(InProcessCase):
         self.assertEqual(rc, 1, out + err)
         self.assertIn(f"cp: error writing '{base}': No space left on device\n", err)
         self.assertTrue(err.endswith("Backup of main.conf: none taken. Undo: cst-t revert\n"), err)
-        self.assertEqual(self.sudo_cps(m), [f"sudo cp -p --update=none-fail {m.main_conf} {base}"])
+        self.assertEqual(self.sudo_cps(m), [f"sudo env LC_ALL=C cp -p --update=none-fail {m.main_conf} {base}"])
         self.assertFalse(os.path.exists(base + "-1"))
         self.assertEqual(self.text(m.main_conf), VENDOR)
 
@@ -888,19 +926,21 @@ class SetupModelParityTest(unittest.TestCase):
         m.put("wp-roles", "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n")
         return m
 
-    def runs(self, m: Machine, *, model: bool) -> list[tuple[int | object, str, str, list[str]]]:
-        """apply --yes, then revert --yes: (exit, stdout, stderr, command lines) of each, as the test sees them."""
+    def runs(self, m: Machine, *, model: bool, lang: str = "") -> list[tuple[int | object, str, str, list[str]]]:
+        """apply --yes, then revert --yes: (exit, stdout, stderr, command lines) of each, as the test
+        sees them; lang: the LANG the commands get."""
         self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
         out: list[tuple[int | object, str, str, list[str]]] = []
         for args in (("apply", "--yes"), ("revert", "--yes")):
             if model:
-                twin = SetupModel(m)
+                twin = SetupModel(m, lang=lang)
                 run, console, _ = change(m, *args, doubles=SetupDoubles(runner=twin))
                 rc = run.run_command()
                 calls = twin.calls
             else:
                 real = SubprocessCommandRunner(
-                    HostExecutionContext(exists=lambda _p: True), base_env=m.env(container=True)
+                    HostExecutionContext(exists=lambda _p: True),
+                    base_env=m.env(container=True, extra={"LANG": lang} if lang else None),
                 )
                 with mock.patch.object(real, "run", wraps=real.run) as spy:
                     run, console, _ = change(m, *args, doubles=SetupDoubles(runner=real))
@@ -943,6 +983,18 @@ class SetupModelParityTest(unittest.TestCase):
         self.assertEqual(self.runs(model, model=True), self.runs(fake, model=False))
         self.assertEqual(self.files(model), self.files(fake))
         self.assertIn("another run's backup\n", self.files(model).values())
+
+    def test_a_raced_backup_name_in_another_language_as_fake_does(self) -> None:
+        # A sudoers that keeps no LC_ALL and a pt_BR session: both read cp's words in the C locale.
+        fake, model = self.machine(), self.machine()
+        for m in (fake, model):
+            m.flag("race-backup")
+            m.flag("sudo-keeps-no-lc-all")
+            os.utime(m.main_conf, (1_000_000, 1_000_000))
+        on_model = self.runs(model, model=True, lang="pt_BR.UTF-8")
+        self.assertEqual(on_model, self.runs(fake, model=False, lang="pt_BR.UTF-8"))
+        self.assertEqual(self.files(model), self.files(fake))
+        self.assertEqual(on_model[0][0], 0, on_model[0])
 
     def test_apply_then_revert_as_fake_does(self) -> None:
         fake, model = self.machine(), self.machine()
