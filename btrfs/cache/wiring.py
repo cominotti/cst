@@ -12,7 +12,15 @@ from collections.abc import Mapping, Sequence
 import os
 
 from btrfs.cache import domain as cache_mount_domain
-from btrfs.cache.adapters import cache_mounts, cache_runtime
+from btrfs.cache.adapters import (
+    CacheAccounts,
+    CacheFolders,
+    CacheHostView,
+    CacheMountTable,
+    CacheSystemd,
+    FstabFile,
+    cache_runtime,
+)
 from btrfs.cache.application import CacheMounts
 from btrfs.cache.domain import CacheMountParsedArgs
 from cst_core.adapters.runtime import ManagedCliEnv, ManagedCliSpec, run_managed_cli, undo_python_start
@@ -31,7 +39,16 @@ def build_cache_mounts(
 ) -> CacheMounts:
     """The use cases over the real files and commands: the test root from env_map (CST_BTRFS_CACHE_ROOT), ctx
     and runner (None: the host's, a subprocess)."""
-    return cache_mounts(cache_runtime(env_map, ctx, runner))
+    rt = cache_runtime(env_map, ctx, runner)
+    return CacheMounts(
+        fstab=FstabFile(rt),
+        mounts=CacheMountTable(rt),
+        systemd=CacheSystemd(rt),
+        folders=CacheFolders(rt),
+        host=CacheHostView(rt),
+        accounts=CacheAccounts(rt),
+        seam_root=rt.seam_root,
+    )
 
 
 def dispatch_cache_mount_cli_action(

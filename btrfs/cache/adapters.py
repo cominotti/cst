@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Host and toolbox adapters for `cst btrfs cache` (`btrfs/btrfs-cache`): the ports of ports.py over the
 host's files and commands, as the host sees them (the test root of CST_BTRFS_CACHE_ROOT; /run/host for the
-reads from a toolbox), and cache_mounts, the use cases of application.py over them (wiring.py builds it)."""
+reads from a toolbox), and cache_runtime, what they run over (wiring.py builds the use cases on them)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import pwd
 import stat
 from typing import Final
 
-from btrfs.cache.application import CacheMounts
 from btrfs.cache.domain import (
     CACHE_SEAM_ROOT_ENV,
     DIR_MODE_PRIVATE,
@@ -297,17 +296,4 @@ def cache_runtime(
         ctx=HostExecutionContext() if ctx is None else ctx,
         runner=SubprocessCommandRunner() if runner is None else runner,
         env_map=env_map,
-    )
-
-
-def cache_mounts(rt: CacheMountRuntime) -> CacheMounts:
-    """The use cases over the real adapters of rt."""
-    return CacheMounts(
-        fstab=FstabFile(rt),
-        mounts=CacheMountTable(rt),
-        systemd=CacheSystemd(rt),
-        folders=CacheFolders(rt),
-        host=CacheHostView(rt),
-        accounts=CacheAccounts(rt),
-        seam_root=rt.seam_root,
     )
