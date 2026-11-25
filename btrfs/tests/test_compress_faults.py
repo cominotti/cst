@@ -47,11 +47,11 @@ from typing import ClassVar, override
 import unittest
 from unittest import mock
 
-from btrfs.commit.adapters import execute_commit_change, format_commit_plan_lines, read_commit_snapshot
+from btrfs.commit import adapters as commit_adapters
+from btrfs.commit.adapters import dispatch_commit_cli_action, execute_commit_change, read_commit_snapshot
 from btrfs.commit.domain import (
     CommitAction,
     CommitParsedArgs,
-    build_commit_plan,
     assess_commit_coherence,
     effective_commit_seconds,
     format_commit_label,
@@ -81,6 +81,7 @@ from btrfs.compress.presenter import render_compress_plan
 from btrfs.compress.domain.rpm_ostree import kargs_refused
 from btrfs.tests.fakes import RELOAD_FAILED, CompressWorld, kernel_remount_options
 from cst_core.adapters.files import LocalFileSystemAdapter
+from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.application.install import InstallRequest, InstallService
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandFailed, CommandResult
@@ -1277,12 +1278,12 @@ class CatchUpReloadTest(unittest.TestCase):
                     )
                     plan = out.getvalue()
                 else:
-                    snap = read_commit_snapshot(w)[0]
-                    plan = "\n".join(
-                        format_commit_plan_lines(
-                            build_commit_plan(snap, target_seconds=60), "cst", dry_run=True, reload_pending=True
+                    with mock.patch.object(commit_adapters, "_host_for_env", return_value=(w, "", {})):
+                        plan_rc, plan_lines = dispatch_commit_cli_action(
+                            CommitParsedArgs(CommitAction.PLAN, seconds=60), ManagedCliEnv(), read_only=True
                         )
-                    )
+                    self.assertEqual(plan_rc, 0)
+                    plan = "\n".join(plan_lines)
                 self.assertIn(FSTAB_RELOAD_PENDING, plan)
                 self.assertIn("Dry run, nothing changed.", plan)
                 self.assertNotIn("nothing to do", plan)

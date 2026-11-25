@@ -12,7 +12,9 @@ from typing import override
 import unittest
 from unittest import mock
 
+from btrfs.commit import adapters as commit_adapters
 from btrfs.commit.adapters import (
+    dispatch_commit_cli_action,
     execute_commit_change,
     format_commit_plan_lines,
     format_commit_status,
@@ -32,6 +34,7 @@ from btrfs.commit.domain import (
     parse_commit_args,
     rewrite_commit_options,
 )
+from btrfs.compress.application import FSTAB_RELOAD_PENDING
 from btrfs.compress.domain import (
     CompressSnapshot,
     LayerStatus,
@@ -600,3 +603,42 @@ class CommitAdapterAndCliTests(unittest.TestCase):
         )
         self.assertEqual(rc_u, 2)
         self.assertIn("invalid commit interval", err_u.getvalue())
+
+
+class CommitCatchUpDispatchTest(unittest.TestCase):
+    """commit-interval status and plan, as the command runs them (dispatch_commit_cli_action), name the
+    catch-up reload the next run would do: status just before its overall line; plan only when it writes no
+    /etc/fstab (a run that writes it reloads with its write)."""
+
+    def _dispatch(self, host: _FakeHost, parsed: CommitParsedArgs) -> tuple[int, list[str]]:
+        with mock.patch.object(commit_adapters, "_host_for_env", return_value=(host, "", {})):
+            return dispatch_commit_cli_action(parsed, CommitCliDeps(), read_only=True)
+
+    def test_status_names_a_pending_reload_before_the_overall_line(self) -> None:
+        for behind in (True, False):
+            with self.subTest(behind=behind):
+                rc, lines = self._dispatch(
+                    _FakeHost(_FakeState(fstab_behind=behind)), CommitParsedArgs(CommitAction.STATUS)
+                )
+                self.assertEqual(rc, 0)
+                self.assertTrue(lines[-1].startswith("  overall "), lines)
+                self.assertEqual(lines[-2] == f"  {FSTAB_RELOAD_PENDING}", behind, lines)
+                self.assertEqual(sum(FSTAB_RELOAD_PENDING in line for line in lines), int(behind))
+
+    def test_plan_names_it_when_it_writes_no_fstab(self) -> None:
+        plan60 = CommitParsedArgs(CommitAction.PLAN, seconds=60)
+        for at_target in (True, False):
+            with self.subTest(at_target=at_target):
+                host = _FakeHost()
+                if at_target:
+                    rc_on, out_on = execute_commit_change(
+                        host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True)
+                    )
+                    self.assertEqual(rc_on, 0, out_on)
+                host.s.fstab_behind = True
+                host.calls.clear()
+                rc, lines = self._dispatch(host, plan60)
+                self.assertEqual(rc, 0)
+                self.assertEqual(FSTAB_RELOAD_PENDING in lines, at_target, lines)
+                self.assertTrue(lines[-1].startswith("Dry run, nothing changed."), lines)
+                self.assertEqual(host.calls, [])

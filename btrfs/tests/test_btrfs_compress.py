@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
-from btrfs.compress.application import CompressService
+from btrfs.compress.application import FSTAB_RELOAD_PENDING, CompressService
 from btrfs.compress.cli import CompressCliStreams, compress_cli
 from btrfs.compress.domain import (
     CompressMode,
@@ -1191,3 +1191,75 @@ class AnacondaScriptTest(unittest.TestCase):
             upgraded = fh.read()
         self.assertIn("compress-force=%s", upgraded)
         self.assertNotIn('"compress=%s"', upgraded)
+
+
+class _SystemctlRunner:
+    """Answers `systemctl show` with one mount unit and `systemctl daemon-reload` (reload_error: its stderr
+    when it fails, "" when it works); calls holds each argv with the options the adapter passed."""
+
+    def __init__(self, *, reload_error: str = "") -> None:
+        self.reload_error = reload_error
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        cmd = list(argv)
+        self.calls.append((cmd, kw))
+        if cmd[1:2] == ["show"]:
+            return CommandResult(0, "Id=-.mount\nNeedDaemonReload=yes\n", "", tuple(cmd))
+        if cmd[1:2] == ["daemon-reload"] and self.reload_error:
+            return CommandResult(1, "", self.reload_error, tuple(cmd))
+        return CommandResult(0, "", "", tuple(cmd))
+
+
+class CompressSystemdAdapterTest(unittest.TestCase):
+    """LinuxCompressHostAdapter's mount_units and daemon_reload (the catch-up reload's two calls): the units
+    systemd loaded, asked of the host's systemd from a toolbox; none under a test root; why a reload failed."""
+
+    def _adapter(self, runner: _SystemctlRunner, *, container: bool, host_root: str = "") -> LinuxCompressHostAdapter:
+        cfg = CompressAdapterConfig(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
+            fallback_root=REPO,
+            proc_dir="/proc",
+            host_root=host_root,
+        )
+        return LinuxCompressHostAdapter(cfg, ctx=_FakeCtx(container=container), runner=runner)
+
+    def test_the_mount_units_are_asked_of_the_host_s_systemd_from_a_toolbox(self) -> None:
+        for container in (False, True):
+            with self.subTest(container=container):
+                runner = _SystemctlRunner()
+                units = self._adapter(runner, container=container).mount_units()
+                self.assertEqual(units, [{"Id": "-.mount", "NeedDaemonReload": "yes"}])
+                [(argv, kw)] = runner.calls
+                self.assertEqual(argv[:3], ["systemctl", "show", "--state=loaded"])
+                self.assertEqual(argv[-1], "*.mount")
+                self.assertEqual(kw.get("on_host"), container)
+
+    def test_no_mount_unit_and_no_call_under_a_test_root(self) -> None:
+        runner = _SystemctlRunner()
+        self.assertEqual(self._adapter(runner, container=True, host_root="/nonexistent-root").mount_units(), [])
+        self.assertEqual(runner.calls, [])
+
+    def test_a_reload_runs_here_and_says_why_it_failed(self) -> None:
+        for error, want in (("", None), ("Access denied", "systemctl daemon-reload failed: Access denied")):
+            with self.subTest(error=error):
+                runner = _SystemctlRunner(reload_error=error)
+                self.assertEqual(self._adapter(runner, container=True).daemon_reload(), want)
+                [(argv, kw)] = runner.calls
+                self.assertEqual(argv, ["systemctl", "daemon-reload"])
+                self.assertFalse(kw.get("on_host", False))
+
+
+class CompressCatchUpStatusTest(unittest.TestCase):
+    """compress-force status names the catch-up reload the next run would do, just before its overall line."""
+
+    def test_status_names_a_pending_reload_before_the_overall_line(self) -> None:
+        for behind in (True, False):
+            with self.subTest(behind=behind):
+                out = io.StringIO()
+                svc = CompressService(_FakeHost(_FakeState(fstab_behind=behind)))
+                self.assertEqual(render_compress_status(svc.gather_status(), out), 0)
+                lines = out.getvalue().splitlines()
+                self.assertTrue(lines[-1].startswith("  overall "), lines)
+                self.assertEqual(lines[-2] == f"  {FSTAB_RELOAD_PENDING}", behind, lines)
+                self.assertEqual(sum(FSTAB_RELOAD_PENDING in line for line in lines), int(behind))
