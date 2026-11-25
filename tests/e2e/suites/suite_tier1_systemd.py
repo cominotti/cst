@@ -14874,8 +14874,9 @@ echo E2E-OK
         that nothing ever writes to at /etc/systemd/system/machine.slice.d/50-memory-low.conf, the name an
         older CST gave its drop-in (plan reads it to decide whether apply removes it). Each run is bounded
         by timeout(1) at 30 s: before this change plan opened the FIFO and waited for a writer for ever
-        (exit 124 here). Now the FIFO is not CST's file: plan and status exit 0 at once with no row for it,
-        and change nothing. machine.slice is started before the FIFO is made, so systemd has loaded it and
+        (exit 124 here). Now the FIFO is not CST's file: plan and status exit 0 at once, with no "remove" row
+        for it but a REFUSE row (since 2026-11: apply refuses a drop-in there that is not a regular file,
+        test_274), and change nothing. machine.slice is started before the FIFO is made, so systemd has loaded it and
         its drop-ins already: systemd itself opens a FIFO drop-in when it loads the slice (and at a
         daemon-reload) and waits for a writer, and PID 1 then stops answering (seen in a first version of
         this test). So apply, whose daemon-reload reloads the slice, is not run here; the unit tests show
@@ -14911,10 +14912,12 @@ s0="$(snap)"
 bounded plan
 [[ $rc == 0 ]] || fail "plan with a FIFO at $OLD exited $rc"
 grep -qE '^  write +crypttab: swap0 line' <<<"$out" || fail "plan's crypttab row"
-if grep -qF '50-memory-low.conf' <<<"$out"; then fail "plan has a row for the FIFO"; fi
+# Not CST's file (no "remove" row), and one a daemon-reload would wait on: apply refuses it (REFUSE).
+grep -qE '^ *REFUSE +machine.slice.d/50-memory-low.conf +not a regular file: systemd' <<<"$out" || fail "plan's REFUSE row"
+if grep -qE '^ *remove +machine.slice.d/50-memory-low.conf' <<<"$out"; then fail "plan would remove the FIFO"; fi
 bounded status
 [[ $rc == 0 || $rc == 1 ]] || fail "status with a FIFO at $OLD exited $rc"
-if grep -qF '50-memory-low.conf' <<<"$out"; then fail "status has a row for the FIFO"; fi
+grep -qE '^ *REFUSE +machine.slice.d/50-memory-low.conf +not a regular file: systemd' <<<"$out" || fail "status's REFUSE row"
 [[ -p "$OLD" ]] || fail "the FIFO is gone"
 [[ "$(snap)" == "$s0" ]] || fail "plan or status changed /etc or the scratch tree"
 echo E2E-OK
@@ -15122,6 +15125,54 @@ cp "$W/crypto.e2e276" "$W/proc/crypto"
 grep -qE "^ *\? +compressor zstd +not in /proc/crypto now: apply loads its module \(modprobe\) and stops if it is still missing$" \
     <<<"$out" || fail "plan's compressor row"
 if grep -qs '^modprobe ' "$W/calls"; then fail "plan ran modprobe"; fi
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_274_swap_apply_refuses_a_fifo_among_machine_slice_s_drop_ins_before_its_daemon_reload(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap set
+        before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and a FIFO that nothing
+        writes to at /etc/systemd/system/machine.slice.d/60-e2e274.conf. machine.slice is started before
+        the FIFO is made, so systemd has loaded the slice and does not open the FIFO unless something
+        reloads it (as test_213; this test, too, relies on nothing else reloading systemd while the FIFO is
+        there: each tier 1 job has a container of its own). apply, bounded by timeout(1) at 60 s, exits 1
+        with "...: not a regular file: systemd's daemon-reload would wait on it; nothing was changed",
+        changes nothing, and systemd still answers within 10 s. On the old code apply's daemon-reload would
+        make PID 1 wait in the FIFO's open; the unit tests prove that (a fake records the reload), and this
+        test is not run against the old code. The trap lets a reader that waits go (a writer's open) and
+        removes the FIFO before swap_cleanup's daemon-reload."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+FIFO="$DROPIN_DIR/60-e2e274.conf"
+release() { if [[ -p "$FIFO" ]]; then timeout 2 sh -c 'exec 3>"$1"' sh "$FIFO" || true; rm -f "$FIFO"; fi; }
+trap 'release; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+systemctl start machine.slice
+mkdir -p "$DROPIN_DIR"
+mkfifo -m 0644 "$FIFO"
+s0="$(snap)"
+rc=0
+timeout 60 "$CST" swap apply >"$W/out" 2>"$W/err" </dev/null || rc=$?
+out="$(cat "$W/out")"
+err="$(cat "$W/err")"
+[[ $rc != 124 ]] || fail "apply blocked"
+[[ $rc == 1 ]] || fail "apply with a FIFO among the drop-ins exited $rc"
+grep -qF "ERROR: $FIFO: not a regular file: systemd's daemon-reload would wait on it; nothing was changed" <<<"$err" ||
+    fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+timeout 10 systemctl is-system-running >/dev/null || [[ $? != 124 ]] || fail "systemd does not answer"
 echo E2E-OK
 """,
             check=False,

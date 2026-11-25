@@ -1298,22 +1298,31 @@ class SwapApplicationTest(_SwapScratch):
 
     def test_a_fifo_at_the_old_drop_in_name_is_left_alone_and_nothing_blocks(self) -> None:
         # A FIFO (its open waits for a writer) at machine.slice.d/50-memory-low.conf, which an older CST
-        # wrote and its record still lists: not CST's file. plan shows no "remove" row and apply forgets the
-        # record line and leaves the FIFO. Before, plan and apply blocked in its open (bounded: CallBlocked).
+        # wrote and its record still lists: not CST's file, and one systemd's daemon-reload would wait on
+        # (since 2026-11 plan shows REFUSE for it and apply stops before its first write; before, apply ran
+        # its daemon-reloads). plan shows no "remove" row, and apply leaves the FIFO and the record. Before
+        # that, plan and apply blocked in its open (bounded: CallBlocked).
         record = os.path.join(self.tmp, "var/lib/cst/installed.json")
         env = dataclasses.replace(self.env, install_record=record)
         old = self._old_dropin_install(record, MAIN_DROPIN)
         os.remove(old)
         os.mkfifo(old)
+        with open(record, encoding="utf-8") as f:
+            recorded = f.read()
         with time_bound(5):
-            self.assertNotIn("50-memory-low.conf", self._plan_text(env))
+            plan = self._plan_text(env)
             rc, out, err, _ = self._apply_once(env, mapper_present=False)
-        self.assertEqual(rc, 0, err)
+        self.assertIn(
+            "machine.slice.d/50-memory-low.conf     not a regular file: systemd's daemon-reload would wait on it; apply stops",
+            plan,
+        )
+        self.assertNotIn("  remove    machine.slice.d/50-memory-low.conf", plan)
+        self.assertEqual(rc, 1, err)
+        self.assertIn(f"{old}: not a regular file: systemd's daemon-reload would wait on it; nothing was changed", err)
         self.assertNotIn("removed:", out)
         self.assertTrue(stat.S_ISFIFO(os.lstat(old).st_mode), "apply replaced the FIFO")
         with open(record, encoding="utf-8") as f:
-            files = json.load(f)["files"]
-        self.assertNotIn("/etc/systemd/system/machine.slice.d/50-memory-low.conf", files)
+            self.assertEqual(f.read(), recorded)
 
     def test_the_old_record_line_goes_also_when_the_file_is_gone_or_not_cst_s(self) -> None:
         old_dest = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
@@ -3368,6 +3377,54 @@ class SwapApplyBranchesTest(_SwapScratch):
                 self.assertEqual(row in self._plan_with(system), want)
                 self.assertEqual(system.modprobes, [])
 
+    def test_a_slice_drop_in_that_is_not_a_regular_file_stops_apply_before_its_daemon_reload(self) -> None:
+        # Before, apply went on and ran its daemon-reloads, and systemd waited in the FIFO's open (PID 1
+        # stopped answering).
+        kinds: tuple[tuple[str, Callable[[str], None]], ...] = (
+            ("fifo", os.mkfifo),
+            ("folder", os.mkdir),
+            ("link to a device", lambda p: os.symlink(os.devnull, p)),
+        )
+        for where in ("etc", "run"):
+            for sub in ("machine.slice.d", "slice.d"):
+                for kind, make in kinds:
+                    tmp = self._fresh_scratch()
+                    run = os.path.join(tmp, "run", "systemd", "system")
+                    self.env = dataclasses.replace(self.env, unit_dirs=(run,))
+                    base = os.path.join(self.env.etc_dir, "systemd", "system") if where == "etc" else run
+                    path = os.path.join(base, sub, "60-x.conf")
+                    with self.subTest(where=where, sub=sub, kind=kind), time_bound(5):
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
+                        make(path)
+                        short = path.removeprefix(self.env.etc_dir.rstrip("/") + "/").removeprefix("systemd/system/")
+                        row = PlanItem(
+                            "REFUSE", short, "not a regular file: systemd's daemon-reload would wait on it; apply stops"
+                        )
+                        self.assertIn(row.format_line(), self._plan_text(self.env).splitlines())
+                        before = file_tree(tmp)
+                        rc, out, err, systemd = self._run(mapper_present=False)
+                        self.assertEqual(rc, 1)
+                        self.assertEqual(
+                            err,
+                            f"cst swap: ERROR: {path}: not a regular file: systemd's daemon-reload would wait on it;"
+                            " nothing was changed\n",
+                        )
+                        self.assertNotIn("written:", out)
+                        self.assertEqual(file_tree(tmp), before)
+                        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_a_regular_slice_drop_in_a_link_to_one_or_a_dangling_link_is_no_obstacle(self) -> None:
+        folder = os.path.join(self.env.etc_dir, "systemd", "system", "machine.slice.d")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "60-a.conf"), "w", encoding="utf-8") as f:
+            f.write("[Slice]\n")
+        os.symlink("60-a.conf", os.path.join(folder, "61-b.conf"))
+        os.symlink("nowhere", os.path.join(folder, "62-c.conf"))
+        self.assertNotIn("daemon-reload would wait", self._plan_text(self.env))
+        rc, _out, err, _systemd = self._run(mapper_present=False)
+        self.assertNotIn("daemon-reload would wait", err)
+        self.assertEqual(rc, 0, err)
+
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the
         # earlier files first, and stopped only at that step.
@@ -3728,6 +3785,12 @@ class SwapWiringTest(unittest.TestCase):
                 prog="cst swap",
                 install_record="/x/var/lib/cst/installed.json",
                 in_container=True,
+                unit_dirs=(
+                    "/x/run/systemd/system",
+                    "/x/run/systemd/system.control",
+                    "/x/run/systemd/transient",
+                    "/usr/lib/systemd/system",
+                ),
             ),
         )
 

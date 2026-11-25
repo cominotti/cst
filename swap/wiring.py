@@ -131,4 +131,10 @@ def desired_paths(
         install_record=os.path.join(os.path.dirname(etc.rstrip("/")), ROOT_RECORD.lstrip("/")),
         as_root=ctx.is_root(),
         in_container=ctx.is_container(),
+        unit_dirs=(
+            ctx.host_run_dir("systemd/system"),
+            ctx.host_run_dir("systemd/system.control"),
+            ctx.host_run_dir("systemd/transient"),
+            "/usr/lib/systemd/system",
+        ),
     )

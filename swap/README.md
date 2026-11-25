@@ -205,7 +205,14 @@ is anything there that is not a regular file (a FIFO, a device, or a link
 to one): `plan`, `status` and `apply` do not open it in a way that waits.
 systemd itself does: it opens a FIFO among `machine.slice`'s drop-ins when
 it loads the slice or at a `daemon-reload` (`apply` runs one) and waits for
-a writer, and stops answering. Remove such a FIFO by hand. While a game
+a writer, and stops answering. So `plan` and `status` show a `REFUSE` row
+for each `*.conf` in `machine.slice.d/` or `slice.d/` (under
+`/etc/systemd/system`, `/etc/systemd/system.control`, `/run/systemd/system`,
+`/run/systemd/system.control`, `/run/systemd/transient` and
+`/usr/lib/systemd/system`) that is not a regular file (a FIFO, a device, a
+folder, or a link to one; a link to a regular file and a link that leads
+nowhere are fine), and `apply` refuses before it writes anything (step 1).
+Remove such a file by hand. While a game
 runs, the `cpu` module's game profile gives the game's cgroups
 `MemoryLow=16G` (runtime only); it does not touch `machine.slice`'s memory
 settings. `cst swap status` shows both floors in its `low` column.
@@ -357,7 +364,11 @@ What `apply` does, in order:
    is in place of `/etc/systemd/zram-generator.conf`, where step 4 puts a
    link, or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, which step 5
    removes (refused with `<file>: a folder is in its place: nothing was
-   changed`), and that
+   changed`), that no `*.conf` among `machine.slice`'s drop-in folders
+   is something other than a regular file (refused with `<file>: not a
+   regular file: systemd's daemon-reload would wait on it; nothing was
+   changed`: its `daemon-reload` would make systemd wait in a FIFO's open),
+   and that
    root's install record (`/var/lib/cst/installed.json`) was not written by
    a newer CST (a downgrade) and, when it is there, can be read (a folder,
    a FIFO, a read error): a refusal stops it before it writes anything.

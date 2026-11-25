@@ -126,11 +126,19 @@ class SwapEnvironment:
     in_container: bool = False
     # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
     test_seam: tuple[tuple[str, str, str], ...] = ()
+    # The system manager's unit folders besides etc_dir's (/run's and /usr's: wiring names them; a test none).
+    unit_dirs: tuple[str, ...] = ()
 
     @property
     def host_root(self) -> bool:
         """Root of the host, whom --root cannot help with a file it cannot read (cst doctor's rule too)."""
         return self.as_root and not self.in_container
+
+    @property
+    def slice_dropin_dirs(self) -> tuple[str, ...]:
+        """The system manager's unit folders whose machine.slice.d/ and slice.d/ daemon-reload reads."""
+        etc = posixpath.join(self.etc_dir, "systemd")
+        return (posixpath.join(etc, "system"), posixpath.join(etc, "system.control"), *self.unit_dirs)
 
     @property
     def managed_files(self) -> tuple[tuple[str, str], ...]:
@@ -219,6 +227,10 @@ _ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before i
 # row, whoever runs plan (after the name, for a name above a file apply writes whole that is not a folder).
 _FOLDER_IN_PLACE_NOTE: Final = "a folder is in its place: apply refuses before it writes anything"
 _NOT_A_FOLDER_NOTE: Final = "is not a folder: apply refuses before it writes anything"
+# The drop-in folders of machine.slice that systemd reads at a daemon-reload (its own and every slice's).
+_SLICE_DROPIN_FOLDERS: Final = ("machine.slice.d", "slice.d")
+# What plan and apply say of a drop-in there that is not a regular file.
+SLICE_DROPIN_NOT_REGULAR: Final = "not a regular file: systemd's daemon-reload would wait on it"
 # The install record's row (check_record's refusal), and what that refusal says apply does.
 _RECORD_ROW: Final = "install record"
 _RECORD_REFUSAL_OUTCOME: Final = "apply stops before it writes anything"
@@ -616,6 +628,11 @@ class SwapReports:
         record = self._record_item(verb)
         if record is not None:
             file_items.append(record)
+        dropin = self.slice_dropin_in_the_way()
+        if dropin is not None:
+            file_items.append(
+                PlanItem("REFUSE", _short_etc_path(env.etc_dir, dropin), f"{SLICE_DROPIN_NOT_REGULAR}; apply stops")
+            )
 
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
         runtime_items = (
@@ -634,6 +651,26 @@ class SwapReports:
             file_items=tuple(file_items),
             runtime_items=tuple(runtime_items),
         )
+
+    def slice_dropin_in_the_way(self) -> str | None:
+        """The first NAME.conf in machine.slice.d/ or slice.d/ of the system manager's unit folders that is
+        there and is not a regular file after links (a FIFO, a device, a folder): every daemon-reload of apply
+        makes systemd open it, and a FIFO's open waits for ever (PID 1 stops answering). A link that leads
+        nowhere is no obstacle (systemd skips it). Only stat, never an open. None: none."""
+        for base in self._env.slice_dropin_dirs:
+            for sub in _SLICE_DROPIN_FOLDERS:
+                folder = posixpath.join(base, sub)
+                try:
+                    names = sorted(self._fs.list_dir(folder)) if self._fs.is_dir(folder) else []
+                except OSError:  # a folder this user may not list: plan cannot tell, apply (root) can
+                    names = []
+                for name in names:
+                    path = posixpath.join(folder, name)
+                    if path == self._env.slice_dropin:
+                        continue  # CST's own: refused as a file apply writes whole ("cannot be read")
+                    if name.endswith(".conf") and self._fs.exists(path) and not self._fs.is_file(path):
+                        return path
+        return None
 
     def _record_item(self, verb: str) -> PlanItem | None:
         """The install record's row when apply would refuse it before its first write (check_record: one of a
