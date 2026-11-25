@@ -10317,6 +10317,10 @@ echo E2E-OK
         uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
         home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0"
         home_mount = "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0"
+        # The cleanup removes the top-mount units: never ones the test did not make.
+        units = " ".join(shlex.quote(f"/etc/systemd/system/{u}") for u in (top_unit, auto_unit))
+        if exec_bash(c, f"for u in {units}; do [[ ! -e $u ]] || echo $u; done").stdout.strip():
+            self.skipTest("the btrfs top-mount unit or automount already exists (another test's)")
         self.addCleanup(
             exec_bash,
             c,
