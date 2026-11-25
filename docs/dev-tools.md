@@ -264,7 +264,7 @@ cache folder, here and for every dev tool (`tests/uv-dev`, `tests/run_unit.py`'s
 durations file, the mbt profiles, `cst-mutation`, `cst-quint`), follows one
 rule (`tests/xdg_cache.py`, and the same in `tests/uv-dev`'s bash): an
 absolute `XDG_CACHE_HOME`; else `.cache` under an absolute `HOME`; else
-under the home folder of the password database. A relative `XDG_CACHE_HOME`
+under the home folder of the password database, when it is absolute. A relative `XDG_CACHE_HOME`
 is ignored, as the XDG spec says, and a relative or empty `HOME` is no
 home: the tools run from the top of the checkout, so either would put the
 cache inside it. With none of the three the tool stops with "no cache

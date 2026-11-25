@@ -37,6 +37,15 @@ class CacheBaseTest(unittest.TestCase):
             self.assertIsNone(cache_base({"HOME": ""}))
             self.assertEqual(cache_base({"XDG_CACHE_HOME": "/c", "HOME": ""}), "/c")
 
+    def test_a_relative_or_empty_home_in_the_password_database_gives_none(self) -> None:
+        # tests/uv-dev stops on such a getent home too: either would put the cache inside the checkout.
+        for pw_dir in ("", "rel", "./rel"):
+            entry = pwd.struct_passwd(("u", "x", 1000, 1000, "", pw_dir, "/bin/sh"))
+            with self.subTest(pw_dir=pw_dir), mock.patch("tests.xdg_cache.pwd.getpwuid", return_value=entry):
+                self.assertIsNone(cache_base({"HOME": ""}))
+                self.assertIsNone(cache_base({"XDG_CACHE_HOME": "rel"}))
+                self.assertEqual(cache_base({"XDG_CACHE_HOME": "/c", "HOME": ""}), "/c")
+
 
 if __name__ == "__main__":
     unittest.main()

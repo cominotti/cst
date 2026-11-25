@@ -25,8 +25,9 @@ def cache_base(environ: Mapping[str, str]) -> str | None:
     """The user's cache folder: an absolute XDG_CACHE_HOME, else ~/.cache (HOME, else the password database).
 
     The XDG Base Directory spec ignores a relative XDG_CACHE_HOME, and a relative or empty HOME is no home:
-    the tools run from the top of the checkout, so either would put the cache inside it. None when neither
-    is absolute and the password database has no entry for this user.
+    the tools run from the top of the checkout, so either would put the cache inside it; so would a relative
+    or empty home folder in the password database. None when neither is absolute and the password database
+    has no absolute home folder for this user (no entry, or a home field that is not an absolute path).
     """
     base = environ.get("XDG_CACHE_HOME", "")
     if os.path.isabs(base):
@@ -36,5 +37,7 @@ def cache_base(environ: Mapping[str, str]) -> str | None:
         try:
             home = pwd.getpwuid(os.getuid()).pw_dir
         except KeyError:
+            return None
+        if not os.path.isabs(home):
             return None
     return os.path.join(home, ".cache")
