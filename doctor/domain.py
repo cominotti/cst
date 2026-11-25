@@ -147,6 +147,7 @@ NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 GAME_RUN = HostPath(state_format(StateFormatKey.GAME_STATE).folder)
 GAME_STATE = HostPath(state_format(StateFormatKey.GAME_STATE).path)
 GAME_INTENDED = HostPath(state_format(StateFormatKey.GAME_INTENDED).path)
+GAME_LEFTOVERS = HostPath(state_format(StateFormatKey.GAME_LEFTOVERS).path)
 GAME_MANUAL = HostPath(f"{GAME_RUN}/manual")
 GAME_DROPIN_DIR = HostPath("/run/systemd/system")
 GAME_DROPIN = "zz-cst-game.conf"

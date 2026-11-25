@@ -95,7 +95,7 @@ and sampler passed in, and the apply prompt is cst_core's `confirm`. The
 game profile (`cpu-game-profile`) is a light package of its own,
 `cpu/game`: the records of `game.state` and `game.intended` (written as
 bash's `printf %q` writes them, since an installed bash copy of an older CST
-reads them) and the drift rules in `domain.py`; `GameProfile` in
+reads them) and the drift rules in `domain/`; `GameProfile` in
 `adapters.py` carries the paths, the settings and the runner across the
 steps of `on`, `off`, `tick` and `state`. `cpu/setup` (`cst cpu`'s own
 commands) is in `HEXAGONAL_PACKAGES` with only the full profile's `wiring.py` (no

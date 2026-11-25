@@ -7029,6 +7029,407 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_181_cpu_game_profile_tick_sets_a_handled_box_again_when_its_setting_does_not_hold(self) -> None:
+        """The real game profile, on for tester with BUILD_CPUS='0,2' (not contiguous: the real systemd shows
+        "0 2"). A box next to the game (a slice of the user manager's own, made by systemd-run --user)
+        whose record game.state holds with no setting (what a set-property that failed leaves): the tick
+        sets CPUWeight idle in the real user manager, its user.control override written, with no new
+        record. A systemd-run job straight in app.slice (run-e2e181.service) the tick sets; then its
+        transient override removed and a user daemon-reload (what a killed 'off' leaves): its CPUWeight
+        is its own again, and the next tick sets it idle again, with no new record. A Docker-named scope
+        of the system manager and a Steam-named scope of tester's user manager get AllowedCPUs and
+        MemoryLow. A further tick finds every value holding in the forms the real systemd shows (idle,
+        "0 2", the bytes of 16G): game.state byte for byte the same, every override file the same inode
+        and mtime, and its output names none of them. 'off' removes the overrides and both boxes of the
+        user manager get their own CPUWeight back. The old tick skipped every box it held a record of."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e181-box.service run-e2e181.service 2>/dev/null || true
+            systemctl --user -M tester@ stop app-flatpak-com.valvesoftware.Steam-e2e181.scope 2>/dev/null || true
+            systemctl stop docker-e2e181.scope 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-181-conf.bak ]]; then mv /tmp/e2e-181-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-181-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0,2'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            steam=app-flatpak-com.valvesoftware.Steam-e2e181.scope
+            ushow() { systemctl --user -M tester@ show -P "$1" "$2"; }
+            wait_dir() { for _ in $(seq 50); do [[ -d "$1" ]] && break; sleep 0.1; done; test -d "$1"; }
+            touch /run/cpu-setup/manual
+            gp on
+            # A box whose set-property failed: its record, no setting.
+            systemd-run --user -M tester@ --quiet --slice=e2e181.slice --unit=e2e181-box sleep 300
+            wait_dir "$ucg/e2e181.slice"
+            own=$(ushow CPUWeight e2e181.slice)
+            [[ "$own" != idle ]]
+            rec='prop usr e2e181.slice CPUWeight new -'
+            printf '%s\n' "$rec" >>"$st"
+            # A systemd-run job straight in app.slice; a Docker-named scope of the system manager; a
+            # Steam-named scope of tester's (a --user --scope needs a caller the user manager may move).
+            systemd-run --user -M tester@ --quiet --unit=run-e2e181 sleep 300
+            wait_dir "$ucg/app.slice/run-e2e181.service"
+            job_own=$(ushow CPUWeight run-e2e181.service)
+            [[ "$job_own" != idle ]]
+            systemd-run --quiet --unit=e2e181-docker-launch systemd-run --scope --quiet --unit=docker-e2e181.scope sleep 300
+            systemd-run --user -M tester@ --quiet --unit=e2e181-steam-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+                systemd-run --user --scope --quiet --unit="$steam" sleep 300
+            for _ in $(seq 50); do
+                [[ "$(systemctl show -P ActiveState docker-e2e181.scope)" == active \
+                    && "$(ushow ActiveState "$steam")" == active ]] && break
+                sleep 0.1
+            done
+            [[ "$(systemctl show -P ActiveState docker-e2e181.scope)" == active ]]
+            [[ "$(ushow ActiveState "$steam")" == active ]]
+            [[ "$(systemctl show -P Slice docker-e2e181.scope)" != builds.slice ]]
+            got=$(gp tick)
+            [[ "$(ushow CPUWeight e2e181.slice)" == idle ]] || { echo "the box was not set again: $got" >&2; cat "$st" >&2; exit 1; }
+            grep -q "e2e181.slice: CPUWeight is '.*', not 'idle' (its set failed, or something undid it): set CPUWeight=idle again" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            box_ov=/run/user/$uid/systemd/user.control/e2e181.slice.d/50-CPUWeight.conf
+            job_ov=/run/user/$uid/systemd/transient/run-e2e181.service.d/50-CPUWeight.conf
+            test -e "$box_ov"
+            test -e "$job_ov"
+            [[ "$(grep -cxF "$rec" "$st")" == 1 ]] || { echo "a second record of the box" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(ushow CPUWeight run-e2e181.service)" == idle ]]
+            [[ "$(systemctl show -P AllowedCPUs docker-e2e181.scope)" == "0 2" ]] \
+                || { echo "docker scope: $(systemctl show -P AllowedCPUs docker-e2e181.scope)" >&2; exit 1; }
+            [[ "$(ushow MemoryLow "$steam")" == 17179869184 ]] || { echo "steam scope: $(ushow MemoryLow "$steam")" >&2; exit 1; }
+            # What an 'off' killed after this undo leaves, after a reload: no override, its own value.
+            rm "$job_ov"
+            systemctl --user -M tester@ daemon-reload
+            [[ "$(ushow CPUWeight run-e2e181.service)" == "$job_own" ]] \
+                || { echo "the reload kept $(ushow CPUWeight run-e2e181.service)" >&2; exit 1; }
+            lines=$(wc -l <"$st")
+            got=$(gp tick)
+            [[ "$(ushow CPUWeight run-e2e181.service)" == idle ]] || { echo "the job was not set again: $got" >&2; exit 1; }
+            grep -q "run-e2e181.service: CPUWeight is '.*', not 'idle' (its set failed, or something undid it)" <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(wc -l <"$st")" == "$lines" ]] || { echo "a new record" >&2; cat "$st" >&2; exit 1; }
+            # Every value holds now, in the forms the real systemd shows: a tick writes nothing.
+            ovs=("$box_ov" "$job_ov" /run/systemd/transient/docker-e2e181.scope.d/50-AllowedCPUs.conf
+                "/run/user/$uid/systemd/transient/$steam.d/50-MemoryLow.conf")
+            sum=$(sha256sum "$st")
+            marks=$(stat -c '%i %y' "${ovs[@]}")
+            got=$(gp tick)
+            [[ "$(sha256sum "$st")" == "$sum" ]] || { echo "game.state changed" >&2; exit 1; }
+            [[ "$(stat -c '%i %y' "${ovs[@]}")" == "$marks" ]] || { echo "an override was written again: $got" >&2; exit 1; }
+            if grep -qE 'e2e181|Steam' <<<"$got"; then echo "the tick named a box: $got" >&2; exit 1; fi
+            gp off
+            test ! -e "$box_ov" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(ushow CPUWeight e2e181.slice)" == "$own" ]] || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
+            [[ "$(ushow CPUWeight run-e2e181.service)" == "$job_own" ]] || { echo "the job's CPUWeight: not $job_own" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e181-box.service run-e2e181.service "$steam"
+            systemctl stop docker-e2e181.scope
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_182_cpu_game_profile_keeps_an_undo_off_could_not_do_and_the_tick_retries_it(self) -> None:
+        """The real game profile, on for tester, with two more records in game.state whose undo fails: a sysfs
+        file under a path whose folder is a plain file (the write fails, ENOTDIR), and machine.slice's
+        CPUWeight set back to a value the real systemd refuses. 'off' exits 0, undoes everything else
+        (machine.slice gets its own CPUWeight back from on's record), removes game.state, names both in the
+        journal and keeps exactly the two records in game.leftovers; 'state' lists them, and cst doctor warns
+        about both, with off as the fix (and says nothing once the file is gone). A third record, of a
+        cgroup file whose cgroup is gone (ENOENT from the real cgroupfs), is done: neither named nor kept. A tick while off
+        keeps both (the file byte for byte); once the folder is a folder, the next tick writes the old value
+        and keeps only the CPUWeight record, which the next 'off' keeps too. The old 'off' removed game.state
+        with both records in it and kept nothing. With TARGET_USER unset and a GameMode client running, a tick
+        tries a kept record of tester's user manager for tester and still does not start cpu-game.service (a
+        stub): the old tick then acted for tester and started it. A kept record of a uid with no account is
+        never set in tester's manager: kept while that uid's runtime folder is there, done once it is gone.
+        An override that cannot be removed stays kept, and the ticks that retry it run no daemon-reload. A
+        game.leftovers that cannot be read (a folder) is left alone: 'off' exits 0 and removes game.state. With
+        one of a newer format, a failed undo is said not undone, in 'off''s closing line too."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-182-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            rm -f /tmp/e2e-182-client.pid /tmp/e2e-182-ready /tmp/e2e-182-starts /tmp/e2e-182-libgamemode.so
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-182-conf.bak ]]; then mv /tmp/e2e-182-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            systemctl stop e2e182-flag.service 2>/dev/null || true
+            rm -f /run/systemd/system/e2e182-flag.service
+            rm -rf /run/cpu-setup /run/e2e182 /run/user/4242 /run/systemd/system.control/e2e182.slice.d
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-182-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            own=$(systemctl show -P CPUWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" != "$own" ]]
+            mkdir -p /run/e2e182
+            printf 'a file, not a folder\n' >/run/e2e182/dir
+            knob=/run/e2e182/dir/knob
+            sys_rec="sysfs $knob OLD"
+            prop_rec='prop sys machine.slice CPUWeight existed bogus'
+            # And a cgroup file whose cgroup is gone (the real cgroupfs answers ENOENT): no leftover.
+            gone_rec='cgw /sys/fs/cgroup/e2e182-gone.slice/cpu.weight 42'
+            test ! -e /sys/fs/cgroup/e2e182-gone.slice
+            printf '%s\n' "$sys_rec" "$gone_rec" "$prop_rec" >>"$st"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            if grep -qF e2e182-gone <<<"$got"; then echo "off named the gone cgroup: $got" >&2; exit 1; fi
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "machine.slice CPUWeight: $(systemctl show -P CPUWeight machine.slice), not $own" >&2; exit 1; }
+            grep -qF "off: could not undo machine.slice CPUWeight=bogus: kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "off: could not undo $knob = OLD: kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            grep -qF "except 2 setting(s) kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 1' ]] || { cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: $knob, machine.slice CPUWeight" \
+                || { gp state >&2; exit 1; }
+            # cst doctor (as tester) warns about both, by name, with the fix line of a profile that is off.
+            doc() { runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+                /opt/cst-rw/cst doctor 2>&1 || true; }
+            d=$(doc)
+            grep -qE "WARN +game profile: 2 setting\(s\) 'off' could not undo keep the game's value: $knob, machine\.slice CPUWeight \(kept in /run/cpu-setup/game\.leftovers\)" <<<"$d" \
+                || { echo "doctor: $d" >&2; exit 1; }
+            grep -qF 'fix: sudo /usr/local/sbin/cpu-game-profile off' <<<"$d" || { echo "doctor: $d" >&2; exit 1; }
+            # A tick while off: both still fail, the file stays byte for byte.
+            sum=$(sha256sum "$lo")
+            gp tick >/dev/null
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "game.leftovers changed:" >&2; cat "$lo" >&2; exit 1; }
+            # The folder is a folder now: the next tick writes OLD and keeps only the CPUWeight record.
+            rm /run/e2e182/dir
+            mkdir /run/e2e182/dir
+            got=$(gp tick)
+            [[ "$(cat "$knob")" == OLD ]] || { echo "the knob was not written: $got" >&2; exit 1; }
+            grep -qF "undid $knob = OLD, kept in $lo by an earlier off" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            # An 'off' with no game.state retries it too, and keeps it while it fails.
+            got=$(gp off)
+            grep -qF "off: could not undo machine.slice CPUWeight=bogus" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
+            rm -f "$lo"
+            rm -rf /run/e2e182
+            if grep -qF "could not undo keep" <<<"$(doc)"; then echo "doctor warns with no game.leftovers" >&2; exit 1; fi
+            # The tick while off judges TARGET_USER as it is, not the user of a kept record: with TARGET_USER
+            # unset and a GameMode client running, a kept record of tester's user manager that the real
+            # systemd still refuses is tried for tester, and cpu-game.service (a stub that records its starts)
+            # is not started. The old tick acted for tester from then on and started it ('on' then refused).
+            uid=$(id -u tester)
+            urec='prop usr user.slice CPUWeight existed bogus'
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-182-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-182-libgamemode.so /tmp/e2e-182-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-182-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-182-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-182-client.pid)/maps"
+            printf '%s\n' "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            printf 'cst-game-leftovers 1\nuser %s\n%s\n' "$uid" "$urec" >"$lo"
+            got=$(gp tick 2>&1)
+            grep -qF 'GameMode client running, profile not switched on: TARGET_USER not set' <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            if grep -q 'switching on' <<<"$got"; then echo "the tick switched on: $got" >&2; exit 1; fi
+            sleep 1
+            test ! -e /tmp/e2e-182-starts || { echo "cpu-game.service was started" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "user $uid"$'\n'"$urec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            kill "$(cat /tmp/e2e-182-client.pid)"
+            rm -f "$stub" "$lo" /run/cpu-setup/settings-warned
+            systemctl daemon-reload
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            # A kept record of a uid no account has now is never undone in another user's manager: kept while
+            # that uid's user manager is there (/run/user/UID/systemd), done once it is gone. The old tick set
+            # it in tester's (TARGET_USER's) manager and dropped it as undone.
+            ghost=4242
+            if getent passwd "$ghost" >/dev/null; then echo "uid $ghost has an account" >&2; exit 1; fi
+            grec='prop usr app.slice CPUWeight existed 77'
+            app_own=$(systemctl --user -M tester@ show -P CPUWeight app.slice)
+            [[ "$app_own" != 77 ]]
+            mkdir -p "/run/user/$ghost/systemd"
+            printf 'cst-game-leftovers 1\nuser %s\n%s\n' "$ghost" "$grec" >"$lo"
+            gp tick >/dev/null
+            [[ "$(tail -n +2 "$lo")" == "user $ghost"$'\n'"$grec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight app.slice)" == "$app_own" ]] \
+                || { echo "tester's app.slice got the other user's CPUWeight" >&2; exit 1; }
+            rm -rf "/run/user/$ghost"
+            gp tick >/dev/null
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight app.slice)" == "$app_own" ]]
+            # An override 'off' could not remove (a non-empty folder in its place: EISDIR) stays kept, and the
+            # tick that retries it runs no daemon-reload: a loaded unit changed on disk keeps NeedDaemonReload
+            # yes. The old tick reloaded systemd at every try.
+            ovr=/run/systemd/system.control/e2e182.slice.d/50-CPUWeight.conf
+            mkdir -p "$ovr/inside"
+            flag=/run/systemd/system/e2e182-flag.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >"$flag"
+            systemctl daemon-reload
+            systemctl start e2e182-flag.service
+            printf '[Unit]\nDescription=changed on disk\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >"$flag"
+            [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
+                || { echo "the test cannot bite: NeedDaemonReload is not yes" >&2; exit 1; }
+            nrec='prop sys e2e182.slice CPUWeight new -'
+            printf 'cst-game-leftovers 1\n%s\n' "$nrec" >"$lo"
+            for n in 1 2; do
+                gp tick >/dev/null
+                [[ "$(tail -n +2 "$lo")" == "$nrec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+                [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
+                    || { echo "tick $n ran a daemon-reload" >&2; exit 1; }
+            done
+            systemctl stop e2e182-flag.service
+            rm -rf /run/systemd/system.control/e2e182.slice.d
+            rm -f "$flag" "$lo"
+            systemctl daemon-reload
+            # A game.leftovers that cannot be read (a folder in its place) is left alone, never taken for a
+            # missing file: 'off' exits 0, says so, removes game.state and leaves the folder. The old 'off'
+            # crashed on it (IsADirectoryError) after its undos and left game.state: the profile stayed on.
+            mkdir -p "$lo/inside"
+            gp on >/dev/null
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "$lo: cannot be read (Is a directory): left alone, neither undone nor removed" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            test -d "$lo/inside"
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
+            rm -rf "$lo"
+            # A game.leftovers of a newer format is left alone; a setting 'off' could not undo then is said not
+            # undone, and the closing line says so. The old 'off' ended with the plain "restored" line.
+            printf 'cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n' >"$lo"
+            sum=$(sha256sum "$lo")
+            gp on >/dev/null
+            printf '%s\n' "$prop_rec" >>"$st"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "off: could not keep machine.slice CPUWeight=bogus in $lo: not undone" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(tail -n 1 <<<"$got")" == *"settings restored, except 1 setting(s) not undone" ]] \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "game.leftovers changed:" >&2; cat "$lo" >&2; exit 1; }
+            test ! -e "$st"
+            rm -f "$lo"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_183_cpu_game_profile_leaves_a_folder_whose_name_is_no_unit_name_alone(self) -> None:
+        """The real game profile, on for tester; in the real user manager's cgroup tree, as root, folders
+        whose name is no unit name ('a b.slice', and one with byte 0xff): 'on' and three ticks never name
+        them, game.state stays byte for byte as 'on' left it. And where lushtext runs its jobs: the scope
+        lushtext-cap-1234-5678.scope in user-lushtext.slice (under the toolboxes' user.slice), a valid
+        unit name, is covered by user.slice's rule only: no record, set-property or output line names it
+        or its slice, and it gets no override of its own. The old profile recorded both folders, ran a
+        set-property on them that the real systemd refuses, and wrote one more record of the 0xff name
+        at every tick."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            rmdir "$ucg/a b.slice" "$ucg/"$'x\\xff.slice' 2>/dev/null || true
+            systemctl --user -M tester@ stop lushtext-cap-1234-5678.scope e2e183-launch.service 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-183-conf.bak ]]; then mv /tmp/e2e-183-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-183-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            job=lushtext-cap-1234-5678.scope
+            ushow() { systemctl --user -M tester@ show -P "$1" "$2"; }
+            # Where lushtext runs its jobs (a --user --scope needs a caller the user manager may move).
+            systemd-run --user -M tester@ --quiet --unit=e2e183-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+                systemd-run --user --scope --quiet --slice=user-lushtext.slice --unit="$job" sleep 300
+            for _ in $(seq 50); do [[ "$(ushow ActiveState "$job")" == active ]] && break; sleep 0.1; done
+            [[ "$(ushow ActiveState "$job")" == active ]]
+            [[ "$(ushow Slice "$job")" == user-lushtext.slice ]]
+            test -d "$ucg/user.slice/user-lushtext.slice/$job"
+            job_own=$(ushow CPUWeight "$job")
+            mkdir "$ucg/a b.slice" "$ucg/"$'x\xff.slice'
+            touch /run/cpu-setup/manual
+            # The names as the journal, systemctl's refusal and printf %q write them.
+            names=(-e 'a b.slice' -e 'a\ b.slice' -e $'x\xff.slice' -e 'x\xff.slice' -e 'x\377.slice'
+                -e lushtext-cap -e user-lushtext)
+            named() {
+                if LC_ALL=C grep -qaF "${names[@]}" <<<"$got"; then
+                    echo "$1 named a folder:" >&2; cat -v <<<"$got" >&2; cat -v "$st" >&2; exit 1
+                fi
+            }
+            got=$(gp on 2>&1)  # systemctl's own refusals too
+            named on
+            [[ "$(ushow CPUWeight user.slice)" != "" ]]
+            sum=$(sha256sum "$st")
+            for n in 1 2 3; do
+                got=$(gp tick 2>&1)
+                named "tick $n"
+                [[ "$(sha256sum "$st")" == "$sum" ]] || { echo "tick $n changed game.state:" >&2; cat -v "$st" >&2; exit 1; }
+            done
+            if LC_ALL=C grep -qaF "${names[@]}" "$st"; then
+                echo "a record names a folder:" >&2; cat -v "$st" >&2; exit 1
+            fi
+            test ! -e "/run/user/$uid/systemd/transient/$job.d/50-CPUWeight.conf"
+            test ! -e "/run/user/$uid/systemd/user.control/user-lushtext.slice.d/50-CPUWeight.conf"
+            [[ "$(ushow CPUWeight "$job")" == "$job_own" ]]
+            gp off
+            rmdir "$ucg/a b.slice" "$ucg/"$'x\xff.slice'
+            systemctl --user -M tester@ stop "$job" e2e183-launch.service 2>/dev/null || true
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.SMOKE, E2ETag.VM, E2ETag.TOOLCHAINS)
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
@@ -10351,6 +10752,236 @@ swap_run apply
 [[ $rc == 0 ]] || fail "apply with no record"
 grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
 grep -qF '"swap:core": "done"' "$REC" || fail "the record names swap:core done"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_187_swap_apply_refuses_a_path_in_the_way_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, four times: a
+        folder where /etc/tmpfiles.d/zswap.conf goes (plan's row of the file is "?" and says apply refuses
+        it), a folder where /etc/systemd/zram-generator.conf goes (apply renames a link over it), a folder
+        where the legacy /etc/sysctl.d/99-zram-tuning.conf is (apply unlinks it), and a file in place of
+        /etc/systemd/system/machine.slice.d (the folder of the drop-in apply writes; the real one moved
+        aside). The test's own trap puts each back before swap_cleanup runs. Each time apply exits 1 with
+        "<file>: cannot be read: nothing was changed", "<file>: a folder is in its place: nothing was
+        changed" or "<file>: <folder> is not a folder: nothing was changed" on stderr, and every file,
+        link, mode and owner under /etc and the scratch tree, and the install record, are as before (no
+        crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply wrote crypttab and fstab and
+        started swap0's step first, and failed later (at the zswap step, or with "Is a directory" or "Not
+        a directory"). With each one put back, the same apply works and a second one changes nothing."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/tmpfiles.d/zswap.conf
+ZRAM=/etc/systemd/zram-generator.conf
+OLD=/etc/sysctl.d/99-zram-tuning.conf
+DROPIN="$DROPIN_DIR/10-swap-memory-low.conf"
+NOTE="cannot be read, even as root: apply refuses before it writes anything"
+made=""
+put_back() {
+    case "$made" in
+        conf) rm -rf "$CONF" ;;
+        zram) rmdir "$ZRAM" ;;
+        old) rmdir "$OLD" ;;
+        dropin) rm -f "$DROPIN_DIR"; mv "$W/dropin.real" "$DROPIN_DIR" ;;
+    esac
+    made=""
+}
+trap 'put_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+refused() {
+    s0="$(snap)"
+    r0="$(record)"
+    : >"$W/calls"
+    swap_run apply
+    [[ $rc == 1 ]] || fail "apply with $1 exited $rc"
+    grep -qF "swap: ERROR: $2" <<<"$err" || fail "apply's message with $1"
+    [[ "$out" != *"written:"* ]] || fail "apply with $1 wrote before it refused"
+    [[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply with $1 reached swap0's step"
+    [[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+    [[ "$(snap)" == "$s0" ]] || fail "a refused apply with $1 changed /etc or the scratch tree"
+    [[ "$(record)" == "$r0" ]] || fail "a refused apply with $1 changed the install record"
+    if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply with $1 ran sysctl"; fi
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there before the test"
+[[ ! -d "$ZRAM" && ! -e "$OLD" && ! -L "$OLD" && -d "$DROPIN_DIR" && ! -L "$DROPIN_DIR" ]] \
+    || fail "the container's files are not as the test expects"
+mkdir -p "$CONF"
+made=conf
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a folder in place of $CONF exited $rc"
+grep -qE "^  \?  +tmpfiles\.d/zswap\.conf +$NOTE\$" <<<"$out" || fail "plan's row of $CONF"
+refused "a folder in place of $CONF" "$CONF: cannot be read: nothing was changed"
+put_back
+rm -f "$ZRAM"  # the image's own, if any: swap_cleanup puts it back
+mkdir "$ZRAM"
+made=zram
+refused "a folder in place of $ZRAM" "$ZRAM: a folder is in its place: nothing was changed"
+put_back
+mkdir "$OLD"
+made=old
+refused "a folder in place of $OLD" "$OLD: a folder is in its place: nothing was changed"
+put_back
+mv "$DROPIN_DIR" "$W/dropin.real"
+: >"$DROPIN_DIR"
+made=dropin
+refused "a file in place of $DROPIN_DIR" "$DROPIN: $DROPIN_DIR is not a folder: nothing was changed"
+put_back
+
+# Each one put back: the same apply works, and a second one changes nothing.
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with each one put back exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+grep -qF "written:   $CONF" <<<"$out" || fail "$CONF written"
+[[ -f "$CONF" ]] || fail "$CONF is not a file"
+[[ "$(readlink "$ZRAM")" == /dev/null ]] || fail "$ZRAM is not masked"
+[[ -f "$DROPIN" ]] || fail "$DROPIN is not a file"
+s1="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_188_swap_apply_refuses_an_uresourced_conf_it_cannot_copy_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and, where
+        /etc/uresourced.conf goes (the image's own moved aside first; the test's trap removes what it put
+        there and puts it back before swap_cleanup runs), first a folder, then a link to a folder, then a
+        link to a FIFO (apply copies the file aside through the link before it writes it; plan, bounded by
+        a timeout, reads nothing through the link): plan's row of the file is "?" and says apply refuses
+        it; apply exits 1 with "<file>: cannot be read: nothing was changed" on stderr, and every file,
+        link, mode and owner under /etc and the scratch tree, and the install record, are as before (no
+        crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply wrote crypttab and fstab,
+        started swap0's step, set zswap, masked zram and ran sysctl first, and failed at the copy with
+        "Is a directory"; with the FIFO, plan blocked in its open. With the image's file back, the same
+        apply works and a second one changes nothing. Last, on a machine not yet applied again
+        (swap_cleanup, then swap_setup), a link there to /dev/null (a masked vendor file) and no .bak:
+        plan's row is "update", apply exits 0 with an empty regular .pre-swap-config.bak of mode 0644
+        and CST's file in place, and a second apply changes nothing; the image's file is put back.
+        Before, plan said "?" there too and apply refused the link."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/uresourced.conf
+NOTE="cannot be read, even as root: apply refuses before it writes anything"
+conf_made=""
+conf_back() {
+    if [[ -n "$conf_made" ]]; then rm -rf "$CONF"; fi
+    if [[ -e "$W/uresourced.real" ]]; then mv "$W/uresourced.real" "$CONF"; fi
+}
+trap 'conf_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+refused() {
+    swap_run plan
+    [[ $rc == 0 ]] || fail "plan with $1 exited $rc"
+    grep -qE "^  \?  +uresourced\.conf +$NOTE\$" <<<"$out" || fail "plan's row of $CONF with $1"
+    s0="$(snap)"
+    r0="$(record)"
+    : >"$W/calls"
+    swap_run apply
+    [[ $rc == 1 ]] || fail "apply with $1 exited $rc"
+    grep -qF "ERROR: $CONF: cannot be read: nothing was changed" <<<"$err" || fail "apply's message with $1"
+    [[ "$out" != *"written:"* ]] || fail "apply with $1 wrote before it refused"
+    [[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply with $1 reached swap0's step"
+    [[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+    [[ ! -e "$CONF.pre-swap-config.bak" && ! -L "$CONF.pre-swap-config.bak" ]] || fail "$CONF's .bak was written"
+    [[ "$(snap)" == "$s0" ]] || fail "a refused apply with $1 changed /etc or the scratch tree"
+    [[ "$(record)" == "$r0" ]] || fail "a refused apply with $1 changed the install record"
+    if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply with $1 ran sysctl"; fi
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -d "$CONF" && ! -L "$CONF" ]] || fail "$CONF is a folder or a link before the test"
+if [[ -e "$CONF" ]]; then mv "$CONF" "$W/uresourced.real"; fi
+mkdir "$CONF"
+conf_made=1
+refused "a folder in its place"
+rmdir "$CONF"
+mkdir "$W/ures-dir"
+ln -s "$W/ures-dir" "$CONF"
+refused "a link to a folder in its place"
+rm "$CONF"
+mkfifo "$W/ures-fifo"
+ln -s "$W/ures-fifo" "$CONF"
+# Bounded: plan read the file through the link before, and blocked in the FIFO's open.
+rc=0
+timeout 60 "$CST" swap plan >"$W/out" 2>"$W/err" || rc=$?
+[[ $rc != 124 ]] || fail "plan blocked on a link to a FIFO"
+refused "a link to a FIFO in its place"
+
+# The image's file back (or none): the same apply works, and a second one changes nothing.
+conf_back
+conf_made=""
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with $CONF back exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file"
+s1="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+
+# A link at $CONF to /dev/null (a masked vendor file), no .bak, on a machine not yet applied
+# (swap_cleanup, then swap_setup again): plan's row is "update"; apply copies it aside as an empty
+# 0644 .bak, reading nothing from the device, writes CST's file and exits 0; a second apply changes
+# nothing. Before, plan said "?" and apply refused it as a link to anything but a file.
+BAK="$CONF.pre-swap-config.bak"
+swap_cleanup
+swap_setup
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -d "$CONF" && ! -L "$CONF" && ! -e "$BAK" && ! -L "$BAK" ]] || fail "$CONF or its .bak is not as the test left it"
+if [[ -e "$CONF" ]]; then mv "$CONF" "$W/uresourced.real"; fi
+ln -s /dev/null "$CONF"
+conf_made=1
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a link to /dev/null in its place exited $rc"
+grep -qE "^  update +uresourced\.conf " <<<"$out" || fail "plan's row of $CONF with a link to /dev/null"
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with a link to /dev/null in its place exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written with a link to /dev/null"
+[[ -f "$BAK" && ! -L "$BAK" && ! -s "$BAK" ]] || fail "$BAK is not an empty file"
+[[ "$(stat -c %a "$BAK")" == 644 ]] || fail "$BAK's mode is $(stat -c %a "$BAK")"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file after apply"
+cmp -s "$SRC/units/uresourced.conf" "$CONF" || fail "$CONF is not CST's file"
+s2="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply after the link to /dev/null exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply after the link to /dev/null wrote"
+[[ "$(snap)" == "$s2" ]] || fail "a second apply after the link to /dev/null changed /etc or the scratch tree"
+# What the test found back in place (the image's file, or none); swap_cleanup removes the .bak.
+conf_back
+conf_made=""
+if [[ -e "$W/orig/uresourced.conf" ]]; then
+    cmp -s "$W/orig/uresourced.conf" "$CONF" || fail "$CONF is not the image's file again"
+else
+    [[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there, where the image had none"
+fi
 echo E2E-OK
 """,
             check=False,

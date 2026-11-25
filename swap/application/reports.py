@@ -16,9 +16,11 @@ from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from perf.application import collect_memory_from_reader
 from perf.domain.evaluate import evaluate_perf_memory
 from perf.domain.models import PerfRootKind, PerfVerdict
+from swap.application.in_the_way import folder_in_place, non_folder_above
 from swap.application.memory_tuning import (
     MM_TMPFILES_ENTRY,
     THP_EXPERIMENT,
+    URESOURCED_BAK_SUFFIX,
     URESOURCED_ENTRY,
     SwapPerfReader,
     UresourcedView,
@@ -128,6 +130,17 @@ class SwapEnvironment:
         return self.as_root and not self.in_container
 
     @property
+    def managed_files(self) -> tuple[tuple[str, str], ...]:
+        """The files apply writes whole, as (source in swap/, where it goes), in the order plan lists them."""
+        return (
+            (self.src_tmpfiles, self.tmpfiles_conf),
+            (self.src_path(MM_TMPFILES_ENTRY), self.etc_path(MM_TMPFILES_ENTRY)),
+            (self.src_sysctl, self.sysctl_conf),
+            (self.src_path(URESOURCED_ENTRY), self.etc_path(URESOURCED_ENTRY)),
+            (self.src_dropin, self.slice_dropin),
+        )
+
+    @property
     def uresourced_view(self) -> UresourcedView:
         """Where uresourced's floor is read (the cgroup tree, /proc, the seat files)."""
         return UresourcedView(self.cgroup_dir, self.proc_dir, self.seats_dir)
@@ -195,12 +208,14 @@ class SwapEnvironment:
         return _under(self.src_dir, DROPIN_ENTRY.src, _SWAP_SRC_PREFIX)
 
 
-# A crypttab or fstab that root cannot read (a security policy, a root-squashed mount): --root cannot help, and
-# apply refuses it before the first write.
+# A crypttab or fstab, or a file apply writes whole (the tmpfiles, sysctl and uresourced files, the slice
+# drop-in), that root cannot read (a folder in its place, a security policy, a root-squashed mount): --root cannot
+# help, and apply refuses it before the first write.
 _ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before it writes anything"
-# A file apply writes whole (the tmpfiles, sysctl and uresourced files, the slice drop-in) that root cannot read:
-# --root cannot help either.
-_ROOT_CANNOT_READ_FILE: Final = "cannot be read, even as root"
+# A path in apply's way (swap.application.in_the_way), which apply refuses before its first write: the note of its
+# row, whoever runs plan (after the name, for a name above a file apply writes whole that is not a folder).
+_FOLDER_IN_PLACE_NOTE: Final = "a folder is in its place: apply refuses before it writes anything"
+_NOT_A_FOLDER_NOTE: Final = "is not a folder: apply refuses before it writes anything"
 
 
 def _root_note(env: SwapEnvironment, state: ManagedState, swap_name: str, verb: str, *, cannot_read: str) -> str:
@@ -335,6 +350,28 @@ class SwapReports:
             return inspect_managed_file(desired, None, exists=True, is_symlink=False, readable=False)
         actual = self._fs.read_text(dest)
         return inspect_managed_file(desired, actual, exists=True, is_symlink=False, readable=actual is not None)
+
+    def _uresourced_copy_due(self, dest: str, st: ManagedState) -> bool:
+        """apply copies /etc/uresourced.conf (dest, whose _inspect_file state is st) aside before it writes it:
+        when it is there (through a link) and not CST's (neither ok nor adopt)."""
+        return self._fs.exists(dest) and st not in (OwnedState.OK, OwnedState.ADOPT)
+
+    def _managed_state(self, src: str, dest: str) -> ManagedState:
+        """The state of a file apply writes whole (src: its source in swap/), as plan shows it and apply checks it
+        before its first write: _inspect_file's, except unreadable for /etc/uresourced.conf when apply would copy it
+        aside and cannot read it (a link to a folder, to a file it may not read, or to anything but a file or a
+        character device, such as a FIFO, whose open would block: the copy follows the link). A character device it
+        may read (/dev/null: a masked vendor file) counts as an empty file. Nothing is read through the link. The
+        installer replaces a link at any of the others itself, and reads nothing through it."""
+        st = self._inspect_file(src, dest)
+        if st == OwnedState.UNREADABLE or dest != self._env.etc_path(URESOURCED_ENTRY):
+            return st
+        copy_fails = (
+            self._uresourced_copy_due(dest, st)
+            and not self._fs.lexists(dest + URESOURCED_BAK_SUFFIX)
+            and not ((self._fs.is_file(dest) or self._fs.is_char_device(dest)) and self._fs.is_readable(dest))
+        )
+        return OwnedState.UNREADABLE if copy_fails else st
 
     def old_dropin_is_ours(self) -> bool:
         """The drop-in under its old name is there and CST (or the script before it) wrote it."""
@@ -493,18 +530,18 @@ class SwapReports:
         file_items.insert(0, self._settings_item(res, verb))
         name = DEFAULT_SWAP_NAME if spec is None else spec.name
 
-        for src, dest in (
-            (env.src_tmpfiles, env.tmpfiles_conf),
-            (env.src_path(MM_TMPFILES_ENTRY), env.etc_path(MM_TMPFILES_ENTRY)),
-            (env.src_sysctl, env.sysctl_conf),
-            (env.src_path(URESOURCED_ENTRY), env.etc_path(URESOURCED_ENTRY)),
-            (env.src_dropin, env.slice_dropin),
-        ):
-            st = self._inspect_file(src, dest)
-            note = _root_note(env, st, name, verb, cannot_read=_ROOT_CANNOT_READ_FILE)
+        for src, dest in env.managed_files:
+            above = non_folder_above(self._fs, dest)
+            if above is not None:
+                file_items.append(PlanItem("?", _short_etc_path(env.etc_dir, dest), f"{above} {_NOT_A_FOLDER_NOTE}"))
+                continue
+            st = self._managed_state(src, dest)
+            note = _root_note(env, st, name, verb, cannot_read=_ROOT_CANNOT_READ)
             file_items.append(PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), note))
 
-        if self._fs.exists(env.old_sysctl_conf):
+        if folder_in_place(self._fs, env.old_sysctl_conf):
+            file_items.append(PlanItem("?", _short_etc_path(env.etc_dir, env.old_sysctl_conf), _FOLDER_IN_PLACE_NOTE))
+        elif self._fs.exists(env.old_sysctl_conf):
             file_items.append(
                 PlanItem("remove", _short_etc_path(env.etc_dir, env.old_sysctl_conf), "legacy file of the zram setup")
             )
@@ -533,8 +570,10 @@ class SwapReports:
         )
 
     def _zram_conf_item(self) -> PlanItem:
-        """The row of zram-generator.conf: masked, or apply masks it."""
+        """The row of zram-generator.conf: masked, apply masks it, or a folder in its place that apply refuses."""
         path = _short_etc_path(self._env.etc_dir, self._env.zram_conf)
+        if folder_in_place(self._fs, self._env.zram_conf):
+            return PlanItem("?", path, _FOLDER_IN_PLACE_NOTE)
         if self._zram_masked():
             return PlanItem("ok", path, "masked (-> /dev/null): no zram devices at boot")
         return PlanItem("mask", path, "not masked: zram-generator would create zram0 at boot")

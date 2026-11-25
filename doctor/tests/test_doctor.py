@@ -2594,6 +2594,66 @@ class GameProfileTest(Scratch):
         self.profile_on()
         self.assertNotIn("drop-ins", " ".join(r.message for r in self.results()))
 
+    def leftovers_results(self) -> list[Result]:
+        """The check of the settings 'off' could not undo, called directly, as root."""
+        host = doc_adapters.Host(self.env, repo=REPO)
+        host.uid = 0
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(doc_cpu.check_game_leftovers(host))
+        self.assert_read_only()
+        return res
+
+    def test_settings_off_could_not_undo_warn(self) -> None:
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write(
+                "cst-game-leftovers 1\nprop sys machine.slice CPUWeight existed 70\n"
+                "user 1000\nprop usr user.slice CPUWeight existed 30\ncgw /sys/fs/cgroup/x/cpuset.cpus 0-23\n"
+            )
+        message = (
+            "game profile: 3 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight, "
+            "user.slice CPUWeight, /sys/fs/cgroup/x/cpuset.cpus (kept in /run/cpu-setup/game.leftovers). The next "
+            "'off' and the watchdog's tick while the profile is off (cpu-game-watchdog.timer, every 30 s) undo them "
+            "again; the journal of 'off' names why each one failed"
+        )
+        self.assertEqual(
+            self.leftovers_results(), [Result(doc_domain.WARN, message, "sudo /usr/local/sbin/cpu-game-profile off")]
+        )
+        self.assertEqual(self.calls(), [])  # nothing asked
+        # While the profile is on, 'off' would end the game's profile: no fix line.
+        self.profile_on()
+        self.assertEqual(
+            self.leftovers_results(),
+            [Result(doc_domain.WARN, message + ". The profile is on: the next 'off' retries them")],
+        )
+
+    def test_no_settings_off_could_not_undo_say_nothing(self) -> None:
+        self.assertEqual(self.leftovers_results(), [])  # no file
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write("cst-game-leftovers 1\n")
+        self.assertEqual(self.leftovers_results(), [])
+
+    def test_a_leftovers_file_it_cannot_read_is_info(self) -> None:
+        left = os.path.join(self.run_dir, "game.leftovers")
+        with open(left, "w") as f:
+            f.write("cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n")
+        res = self.leftovers_results()
+        self.assertEqual([r.status for r in res], [doc_domain.INFO], res)
+        self.assertIn("is format 9 of the game-leftovers", res[0].message)
+        os.unlink(left)
+        os.makedirs(os.path.join(left, "inside"))
+        self.assertEqual(
+            self.leftovers_results(),
+            [
+                Result(
+                    doc_domain.INFO,
+                    "game profile: settings 'off' could not undo not checked "
+                    "(/run/cpu-setup/game.leftovers: Is a directory)",
+                )
+            ],
+        )
+
     def test_old_format_state_is_info(self) -> None:
         self.profile_on(intended=False)
         res = self.results()

@@ -53,6 +53,7 @@ cst doctor help
 | `cpu` | `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf` that names no account of the host (`getent passwd`, run on the host, also from a toolbox): `on` refuses it, and the watchdog does not start the profile while a game runs ([cpu/README.md, section 6.2](../cpu/README.md#62-settings-file)) | `WARN`: the game profile does not switch on; set `TARGET_USER` to your user (`id -un`). No fix line. Nothing when it names an account, is not set, or `getent` cannot answer, or when the file is absent |
 | `cpu` | While the game profile is on (`/run/cpu-setup/game.state` exists): the settings it made that no longer hold ("drift"), compared with what it recorded in `/run/cpu-setup/game.intended` right after `on` (see [section 8](#8-the-cpu-checks-game-profile-and-user-manager)) | `WARN`, fix: `sudo systemctl restart cpu-game.service` (`cst cpu game off && cst cpu game on` for a profile switched on by hand); `ok` when they all hold, or "game profile: off"; `info` when a profile switched on by an older version recorded nothing, when `game.intended` is of a newer format than this CST reads, or its first line names the format with no version number ("drift not checked"; systemd is not asked), or a unit could not be asked; nothing when the cpu module is not installed |
 | `cpu` | While the game profile is off: its MemoryLow drop-ins `/run/systemd/system/*.d/zz-cst-game.conf` still there | `WARN`, fix: `sudo /usr/local/sbin/cpu-game-profile off` |
+| `cpu` | Settings the game profile's `off` could not undo, kept in `/run/cpu-setup/game.leftovers` for the next `off` and the watchdog's tick (see [section 8.4](#84-settings-off-could-not-undo)) | `WARN` naming each one, fix (while the profile is off): `sudo /usr/local/sbin/cpu-game-profile off`; no fix line while it is on (the next `off` retries them); `info` when the file cannot be read or is of a newer format; nothing when it is not there or holds none |
 | `cpu` | Your user manager's cgroup tree (`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service`): top-level slices other than `app.slice`, `session.slice`, `background.slice`, `user.slice` and `sccache.slice` (CST's host shared sccache server), with the CPU time each used (`cpu.stat`); `systemd-run --user` jobs (`run-*.scope`, `run-*.service`) straight in `app.slice` | `WARN` per unknown slice, with the name to use instead (`user-<name>.slice`; no fix line, it is a change in whatever starts the jobs); one `info` line for the jobs, busiest first; `ok` when there are none; nothing when there is no user manager to look at (CI, containers) |
 | `swap` | Each zswap parameter that `/etc/tmpfiles.d/zswap.conf` (installed by `cst swap apply`) sets and this kernel does not have in `/sys/module/zswap/parameters` (a new kernel can rename or drop one; `systemd-tmpfiles` then skips it at boot without a word) | `WARN` per parameter (no fix line: it needs another kernel or a change in CST); one `WARN` when the kernel has no zswap at all; `ok` when they are all there; nothing when the file is not installed |
 | `swap` | Each sysfs memory knob that `/etc/tmpfiles.d/cst-mm-responsiveness.conf` (installed by `cst swap apply`) sets and this kernel lacks | `WARN` per missing knob; `ok` when all are present; nothing when the file is not installed |
@@ -229,7 +230,9 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   profile is for another user than the one running the doctor, the user
   manager's units are skipped (`info`). A `cpuset.cpus` file the profile wrote directly is read under
   `/sys/fs/cgroup`. While the profile is off it lists
-  `/run/systemd/system/*.d/zz-cst-game.conf`. The check of the user
+  `/run/systemd/system/*.d/zz-cst-game.conf`. It reads
+  `/run/cpu-setup/game.leftovers` (world-readable) with the game profile's
+  own reader, and asks nothing about it. The check of the user
   manager's boxes reads only files: the folder names and `cpu.stat` under
   `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service` (your uid,
   or, when run as root, the user the profile acts for, as above: the one
@@ -545,6 +548,29 @@ user manager looked at is your own, or, when the doctor runs as root, the
 user the game profile acts for: the one `game.state` names while the
 profile is on (as the drift check asks, and as the tick demotes that user's
 boxes), else the `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
+
+### 8.4 Settings 'off' could not undo
+
+When one undo of the game profile's `off` fails (a `set-property` that
+systemd refuses, a sysfs or EPP file that cannot be written), `off` still
+switches the profile off and keeps that setting in
+`/run/cpu-setup/game.leftovers`; the next `off` and the watchdog's tick
+while the profile is off undo it again
+([cpu/README.md, section 7.4](../cpu/README.md#74-the-exact-revert)).
+Until one of them does, that setting keeps the game's value (for example
+`machine.slice` keeps the game's `CPUWeight`, and the VM stays starved), and
+the tick retries it quietly. So the check says `WARN` for each one kept, by
+name:
+
+```
+  WARN   game profile: 1 setting(s) 'off' could not undo keep the game's value: machine.slice CPUWeight (kept in /run/cpu-setup/game.leftovers). ...
+         fix: sudo /usr/local/sbin/cpu-game-profile off
+```
+
+The fix runs `off` once more, which retries them and names in the journal
+why each one still fails. While the profile is on there is no fix line: the
+next `off` retries them anyway. A file of a newer format than this CST reads,
+or one it cannot read, gets `info` ("not checked").
 
 ## 9. The install check
 
