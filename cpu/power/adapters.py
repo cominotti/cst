@@ -40,9 +40,9 @@ from cpu.power.domain import (
     plan_power_revert,
 )
 
-_CARD_RE: Final = re.compile(r"^card([0-9]+)$")
-_CPU_RE: Final = re.compile(r"^cpu([0-9]+)$")
-_STATE_RE: Final = re.compile(r"^state([0-9]+)$")
+_CARD_RE: Final = re.compile(r"^card(\d+)$", re.ASCII)
+_CPU_RE: Final = re.compile(r"^cpu(\d+)$", re.ASCII)
+_STATE_RE: Final = re.compile(r"^state(\d+)$", re.ASCII)
 _CONNECTED_VALUE: Final = "connected"
 # The run lock's wait, as cpu-game-profile's (a name of this module, which a test shortens).
 _POWER_LOCK_TIMEOUT_S: Final = RUN_LOCK_WAIT_S

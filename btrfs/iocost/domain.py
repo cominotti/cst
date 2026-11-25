@@ -33,7 +33,7 @@ IOCOST_ENABLE_CTRL_AUTO: Final = "enable=1 ctrl=auto"
 IOCOST_DISABLE_CTRL_AUTO: Final = "enable=0 ctrl=auto"
 _CTRL_AUTO: Final = "auto"  # the ctrl CST writes; 90-iocost.rules' hwdb solutions write ctrl=user
 
-_AUTO_DISK_RE: Final = re.compile(r"^(?:nvme[0-9]+n[0-9]+|sd[a-z]+|vd[a-z]+)$")
+_AUTO_DISK_RE: Final = re.compile(r"^(?:nvme\d+n\d+|sd[a-z]+|vd[a-z]+)$", re.ASCII)
 _LIVE_ONLY_FLAG: Final = "--live-only"
 _DEVICE_FLAG: Final = "--device"
 

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_GAME_CSTATE_US: Final = 50
 _MAX_CGROUP_WALK_DEPTH: Final = 3
-_STATE_NAME_RE: Final = re.compile(r"^state([0-9]+)$")
+_STATE_NAME_RE: Final = re.compile(r"^state(\d+)$", re.ASCII)
 _GPU_PM_ON: Final = "on"
 _DPM_MANUAL: Final = "manual"
 _CSTATE_ENABLE: Final = "0"

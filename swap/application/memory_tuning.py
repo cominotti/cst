@@ -40,7 +40,7 @@ _ACTIVE_USER_SECTION: Final = "[ActiveUser]"
 _USER_SLICE_ROW: Final = "user.slice memory.min"
 _MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MemoryMin\s*=\s*(\S+)")
 _MAX_MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MaxMemoryMin\s*=\s*(\S+)")
-_PERCENT_RE: Final = re.compile(r"^([0-9]+)%$")
+_PERCENT_RE: Final = re.compile(r"^(\d+)%$", re.ASCII)
 _PERCENT: Final = 100
 # logind's seat files (/run/systemd/seats/SEAT): ACTIVE= names the seat's foreground session, if any,
 # and ACTIVE_UID= its user.

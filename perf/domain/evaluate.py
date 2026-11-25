@@ -268,7 +268,7 @@ def _eval_memory_psi(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
             )
 
 
-_SLICE_UID_RE: Final = re.compile(r"^user-([0-9]+)\.slice/")
+_SLICE_UID_RE: Final = re.compile(r"^user-(\d+)\.slice/", re.ASCII)
 
 
 def _slice_uid(sslice: CgroupMemorySlice) -> int | None:

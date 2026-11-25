@@ -82,7 +82,7 @@ def read_int(path: str) -> int:
 
 # An avg10 as the kernel writes it ("%lu.%02lu"): ASCII digits, an optional fraction. float() alone also
 # takes "nan", "inf", "1e9", "1_0" and digits of other scripts.
-_PSI_AVG: Final = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_PSI_AVG: Final = re.compile(r"\d+(?:\.\d+)?", re.ASCII)
 
 
 def parse_psi(path: str, *, unreadable: list[float | int] | None = None) -> list[float | int] | None:

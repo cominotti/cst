@@ -7,7 +7,7 @@ from typing import Final
 
 from cst_core.domain.text import group
 
-_CARD_NAME_RE: Final = re.compile(r"^card([0-9]+)$")
+_CARD_NAME_RE: Final = re.compile(r"^card(\d+)$", re.ASCII)
 
 
 def suffix_number(name: str, pattern: re.Pattern[str]) -> int:

@@ -90,7 +90,7 @@ def _based(base: int, digits: str, *, exact: bool = False) -> int:
 # The operators bash's arithmetic reads: after a name, one of these (or another name) is read later, as
 # the expression goes on; any other token after a name is an error bash meets before the name's value.
 _ARITH_OPERATORS: Final = frozenset("+-*/%<>=!&|^~?:,()[]") | {"**"}
-_ARITH_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ARITH_NAME: Final = re.compile(r"[A-Za-z_]\w*", re.ASCII)
 # A token after bash's blanks (space, tab and newline only: a no-break space, \r, \f, \v or another
 # blank is a token of its own, which no rule takes).
 _ARITH_TOKEN: Final = re.compile(r"[ \t\n]*(\*\*|[0-9A-Za-z_#@]+|[^ \t\n])")
