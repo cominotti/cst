@@ -26,6 +26,7 @@ import json
 import os
 import pty
 import re
+import resource
 import shutil
 import signal
 import stat
@@ -3585,6 +3586,41 @@ class ResticBackupOutputTest(unittest.TestCase):
             self._backup(child)
         self.assertTrue(child.terminated)
         self.assertTrue(child.stdout.closed)
+
+
+# select's FD_SETSIZE (glibc's): select refuses a descriptor at or above it.
+SELECT_FD_LIMIT = 1024
+
+
+class ResticOutputDescriptorTest(unittest.TestCase):
+    """restic's output is read whatever the number of its pipe's descriptor, also one at or above select's
+    FD_SETSIZE: a process with many descriptors open gets such a pipe."""
+
+    def _high_pipe(self) -> tuple[io.FileIO, int]:
+        """A pipe whose read end has a descriptor at or above SELECT_FD_LIMIT: (read end, write end)."""
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft <= SELECT_FD_LIMIT:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (SELECT_FD_LIMIT * 2, hard))
+            self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
+        r, w = os.pipe()
+        self.addCleanup(os.close, w)
+        high = fcntl.fcntl(r, fcntl.F_DUPFD_CLOEXEC, SELECT_FD_LIMIT)
+        os.close(r)
+        stream = io.FileIO(high, "rb")
+        self.addCleanup(stream.close)
+        self.assertGreaterEqual(stream.fileno(), SELECT_FD_LIMIT)
+        return stream, w
+
+    def test_a_line_from_a_high_descriptor_is_read(self) -> None:
+        stream, w = self._high_pipe()
+        os.write(w, b'{"message_type": "status"}\n')
+        output = vm_adapters_restic._Output(stream)
+        self.assertTrue(output.fill(5.0))
+        self.assertEqual(output.line(), '{"message_type": "status"}\n')
+
+    def test_a_high_descriptor_with_nothing_to_read_times_out(self) -> None:
+        stream, _ = self._high_pipe()
+        self.assertFalse(vm_adapters_restic._Output(stream).fill(0.01))
 
 
 class ResticBackupStartStopTest(unittest.TestCase):

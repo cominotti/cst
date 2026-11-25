@@ -106,10 +106,14 @@ class _Output:
         self.stream = stream
         self.pending = bytearray()
         self.ended = False
+        # poll, not select: select refuses a descriptor at or above FD_SETSIZE (1024).
+        self.poller: select.poll | None = None
         try:
-            self.fd: int | None = stream.fileno()
+            fd = stream.fileno()
         except OSError, ValueError:  # not a pipe (a test's bytes)
-            self.fd = None
+            return
+        self.poller = select.poll()
+        self.poller.register(fd, select.POLLIN)
 
     def _line_end(self) -> int | None:
         """Where the first whole line of pending ends (the rest, at the end of the output), or None."""
@@ -129,7 +133,8 @@ class _Output:
     def fill(self, timeout: float | None = None) -> bool:
         """More of the output into pending, once there is some (or its end); False when timeout seconds
         (None: no limit) passed first. The wait lets the stops in; the read holds them."""
-        if self.fd is not None and not select.select([self.fd], [], [], timeout)[0]:
+        # poll's timeout is in milliseconds (None: no limit).
+        if self.poller is not None and not self.poller.poll(None if timeout is None else timeout * 1000):
             return False
         with signals_held():
             chunk = self.stream.read(_CHUNK)
