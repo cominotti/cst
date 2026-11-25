@@ -283,14 +283,18 @@ class Change(Checks):
         return False
 
     def save_owed(self, *units: str) -> bool:
-        """The record saved, owing the units' restarts; False when it cannot be written (warned once a
-        run). The invocation IDs are read again first: a service that restarted by itself since they
-        were read may have read the old files."""
+        """The record saved, owing the units' restarts; False when saving it failed (warned once a run).
+        The warning does not say the record is unwritten: a write that fails at the sync of its folder
+        has already put the new record in place. The invocation IDs are read again first: a service
+        that restarted by itself since they were read may have read the old files."""
         self.forget_unit(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
         if self.restart_state("save", *units) is not None:
             return True
         if not self.owed_warned:
-            self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
+            self.err(
+                f"WARNING: could not save the restarts still owed in {self.p.pending} for sure"
+                f" ({self.restart_error}): if this run stops before its restarts, the next run may not make them\n"
+            )
             self.owed_warned = True
         return False
 

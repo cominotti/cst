@@ -340,8 +340,11 @@ that restart owed too (a change that fails stops the run as well: a
 `sudo mv` of `main.conf` that is refused, say). The next `apply` makes it
 for the change it then makes. A `revert` with nothing left to revert makes
 it once, for no change. Only when the record
-cannot be written (the run then warns: `could not record the restarts still
-owed`) can a stop after a change lose its restart: restart the service by
+cannot be saved (the run then warns: `could not save the restarts still owed
+in ... for sure (ERROR): if this run stops before its restarts, the next run
+may not make them`; "for sure": a save that fails only at the sync of its
+folder has already put the record in place) can a stop after a change lose
+its restart: restart the service by
 hand (`sudo systemctl restart bluetooth`, `systemctl --user restart
 wireplumber`).
 

@@ -165,6 +165,7 @@ class Survey:
         self.wp_restart = False
         self.owing: set[str] = set()  # the units whose restart this run's writes need so far (Change.owe)
         self.owed_warned = False  # the run said it could not record the restarts still owed
+        self.restart_error = ""  # why restart_state last failed, for save_owed's warning
         # (user, unit) -> (ActiveState, InvocationID), see unit_show: a system unit and a user unit
         # of the same name are two units.
         self.unit_states: dict[tuple[bool, str], tuple[str, str]] = {}
@@ -296,6 +297,7 @@ class Survey:
             return self.m.host.restart_pending(self.p.pending, ids, units, save=mode == "save")
         except (OSError, ValueError) as e:
             self.err(f"bt-helper: {e}\n")
+            self.restart_error = str(e)
             return None
 
     # ---- facts -----------------------------------------------------------------------------

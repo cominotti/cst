@@ -18,6 +18,7 @@ from typing import override
 import unittest
 from unittest import mock
 
+from bluetooth import adapters as bt_adapters
 from bluetooth.adapters import LocalBluetoothHostAdapter
 from bluetooth.domain import parse_pending
 from bluetooth.setup import wiring
@@ -900,7 +901,13 @@ class OwedBeforeTheWriteUnitTest(InProcessCase):
         host = SavingHost(fail=True)
         rc, out, err = self.run_with(m, host, "apply", "--yes")
         self.assertEqual(rc, 0, out + err)
-        self.assertEqual(err.count("WARNING: could not record the restarts still owed"), 1, err)
+        self.assertEqual(err.count("WARNING: could not save the restarts still owed"), 1, err)
+        self.assertIn(
+            f"WARNING: could not save the restarts still owed in {m.pending} for sure"
+            " ([Errno 30] Read-only file system): if this run stops before its restarts, the next run may not make"
+            " them\n",
+            err,
+        )
         self.assertIn(f"KernelExperimental = {ISO}", self.text(m.main_conf))
         calls = m.read("log").splitlines()
         self.assertIn("sudo systemctl restart bluetooth", calls)
@@ -909,6 +916,34 @@ class OwedBeforeTheWriteUnitTest(InProcessCase):
         # the restarts', then the clearing one.
         bt, wp = "bluetooth.service", "wireplumber.service"
         self.assertEqual(host.saves, [(bt, wp), (bt, wp), (bt, wp), (wp, bt), ()])
+
+    def test_a_save_that_fails_after_or_before_its_replace_never_says_the_record_is_unwritten(self) -> None:
+        # write_atomic renames the new record into place, then syncs its folder: an error there (EIO)
+        # comes after the record is written. Before, the warning said "could not record the restarts
+        # still owed", false then. The new words are true both ways.
+        real_write = bt_adapters.write_atomic
+
+        def replaced_then_eio(path: str, data: str, *, mode: int, relabel: bool) -> None:
+            real_write(path, data, mode=mode, relabel=relabel)
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        def eio_before(path: str, data: str, *, mode: int, relabel: bool) -> None:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        for fake, written in ((replaced_then_eio, True), (eio_before, False)):
+            with self.subTest(written=written):
+                m = self.machine()
+                with mock.patch.object(bt_adapters, "write_atomic", fake):
+                    rc, out, err = self.run_with(m, SavingHost(), "apply", "--yes")
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("could not record", err)
+                self.assertEqual(err.count("WARNING: could not save the restarts still owed"), 1, err)
+                self.assertIn(
+                    f"WARNING: could not save the restarts still owed in {m.pending} for sure"
+                    " ([Errno 5] Input/output error): if this run stops before its restarts, the next run may"
+                    " not make them\n",
+                    err,
+                )
 
     def stopped_apply(self, m: Machine, host: SavingHost) -> None:
         """apply --yes, stopped by host (Stopped) at a save of the record."""
