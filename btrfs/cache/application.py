@@ -237,8 +237,7 @@ def _commit_fstab(previous: str | None, new_text: str, m: CacheMounts) -> _Fstab
     why = m.systemd.daemon_reload()
     if why is None:
         return None
-    put_back = _put_fstab_back(previous, m)
-    return _FstabFailure(why, () if put_back.error is None else (put_back.error,))
+    return _FstabFailure(why, _put_fstab_back(previous, m).errors)
 
 
 def _undo_replaced(previous: str | None, new_text: str, m: CacheMounts) -> tuple[str, ...]:
@@ -248,10 +247,7 @@ def _undo_replaced(previous: str | None, new_text: str, m: CacheMounts) -> tuple
         now = m.fstab.read()
     except OSError as exc:
         return (f"cannot read {FSTAB_PATH} back: {exc.strerror or exc}",)
-    if now != new_text:
-        return ()
-    put_back = _put_fstab_back(previous, m)
-    return () if put_back.error is None else (put_back.error,)
+    return _put_fstab_back(previous, m).errors if now == new_text else ()
 
 
 def _fstab_behind(snap: CacheMountSnapshot, m: CacheMounts, mounting: Collection[str] = ()) -> bool | None:
@@ -295,6 +291,11 @@ class _PutBack:
     in_place: bool
     error: str | None = None
 
+    @property
+    def errors(self) -> tuple[str, ...]:
+        """The error, if any, as the undo errors it adds."""
+        return () if self.error is None else (self.error,)
+
 
 def _put_fstab_back(previous: str | None, m: CacheMounts) -> _PutBack:
     """/etc/fstab as it was (the previous text, or no file when there was none). A write whose folder sync
@@ -315,9 +316,8 @@ def _put_fstab_back(previous: str | None, m: CacheMounts) -> _PutBack:
 def _restore_fstab(previous: str | None, m: CacheMounts) -> list[str]:
     """Put /etc/fstab back as it was and reload systemd when the old text is in place; what of it failed."""
     put_back = _put_fstab_back(previous, m)
-    errors = [] if put_back.error is None else [put_back.error]
     why = m.systemd.daemon_reload() if put_back.in_place else None
-    return errors if why is None else [*errors, why]
+    return [*put_back.errors] if why is None else [*put_back.errors, why]
 
 
 def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
