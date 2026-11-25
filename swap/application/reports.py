@@ -523,17 +523,21 @@ class SwapReports:
         for base in self._env.slice_dropin_dirs:
             for sub in _SLICE_DROPIN_FOLDERS:
                 folder = posixpath.join(base, sub)
-                try:
-                    names = sorted(self._fs.list_dir(folder)) if self._fs.is_dir(folder) else []
-                except OSError:  # a folder this user may not list: plan cannot tell, apply (root) can
-                    names = []
-                for name in names:
+                for name in self._sorted_names(folder):
                     path = posixpath.join(folder, name)
                     if path == self._env.slice_dropin:
                         continue  # CST's own: refused as a file apply writes whole ("cannot be read")
                     if name.endswith(".conf") and self._fs.exists(path) and not self._fs.is_file(path):
                         return path
         return None
+
+    def _sorted_names(self, folder: str) -> list[str]:
+        """The names in folder, sorted; none when it is no folder or this user may not list it (plan
+        cannot tell, apply (root) can)."""
+        try:
+            return sorted(self._fs.list_dir(folder)) if self._fs.is_dir(folder) else []
+        except OSError:
+            return []
 
     def _record_item(self, verb: str) -> PlanItem | None:
         """The install record's row when apply would refuse it before its first write (check_record: one of a
