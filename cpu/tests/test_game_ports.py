@@ -31,6 +31,7 @@ from cpu.tests.fakes import (
     FaultySysfsFiles,
     FaultyUnitFiles,
 )
+from cst_core.adapters.locks import take_lock
 from cst_core.ports import CommandResult, OutputMode
 from tests.fault_injection import FaultMode, FaultPlan, Killed, no_file_may_grow
 
@@ -373,9 +374,12 @@ class PinTest(Case):
         waiter.release()
 
     def test_the_front_waits_60_seconds_for_the_lock(self) -> None:
-        lock = machine_ports(GamePaths(), RecordingRunner()).lock
-        assert isinstance(lock, GameRunLock)
-        self.assertEqual(lock.timeout, 60)
+        run = self.path("run")
+        lock = machine_ports(GamePaths(run=run), RecordingRunner()).lock
+        with unittest.mock.patch("cpu.game.adapters.files.take_lock", wraps=take_lock) as took:
+            self.assertTrue(lock.take())
+        lock.release()
+        self.assertEqual(took.call_args_list, [unittest.mock.call(f"{run}/lock", wait=True, mode=0o644, timeout=60)])
 
     def test_the_output_lines(self) -> None:
         out, err = io.StringIO(), io.StringIO()
