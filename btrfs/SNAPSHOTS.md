@@ -1663,6 +1663,27 @@ back at the usual path and deletes neither side. Copy what you need from the
 `.bulk-new` folder into the usual path, delete the `.bulk-new` folder, then run
 `cst btrfs bulk apply`.
 
+A deletion of the copy that was cut short no longer leads here. Once the copy
+passed this check, the repair (or an undo right after the switch) first
+renames it to `<path>.bulk-new.bulk-drop` and then deletes it; so does a move
+that drops its copy, never used, because the usual folder changed while it was
+being copied. After a power
+loss or a failed deletion, the next repair goes on deleting the marked folder
+without checking it again. A half-deleted `.bulk-new` left by an older CST
+(before this change) still leads here: it cannot be told from a copy that was
+written to. If you did not work through the link while the move was being
+undone, that `.bulk-new` folder holds nothing you need: delete it and run
+`cst btrfs bulk apply`. A folder named `<path>.bulk-new.bulk-drop` never
+holds anything you need: delete it if one is left (for example after going
+back to an older CST).
+
+This covers the moves of `cst btrfs bulk apply` only. The undo of a
+`cst btrfs bulk steam apply` move still deletes a game's copy under its own
+name, so a cut deletion there can still lead here (the message then ends with
+"run 'bulk steam apply' again"). If you did not play or install through the
+new library while the move was being undone, that copy holds nothing you
+need: delete it and run `cst btrfs bulk steam apply`.
+
 **`bulk status` says `NEEDS A LOOK: ... was created again after its data was moved to ...`.**
 An old subvolume was being moved into `~/Bulk` (the rename is instant) and the
 run was interrupted before the link was made; then a program created the usual
@@ -2307,7 +2328,10 @@ folder back instead (or, if the copy was written to as well, keeps both and
 reports `written to on both sides`). If the switch was not complete, it puts
 the old folder back at its usual path and deletes the copy, unless the copy
 was written to through the link after the switch: then it keeps both and
-reports it ([section 10](#10-what-to-do-if)). Either way your
+reports it ([section 10](#10-what-to-do-if)). Once that check passed, the copy
+is renamed to `<target>.bulk-new.bulk-drop` and then deleted; a repair that
+finds that name goes on deleting it without checking again (as with
+`"finishing"` for the old folder). Either way your
 data is never only in a half-finished place, and a late write is never
 deleted. Then it tries again. One exception: if the usual path was **created
 again** meanwhile (an app started before the repair), it deletes nothing,
@@ -2633,8 +2657,9 @@ How it works, as a sequence:
 1. Free space falls to **250 GiB or less**: snapshots **pause**. No new
    snapshots; old snapshots still expire normally. Alert
    `Snapshots paused: low space`.
-2. They stay paused until free space is **above 270 GiB**. The gap between
-   250 and 270 stops them from switching on and off every hour.
+2. They stay paused until free space is **above 270 GiB** (the larger of
+   `RESUME_ABOVE_GIB` and `SKIP_AT_OR_BELOW_GIB`; the alert names it). The gap
+   between 250 and 270 stops them from switching on and off every hour.
 3. Free space falls to **150 GiB or less**: **emergency purge**. The retention
    becomes `24h 3d` (`EMERGENCY_PRESERVE`) for both sources, the circuit
    breaker is off, and the extra snapshots are deleted. Alert

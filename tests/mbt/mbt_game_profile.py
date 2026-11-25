@@ -15,7 +15,8 @@ override of machine.slice's CPUWeight from before the game ('existed').
 Between the profile's calls the machine changes the world: the game starts or ends (a GameMode
 client in /proc), the by-hand mark comes and goes, Docker containers and Steam scopes start, boxes
 of the user manager appear next to the game (a slice, or a systemd-run scope in app.slice; with the
-game inside or not), a setting the profile made drifts (uresourced, someone else's daemon-reload),
+game inside or not), a folder whose name is no unit name appears there (a blank, a byte that is not
+UTF-8: made by hand), a setting the profile made drifts (uresourced, someone else's daemon-reload),
 and an outside daemon-reload runs. A tick that asks systemd to stop cpu-game.service is followed by
 its ExecStop ('off'), one that asks to start it by 'on'.
 
@@ -30,41 +31,37 @@ is no fault.
 Checked, relative to the baseline (the machine at the start: every runtime override file by the
 value it sets, every value systemd shows, every sysfs file; the drop-ins and the state files):
 1. Record cover, after every step: every override file, shown value and sysfs file that differs
-   from the baseline has a record in game.state that 'off' undoes (state_undo): so with no
-   game.state, nothing differs. The one exception is a MemoryLow of the memory chain that its
+   from the baseline has a record in game.state or game.leftovers that 'off' undoes (state_undo):
+   so with neither, nothing differs. The one exception is a MemoryLow of the memory chain that its
    zz-cst-game.conf drop-in sets after a daemon-reload: 'off' and the tick remove every such
    drop-in, with a record or without (a setp whose record could not be written is skipped, the
    drop-ins are written for the whole chain).
 2. Off restores: after an 'off' with no fault, whatever ran between (faults, kills, drift, outside
    reloads, more boxes): every override file and shown value as at the baseline (an 'existed'
    override comes back as its shown value: 16G as 17179869184), every sysfs file byte for byte, no
-   drop-in, no game.state, game.intended, manual or drift-warned. check_off runs such an off at
-   points Hypothesis chooses on a copy of the machine, and puts the machine back. After a kill
-   inside 'off', the next 'off' restores it. Named gap (O4): after a set-property or a sysfs write
-   that fails inside 'off', game.state is gone, every other undo is done, and that one setting keeps
-   the value it had before that 'off' (the profile's, unless an 'off' killed earlier undid it),
-   asserted exactly; it is then the machine's own (the baseline takes it).
+   drop-in, no game.state, game.intended, game.leftovers, manual or drift-warned. check_off runs
+   such an off at points Hypothesis chooses on a copy of the machine, and puts the machine back.
+   After a kill inside 'off', the next 'off' restores it. After a set-property or a sysfs write that
+   fails inside 'off' (O4): game.state is gone, every other undo is done, that one setting keeps the
+   value it had before that 'off', and game.leftovers holds exactly its record; the baseline does not
+   move, and after the next tick with no fault while the profile is off (or the next whole 'off')
+   every setting is at the baseline and game.leftovers is gone.
 3. On twice equals on once: 'on' with game.state there changes nothing and sets nothing.
 4. A tick leaves nothing half applied: after a tick with no fault while the profile stays on,
    every running Docker scope has AllowedCPUs = BUILD_CPUS and its record, every Steam scope its
    MemoryLow, every box without the game all of its settings (CPUWeight idle, and AllowedCPUs with
-   cpuset delegated), and drift() lists no drift game.state holds a record of. Named gap (O2): a
-   box whose record a faulted step wrote without its setting (its set-property failed, or the
-   process died between the two) is never set again while the profile is on; such boxes are
-   asserted to stay as they are until game.state is gone (an 'off' that ended, the tick's own
-   'off' too, or one killed after it removed the file), when the next 'on' handles them again.
-   Named gap (O6): an 'off' killed after it undid a setting of a transient box (a Docker or Steam
-   scope, a systemd-run scope: its override file removed, or set back) leaves that box's record in
-   game.state; while the profile stays on the tick skips the box (it has a record) and the drift
-   repair does not cover it (game.intended records no transient unit), so the setting stays
-   undone (after a daemon-reload, the box runs without it). Each such override file is asserted to
-   stay as the killed 'off' left it, until game.state is gone, as for O2.
+   cpuset delegated), and drift() lists no drift game.state holds a record of. With no exception:
+   a box whose record a faulted step wrote without its setting (its set-property failed, or the
+   process died between the two: O2), and a box whose setting an 'off' that was killed undid while
+   game.state stayed (O6), are set again by the next whole tick, with no new record.
+5. A folder whose name is no unit name (O5) is left alone, after every step: no record of
+   game.state or game.leftovers names it and no systemctl call of the last step does.
 
 Not modelled: the lock between processes (one call at a time here), cpu-power, the GPU, a settings
 file with problem lines and a TARGET_USER without an account (the unit tests cover the refusals),
 a record cut short in the middle of its write (tests/mbt/mbt_game_state.py Q5), a full /run from
-some point on (FullRunFolderTest), a failing daemon-reload, real systemd's merge of drop-ins
-(test_07, test_08), and box names that are not UTF-8 (O5: mbt_game_state.py Q1 pins that gap).
+some point on (FullRunFolderTest), a failing daemon-reload, and real systemd's merge of drop-ins
+(test_07, test_08).
 """
 
 from collections.abc import Callable, Sequence
@@ -86,16 +83,22 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, pr
 from cpu.game.adapters import host as game_host, profile as game_profile
 from cpu.game.adapters.profile import GameProfile
 from cpu.game.domain import (
+    CgroupUndo,
+    EppUndo,
     GameSettings,
+    PropUndo,
+    SysfsUndo,
     has_prop_record,
     has_sys_record,
     intended_records,
     manager_of,
     records,
-    transient_unit,
+    state_undo,
     unheld,
 )
+from cpu.game.domain.leftovers import leftover_entries
 from cpu.tests.test_game_profile import UID, USER, FakeSystemd, add_gamemode_pid, game_scratch, override_path
+from cst_core.adapters.files import read_text
 from cst_core.ports import CommandResult
 from tests.fault_injection import FaultMode, FaultPlan, FaultyOs, FaultyRunner, Killed, stub_fsync
 from tests.mbt import profiles
@@ -109,6 +112,8 @@ MEMORY_LOW_BYTES: Final = "17179869184"  # 16G as systemctl show gives it
 ON_POINTS: Final = 40
 FEW_POINTS: Final = 8
 MAX_SCOPES: Final = 3
+# Folders whose name is no unit name (O5): a blank, and a byte that is not UTF-8 (as glob gives it).
+ODD_NAMES: Final = ("a b.slice", os.fsdecode(b"x\xff.slice"), os.fsdecode(b"app.slice/run-\xff.scope"))
 STEPS: Final = 30
 # The profile module's os functions that are points of a kill (never a failure: none of them fails with
 # ENOSPC, and the profile suppresses only the errors those calls give).
@@ -299,8 +304,7 @@ class GameProfileMachine(RuleBasedStateMachine):
         self.cpuset = False
         self.scopes = 0
         self.boxes: dict[str, str] = {}  # unit -> its cgroup folder
-        self.unset_boxes: set[Key] = set()  # O2: recorded by a faulted step, never set
-        self.undone_boxes: dict[Key, str | None] = {}  # O6: undone by a killed 'off': its override file then
+        self.odd: list[str] = []  # the names of the folders odd_box made
         self.log = io.StringIO()
 
     @override
@@ -358,22 +362,6 @@ class GameProfileMachine(RuleBasedStateMachine):
             )
         return killed, failed
 
-    def note_unset_boxes(self) -> None:
-        """O2: after a faulted step, the boxes game.state holds a record of every setting of, whose
-        settings are not all made (a box with a setting not recorded yet is handled again)."""
-        text = self.state_text()
-        by_unit: dict[str, list[tuple[str, str, str]]] = {}
-        for mgr, unit, prop, want in self.box_settings():
-            by_unit.setdefault(unit, []).append((mgr, prop, want))
-        for unit, wanted in by_unit.items():
-            recorded = []
-            for mgr, prop, _want in wanted:
-                manager = manager_of(mgr)
-                assert manager is not None
-                recorded.append(has_prop_record(text, manager, unit, prop))
-            if all(recorded):
-                self.unset_boxes |= {(m, unit, p) for m, p, want in wanted if self.systemd.now(m, unit, p) != want}
-
     def game_in(self, folder: str) -> bool:
         procs = os.path.join(folder, "cgroup.procs")
         return os.path.exists(procs) and os.path.exists(os.path.join(self.paths.proc, "1", "maps"))
@@ -403,17 +391,34 @@ class GameProfileMachine(RuleBasedStateMachine):
         assert keys <= skip, f"{what}: settings not restored: {sorted(keys - skip)}"
         assert files <= skip_files, f"{what}: sysfs files not restored: {sorted(files - skip_files)}"
         assert now.dropins == [], f"{what}: drop-ins left: {now.dropins}"
-        # With no game.state, off removes the by-hand mark and the drop-ins only.
+        # With no game.state, off removes the by-hand mark and the drop-ins only (and undoes the leftovers).
         p = self.paths
         files = (p.state, p.intended, p.manual, p.drift_warned) if was_on else (p.state, p.manual)
+        if not (skip or skip_files):
+            files = (*files, p.leftovers)
         left = [f for f in files if os.path.exists(f)]
         assert left == [], f"{what}: files left: {left}"
+
+    def leftover_keys(self) -> set[tuple[str, str]]:
+        """What game.leftovers holds, as failed_key names a point: ("prop", "MGR UNIT PROP"), ("file", PATH)."""
+        out: set[tuple[str, str]] = set()
+        for _uid, rec in leftover_entries(read_text(self.paths.leftovers, "")):
+            match state_undo(rec):
+                case PropUndo(mgr=mgr, unit=unit, prop=prop):
+                    out.add(("prop", f"{mgr} {unit} {prop}"))
+                case CgroupUndo(file=f) | SysfsUndo(file=f):
+                    out.add(("file", f))
+                case EppUndo(cpu=cpu):
+                    out.add(("file", self.paths.epp(cpu)))
+                case None:
+                    pass
+        return out
 
     def after_off(
         self, what: str, failed: str | None, *, killed: bool, was_on: bool, before: View | None = None
     ) -> None:
         """The checks after an 'off' (point 2 of the docstring; was_on: game.state was there; before: the
-        machine before it, for a fault), and O4's new baseline."""
+        machine before it, for a fault)."""
         if killed:
             return
         if failed is None:
@@ -427,17 +432,28 @@ class GameProfileMachine(RuleBasedStateMachine):
             mgr, unit, prop = which.split()
             skip = frozenset({(mgr, unit, prop)})
         skip_files = frozenset({which}) if kind == "file" else frozenset()
-        # O4: game.state is gone, every other undo done; the failed one is as it was before this off (the
-        # profile's value, unless an off killed earlier undid it already).
+        # O4: game.state is gone, every other undo done; the failed one is as it was before this off, and
+        # game.leftovers holds exactly its record, for the next off and tick.
         self.assert_restored(f"{what} (failed at {failed})", skip=skip, skip_files=skip_files, was_on=was_on)
         assert before is not None, f"{what}: a fault without the machine before it"
         now = self.view()
         for k in skip:
             was, after = (before.overrides.get(k), before.live.get(k)), (now.overrides.get(k), now.live.get(k))
-            assert was == after, f"O4 fixed? {failed}: {k} went from {was} to {after}"
+            assert was == after, f"{failed}: {k} went from {was} to {after}"
         for f in skip_files:
-            assert before.sysfs.get(f) == now.sysfs.get(f), f"O4 fixed? {failed}: {f} changed"
-        self.base = now  # the setting is the machine's own now
+            assert before.sysfs.get(f) == now.sysfs.get(f), f"{failed}: {f} changed"
+        kept = self.leftover_keys()
+        assert kept == {key}, f"{what} (failed at {failed}): game.leftovers holds {kept}, not {key}"
+
+    def assert_off_restored(self, what: str) -> None:
+        """With the profile off after a whole tick: every setting at the baseline, no drop-in, no game.leftovers."""
+        now = self.view()
+        keys, files = now.differences(self.base)
+        assert (keys, files) == (set(), set()), f"{what}: not restored: {sorted(keys)} {sorted(files)}"
+        assert now.dropins == [], f"{what}: drop-ins left: {now.dropins}"
+        assert not os.path.exists(self.paths.leftovers), (
+            f"{what}: game.leftovers left: {read_text(self.paths.leftovers, '')}"
+        )
 
     def run_follow_up(self) -> None:
         """A tick's start or stop of cpu-game.service: its ExecStart ('on') or ExecStop ('off'), no fault."""
@@ -448,33 +464,6 @@ class GameProfileMachine(RuleBasedStateMachine):
             self.after_off("the tick's off", failed, killed=killed, was_on=was_on)
         elif "systemctl start --no-block cpu-game.service" in asked:
             self.call("on", ProfileFault.NONE, 1)
-        self.end_gaps()
-
-    def end_gaps(self) -> None:
-        """With game.state gone (an 'off' that ended, or one killed after it removed the file), the
-        named gaps of the session end: no record is left to skip a box by, so the next 'on' handles
-        every box again."""
-        if not os.path.exists(self.paths.state):
-            self.unset_boxes = set()
-            self.undone_boxes = {}
-
-    def note_undone_boxes(self, before: View) -> None:
-        """O6: after an 'off' killed after some of its undos, each setting of a transient box (a Docker
-        or Steam scope, a systemd-run scope) whose override file that 'off' removed or set back while
-        game.state still holds its record, with the file's value it left (None: removed)."""
-        text, now = self.state_text(), self.view()
-        for mgr, unit, prop, _want in self.box_settings():
-            key = (mgr, unit, prop)
-            if (
-                not transient_unit(unit)
-                or key not in before.overrides
-                or now.overrides.get(key) == before.overrides[key]
-            ):
-                continue
-            manager = manager_of(mgr)
-            assert manager is not None
-            if has_prop_record(text, manager, unit, prop):
-                self.undone_boxes[key] = now.overrides.get(key)
 
     # ---- rules -------------------------------------------------------------------------------
     @initialize(prior=st.booleans(), cpuset=st.booleans(), builds=st.booleans())
@@ -551,6 +540,13 @@ class GameProfileMachine(RuleBasedStateMachine):
                 fh.write("1\n")
         self.boxes[unit] = folder
 
+    @precondition(lambda self: not self.odd)
+    @rule(name=st.sampled_from(ODD_NAMES))
+    def odd_box(self, name: str) -> None:
+        """A folder whose name is no unit name, made by hand in the user manager's tree."""
+        os.makedirs(os.path.join(self.scratch.ucg, *name.split("/")))
+        self.odd.append(os.path.basename(name))
+
     @precondition(lambda self: os.path.exists(self.paths.state))
     @rule(data=st.data())
     def drift(self, data: st.DataObject) -> None:
@@ -574,21 +570,21 @@ class GameProfileMachine(RuleBasedStateMachine):
     def on(self, fault: ProfileFault, at: int) -> None:
         was_on = os.path.exists(self.paths.state)
         before = self.view()
-        killed, failed = self.call("on", fault, at)
+        self.call("on", fault, at)
         if was_on:
             # On twice equals on once.
             assert not [a for a in self.systemd.actions if "set-property" in a], "on with game.state set something"
             keys, files = self.view().differences(before)
             assert (keys, files) == (set(), set()), f"on with game.state changed {keys} {files}"
-        if killed or failed is not None:
-            self.note_unset_boxes()
 
     @rule(fault=st.sampled_from(ProfileFault), at=st.integers(1, FEW_POINTS))
     def tick(self, fault: ProfileFault, at: int) -> None:
+        was_off = not os.path.exists(self.paths.state)
         killed, failed = self.call("tick", fault, at)
         if killed or failed is not None:
-            self.note_unset_boxes()
             return
+        if was_off:
+            self.assert_off_restored("a tick with the profile off")
         stays_on = os.path.exists(self.paths.state) and not [a for a in self.systemd.actions if "cpu-game.service" in a]
         if stays_on:
             self.assert_tick_whole()
@@ -599,9 +595,6 @@ class GameProfileMachine(RuleBasedStateMachine):
         was_on, before = os.path.exists(self.paths.state), self.view()
         killed, failed = self.call("off", fault, at)
         self.after_off("off", failed, killed=killed, was_on=was_on, before=before)
-        if killed:
-            self.note_undone_boxes(before)
-        self.end_gaps()
 
     @precondition(lambda self: os.path.exists(self.paths.state))
     @rule()
@@ -618,18 +611,9 @@ class GameProfileMachine(RuleBasedStateMachine):
 
     # ---- checks ------------------------------------------------------------------------------
     def assert_tick_whole(self) -> None:
-        """Point 4 of the docstring, with O2's and O6's boxes as they are."""
+        """Point 4 of the docstring."""
         text = self.state_text()
-        overrides = self.view().overrides
         for mgr, unit, prop, want in self.box_settings():
-            if (mgr, unit, prop) in self.undone_boxes:
-                left = self.undone_boxes[mgr, unit, prop]
-                now = overrides.get((mgr, unit, prop))
-                assert now == left, f"O6 fixed? {unit} {prop}: its override is {now}, the killed off left {left}"
-                continue
-            if (mgr, unit, prop) in self.unset_boxes:
-                assert self.systemd.now(mgr, unit, prop) != want, f"O2 fixed? {unit} {prop} is set now"
-                continue
             manager = manager_of(mgr)
             assert manager is not None
             assert has_prop_record(text, manager, unit, prop), f"tick: {unit} {prop} has no record: {text}"
@@ -643,10 +627,20 @@ class GameProfileMachine(RuleBasedStateMachine):
         assert unheld(drifts, records(text)) == drifts, f"tick left a drift game.state holds: {drifts}"
 
     @invariant()
+    def no_odd_box_is_named(self) -> None:
+        """Point 5 of the docstring."""
+        text = self.state_text() + read_text(self.paths.leftovers, "")
+        for name in self.odd:
+            shown = name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")  # as game.state reads back
+            assert shown not in text, f"a record names {shown!r}: {text}"
+            named = [a for a in self.systemd.actions if name in a or shown in a]
+            assert named == [], f"a systemctl call names {shown!r}: {named}"
+
+    @invariant()
     def every_change_has_its_record(self) -> None:
         now = self.view()
         keys, files = now.differences(self.base)
-        text = self.state_text()
+        text = self.state_text() + read_text(self.paths.leftovers, "")  # off keeps what it could not undo there
         for mgr, unit, prop in sorted(keys):
             dropin = os.path.join(self.paths.unit_runtime, f"{unit}.d", "zz-cst-game.conf")
             same_file = now.overrides.get((mgr, unit, prop)) == self.base.overrides.get((mgr, unit, prop))
@@ -680,26 +674,24 @@ class GameProfileMachineTest(profiles.MbtTestCase):
             step(machine)
             machine.every_change_has_its_record()
 
-    def test_a_box_left_unset_is_handled_again_after_the_tick_s_off(self) -> None:
-        # O2's box (its set-property failed in a tick) ends with the session: the tick's own 'off'
-        # removes game.state, and the 'on' a later tick starts sets the box like any other.
+    def test_a_box_whose_set_failed_in_a_tick_is_set_by_the_next_tick(self) -> None:
+        # O2: the Steam scope's set-property fails in a tick, after its record was written; the next
+        # whole tick sets it (point 4), with no new record. The old profile skipped it (it had a record)
+        # until the session ended.
         self.replay(
             lambda m: m.start(prior=False, cpuset=False, builds=False),
             lambda m: m.on(ProfileFault.NONE, 1),
             lambda m: m.scope(steam=True),
             lambda m: m.tick(ProfileFault.FAIL, 3),  # the Steam scope's set-property
-            lambda m: m.game(running=False),
-            lambda m: m.tick(ProfileFault.NONE, 1),  # no client left: stop, then its 'off'
-            lambda m: m.game(running=True),
-            lambda m: m.tick(ProfileFault.NONE, 1),  # a client, profile off: start, then its 'on'
             lambda m: m.tick(ProfileFault.NONE, 1),
+            lambda m: m.off(ProfileFault.NONE, 1),
         )
 
-    def test_a_steam_scope_a_killed_off_undid_stays_undone_o6(self) -> None:
+    def test_a_steam_scope_a_killed_off_undid_is_set_again(self) -> None:
         # Found by the simplify stage (Hypothesis 6.170.17); the ci profile's draws miss it today.
         # The tick sets the Steam scope's MemoryLow; an 'off' killed at its first point (the unlink of
         # that override) keeps game.state; after a user daemon-reload the scope has no MemoryLow, and
-        # the next tick does not set it again (O6).
+        # the next tick sets it again (O6; the old profile left it undone).
         self.replay(
             lambda m: m.start(prior=False, cpuset=False, builds=False),
             lambda m: m.on(ProfileFault.NONE, 1),
@@ -709,6 +701,26 @@ class GameProfileMachineTest(profiles.MbtTestCase):
             lambda m: m.off(ProfileFault.KILL, 1),
             lambda m: m.reload("usr"),
             lambda m: m.tick(ProfileFault.NONE, 1),
+        )
+
+    def test_a_setting_an_off_could_not_undo_is_undone_by_the_next_tick(self) -> None:
+        # O4: the set-property that gives machine.slice its CPUWeight back fails inside 'off'; game.state
+        # is gone, and game.leftovers keeps that record, which the next tick while off undoes. The old
+        # profile dropped it with game.state: the setting stayed the game's until a reboot.
+        self.replay(
+            lambda m: m.start(prior=True, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.NONE, 1),
+            lambda m: m.off(ProfileFault.FAIL, 17),  # systemctl set-property --runtime machine.slice CPUWeight
+            lambda m: m.tick(ProfileFault.NONE, 1),
+        )
+
+    def test_a_setting_an_off_could_not_undo_is_undone_by_the_next_off(self) -> None:
+        # O4: the same failed undo, then a whole 'off' with no game.state undoes the kept record.
+        self.replay(
+            lambda m: m.start(prior=True, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.NONE, 1),
+            lambda m: m.off(ProfileFault.FAIL, 17),
+            lambda m: m.off(ProfileFault.NONE, 1),
         )
 
 

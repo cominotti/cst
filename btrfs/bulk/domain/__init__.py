@@ -34,6 +34,9 @@ TAG_TEXT = (
 )
 BIG = 1024**3  # old data from this size on is pointed out
 MARGIN = 20 * BIG  # free space kept besides a real (NOCOW) copy
+# Added to a checked copy's name before its deletion (UserFiles.u_drop): a repair that finds a
+# folder of that name goes on deleting it, without taking what the cut deletion left for a write.
+DROP_MARK: Final = ".bulk-drop"
 
 
 class Item:

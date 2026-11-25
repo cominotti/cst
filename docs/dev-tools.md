@@ -223,18 +223,18 @@ tests, such as tier 1's `test_161` for scrub-limit's reload).
 **btrfs-bulk.** `btrfs/tests/test_btrfs_bulk_faults.py` runs the
 program over the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`
 `BulkHome`: the real moves, cp included, with fakes only for subvolumes,
-+C, the busy check, flatpak and btrfs-snapshot's convert), from eight start
++C, the busy check, flatpak and btrfs-snapshot's convert), from nine start
 states (a plain move, the in-place +C rewrite, a +C copy out of /home, an
 old subvolume, a stale cache, an empty folder, a late write into the old
-tree, and writes on both sides). `arm_points` makes the user adapter's
+tree, a write into the source during its copy, and writes on both sides). `arm_points` makes the user adapter's
 `os` calls (`FaultyOs`), the state files' writes and removals, cp
 (`FaultyRunner`), +C on a folder, the creation of `~/Bulk` and each
 tree's deletion (torn in two) points of the plan, which is dead after a kill. After a kill every mode is tried again
-inside the repair; after a failure or a full disk, only a kill. One known
-gap is let through by name and counted per class: a fault that cuts the
-deletion of the copy (`<target>.bulk-new`) while a rollback deletes it
-leaves a journal that every later repair keeps ("the copy ... was written
-to as well"), with the data back in /home.
+inside the repair; after a failure or a full disk, only a kill. No gap is
+let through: a fault that cuts the deletion of a checked copy (a rollback's,
+or the switch's when the source changed) must converge too, because the
+copy is renamed to `<target>.bulk-new.bulk-drop` before it is deleted and a
+repair deletes a marked copy without the "written to" check.
 
 **Cost.** The eight modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
@@ -245,7 +245,7 @@ together: 4.3 to 4.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
 -I -B tests/run_unit.py --jobs 4` on the eight, 3 runs, on a workstation
 whose load average was 20 on 16 CPUs; the seven before bulk's took 2.7 s
 there, and 2.3 to 2.4 s unloaded). btrfs-bulk's alone is about 10 s of CPU
-in 24 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
+in 27 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
 the times are about the same on tmpfs and on a btrfs home.
 
 ## Where the virtual environment lives
@@ -752,24 +752,26 @@ not derive from it.
   `eval` reads back the exact bytes, `record_line` is bash's own
   `printf %q` line, a line bash wrote reads back, a record cut short is
   left out and removed before the next one, and `game.intended`'s drift
-  records keep their six fields. One known gap is let through by name: a
-  field that is not UTF-8 (a cgroup folder's name the user made) reads back
-  decoded with U+FFFD, so it never matches its record.
+  records keep their six fields. A known limit of the reader is pinned: a
+  field that is not UTF-8 reads back decoded with U+FFFD. No writer is left
+  for one: the game profile leaves a cgroup folder whose name is no unit
+  name alone, and systemd names the scopes.
 - `mbt_game_profile.py`: a state machine over the game profile's `on`,
   `tick` and `off` (through `locked`), with the unit tests' scratch and fake
   systemctl, whose daemon-reload sets each value from the override files and
   the drop-ins; between them the game starts and ends, Docker containers,
-  Steam scopes and boxes appear, settings drift and someone else reloads, and
+  Steam scopes and boxes appear (also a folder whose name is no unit name:
+  no record or systemctl call ever names it), settings drift and someone
+  else reloads, and
   each call may fail or die at any of its set-property calls and file writes:
   every change has its record in `game.state`, an `off` with no fault
   restores everything, `on` twice is `on` once, and a tick leaves no box
-  half handled. Three known gaps are let through by name: a set-property that
-  failed (or a process that died between the record and the set) is never
-  tried again while the profile is on; an `off` whose undo step fails
-  still removes `game.state`, so that setting keeps the profile's value;
-  and an `off` killed after it undid a setting of a scope (a Docker
-  container's, a Steam game's) keeps that scope's record in `game.state`,
-  so while the profile stays on no tick sets it again.
+  half handled, also a box whose set-property failed (or whose process died
+  between the record and the set) and a scope whose setting an `off` that
+  was killed undid: the next tick sets them again. An `off` whose undo
+  step fails undoes everything else and keeps exactly that record in
+  `game.leftovers`, and the next tick while off (or the next `off`) puts
+  it back.
 - `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
   unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
   hand-edited settings, crypttab and fstab lines (CST's, an older CST's,

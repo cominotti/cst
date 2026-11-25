@@ -7018,6 +7018,407 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_181_cpu_game_profile_tick_sets_a_handled_box_again_when_its_setting_does_not_hold(self) -> None:
+        """The real game profile, on for tester with BUILD_CPUS='0,2' (not contiguous: the real systemd shows
+        "0 2"). A box next to the game (a slice of the user manager's own, made by systemd-run --user)
+        whose record game.state holds with no setting (what a set-property that failed leaves): the tick
+        sets CPUWeight idle in the real user manager, its user.control override written, with no new
+        record. A systemd-run job straight in app.slice (run-e2e181.service) the tick sets; then its
+        transient override removed and a user daemon-reload (what a killed 'off' leaves): its CPUWeight
+        is its own again, and the next tick sets it idle again, with no new record. A Docker-named scope
+        of the system manager and a Steam-named scope of tester's user manager get AllowedCPUs and
+        MemoryLow. A further tick finds every value holding in the forms the real systemd shows (idle,
+        "0 2", the bytes of 16G): game.state byte for byte the same, every override file the same inode
+        and mtime, and its output names none of them. 'off' removes the overrides and both boxes of the
+        user manager get their own CPUWeight back. The old tick skipped every box it held a record of."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e181-box.service run-e2e181.service 2>/dev/null || true
+            systemctl --user -M tester@ stop app-flatpak-com.valvesoftware.Steam-e2e181.scope 2>/dev/null || true
+            systemctl stop docker-e2e181.scope 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-181-conf.bak ]]; then mv /tmp/e2e-181-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-181-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0,2'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            steam=app-flatpak-com.valvesoftware.Steam-e2e181.scope
+            ushow() { systemctl --user -M tester@ show -P "$1" "$2"; }
+            wait_dir() { for _ in $(seq 50); do [[ -d "$1" ]] && break; sleep 0.1; done; test -d "$1"; }
+            touch /run/cpu-setup/manual
+            gp on
+            # A box whose set-property failed: its record, no setting.
+            systemd-run --user -M tester@ --quiet --slice=e2e181.slice --unit=e2e181-box sleep 300
+            wait_dir "$ucg/e2e181.slice"
+            own=$(ushow CPUWeight e2e181.slice)
+            [[ "$own" != idle ]]
+            rec='prop usr e2e181.slice CPUWeight new -'
+            printf '%s\n' "$rec" >>"$st"
+            # A systemd-run job straight in app.slice; a Docker-named scope of the system manager; a
+            # Steam-named scope of tester's (a --user --scope needs a caller the user manager may move).
+            systemd-run --user -M tester@ --quiet --unit=run-e2e181 sleep 300
+            wait_dir "$ucg/app.slice/run-e2e181.service"
+            job_own=$(ushow CPUWeight run-e2e181.service)
+            [[ "$job_own" != idle ]]
+            systemd-run --quiet --unit=e2e181-docker-launch systemd-run --scope --quiet --unit=docker-e2e181.scope sleep 300
+            systemd-run --user -M tester@ --quiet --unit=e2e181-steam-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+                systemd-run --user --scope --quiet --unit="$steam" sleep 300
+            for _ in $(seq 50); do
+                [[ "$(systemctl show -P ActiveState docker-e2e181.scope)" == active \
+                    && "$(ushow ActiveState "$steam")" == active ]] && break
+                sleep 0.1
+            done
+            [[ "$(systemctl show -P ActiveState docker-e2e181.scope)" == active ]]
+            [[ "$(ushow ActiveState "$steam")" == active ]]
+            [[ "$(systemctl show -P Slice docker-e2e181.scope)" != builds.slice ]]
+            got=$(gp tick)
+            [[ "$(ushow CPUWeight e2e181.slice)" == idle ]] || { echo "the box was not set again: $got" >&2; cat "$st" >&2; exit 1; }
+            grep -q "e2e181.slice: CPUWeight is '.*', not 'idle' (its set failed, or something undid it): set CPUWeight=idle again" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            box_ov=/run/user/$uid/systemd/user.control/e2e181.slice.d/50-CPUWeight.conf
+            job_ov=/run/user/$uid/systemd/transient/run-e2e181.service.d/50-CPUWeight.conf
+            test -e "$box_ov"
+            test -e "$job_ov"
+            [[ "$(grep -cxF "$rec" "$st")" == 1 ]] || { echo "a second record of the box" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(ushow CPUWeight run-e2e181.service)" == idle ]]
+            [[ "$(systemctl show -P AllowedCPUs docker-e2e181.scope)" == "0 2" ]] \
+                || { echo "docker scope: $(systemctl show -P AllowedCPUs docker-e2e181.scope)" >&2; exit 1; }
+            [[ "$(ushow MemoryLow "$steam")" == 17179869184 ]] || { echo "steam scope: $(ushow MemoryLow "$steam")" >&2; exit 1; }
+            # What an 'off' killed after this undo leaves, after a reload: no override, its own value.
+            rm "$job_ov"
+            systemctl --user -M tester@ daemon-reload
+            [[ "$(ushow CPUWeight run-e2e181.service)" == "$job_own" ]] \
+                || { echo "the reload kept $(ushow CPUWeight run-e2e181.service)" >&2; exit 1; }
+            lines=$(wc -l <"$st")
+            got=$(gp tick)
+            [[ "$(ushow CPUWeight run-e2e181.service)" == idle ]] || { echo "the job was not set again: $got" >&2; exit 1; }
+            grep -q "run-e2e181.service: CPUWeight is '.*', not 'idle' (its set failed, or something undid it)" <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(wc -l <"$st")" == "$lines" ]] || { echo "a new record" >&2; cat "$st" >&2; exit 1; }
+            # Every value holds now, in the forms the real systemd shows: a tick writes nothing.
+            ovs=("$box_ov" "$job_ov" /run/systemd/transient/docker-e2e181.scope.d/50-AllowedCPUs.conf
+                "/run/user/$uid/systemd/transient/$steam.d/50-MemoryLow.conf")
+            sum=$(sha256sum "$st")
+            marks=$(stat -c '%i %y' "${ovs[@]}")
+            got=$(gp tick)
+            [[ "$(sha256sum "$st")" == "$sum" ]] || { echo "game.state changed" >&2; exit 1; }
+            [[ "$(stat -c '%i %y' "${ovs[@]}")" == "$marks" ]] || { echo "an override was written again: $got" >&2; exit 1; }
+            if grep -qE 'e2e181|Steam' <<<"$got"; then echo "the tick named a box: $got" >&2; exit 1; fi
+            gp off
+            test ! -e "$box_ov" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(ushow CPUWeight e2e181.slice)" == "$own" ]] || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
+            [[ "$(ushow CPUWeight run-e2e181.service)" == "$job_own" ]] || { echo "the job's CPUWeight: not $job_own" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e181-box.service run-e2e181.service "$steam"
+            systemctl stop docker-e2e181.scope
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_182_cpu_game_profile_keeps_an_undo_off_could_not_do_and_the_tick_retries_it(self) -> None:
+        """The real game profile, on for tester, with two more records in game.state whose undo fails: a sysfs
+        file under a path whose folder is a plain file (the write fails, ENOTDIR), and machine.slice's
+        CPUWeight set back to a value the real systemd refuses. 'off' exits 0, undoes everything else
+        (machine.slice gets its own CPUWeight back from on's record), removes game.state, names both in the
+        journal and keeps exactly the two records in game.leftovers; 'state' lists them, and cst doctor warns
+        about both, with off as the fix (and says nothing once the file is gone). A third record, of a
+        cgroup file whose cgroup is gone (ENOENT from the real cgroupfs), is done: neither named nor kept. A tick while off
+        keeps both (the file byte for byte); once the folder is a folder, the next tick writes the old value
+        and keeps only the CPUWeight record, which the next 'off' keeps too. The old 'off' removed game.state
+        with both records in it and kept nothing. With TARGET_USER unset and a GameMode client running, a tick
+        tries a kept record of tester's user manager for tester and still does not start cpu-game.service (a
+        stub): the old tick then acted for tester and started it. A kept record of a uid with no account is
+        never set in tester's manager: kept while that uid's runtime folder is there, done once it is gone.
+        An override that cannot be removed stays kept, and the ticks that retry it run no daemon-reload. A
+        game.leftovers that cannot be read (a folder) is left alone: 'off' exits 0 and removes game.state. With
+        one of a newer format, a failed undo is said not undone, in 'off''s closing line too."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-182-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            rm -f /tmp/e2e-182-client.pid /tmp/e2e-182-ready /tmp/e2e-182-starts /tmp/e2e-182-libgamemode.so
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-182-conf.bak ]]; then mv /tmp/e2e-182-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            systemctl stop e2e182-flag.service 2>/dev/null || true
+            rm -f /run/systemd/system/e2e182-flag.service
+            rm -rf /run/cpu-setup /run/e2e182 /run/user/4242 /run/systemd/system.control/e2e182.slice.d
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-182-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            own=$(systemctl show -P CPUWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" != "$own" ]]
+            mkdir -p /run/e2e182
+            printf 'a file, not a folder\n' >/run/e2e182/dir
+            knob=/run/e2e182/dir/knob
+            sys_rec="sysfs $knob OLD"
+            prop_rec='prop sys machine.slice CPUWeight existed bogus'
+            # And a cgroup file whose cgroup is gone (the real cgroupfs answers ENOENT): no leftover.
+            gone_rec='cgw /sys/fs/cgroup/e2e182-gone.slice/cpu.weight 42'
+            test ! -e /sys/fs/cgroup/e2e182-gone.slice
+            printf '%s\n' "$sys_rec" "$gone_rec" "$prop_rec" >>"$st"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            if grep -qF e2e182-gone <<<"$got"; then echo "off named the gone cgroup: $got" >&2; exit 1; fi
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "machine.slice CPUWeight: $(systemctl show -P CPUWeight machine.slice), not $own" >&2; exit 1; }
+            grep -qF "off: could not undo machine.slice CPUWeight=bogus: kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "off: could not undo $knob = OLD: kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            grep -qF "except 2 setting(s) kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 1' ]] || { cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: $knob, machine.slice CPUWeight" \
+                || { gp state >&2; exit 1; }
+            # cst doctor (as tester) warns about both, by name, with the fix line of a profile that is off.
+            doc() { runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+                /opt/cst-rw/cst doctor 2>&1 || true; }
+            d=$(doc)
+            grep -qE "WARN +game profile: 2 setting\(s\) 'off' could not undo keep the game's value: $knob, machine\.slice CPUWeight \(kept in /run/cpu-setup/game\.leftovers\)" <<<"$d" \
+                || { echo "doctor: $d" >&2; exit 1; }
+            grep -qF 'fix: sudo /usr/local/sbin/cpu-game-profile off' <<<"$d" || { echo "doctor: $d" >&2; exit 1; }
+            # A tick while off: both still fail, the file stays byte for byte.
+            sum=$(sha256sum "$lo")
+            gp tick >/dev/null
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "game.leftovers changed:" >&2; cat "$lo" >&2; exit 1; }
+            # The folder is a folder now: the next tick writes OLD and keeps only the CPUWeight record.
+            rm /run/e2e182/dir
+            mkdir /run/e2e182/dir
+            got=$(gp tick)
+            [[ "$(cat "$knob")" == OLD ]] || { echo "the knob was not written: $got" >&2; exit 1; }
+            grep -qF "undid $knob = OLD, kept in $lo by an earlier off" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            # An 'off' with no game.state retries it too, and keeps it while it fails.
+            got=$(gp off)
+            grep -qF "off: could not undo machine.slice CPUWeight=bogus" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
+            rm -f "$lo"
+            rm -rf /run/e2e182
+            if grep -qF "could not undo keep" <<<"$(doc)"; then echo "doctor warns with no game.leftovers" >&2; exit 1; fi
+            # The tick while off judges TARGET_USER as it is, not the user of a kept record: with TARGET_USER
+            # unset and a GameMode client running, a kept record of tester's user manager that the real
+            # systemd still refuses is tried for tester, and cpu-game.service (a stub that records its starts)
+            # is not started. The old tick acted for tester from then on and started it ('on' then refused).
+            uid=$(id -u tester)
+            urec='prop usr user.slice CPUWeight existed bogus'
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-182-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-182-libgamemode.so /tmp/e2e-182-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-182-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-182-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-182-client.pid)/maps"
+            printf '%s\n' "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            printf 'cst-game-leftovers 1\nuser %s\n%s\n' "$uid" "$urec" >"$lo"
+            got=$(gp tick 2>&1)
+            grep -qF 'GameMode client running, profile not switched on: TARGET_USER not set' <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            if grep -q 'switching on' <<<"$got"; then echo "the tick switched on: $got" >&2; exit 1; fi
+            sleep 1
+            test ! -e /tmp/e2e-182-starts || { echo "cpu-game.service was started" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "user $uid"$'\n'"$urec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            kill "$(cat /tmp/e2e-182-client.pid)"
+            rm -f "$stub" "$lo" /run/cpu-setup/settings-warned
+            systemctl daemon-reload
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            # A kept record of a uid no account has now is never undone in another user's manager: kept while
+            # that uid's user manager is there (/run/user/UID/systemd), done once it is gone. The old tick set
+            # it in tester's (TARGET_USER's) manager and dropped it as undone.
+            ghost=4242
+            if getent passwd "$ghost" >/dev/null; then echo "uid $ghost has an account" >&2; exit 1; fi
+            grec='prop usr app.slice CPUWeight existed 77'
+            app_own=$(systemctl --user -M tester@ show -P CPUWeight app.slice)
+            [[ "$app_own" != 77 ]]
+            mkdir -p "/run/user/$ghost/systemd"
+            printf 'cst-game-leftovers 1\nuser %s\n%s\n' "$ghost" "$grec" >"$lo"
+            gp tick >/dev/null
+            [[ "$(tail -n +2 "$lo")" == "user $ghost"$'\n'"$grec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight app.slice)" == "$app_own" ]] \
+                || { echo "tester's app.slice got the other user's CPUWeight" >&2; exit 1; }
+            rm -rf "/run/user/$ghost"
+            gp tick >/dev/null
+            test ! -e "$lo" || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight app.slice)" == "$app_own" ]]
+            # An override 'off' could not remove (a non-empty folder in its place: EISDIR) stays kept, and the
+            # tick that retries it runs no daemon-reload: a loaded unit changed on disk keeps NeedDaemonReload
+            # yes. The old tick reloaded systemd at every try.
+            ovr=/run/systemd/system.control/e2e182.slice.d/50-CPUWeight.conf
+            mkdir -p "$ovr/inside"
+            flag=/run/systemd/system/e2e182-flag.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >"$flag"
+            systemctl daemon-reload
+            systemctl start e2e182-flag.service
+            printf '[Unit]\nDescription=changed on disk\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >"$flag"
+            [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
+                || { echo "the test cannot bite: NeedDaemonReload is not yes" >&2; exit 1; }
+            nrec='prop sys e2e182.slice CPUWeight new -'
+            printf 'cst-game-leftovers 1\n%s\n' "$nrec" >"$lo"
+            for n in 1 2; do
+                gp tick >/dev/null
+                [[ "$(tail -n +2 "$lo")" == "$nrec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+                [[ "$(systemctl show -P NeedDaemonReload e2e182-flag.service)" == yes ]] \
+                    || { echo "tick $n ran a daemon-reload" >&2; exit 1; }
+            done
+            systemctl stop e2e182-flag.service
+            rm -rf /run/systemd/system.control/e2e182.slice.d
+            rm -f "$flag" "$lo"
+            systemctl daemon-reload
+            # A game.leftovers that cannot be read (a folder in its place) is left alone, never taken for a
+            # missing file: 'off' exits 0, says so, removes game.state and leaves the folder. The old 'off'
+            # crashed on it (IsADirectoryError) after its undos and left game.state: the profile stayed on.
+            mkdir -p "$lo/inside"
+            gp on >/dev/null
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "$lo: cannot be read (Is a directory): left alone, neither undone nor removed" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            test -d "$lo/inside"
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
+            rm -rf "$lo"
+            # A game.leftovers of a newer format is left alone; a setting 'off' could not undo then is said not
+            # undone, and the closing line says so. The old 'off' ended with the plain "restored" line.
+            printf 'cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n' >"$lo"
+            sum=$(sha256sum "$lo")
+            gp on >/dev/null
+            printf '%s\n' "$prop_rec" >>"$st"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            grep -qF "off: could not keep machine.slice CPUWeight=bogus in $lo: not undone" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(tail -n 1 <<<"$got")" == *"settings restored, except 1 setting(s) not undone" ]] \
+                || { echo "off: $got" >&2; exit 1; }
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "game.leftovers changed:" >&2; cat "$lo" >&2; exit 1; }
+            test ! -e "$st"
+            rm -f "$lo"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_183_cpu_game_profile_leaves_a_folder_whose_name_is_no_unit_name_alone(self) -> None:
+        """The real game profile, on for tester; in the real user manager's cgroup tree, as root, folders
+        whose name is no unit name ('a b.slice', and one with byte 0xff): 'on' and three ticks never name
+        them, game.state stays byte for byte as 'on' left it. And where lushtext runs its jobs: the scope
+        lushtext-cap-1234-5678.scope in user-lushtext.slice (under the toolboxes' user.slice), a valid
+        unit name, is covered by user.slice's rule only: no record, set-property or output line names it
+        or its slice, and it gets no override of its own. The old profile recorded both folders, ran a
+        set-property on them that the real systemd refuses, and wrote one more record of the 0xff name
+        at every tick."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            rmdir "$ucg/a b.slice" "$ucg/"$'x\\xff.slice' 2>/dev/null || true
+            systemctl --user -M tester@ stop lushtext-cap-1234-5678.scope e2e183-launch.service 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-183-conf.bak ]]; then mv /tmp/e2e-183-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-183-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            job=lushtext-cap-1234-5678.scope
+            ushow() { systemctl --user -M tester@ show -P "$1" "$2"; }
+            # Where lushtext runs its jobs (a --user --scope needs a caller the user manager may move).
+            systemd-run --user -M tester@ --quiet --unit=e2e183-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+                systemd-run --user --scope --quiet --slice=user-lushtext.slice --unit="$job" sleep 300
+            for _ in $(seq 50); do [[ "$(ushow ActiveState "$job")" == active ]] && break; sleep 0.1; done
+            [[ "$(ushow ActiveState "$job")" == active ]]
+            [[ "$(ushow Slice "$job")" == user-lushtext.slice ]]
+            test -d "$ucg/user.slice/user-lushtext.slice/$job"
+            job_own=$(ushow CPUWeight "$job")
+            mkdir "$ucg/a b.slice" "$ucg/"$'x\xff.slice'
+            touch /run/cpu-setup/manual
+            # The names as the journal, systemctl's refusal and printf %q write them.
+            names=(-e 'a b.slice' -e 'a\ b.slice' -e $'x\xff.slice' -e 'x\xff.slice' -e 'x\377.slice'
+                -e lushtext-cap -e user-lushtext)
+            named() {
+                if LC_ALL=C grep -qaF "${names[@]}" <<<"$got"; then
+                    echo "$1 named a folder:" >&2; cat -v <<<"$got" >&2; cat -v "$st" >&2; exit 1
+                fi
+            }
+            got=$(gp on 2>&1)  # systemctl's own refusals too
+            named on
+            [[ "$(ushow CPUWeight user.slice)" != "" ]]
+            sum=$(sha256sum "$st")
+            for n in 1 2 3; do
+                got=$(gp tick 2>&1)
+                named "tick $n"
+                [[ "$(sha256sum "$st")" == "$sum" ]] || { echo "tick $n changed game.state:" >&2; cat -v "$st" >&2; exit 1; }
+            done
+            if LC_ALL=C grep -qaF "${names[@]}" "$st"; then
+                echo "a record names a folder:" >&2; cat -v "$st" >&2; exit 1
+            fi
+            test ! -e "/run/user/$uid/systemd/transient/$job.d/50-CPUWeight.conf"
+            test ! -e "/run/user/$uid/systemd/user.control/user-lushtext.slice.d/50-CPUWeight.conf"
+            [[ "$(ushow CPUWeight "$job")" == "$job_own" ]]
+            gp off
+            rmdir "$ucg/a b.slice" "$ucg/"$'x\xff.slice'
+            systemctl --user -M tester@ stop "$job" e2e183-launch.service 2>/dev/null || true
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.SMOKE, E2ETag.VM, E2ETag.TOOLCHAINS)
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
@@ -7261,6 +7662,61 @@ unit_log_has "Traceback (most recent call last):"
 unit_log_has "FileExistsError"
 [ -e /etc/btrfs-setup/bulk-at-boot ]
 [ "$(ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort)" = "$(cat "$s/pending-refused")" ]   # no alert kept
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_184_bulk_boot_finishes_a_cut_deletion_of_a_marked_copy(self) -> None:
+        """btrfs-bulk-boot.service (real systemd), no boot flag, a journal of an interrupted move whose
+        undo was deleting the copy when it was cut: the data is back at ~/Programs (a real folder),
+        and what is left of the copy is a partly deleted folder under the name the undo gives a
+        checked copy before it deletes it (<new>.bulk-drop). The unit runs, undoes the move, deletes
+        the marked folder without the "written to" check and drops the journal (an older btrfs-bulk
+        dropped the journal and left the folder). The same with the copy under its own name (what an
+        older CST left; its times are after the journal's stamp2): "NEEDS A LOOK ... was written to as
+        well", and the journal and the copy stay. The journal's paths are under ~/Store, with no
+        ~/Bulk: the container has no btrfs, and a plain ~/Bulk folder makes a run wait for
+        btrfs-snapshot's conversion before any repair; with ~/Bulk absent the repair runs first, on
+        the journal's paths, and the run then stops at the creation of ~/Bulk (exit 1, a success of
+        the unit)."""
+        out = self.bulk_boot(
+            r"""
+h=/var/tmp/cst-e2e-bulk-home
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+install -d -m 0755 /var/lib/btrfs-bulk
+j=/var/lib/btrfs-bulk/journal-apps.json
+# plant NAME: ~/Programs holding a and sub/b, ~/Store/NAME holding sub/b only, the journal of the move.
+plant() {
+    rm -rf "$h/Programs" "$h/Store" "$h/Bulk"
+    mkdir -p "$h/Programs/sub" "$h/Store/$1/sub"
+    printf a >"$h/Programs/a"
+    printf b >"$h/Programs/sub/b"
+    printf b >"$h/Store/$1/sub/b"
+    chown -R cste2ebulk: "$h/Programs" "$h/Store"
+    printf '{"kind": "copy", "src": "%s/Programs", "target": "%s/Store/apps", "new": "%s/Store/apps.bulk-new", "old": "%s/Programs.bulk-old-1", "stamp": 1, "stamp2": 2, "link": "%s/Programs", "v": 1}' \
+        "$h" "$h" "$h" "$h" "$h" >"$j"
+}
+plant apps.bulk-new.bulk-drop
+boot_unit
+unit_log_has "recovering an interrupted move"
+unit_log_has "apps: undid an interrupted move (the data is back at ~/Programs)"
+[ ! -e "$j" ]
+[ ! -e "$h/Store/apps.bulk-new.bulk-drop" ] || { echo "the marked copy is left" >&2; exit 1; }
+[ ! -e "$h/Store/apps.bulk-new" ]
+[ ! -L "$h/Programs" ]
+[ "$(cat "$h/Programs/a") $(cat "$h/Programs/sub/b")" = "a b" ]
+journalctl --sync 2>/dev/null || true
+if journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" | grep -qF "was written to as well"; then
+    echo "the marked copy was taken for a write" >&2; exit 1
+fi
+plant apps.bulk-new
+boot_unit
+unit_log_has "NEEDS A LOOK: apps: an interrupted move: the data is back at $h/Programs, but the copy $h/Store/apps.bulk-new was written to as well"
+[ -e "$j" ]
+[ "$(cat "$h/Store/apps.bulk-new/sub/b")" = b ]
+[ "$(cat "$h/Programs/a") $(cat "$h/Programs/sub/b")" = "a b" ]
 echo E2E-OK
 """
         )
@@ -7566,7 +8022,9 @@ echo test_109-ok
         the spool's format) and sets the day's stamp, so the next run keeps no second copy. Then
         convert-planned --lock-held against the real /run lock (/proc/self/fdinfo): an fd that holds
         the flock is taken; another open of the lock file while that one holds it, an fd of another
-        file and an fd whose lock was released are refused (exit 2, nothing converted)."""
+        file and an fd whose lock was released are refused (exit 2, nothing converted). Last, paused
+        with RESUME_ABOVE_GIB below SKIP_AT_OR_BELOW_GIB: the kept alert says the snapshots resume
+        above the larger of the two (the installed runtime's snapshots_resume_above)."""
         d = "/var/tmp/e2e-snapshot-unit"
         conf = "/etc/btrfs-setup/snapshots.conf"
         inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
@@ -7667,6 +8125,19 @@ rc=0; "$S" convert-planned --lock-held 9 >"$d/out" 2>&1 || rc=$?
 [ "$rc" = 2 ]
 refused 9
 exec 9>&- 8<&- 7<&-
+
+# 5. Paused (200 GiB free, SKIP 250, RESUME 100): the alert names the larger limit, where snapshots resume.
+printf '%s\n' '#!/bin/bash' 'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     214748364800      (min: 214748364800)"; fi' 'exit 0' \
+    >"$d/bin/btrfs"
+printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" "SKIP_AT_OR_BELOW_GIB=250" "RESUME_ABOVE_GIB=100" >"$conf"
+rm -f /var/lib/btrfs-snapshot/emergency
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 0 ]
+body="200 GiB free; hourly snapshots resume above 250 GiB. Older snapshots still expire normally."
+grep -qxF "<4>btrfs-snapshot: Snapshots paused: low space: $body" "$d/out"
+paused="$(grep -lxF "title=Snapshots paused: low space" "$pending"/*.alert)"
+grep -qxF "$body" "$paused"
 echo test_110-ok
 """,
         ).stdout
@@ -9015,6 +9486,345 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-CACHE-177-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed(self) -> None:
+        """`cst bluetooth apply` as tester with the real user manager and WirePlumber, stopped by
+        SIGTERM after its writes and before its restarts (a `systemctl` shim on PATH, for that run
+        only, sends SIGTERM to the program at its first look at wireplumber.service once the LE Audio
+        drop-in exists: the look right before the restarts). main.conf is as apply leaves it, so no run
+        restarts bluetoothd. The record of restarts owed names
+        wireplumber.service under the InvocationID systemd gives it (bluetoothd does not run here: it
+        owes nothing), written before the writes; `plan` exits 10 with WirePlumber's restart still
+        owed; the next `apply` makes that restart (a new InvocationID), writes nothing and forgets the
+        record; `plan` then has nothing to do and a third `apply` restarts nothing. Before, the record
+        was written only at the restarts: none after the stop, and `plan` said no restart was needed.
+        Then WirePlumber restarts by itself between the rule's write and the drop-in's (the shim
+        restarts it at the first look at it once the rule exists and the drop-in does not) and the run
+        is stopped as before: the record owes WirePlumber under its new InvocationID (the save before
+        the drop-in's write read it again), `plan` exits 10, and the next `apply` restarts it once.
+        Before, that save was skipped (the record owed WirePlumber under the old ID already), and
+        nothing owed the restart after the stop."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -rf /var/tmp/e2e-178 /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.local/state/cst/bluetooth-restart-pending.json",
+            check=False,
+        )
+        # main.conf as apply leaves it: no run of this test restarts bluetoothd (a real restart in
+        # the shared container), even one the stop did not stop.
+        exec_bash(
+            c,
+            "mkdir -p /etc/bluetooth && printf '[General]\\nExperimental = true\\n"
+            "KernelExperimental = 6fbaf188-05e0-496a-9885-d6ddfdb4e03e\\n' >/etc/bluetooth/main.conf",
+        )
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_178
+            trap 'echo "test_178 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            w=/var/tmp/e2e-178
+            wp="$H/.config/wireplumber/wireplumber.conf.d"
+            rule="$wp/50-bluez-00_11_22_33_44_55.conf"
+            le="$wp/90-cst-le-audio-off.conf"
+            owed_file="$H/.local/state/cst/bluetooth-restart-pending.json"
+            wp_id() { systemctl --user show -p InvocationID --value wireplumber.service; }
+            rm -rf "$w" "$owed_file" "$rule" "$le"
+            mkdir -p "$w/bin" "$H/.config/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n' >"$H/.config/cst/bluetooth.conf"
+            # The shim: SIGTERM to its caller at a look at wireplumber.service once the drop-in exists.
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ -e '$le' && \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                '    kill -TERM "$PPID"' '    exit 1' 'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            chmod 0755 "$w/bin/systemctl"
+            cat "$w/bin/systemctl" >&2
+            id0="$(wp_id)"
+            [[ -n "$id0" ]]
+
+            # 1. apply, stopped after its writes, before its restarts.
+            rc=0; out="$(PATH="$w/bin:$PATH" bt apply --yes 2>&1)" || rc=$?
+            show "stopped apply" "$out"
+            [[ $rc == 143 ]] || { echo "test_178: the stopped apply exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            if grep -q '^restart: ' <<<"$out"; then echo "test_178: the stopped apply restarted" >&2; exit 1; fi
+            [[ -f "$rule" && -f "$le" ]]
+            [[ "$(wp_id)" == "$id0" ]]
+            [[ -f "$owed_file" ]] || { echo "test_178: no record of the restart owed" >&2; exit 1; }
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id0"
+
+            # 2. plan shows it owed.
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the stop" "$out"
+            [[ $rc == 10 ]]
+            grep -qE '^  ok +bluetooth.service +no restart needed$' <<<"$out"
+            grep -qE '^  restart +wireplumber \(your session\) ' <<<"$out"
+            grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
+
+            # 3. the next apply makes the restart, writes nothing and forgets the record.
+            step "apply after the stop" apply --yes
+            wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            if grep -q '^restart:   bluetooth' <<<"$out"; then echo "test_178: bluetoothd restarted" >&2; exit 1; fi
+            no_writes "apply after the stop" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+            id1="$(wp_id)"
+            [[ -n "$id1" && "$id1" != "$id0" ]]
+            [[ ! -e "$owed_file" ]]
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the restart" "$out"
+            [[ $rc == 0 ]]
+
+            # 4. a third apply restarts nothing.
+            step "third apply" apply --yes
+            no_writes "third apply" "$out"
+            grep -qxF "none needed" <<<"$out"
+            [[ "$(wp_id)" == "$id1" ]]
+
+            # 5. WirePlumber restarts by itself after the rule's write, before the drop-in's: the save
+            # before the drop-in's write owes it again, under its new InvocationID. The shim restarts it
+            # at the first look at it once the rule exists and the drop-in does not, then stops the run
+            # as above. Before, that look did not happen (the record owed WirePlumber already, under the
+            # old ID), and nothing owed its restart after the stop.
+            rm -f "$rule" "$le" "$owed_file" "$w/restarted"
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                "    if [[ -e '$rule' && ! -e '$le' && ! -e '$w/restarted' ]]; then" \
+                "        touch '$w/restarted'; /usr/bin/systemctl --user restart wireplumber.service" \
+                '    fi' \
+                "    if [[ -e '$le' ]]; then kill -TERM \"\$PPID\"; exit 1; fi" \
+                'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            cat "$w/bin/systemctl" >&2
+            id2="$(wp_id)"
+            rc=0; out="$(PATH="$w/bin:$PATH" bt apply --yes 2>&1)" || rc=$?
+            show "apply stopped after WirePlumber restarted by itself" "$out"
+            [[ $rc == 143 ]] || { echo "test_178: the second stopped apply exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            [[ -e "$w/restarted" ]] || { echo "test_178: no look at WirePlumber between the rule's write and the drop-in's" >&2; exit 1; }
+            [[ -f "$rule" && -f "$le" ]]
+            id3="$(wp_id)"
+            [[ -n "$id3" && "$id3" != "$id2" ]]
+            [[ -f "$owed_file" ]] || { echo "test_178: no record after the second stop" >&2; exit 1; }
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id3"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the second stop" "$out"
+            [[ $rc == 10 ]]
+            grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
+            step "apply after the second stop" apply --yes
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            no_writes "apply after the second stop" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+            [[ "$(wp_id)" != "$id3" && ! -e "$owed_file" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_179_bluetooth_revert_again_makes_the_restart_a_stopped_revert_owes(self) -> None:
+        """`cst bluetooth revert` as tester with the real user manager and WirePlumber, after the
+        applied state is built as test_80 builds it (`apply --yes --no-restart`, then `apply --yes`:
+        bluetoothd does not run here, so only WirePlumber is restarted). `revert --yes` is stopped by
+        SIGTERM after its changes and before its restarts (a `systemctl` shim on PATH, for that run
+        only, sends SIGTERM to the program at its first look at wireplumber.service once the LE Audio
+        drop-in is gone; a `sudo` shim refuses `systemctl restart bluetooth`, so no run restarts
+        bluetoothd in the shared container): exit 143, the rule and the drop-in gone, the vendor keys
+        back in main.conf, and the record owes WirePlumber's restart under its InvocationID.
+        `revert --check` exits 10 and says it would restart WirePlumber, still owed; `revert --yes`
+        makes that restart (a new InvocationID) and forgets the record; a third `revert --yes` says
+        "none needed" and restarts nothing. Before, the second revert found nothing to revert and said
+        "none needed"."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -rf /var/tmp/e2e-179 /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.local/state/cst/bluetooth-restart-pending.json",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_179
+            trap 'echo "test_179 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            w=/var/tmp/e2e-179
+            wp="$H/.config/wireplumber/wireplumber.conf.d"
+            rule="$wp/50-bluez-00_11_22_33_44_55.conf"
+            le="$wp/90-cst-le-audio-off.conf"
+            owed_file="$H/.local/state/cst/bluetooth-restart-pending.json"
+            wp_id() { systemctl --user show -p InvocationID --value wireplumber.service; }
+            wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
+            rm -rf "$w" "$owed_file" "$rule" "$le"
+            mkdir -p "$w/bin" "$H/.config/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n' >"$H/.config/cst/bluetooth.conf"
+            # The shims: SIGTERM to the caller at a look at wireplumber.service once the drop-in is gone;
+            # bluetoothd's restart refused.
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ ! -e '$le' && \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                '    kill -TERM "$PPID"' '    exit 1' 'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            printf '%s\n' '#!/bin/bash' \
+                'if [[ "$*" == "systemctl restart bluetooth" ]]; then echo "test_179: refused: sudo $*" >&2; exit 1; fi' \
+                'exec /usr/bin/sudo "$@"' >"$w/bin/sudo"
+            chmod 0755 "$w/bin/systemctl" "$w/bin/sudo"
+
+            # 0. the applied state, as test_80 builds it.
+            step "apply --no-restart" apply --yes --no-restart
+            step apply apply --yes
+            grep -qxF "$wp_restart_line" <<<"$out"
+            [[ -f "$rule" && -f "$le" && ! -e "$owed_file" ]]
+            grep -qxF "Experimental = true" /etc/bluetooth/main.conf
+            id0="$(wp_id)"
+
+            # 1. revert, stopped after its changes, before its restarts.
+            rc=0; out="$(PATH="$w/bin:$PATH" bt revert --yes 2>&1)" || rc=$?
+            show "stopped revert" "$out"
+            [[ $rc == 143 ]] || { echo "test_179: the stopped revert exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            if grep -q '^restart: ' <<<"$out"; then echo "test_179: the stopped revert restarted" >&2; exit 1; fi
+            [[ ! -e "$rule" && ! -e "$le" ]]
+            if grep -qxF "Experimental = true" /etc/bluetooth/main.conf; then echo "test_179: main.conf not reverted" >&2; exit 1; fi
+            [[ "$(wp_id)" == "$id0" ]]
+            [[ -f "$owed_file" ]]
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id0"
+
+            # 2. revert --check says it would make the restart.
+            rc=0; out="$(bt revert --check 2>&1)" || rc=$?
+            show "revert --check" "$out"
+            [[ $rc == 10 ]] || { echo "test_179: revert --check exited $rc" >&2; exit 1; }
+            grep -qxF "would restart wireplumber" <<<"$out"
+            grep -qxF "owed:      wireplumber.service (still owed: an earlier run did not restart it)" <<<"$out"
+
+            # 3. revert again makes it and forgets the record.
+            rc=0; out="$(bt revert --yes 2>&1)" || rc=$?
+            show "revert again" "$out"
+            [[ $rc == 0 ]]
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            if grep -q '^restart:   bluetooth' <<<"$out"; then echo "test_179: bluetoothd restarted" >&2; exit 1; fi
+            id1="$(wp_id)"
+            [[ -n "$id1" && "$id1" != "$id0" ]]
+            [[ ! -e "$owed_file" ]]
+
+            # 4. a third revert has nothing to do.
+            out="$(bt revert --yes 2>&1)"
+            show "third revert" "$out"
+            grep -qxF "none needed" <<<"$out"
+            [[ "$(wp_id)" == "$id1" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_180_bluetooth_main_conf_backups_never_replace_one_another(self) -> None:
+        """main.conf's backups with the real GNU cp: a backup is never replaced. A backup of each
+        second of the next two minutes is there already (each its own text, its mtime a day ahead, so
+        none is the oldest). `apply --yes --no-restart` (as tester) backs main.conf up as
+        `main.conf.bak-<its second>-1`, holding the vendor text, and leaves every planted file as it
+        was (content and mtime); the `revert --yes --no-restart` right after takes a name of its own
+        (another -1, or -2 in the same second), leaves the planted files and apply's backup, and puts
+        the vendor keys back; a second revert finds them as in the oldest backup and changes nothing.
+        The exact command apply runs, `sudo cp -p --preserve=context --update=none-fail`, onto a name
+        that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the planted file
+        of its second."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            """
+            set +e
+            runuser -u tester -- env HOME=/home/tester XDG_RUNTIME_DIR=/run/user/1000 \\
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \\
+                /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1
+            if [[ -f /tmp/bt180/before ]]; then
+                comm -13 /tmp/bt180/before <(ls -1 /etc/bluetooth/main.conf.bak-* 2>/dev/null | sort) | xargs -r -d '\\n' rm -f
+            fi
+            rm -rf /tmp/bt180 /home/tester/.config/cst/bluetooth.conf
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_180 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            w=/tmp/bt180
+            mc=/etc/bluetooth/main.conf
+            vendor=$'[General]\n# Name = BlueZ'
+            rm -rf "$w"; mkdir -p "$w" /etc/bluetooth
+            printf '%s\n' "$vendor" >"$mc"
+            { ls -1 "$mc".bak-* 2>/dev/null || true; } | sort >"$w/before"
+            runuser -u tester -- bash -c 'mkdir -p ~/.config/cst && printf "DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n" >~/.config/cst/bluetooth.conf'
+            bt() {
+                runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /opt/cst-rw/cst bluetooth "$@"
+            }
+            show() { sed "s/^/test_180 $1: /" <<<"$2" >&2; }   # the CI log
+            # A backup of each second from now + 2 to now + 122 s, each its own text, a day ahead in time
+            # (an earlier test's backups are of a second before now); then wait for the first of them.
+            now="$(date +%s)"
+            for t in $(seq $((now + 2)) $((now + 122))); do
+                f="$mc.bak-$(date -d "@$t" +%Y%m%d-%H%M%S)"
+                [[ ! -e "$f" ]]
+                echo "planted for $t" >"$f"
+                touch -d "@$((now + 86400))" "$f"
+                echo "$f" >>"$w/planted"
+            done
+            planted() { while read -r f; do echo "$(stat -c %Y "$f") $(sha256sum <"$f") $f"; done <"$w/planted"; }
+            p0="$(planted)"
+            while (( $(date +%s) < now + 2 )); do sleep 0.1; done
+            backup_of() { sed -n 's/^backup:    //p' <<<"$1"; }
+
+            # 1. apply: its second's name is taken, so its backup is that name with -1.
+            rc=0; out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+            show apply "$out"
+            [[ $rc == 1 ]]   # the live checks fail here (no adapter), and only they
+            grep -qF "ERROR: verification found problems (see above)." <<<"$out"
+            if grep -qF "stopped:" <<<"$out"; then exit 1; fi
+            a="$(backup_of "$out")"
+            [[ "$a" == "$mc".bak-[0-9]*-[0-9]*-1 ]] || { echo "apply's backup: $a" >&2; exit 1; }
+            grep -qxF "${a%-1}" "$w/planted"
+            [[ "$(cat "$a")" == "$vendor" ]]
+            [[ "$(planted)" == "$p0" ]] || { echo "apply changed a planted backup" >&2; exit 1; }
+            grep -qxF "Experimental = true" "$mc"
+
+            # 2. revert right after: a name of its own; the vendor keys back.
+            rc=0; out="$(bt revert --yes --no-restart 2>&1)" || rc=$?
+            show revert "$out"
+            [[ $rc == 0 ]]
+            r="$(backup_of "$out")"
+            [[ -n "$r" && "$r" != "$a" ]]
+            if grep -qxF "$r" "$w/planted"; then echo "revert's backup took a planted name: $r" >&2; exit 1; fi
+            [[ "$(planted)" == "$p0" ]] || { echo "revert changed a planted backup" >&2; exit 1; }
+            [[ "$(cat "$a")" == "$vendor" ]]
+            if grep -qxF "Experimental = true" "$mc"; then echo "revert left Experimental = true" >&2; exit 1; fi
+
+            # 3. a second revert: the keys are as in the oldest backup already; nothing written.
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show "second revert" "$out"
+            grep -qF "unchanged: Experimental and KernelExperimental are already as in " <<<"$out"
+            if grep -q '^backup:' <<<"$out"; then echo "the second revert took a backup" >&2; exit 1; fi
+
+            # 4. apply's exact cp onto a name that is there: exit 1, the file left alone.
+            f="$(head -n 1 "$w/planted")"
+            s="$(stat -c %Y "$f") $(sha256sum <"$f")"
+            rc=0; runuser -u tester -- sudo cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
+            [[ $rc == 1 ]] || { echo "cp onto a backup that is there: exit $rc" >&2; cat "$w/cp.err" >&2; exit 1; }
+            [[ "$(stat -c %Y "$f") $(sha256sum <"$f")" == "$s" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:

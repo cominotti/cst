@@ -1877,6 +1877,7 @@ class StateContractsTest(unittest.TestCase):
         StateFormatKey.INSTALL_RECORD,
         StateFormatKey.GAME_STATE,
         StateFormatKey.GAME_INTENDED,
+        StateFormatKey.GAME_LEFTOVERS,
     )
 
     def test_every_format_names_real_writers_and_readers(self) -> None:
@@ -1908,6 +1909,7 @@ class StateContractsTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(first_line_version(text, "cst-game-intended"))
         self.assertEqual(state_format(StateFormatKey.GAME_INTENDED).version, 1)
+        self.assertEqual(state_format(StateFormatKey.GAME_LEFTOVERS).version, 1)
 
     def test_a_version_is_a_whole_number_and_none_is_version_0(self) -> None:
         self.assertEqual(
@@ -1928,6 +1930,7 @@ class StateContractsTest(unittest.TestCase):
         from btrfs.stall_monitord.domain import VERSION
         from btrfs.stall_report.adapters import LOG_DIR
         from cpu.domain import GAME_STATE
+        from cpu.game.domain import GamePaths
         from cst_core.domain.record import ROOT_RECORD
         from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX, VM_TORN
 
@@ -1942,6 +1945,7 @@ class StateContractsTest(unittest.TestCase):
         )
         self.assertEqual(GAME_STATE, state_format(StateFormatKey.GAME_STATE).path)
         self.assertEqual(GAME_INTENDED, state_format(StateFormatKey.GAME_INTENDED).path)
+        self.assertEqual(GamePaths().leftovers, state_format(StateFormatKey.GAME_LEFTOVERS).path)
         self.assertEqual(ALERT_PENDING, state_format(StateFormatKey.ALERT_SPOOL).folder)
         self.assertEqual(VM_INDEX, state_format(StateFormatKey.VM_INDEX).path)
         self.assertEqual(VM_TORN, state_format(StateFormatKey.VM_NAS_TORN).path)

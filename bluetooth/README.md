@@ -230,18 +230,26 @@ reads, also works in a toolbox).
 | `--no-restart` | apply, revert, le-audio | Write the files, restart nothing; prints the commands to run later. The restarts stay owed (see below). |
 | `--check` | revert | Only show what `revert` would do. |
 
-**Restarts still owed.** A restart that `apply`, `revert` or `le-audio` did
-not make (`--no-restart`, the question answered no, a restart that failed)
-is remembered in `~/.local/state/cst/bluetooth-restart-pending.json`, with
+**Restarts still owed.** `apply`, `revert` and `le-audio` record the
+restart a change needs before they make that change (`main.conf`:
+bluetoothd and WirePlumber; the WirePlumber rule, its old name and the LE
+Audio drop-in: WirePlumber; a renewal of comments: nothing), and again right
+before their restarts. Each time, the record holds every restart that
+the run's changes needed so far, under the invocation IDs read right then
+(a save that failed is so made up for by the next one, and a service that
+restarted by itself since an earlier change is owed again). A restart that a run did not make (`--no-restart`,
+the question answered no, a restart that failed, a run stopped after a
+change) is so remembered in
+`~/.local/state/cst/bluetooth-restart-pending.json`, with
 the invocation ID the service had then (`systemctl show -p ActiveState -p
 InvocationID`, in the C locale and given up after 20 s: one call per
-service, read again only where it may have changed: before the record is
-written and after CST restarts the service; the wait for the BAP endpoint
+service, read again only where it may have changed: before each time the
+record is written and after CST restarts the service; the wait for the BAP endpoint
 after a restart reads bluetoothd's at each look; the `services` rows of
 the checks use the same reading).
 While the service keeps running with that ID, `plan` lists the restart
-("still owed", exit 10), `status` says so, and the next `apply` makes it
-(asking first for Bluetooth). Any restart of the service (by `apply`, by
+("still owed", exit 10), `status` says so, `revert --check` lists it, and
+the next `apply` or `revert` makes it (asking first for Bluetooth). Any restart of the service (by `apply`, by
 hand with the printed commands, or a reboot) or a stop ends it. The file
 goes with the next restart that `apply`, `revert` or `le-audio` makes;
 until then a record whose restarts were made is only ignored. A file that
@@ -317,11 +325,17 @@ head`), a command that only reads (`plan`, `status`, `revert --check`,
 `le-audio` without on/off) ends quietly the same way (`help`: exit status 141). `apply`,
 `revert` and `le-audio on|off` stop instead, with `stopped: its output was
 closed` on stderr (for `apply` and `revert` also the backup of `main.conf`
-and the undo command) and exit status 1. As after any stop, a restart is owed
-to the next `apply` only once the run reached its restarts: a stop between
-writing `main.conf` and the restarts leaves bluetoothd on the old settings,
-and `plan` no longer shows it (restart it by hand:
-`sudo systemctl restart bluetooth`).
+and the undo command) and exit status 1. After any stop, a change already
+made leaves its restart owed (above): `plan` shows it and the next `apply`
+makes it. A stop between recording a restart and making its change leaves
+that restart owed too (a change that fails stops the run as well: a
+`sudo mv` of `main.conf` that is refused, say). The next `apply` makes it
+for the change it then makes. A `revert` with nothing left to revert makes
+it once, for no change. Only when the record
+cannot be written (the run then warns: `could not record the restarts still
+owed`) can a stop after a change lose its restart: restart the service by
+hand (`sudo systemctl restart bluetooth`, `systemctl --user restart
+wireplumber`).
 
 ## 5. Coming from `apply-le-audio.sh`
 
@@ -337,7 +351,12 @@ and `plan` no longer shows it (restart it by hand:
   restart WirePlumber, as the old script did). With no headset it is left
   alone: nothing would take its place.
 - Backups: the old script's `main.conf.bak-YYYYmmdd-HHMMSS` files use the
-  same names as this module's, and `revert` reads them (see below).
+  same names as this module's, and `revert` reads them (see below). When a
+  backup of that second is there already (an `apply` and a `revert` in the
+  same second), the new one gets `-1`, `-2`, ... after the name: a backup
+  is never replaced. It is made with `cp --update=none-fail`, which creates
+  only a name that is not there (GNU coreutils 9.5 or later; Fedora 45 has
+  9.11), so a name another run takes at the same moment is skipped too.
 - The old `--check` is now `plan`, `--revert` is `revert`; the other options
   kept their names.
 
@@ -526,7 +545,8 @@ cst bluetooth revert
 ```
 
 - `main.conf`: the two keys go back to how the **oldest** backup
-  (`main.conf.bak-*`, by time; the old script's count) has them. Only those
+  (`main.conf.bak-*`, by time, then by name and `-N` number; the old
+  script's count) has them. Only those
   two lines change: anything else you changed since stays. Without a backup,
   `main.conf` is not touched. (The old script restored its newest backup as
   a whole file instead.) A new backup is taken first.
@@ -540,11 +560,15 @@ cst bluetooth revert
   `LE_AUDIO=off` writes it again).
 - The LDAC rate watcher is stopped, disabled and removed, if it is installed
   (a later `apply` with `LDAC_RATE=48000` installs it again).
-- Restarts as for `apply`: Bluetooth only after you say yes.
+- Restarts as for `apply`: Bluetooth only after you say yes. `revert` also
+  makes the restarts still owed (section 4), from an earlier `apply` or
+  `revert` that did not make them, also when nothing is left to revert; each
+  shows as an `owed:` line before them (`revert --check`: exit 10).
 - Kept: the backups (also the rule's `.bak`), `~/.config/cst/bluetooth.conf`
   (also a `DEVICE` line `apply` saved there from an older CST's rule),
-  and the headset's preferred bearer. A restart `revert` did not make stays
-  owed (section 4), until the service restarts; delete
+  and the headset's preferred bearer. A restart `revert` did not make
+  (`--no-restart`, the question answered no) stays owed (section 4), until
+  the service restarts or the next `apply` or `revert` makes it; delete
   `~/.local/state/cst/bluetooth-restart-pending.json` to forget it.
 
 ## 9. Not managed here
@@ -585,9 +609,9 @@ replaces it with a backup of the current rule.
 | `bt-ldac-watch` | Python, no root: the LDAC rate watcher (section 7), only the bootstrap and a `main()` that runs `cli.ldac_watch`; its docstring is the help. `apply` installs it as a zipapp (the program plus every CST package it imports, see `cst_core/installer.py`) at `~/.local/lib/cst/bt-ldac-watch` for the user service `cst-bt-ldac48.service`. |
 | `bluetooth.conf` | The default settings. |
 | `tests/test_bluetooth.py` | Unit tests of `bt-helper`'s rules (`python3 -I -B tests/run_unit.py`, from the repository root, runs them with all others; see [AGENTS.md, "Commands"](../AGENTS.md#commands)): `main.conf`, the WirePlumber rule, the LE Audio file's text, the settings, the parsing of `busctl`, `pactl` and `pw-dump`, the record of restarts still owed, and reading the watcher's last failure from its log, and `bt-helper` on a file it cannot read or decode (one line on stderr, exit 1, no traceback). Three tests ask `libwireplumber` how it merges the CST file; inside a toolbox they are skipped (the library is on the host). |
-| `tests/e2e` (tier 1) | `test_05`: `plan`, `apply --no-restart`, the WirePlumber roles read by the real `libwireplumber`, the LDAC unit and `revert`. `test_80`: after `apply --no-restart`, `plan` still owes WirePlumber's restart and the next `apply` makes it; a second `apply` changes nothing (files, backups, no restart), with the watcher missing from the install record `installer.py check` exits 1, `plan` shows it as `adopt`, and an `apply` adds it back (no write, no restart), after which `check` exits 0, and `le-audio on`, `on` again and `off` with real WirePlumber restarts; the watcher's `pactl subscribe` runs with `LC_ALL=C` whatever the user manager's `LC_ALL`. `test_95`: this program and the bash one it replaced (`tests/fixtures/legacy/bluetooth-setup.sh@d4d8c91`) share the files and the restarts still owed, both ways; as root with `SUDO_USER` it runs again as that user through `runuser`. `test_96`: run as root with `SUDO_USER`, the test overrides `CST_BT_ROOT`, `CST_BT_CONTAINER` and `CST_BT_LIBWP` do not reach the run as that user. `test_101`: the headset of an older CST's LDAC rule is used and saved as `DEVICE`, and with no headset at all `plan`, `apply` and `revert` skip the headset's parts. See [tests/e2e/README.md](../tests/e2e/README.md). |
-| `tests/test_setup.py`, `tests/setup_fakes.py` | Behaviour tests of `bluetooth-setup.sh` as a whole: it runs as a user runs it, on a fake machine (stub commands on `PATH` that keep their state in files and log every call, a scratch home and a scratch host root). Two settings exist for these tests only: `CST_BT_CONTAINER` (1: behave as inside a toolbox, 0: as on the host) and `CST_BT_ROOT` (where the host's `/` is, for `/etc` and `/usr/share`), as `CST_DOCTOR_CONTAINER` and `CST_DOCTOR_ROOT` are for `cst doctor`. Never set them on a real machine: `CST_BT_CONTAINER=0` inside a toolbox lifts the refusal of `apply`, `revert` and `le-audio on\|off` there, and `CST_BT_ROOT` names the `main.conf` that `apply` and `revert` write through `sudo`. A third one, `CST_BT_LIBWP`, names the `libwireplumber` that `bt-helper wp-roles` loads (`tests/test_bluetooth.py` points it at a missing library). Run as root (through `sudo`, which by default does not pass them on either), the program drops all three before it runs again as `SUDO_USER` (`StepDownTest`, under `unshare -r`, and tier 1 `test_96`). They cover the options and their errors, the help, `plan`, `status`, `apply` (the order of its steps, `main.conf` through `sudo` with and without SELinux, the restarts and what each failure stops, the question, the restarts still owed, the A2DP restore, the bearer under `timeout` with `/dev/null` as stdin), `revert` (the oldest backup, `--check`), `le-audio on\|off` (a fresh home, a settings file without a final newline, a symlinked one), the LE Audio drop-in (off/on/off, adopted, changed, not ours), the rule, the drop-in, the watcher's program and unit as links (same text, older text, not ours, `/dev/null`, a folder), the role check, other WirePlumber files, the watcher's install and removal and its last failure, a file it cannot read (the settings, the rule: the run stops), the scratch file (every command needs it; removed on a closed stdout and on `SIGTERM`), a closed stdout (`apply`, `revert` and `le-audio on\|off` stop with a message), the headset (`HeadsetTest`: none set, the one of an older CST's rule saved as `DEVICE`, an empty `DEVICE=`, `--device` over the file), and that the commands get the caller's environment (no added variable, `LC_CTYPE` as it was). |
-| `tests/test_setup_units.py` | Unit tests of the program in `setup/` for what the whole-program tests cannot reach on a host: `apply`'s last lines when every check passes (`ApplyDoneTest`), the waits of the restarts with a fake clock (`WaitTest`), and the step down from root to `SUDO_USER` through `runuser` (`StepDownTest`). |
+| `tests/e2e` (tier 1) | `test_05`: `plan`, `apply --no-restart`, the WirePlumber roles read by the real `libwireplumber`, the LDAC unit and `revert`. `test_80`: after `apply --no-restart`, `plan` still owes WirePlumber's restart and the next `apply` makes it; a second `apply` changes nothing (files, backups, no restart), with the watcher missing from the install record `installer.py check` exits 1, `plan` shows it as `adopt`, and an `apply` adds it back (no write, no restart), after which `check` exits 0, and `le-audio on`, `on` again and `off` with real WirePlumber restarts; the watcher's `pactl subscribe` runs with `LC_ALL=C` whatever the user manager's `LC_ALL`. `test_95`: this program and the bash one it replaced (`tests/fixtures/legacy/bluetooth-setup.sh@d4d8c91`) share the files and the restarts still owed, both ways; as root with `SUDO_USER` it runs again as that user through `runuser`. `test_96`: run as root with `SUDO_USER`, the test overrides `CST_BT_ROOT`, `CST_BT_CONTAINER` and `CST_BT_LIBWP` do not reach the run as that user. `test_101`: the headset of an older CST's LDAC rule is used and saved as `DEVICE`, and with no headset at all `plan`, `apply` and `revert` skip the headset's parts. `test_178`: an `apply` stopped by `SIGTERM` after its writes and before its restarts leaves WirePlumber's restart owed (the record, under systemd's InvocationID), `plan` shows it, the next `apply` makes it once; so does one stopped after WirePlumber restarted by itself between two of its writes (the record owes it under its new InvocationID). `test_179`: a `revert` stopped the same way leaves the restart owed, `revert --check` lists it and the next `revert` makes it once. `test_180`: with a backup of each second of the next two minutes already there, `apply` and `revert` each back `main.conf` up under a name of their own (`-1`, `-2`) with the real `cp --update=none-fail`, and replace none. See [tests/e2e/README.md](../tests/e2e/README.md). |
+| `tests/test_setup.py`, `tests/setup_fakes.py` | Behaviour tests of `bluetooth-setup.sh` as a whole: it runs as a user runs it, on a fake machine (stub commands on `PATH` that keep their state in files and log every call, a scratch home and a scratch host root). Two settings exist for these tests only: `CST_BT_CONTAINER` (1: behave as inside a toolbox, 0: as on the host) and `CST_BT_ROOT` (where the host's `/` is, for `/etc` and `/usr/share`), as `CST_DOCTOR_CONTAINER` and `CST_DOCTOR_ROOT` are for `cst doctor`. Never set them on a real machine: `CST_BT_CONTAINER=0` inside a toolbox lifts the refusal of `apply`, `revert` and `le-audio on\|off` there, and `CST_BT_ROOT` names the `main.conf` that `apply` and `revert` write through `sudo`. A third one, `CST_BT_LIBWP`, names the `libwireplumber` that `bt-helper wp-roles` loads (`tests/test_bluetooth.py` points it at a missing library). Run as root (through `sudo`, which by default does not pass them on either), the program drops all three before it runs again as `SUDO_USER` (`StepDownTest`, under `unshare -r`, and tier 1 `test_96`). They cover the options and their errors, the help, `plan`, `status`, `apply` (the order of its steps, `main.conf` through `sudo` with and without SELinux, the restarts and what each failure stops, the question, the restarts still owed (recorded before each write that needs them: a run stopped after `main.conf` or WirePlumber's files leaves them owed), the A2DP restore, the bearer under `timeout` with `/dev/null` as stdin), `revert` (the oldest backup, `--check`, the restarts still owed that it makes, also with nothing left to revert), the backups' names (`-1`, `-2` in one second, a name another run takes meanwhile, the oldest by time, name and number), `le-audio on\|off` (a fresh home, a settings file without a final newline, a symlinked one), the LE Audio drop-in (off/on/off, adopted, changed, not ours), the rule, the drop-in, the watcher's program and unit as links (same text, older text, not ours, `/dev/null`, a folder), the role check, other WirePlumber files, the watcher's install and removal and its last failure, a file it cannot read (the settings, the rule: the run stops), the scratch file (every command needs it; removed on a closed stdout and on `SIGTERM`), a closed stdout (`apply`, `revert` and `le-audio on\|off` stop with a message), the headset (`HeadsetTest`: none set, the one of an older CST's rule saved as `DEVICE`, an empty `DEVICE=`, `--device` over the file), and that the commands get the caller's environment (no added variable, `LC_CTYPE` as it was). |
+| `tests/test_setup_units.py` | Unit tests of the program in `setup/` for what the whole-program tests cannot reach on a host: `apply`'s last lines when every check passes (`ApplyDoneTest`), the waits of the restarts with a fake clock (`WaitTest`), the step down from root to `SUDO_USER` through `runuser` (`StepDownTest`), and a backup of `main.conf` with no free name left, which stops the run (`BackupNameTest`). |
 | `tests/test_ldac_watch.py` | Unit tests of the watcher: parsing, the act/skip decision, one attempt per connection (two at most, none after a fix that did not hold), the cooldown, a stop signal during a profile switch, a SIGTERM to the real program outside one (exit status 0, `stopped` last), the C locale of the real program's `pactl subscribe` and `pw-dump` whatever the session's locale, `--snapshot` on input that is not JSON (exit 3), a profile change by WirePlumber during it, the profile switch against a fake system, and its user unit. |
 
 ## 11. Glossary

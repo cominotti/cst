@@ -43,6 +43,7 @@ from cpu.game.domain import (
     Drift,
     cut_tail,
     drifted,
+    escaped_unit,
     escapes_in_state,
     expand_cpus,
     has_prop_record,
@@ -52,6 +53,16 @@ from cpu.game.domain import (
     records,
     game_settings,
     unheld,
+    unit_name_valid,
+)
+from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
+from cpu.game.domain.leftovers import (
+    leftover_entries,
+    leftovers_text,
+    merged_entries,
+    newer_leftovers,
+    off_text,
+    undo_text,
 )
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
@@ -270,6 +281,42 @@ class GameProfileCase(unittest.TestCase):
 
 
 class PureRulesTest(unittest.TestCase):
+    def test_unit_name_valid(self) -> None:
+        for name in (
+            "lushtext.slice",
+            "background.slice",
+            "run-u7.service",
+            "run-r1a2.scope",
+            "lush\\x2dbatch.slice",  # systemd's escape of a dash, with its backslash
+            "user-lushtext.slice",
+            "lushtext-cap-1234-5678.scope",  # where lushtext runs its jobs
+            "a@b.service",
+            "a@b@c.service",  # systemd checks only the first '@'
+            "a:b_c.target",
+            "a" * 249 + ".slice",  # 255 characters
+        ):
+            self.assertTrue(unit_name_valid(name), name)
+        for name in (
+            "a b.slice",
+            os.fsdecode(b"x\xff.slice"),  # a byte that is not UTF-8, as glob gives it
+            "caf\N{LATIN SMALL LETTER E WITH ACUTE}.slice",
+            "",
+            ".slice",
+            "slice",
+            "a.notatype",
+            "a.slice.",
+            "@a.service",
+            "a" * 250 + ".slice",  # 256 characters
+        ):
+            self.assertFalse(unit_name_valid(name), repr(name))
+
+    def test_escaped_unit_leaves_out_known_slices_and_names_that_are_no_unit(self) -> None:
+        self.assertEqual(escaped_unit("_cpu.slice"), "cpu.slice")
+        self.assertEqual(escaped_unit("lushtext.slice"), "lushtext.slice")
+        self.assertIsNone(escaped_unit("app.slice"))
+        self.assertIsNone(escaped_unit("a b.slice"))
+        self.assertIsNone(escaped_unit(os.fsdecode(b"x\xff.slice")))
+
     def test_expand_cpus(self) -> None:
         self.assertEqual(expand_cpus("0-3,6,12-14"), ["0", "1", "2", "3", "6", "12", "13", "14"])
         self.assertEqual(expand_cpus("0-1,,5,"), ["0", "1", "5"])
@@ -379,6 +426,74 @@ class PureRulesTest(unittest.TestCase):
         self.assertEqual(unheld(drifts, held), [usr])  # another manager's record holds no other
         self.assertEqual(unheld(drifts, [("prop", "sys", "a.slice", "CPUWeight", "new")]), drifts)  # 5 fields
         self.assertEqual(unheld([cgw], [("cgw", "/f")]), [cgw])  # 2 fields: off undoes nothing
+
+    def test_a_setting_holds_as_systemd_reads_it(self) -> None:
+        cases = [
+            # MemoryLow: by its bytes; "infinity"; a percentage cannot be judged.
+            ("MemoryLow", "16G", "17179869184", True),
+            ("MemoryLow", "16G", "16G", True),
+            ("MemoryLow", "16G", "0", False),
+            ("MemoryLow", "16G", "", False),
+            ("MemoryLow", "16G", "infinity", False),
+            ("MemoryLow", "infinity", "infinity", True),
+            ("MemoryLow", "10%", "1717986918", None),
+            ("MemoryLow", "16G", "10%", None),
+            # AllowedCPUs: as a set of CPUs, commas or blanks between ranges; none at all differs.
+            ("AllowedCPUs", "12-23", "12-23", True),
+            ("AllowedCPUs", "12-23", "12-15 16-23", True),
+            ("AllowedCPUs", "0,2", "0 2", True),
+            ("AllowedCPUs", "12-23", "0-23", False),
+            ("AllowedCPUs", "12-23", "", False),
+            ("AllowedCPUs", "12-23", "x", None),
+            ("AllowedCPUs", "", "12-23", None),
+            # CPUWeight: "idle" or a whole number.
+            ("CPUWeight", "idle", "idle", True),
+            ("CPUWeight", "idle", "100", False),
+            ("CPUWeight", "10", "10", True),
+            ("CPUWeight", "10", "010", True),
+            ("CPUWeight", "idle", "", False),
+            ("CPUWeight", "idle", "weird", None),
+            ("CPUWeight", "\N{ARABIC-INDIC DIGIT THREE}", "3", None),  # a digit of another script is no weight
+            # Any other property is never judged.
+            ("IOWeight", "10", "50", None),
+        ]
+        for prop, value, now, want in cases:
+            self.assertIs(setting_holds(prop, value, now), want, (prop, value, now))
+
+    def test_the_settings_of_a_box_that_do_not_hold_and_their_words(self) -> None:
+        unset = unset_settings(
+            ["CPUWeight=idle", "AllowedCPUs=12-23", "MemoryLow=10%"],
+            {"CPUWeight": "100", "AllowedCPUs": "12-23", "MemoryLow": "0"},
+        )
+        self.assertEqual(unset, [Unset("CPUWeight", "idle", "100")])
+        self.assertEqual(unset_settings(["CPUWeight=idle"], {}), [Unset("CPUWeight", "idle", "")])
+        both = [Unset("MemoryLow", "16G", ""), Unset("AllowedCPUs", "0,2-3", "0-23")]
+        self.assertEqual(
+            set_again_text("a.scope", both, ok=True),
+            (
+                5,
+                (
+                    "a.scope: MemoryLow is '', not '17179869184'; AllowedCPUs is '0-23', not '0 2-3' "
+                    "(its set failed, or something undid it): set MemoryLow=16G AllowedCPUs=0,2-3 again"
+                ),
+            ),
+        )
+        self.assertEqual(
+            set_again_text("a.scope", both[:1], ok=False),
+            (4, "a.scope: MemoryLow is '', not '17179869184': could not set MemoryLow=16G again"),
+        )
+
+    def test_what_the_drift_repair_compares(self) -> None:
+        recs = intended_records(
+            "cst-game-intended 1\n"
+            "prop usr a.slice CPUWeight idle idle\n"
+            "prop usr a.slice AllowedCPUs 12-23 ''\n"
+            "prop sys a.slice MemoryLow 16G 17179869184\n"
+            "cgw /f 12-23 12-23\n"
+        )
+        self.assertEqual(intended_covers(recs, "usr", "a.slice"), frozenset({"CPUWeight"}))  # an empty SHOWN: none
+        self.assertEqual(intended_covers(recs, "sys", "a.slice"), frozenset({"MemoryLow"}))
+        self.assertEqual(intended_covers(recs, "usr", "b.slice"), frozenset())
 
     def test_the_state_files_are_the_registered_ones(self) -> None:
         p = GamePaths()
@@ -1913,6 +2028,46 @@ class GameProfileEscapesTest(GameProfileCase):
         self.assertEqual(self.sets(actions), [])
         self.assertEqual(self.read(self.state), grown)
 
+    def test_a_folder_whose_name_is_no_unit_name_is_left_alone(self) -> None:
+        # O5: a folder made by hand in the user manager's tree, with a blank or a byte that is not UTF-8
+        # in its name: no unit systemd could have. The old profile recorded and set it on every run
+        # (game.state is read back with "replace", so the record never matched).
+        self.tree()
+        bad, replaced = os.fsdecode(b"\xff"), "\N{REPLACEMENT CHARACTER}"
+        for name in ("a b.slice", f"x{bad}.slice", f"app.slice/run-{bad}.scope"):
+            self.cg(*name.split("/"))
+        out, actions = self.run_profile("on")
+        self.write(self.manual, "")
+        state = self.read(self.state)
+        self.assertIn(f"{USR} set-property --runtime lushtext.slice CPUWeight=idle", self.sets(actions))
+        for _ in range(3):
+            self.assertFalse([a for a in self.sets(actions) if "a b" in a or replaced in a or bad in a])
+            self.assertNotIn("a b.slice", out)
+            self.assertNotIn(replaced, out)
+            out, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [])
+            self.assertEqual(self.read(self.state), state)
+        self.assertNotIn("a b", state)
+        self.assertNotIn(replaced, state)
+
+    def test_lushtext_jobs_under_user_slice_are_covered_by_its_rule_only(self) -> None:
+        # Where lushtext runs its jobs: a valid unit name under the toolboxes' user.slice, whose own
+        # rule covers it; 'on' and the ticks never name the job or its slice, and a tick with every
+        # value holding runs no set-property (lushtext measures timing there).
+        self.tree()
+        self.cg("user.slice", "user-lushtext.slice", "lushtext-cap-1234-5678.scope", procs=(5151,))
+        _, actions = self.run_profile("on")
+        self.write(self.manual, "")
+        self.assertTrue([a for a in self.sets(actions) if f"{USR} set-property --runtime user.slice " in a])
+        for _ in range(2):
+            names = [a for a in self.sets(actions) if "lushtext-cap" in a or "user-lushtext" in a]
+            self.assertEqual(names, [])
+            _, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [])
+        state = self.read(self.state)
+        self.assertNotIn("lushtext-cap", state)
+        self.assertNotIn("user-lushtext", state)
+
     def test_off_reverts_them_and_tolerates_units_that_are_gone(self) -> None:
         self.tree()
         self.run_profile("on")
@@ -2019,6 +2174,810 @@ class GameProfileEscapesTest(GameProfileCase):
         self.assertIn("were still there: removed them", out)
         out, actions = self.run_profile("tick")
         self.assertEqual((out, actions), ("", []))
+
+
+class HandledBoxSetAgainTest(GameProfileCase):
+    """A box the tick handled already (game.state holds its record) whose setting does not hold: its
+    set-property failed (O2), or an 'off' that was killed undid it while the profile stayed on (O6). The
+    tick reads its recorded settings back and sets each one that does not hold again, with no new record;
+    when every one holds it writes nothing."""
+
+    STEAM = "app-flatpak-com.valvesoftware.Steam-1.scope"
+
+    def docker(self) -> None:
+        self.systemd.units["sys"] = ["docker-1.scope"]
+        self.set_now("sys", "docker-1.scope", Slice="system.slice")
+
+    def box(self, *parts: str, procs: Sequence[int] = ()) -> str:
+        d = os.path.join(self.ucg, *parts)
+        os.makedirs(d, exist_ok=True)
+        if procs:
+            self.write(os.path.join(d, "cgroup.procs"), "".join(f"{p}\n" for p in procs))
+        return d
+
+    def delegate(self) -> None:
+        self.write(os.path.join(self.ucg, "cgroup.subtree_control"), "cpuset cpu memory pids\n")
+
+    def failed_then_tick(self, mgr: str, unit: str) -> tuple[str, str, list[str]]:
+        """'on' with unit's set-property failing, then a tick with it working: (game.state after 'on', the
+        tick's output, its set-property calls)."""
+        self.systemd.fail_set.add((mgr, unit))
+        out, _ = self.run_profile("on")
+        self.assertIn(f"{unit}: could not set", out)
+        state = self.read(self.state)
+        self.systemd.fail_set.clear()
+        out, actions = self.run_profile("tick")
+        return state, out, self.sets(actions)
+
+    def test_a_docker_container_whose_set_failed_is_set_again_with_no_new_record(self) -> None:
+        self.docker()
+        state, out, sets = self.failed_then_tick("sys", "docker-1.scope")
+        self.assertEqual(sets, [f"{SYS} set-property --runtime docker-1.scope AllowedCPUs=12-23"])
+        self.assertEqual(self.read(self.state), state)
+        self.assertIn(
+            "<5>game-profile: docker-1.scope: AllowedCPUs is '', not '12-23' (its set failed, or something undid "
+            "it): set AllowedCPUs=12-23 again\n",
+            out,
+        )
+        self.assertEqual(self.now("sys", "docker-1.scope", "AllowedCPUs"), "12-23")
+        _, actions = self.run_profile("tick")  # it holds now: nothing more
+        self.assertEqual(self.sets(actions), [])
+        self.run_profile("off")  # its "new" record still undoes it
+        self.assertFalse(os.path.exists(self.ctrl("sys", "docker-1.scope", "AllowedCPUs")))
+
+    def test_a_steam_scope_whose_set_failed_is_set_again(self) -> None:
+        self.systemd.units["usr"] = [self.STEAM]
+        state, out, sets = self.failed_then_tick("usr", self.STEAM)
+        self.assertEqual(sets, [f"{USR} set-property --runtime {self.STEAM} MemoryLow=16G"])
+        self.assertEqual(self.read(self.state), state)
+        self.assertIn(f"{self.STEAM}: MemoryLow is '', not '17179869184'", out)
+
+    def test_systemd_run_jobs_whose_set_failed_get_both_settings_again(self) -> None:
+        self.delegate()
+        for unit in ("run-u7.service", "run-r1a2.scope"):
+            self.box("app.slice", unit)
+            self.systemd.fail_set.add(("usr", unit))
+        self.run_profile("on")
+        state = self.read(self.state)
+        for unit in ("run-u7.service", "run-r1a2.scope"):
+            self.assertIn(f"prop usr {unit} AllowedCPUs new -\n", state)
+        self.systemd.fail_set.clear()
+        _, actions = self.run_profile("tick")
+        self.assertEqual(
+            sorted(self.sets(actions)),
+            [
+                f"{USR} set-property --runtime run-r1a2.scope CPUWeight=idle AllowedCPUs=12-23",
+                f"{USR} set-property --runtime run-u7.service CPUWeight=idle AllowedCPUs=12-23",
+            ],
+        )
+        self.assertEqual(self.read(self.state), state)
+
+    def test_a_slice_next_to_the_game_whose_set_failed_in_on_is_set_again(self) -> None:
+        # Its set-property failed, so game.intended has no line for it and the drift repair cannot see it.
+        self.box("e2e.slice")
+        state, out, sets = self.failed_then_tick("usr", "e2e.slice")
+        self.assertNotIn("e2e.slice", self.read(self.intended))
+        self.assertEqual(sets, [f"{USR} set-property --runtime e2e.slice CPUWeight=idle"])
+        self.assertEqual(self.read(self.state), state)
+        self.assertIn("e2e.slice: CPUWeight is '', not 'idle'", out)
+        self.assertNotIn("drift:", out)
+
+    def test_a_steam_scope_a_killed_off_undid_is_set_again_and_off_still_undoes_it(self) -> None:
+        self.systemd.units["usr"] = [self.STEAM]
+        self.run_profile("on")
+        override = self.ctrl("usr", self.STEAM, "MemoryLow")
+        self.assertTrue(os.path.exists(override))
+        state = self.read(self.state)
+        # What an 'off' killed after this undo leaves, once a user daemon-reload ran: no override, the
+        # scope's own value, and game.state still there.
+        os.unlink(override)
+        self.set_now("usr", self.STEAM, MemoryLow="0")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime {self.STEAM} MemoryLow=16G"])
+        self.assertIn(f"{self.STEAM}: MemoryLow is '0', not '17179869184'", out)
+        self.assertEqual(self.read(self.state), state)
+        self.assertTrue(os.path.exists(override))
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(override))
+
+    def test_with_every_setting_holding_a_tick_writes_and_says_nothing(self) -> None:
+        # Another project measures timing on these boxes: a tick that finds everything in place runs no
+        # set-property and changes no file.
+        self.delegate()
+        self.docker()
+        self.systemd.units["usr"] = [self.STEAM]
+        for parts in (("lushtext.slice",), ("background.slice",), ("app.slice", "run-u7.service")):
+            self.box(*parts)
+        self.run_profile("on")
+        files = (self.state, self.intended)
+        before = [self.read(f) for f in files]
+        for _ in range(2):
+            out, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [])
+            self.assertEqual(out, "")
+            self.assertEqual([self.read(f) for f in files], before)
+
+    def test_a_setting_the_drift_repair_covers_is_left_to_it(self) -> None:
+        self.box("lushtext.slice")
+        self.run_profile("on")
+        self.assertIn("prop usr lushtext.slice CPUWeight idle idle\n", self.read(self.intended))
+        self.set_now("usr", "lushtext.slice", CPUWeight="100")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime lushtext.slice CPUWeight=idle"])
+        self.assertIn("drift: lushtext.slice CPUWeight was '100'", out)
+        self.assertNotIn("its set failed", out)
+        # Not even asked about by the box check: the drift repair's own show is the only one.
+        shows = [a for a in actions if a.startswith(f"{USR} show") and a.endswith(" lushtext.slice")]
+        self.assertEqual(len(shows), 1, shows)
+
+    def test_a_box_that_holds_the_game_by_now_is_left_alone(self) -> None:
+        d = self.box("app.slice", "run-r9.scope")
+        self.systemd.fail_set.add(("usr", "run-r9.scope"))
+        self.run_profile("on")
+        self.systemd.fail_set.clear()
+        self.write(os.path.join(d, "cgroup.procs"), "4242\n")
+        self.gamemode_pid("4242")
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+
+    def test_a_unit_systemd_has_not_loaded_is_skipped(self) -> None:
+        self.docker()
+        self.systemd.fail_set.add(("sys", "docker-1.scope"))
+        self.run_profile("on")
+        self.systemd.fail_set.clear()
+        self.systemd.not_loaded.add(("sys", "docker-1.scope"))
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+
+    def test_a_set_that_fails_again_is_said_and_tried_again_at_the_next_tick(self) -> None:
+        self.docker()
+        self.systemd.fail_set.add(("sys", "docker-1.scope"))
+        self.run_profile("on")
+        state = self.read(self.state)
+        for _ in range(2):
+            out, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime docker-1.scope AllowedCPUs=12-23"])
+            self.assertIn(
+                "<4>game-profile: docker-1.scope: AllowedCPUs is '', not '12-23': could not set AllowedCPUs=12-23 "
+                "again\n",
+                out,
+            )
+            self.assertEqual(self.read(self.state), state)
+
+    def test_with_a_newer_game_intended_only_transient_units_are_set_again(self) -> None:
+        self.box("e2e.slice")
+        self.box("app.slice", "run-u7.service")
+        self.systemd.fail_set |= {("usr", "e2e.slice"), ("usr", "run-u7.service")}
+        self.run_profile("on")
+        self.systemd.fail_set.clear()
+        self.write(self.intended, "cst-game-intended 99\n")
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime run-u7.service CPUWeight=idle"])
+
+    def test_a_value_it_cannot_judge_is_not_set_again(self) -> None:
+        settings = dataclasses.replace(self.settings, game_memory_low="10%")
+        self.systemd.units["usr"] = [self.STEAM]
+        self.systemd.fail_set.add(("usr", self.STEAM))
+        self.run_profile("on", settings)
+        self.systemd.fail_set.clear()
+        _, actions = self.run_profile("tick", settings)
+        self.assertEqual([a for a in self.sets(actions) if "Steam" in a], [])
+
+    def test_a_settings_edit_while_on_reaches_the_handled_boxes_once(self) -> None:
+        self.docker()
+        self.run_profile("on")
+        state = self.read(self.state)
+        settings = dataclasses.replace(self.settings, build_cpus="14-23")
+        _, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime docker-1.scope AllowedCPUs=14-23"])
+        self.assertEqual(self.read(self.state), state)
+        _, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [])  # machine.slice keeps what 'on' set (its game.intended line)
+        self.assertEqual(self.now("sys", "machine.slice", "AllowedCPUs"), "12-23")
+
+
+class LeftoversFormatTest(unittest.TestCase):
+    """game.leftovers' format (cpu/game/domain/leftovers.py): its text and back, the undo order, the words."""
+
+    def test_the_text_and_back_with_the_user_of_each_record(self) -> None:
+        entries = [
+            (None, ("prop", "sys", "machine.slice", "CPUWeight", "existed", "70")),
+            ("1000", ("prop", "usr", "a b.slice", "CPUWeight", "existed", "50")),
+            ("1000", ("prop", "usr", "c.slice", "CPUWeight", "new", "-")),
+            ("1001", ("prop", "usr", "d.slice", "CPUWeight", "new", "-")),
+            (None, ("sysfs", "/sys/x", "old")),
+        ]
+        text = leftovers_text(entries)
+        self.assertEqual(
+            text,
+            "cst-game-leftovers 1\n"
+            "prop sys machine.slice CPUWeight existed 70\n"
+            "user 1000\n"
+            "prop usr a\\ b.slice CPUWeight existed 50\n"
+            "prop usr c.slice CPUWeight new -\n"
+            "user 1001\n"
+            "prop usr d.slice CPUWeight new -\n"
+            "sysfs /sys/x old\n",
+        )
+        self.assertEqual(leftover_entries(text), entries)
+        self.assertIsNone(newer_leftovers("/l", text))
+        self.assertEqual(leftover_entries(""), [])
+
+    def test_a_newer_format_or_a_first_line_with_no_version_is_not_read(self) -> None:
+        self.assertIn("is format 2 of the game-leftovers", newer_leftovers("/l", "cst-game-leftovers 2\n") or "")
+        self.assertEqual(newer_leftovers("/l", "cst-game-leftovers x\n"), "/l: its first line names no format version")
+        self.assertIsNone(newer_leftovers("/l", "prop sys a.slice CPUWeight new -\n"))  # no format line: version 0
+
+    def test_the_undo_order_drops_a_kept_record_of_this_game_state(self) -> None:
+        old = ("prop", "sys", "machine.slice", "CPUWeight", "existed", "70")
+        mine = ("prop", "sys", "machine.slice", "CPUWeight", "existed", "10")
+        both = ("epp", "0", "balance_performance")
+        self.assertEqual(
+            merged_entries([(None, old), (None, both)], [both, mine]), [(None, old), (None, both), (None, mine)]
+        )
+
+    def test_the_words(self) -> None:
+        def epp(cpu: str) -> str:
+            return f"/cpu{cpu}/epp"
+
+        self.assertEqual(
+            undo_text(("prop", "sys", "m.slice", "CPUWeight", "existed", "70"), epp), "m.slice CPUWeight=70"
+        )
+        self.assertEqual(
+            undo_text(("prop", "usr", "a.scope", "MemoryLow", "new", "-"), epp),
+            "a.scope MemoryLow (its runtime override)",
+        )
+        self.assertEqual(undo_text(("epp", "3", "balance_power"), epp), "/cpu3/epp = balance_power")
+        self.assertEqual(undo_text(("cgw", "/cg/cpuset.cpus", ""), epp, short=True), "/cg/cpuset.cpus")
+        self.assertEqual(
+            off_text(0, "/l", kept=0), "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
+        )
+        self.assertTrue(off_text(2, "/l", kept=2).endswith("restored, except 2 setting(s) kept in /l"))
+        self.assertTrue(off_text(2, "/l", kept=0).endswith("restored, except 2 setting(s) not undone"))
+        self.assertTrue(off_text(3, "/l", kept=2).endswith("restored, except 3 setting(s): 2 kept in /l, 1 not undone"))
+
+
+class LeftoversTest(GameProfileCase):
+    """O4: a setting 'off' could not undo (a set-property that failed, a sysfs file that refused the write) is
+    named in the journal and kept in game.leftovers; the next 'off' and the tick with the profile off undo it
+    again; game.state is removed anyway, so it still means on."""
+
+    def prior_machine_weight(self) -> None:
+        """machine.slice had a runtime override CPUWeight=70 before the game: 'on' records it as existed."""
+        self.write(self.ctrl("sys", "machine.slice", "CPUWeight"), "[Slice]\nCPUWeight=70\n")
+        self.set_now("sys", "machine.slice", CPUWeight="70")
+
+    def failed_off(self) -> str:
+        """'on', then an 'off' whose set-property of machine.slice fails: its output."""
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        out, _ = self.run_profile("off")
+        self.systemd.fail_set.clear()
+        return out
+
+    def test_off_keeps_what_it_could_not_undo_and_removes_game_state(self) -> None:
+        out = self.failed_off()
+        left = self.paths.leftovers
+        self.assertIn(
+            f"<4>game-profile: off: could not undo machine.slice CPUWeight=70: kept in {left} for the next off and tick\n",
+            out,
+        )
+        self.assertTrue(
+            out.endswith(f"restored, except 1 setting(s) kept in {left}\n"),
+            out,
+        )
+        for f in (self.state, self.intended, self.manual, self.paths.drift_warned):
+            self.assertFalse(os.path.exists(f), f)
+        self.assertEqual(self.read(left), "cst-game-leftovers 1\nprop sys machine.slice CPUWeight existed 70\n")
+        # Every other undo is done: machine.slice's new overrides are gone, the memory chain's too.
+        self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "IOWeight")))
+        self.assertFalse(os.path.exists(self.ctrl("sys", f"user@{UID}.service", "MemoryLow")))
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "10")  # the profile's, kept
+
+    def test_the_next_off_undoes_it_and_removes_the_file(self) -> None:
+        self.failed_off()
+        out, actions = self.run_profile("off")
+        self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime machine.slice CPUWeight=70"])
+        self.assertIn(f"undid machine.slice CPUWeight=70, kept in {self.paths.leftovers} by an earlier off", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "70")
+        _, actions = self.run_profile("off")
+        self.assertEqual(actions, [])
+
+    def test_a_tick_with_the_profile_off_undoes_it(self) -> None:
+        self.failed_off()
+        self.no_game()
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime machine.slice CPUWeight=70"])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_tick_with_the_profile_on_leaves_it_and_the_next_off_ends_at_the_oldest_value(self) -> None:
+        self.failed_off()
+        left = self.read(self.paths.leftovers)
+        self.run_profile("on")  # records machine.slice's CPUWeight as it is now: existed 10
+        self.assertIn("prop sys machine.slice CPUWeight existed 10\n", self.read(self.state))
+        _, actions = self.run_profile("tick")
+        self.assertFalse([a for a in self.sets(actions) if "CPUWeight=70" in a], actions)
+        self.assertEqual(self.read(self.paths.leftovers), left)
+        _, actions = self.run_profile("off")
+        weights = [
+            a for a in self.sets(actions) if a.startswith(f"{SYS} set-property --runtime machine.slice CPUWeight=")
+        ]
+        self.assertEqual(
+            weights,
+            [
+                f"{SYS} set-property --runtime machine.slice CPUWeight=10",
+                f"{SYS} set-property --runtime machine.slice CPUWeight=70",
+            ],
+        )
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "70")
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_retry_that_fails_again_is_said_by_off_and_not_by_the_tick(self) -> None:
+        self.failed_off()
+        left = self.read(self.paths.leftovers)
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        out, _ = self.run_profile("off")
+        self.assertIn("off: could not undo machine.slice CPUWeight=70", out)
+        self.assertEqual(self.read(self.paths.leftovers), left)
+        self.no_game()
+        out, actions = self.run_profile("tick")
+        self.assertEqual(out, "")
+        self.assertEqual(len(self.sets(actions)), 1)
+        self.assertEqual(self.read(self.paths.leftovers), left)
+
+    def test_a_kept_record_of_this_game_state_is_undone_once(self) -> None:
+        # An 'off' killed after it wrote game.leftovers and before it removed game.state left both.
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.write(self.paths.leftovers, "cst-game-leftovers 1\nprop sys machine.slice CPUWeight existed 70\n")
+        _, actions = self.run_profile("off")
+        self.assertEqual(
+            [a for a in self.sets(actions) if "CPUWeight=70" in a],
+            [f"{SYS} set-property --runtime machine.slice CPUWeight=70"],
+        )
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def user_slice_override(self) -> None:
+        """The toolboxes' user.slice had a runtime override CPUWeight=30 before the game (existed)."""
+        self.write(self.ctrl("usr", "user.slice", "CPUWeight"), "[Slice]\nCPUWeight=30\n")
+
+    def test_a_user_manager_s_record_is_undone_for_the_user_it_was_kept_for(self) -> None:
+        self.user_slice_override()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("usr", "user.slice"))
+        self.run_profile("off")
+        self.systemd.fail_set.clear()
+        self.assertEqual(
+            self.read(self.paths.leftovers),
+            f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n",
+        )
+        # TARGET_USER names another user now: the kept record is still undone for the user it was kept for.
+        other = dataclasses.replace(self.settings, target_user="other")
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            other,
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "1234",
+            name_of=lambda uid: USER if uid == UID else "",
+            out=out,
+        )
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual(self.sets(self.systemd.actions), [f"{USR} set-property --runtime user.slice CPUWeight=30"])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def accounts_profile(self, target: str) -> tuple[GameProfile, io.StringIO]:
+        """A profile whose TARGET_USER is target, on accounts where only USER (uid UID) has one."""
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            dataclasses.replace(self.settings, target_user=target),
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "",
+            name_of=lambda uid: USER if uid == UID else "",
+            out=out,
+        )
+        return p, out
+
+    def kept_for_the_user(self, target: str) -> tuple[GameProfile, io.StringIO]:
+        """A game.leftovers whose record of the user manager, for USER, still fails; a profile whose
+        TARGET_USER is target (accounts_profile)."""
+        self.write(
+            self.paths.leftovers, f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n"
+        )
+        self.systemd.fail_set.add(("usr", "user.slice"))
+        os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)  # USER is logged in
+        return self.accounts_profile(target)
+
+    def two_users_profile(self) -> tuple[GameProfile, io.StringIO]:
+        """A profile for USER (uid UID), on accounts where "other" (uid 1001) has one too."""
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            self.settings,
+            self.systemd,
+            uid_of=lambda u: {USER: UID, "other": "1001"}.get(u, ""),
+            name_of=lambda uid: {UID: USER, "1001": "other"}.get(uid, ""),
+            out=out,
+        )
+        return p, out
+
+    @staticmethod
+    def reloads(actions: Sequence[str]) -> list[str]:
+        return [a for a in actions if a.endswith(" daemon-reload")]
+
+    def test_each_user_manager_an_override_was_removed_in_gets_its_daemon_reload(self) -> None:
+        # 'off' undoes game.state's new overrides of USER's manager, and a kept record of another user's
+        # (uid 1001), left by an earlier failed 'off' for that user: USER's manager gets its daemon-reload,
+        # not the manager of the user acted for last.
+        self.run_profile("on")
+        self.assertIn("prop usr user.slice CPUWeight new -\n", self.read(self.state))
+        self.write(
+            self.paths.leftovers, "cst-game-leftovers 1\nuser 1001\nprop usr background.slice CPUWeight existed 100\n"
+        )
+        p, _ = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertIn(
+            "systemctl --user -M other@ set-property --runtime background.slice CPUWeight=100", self.systemd.actions
+        )
+        self.assertEqual(self.reloads(self.systemd.actions), [f"{SYS} daemon-reload", f"{USR} daemon-reload"])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        # A retry of two kept new overrides, one of each user's manager: each manager is reloaded.
+        self.write(
+            self.paths.leftovers,
+            f"cst-game-leftovers 1\nuser {UID}\nprop usr app.slice CPUWeight new -\n"
+            "user 1001\nprop usr app.slice MemoryLow new -\n",
+        )
+        self.no_game()
+        p, out = self.two_users_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(out.getvalue().count("undid"), 2, out.getvalue())
+        self.assertEqual(
+            self.reloads(self.systemd.actions),
+            ["systemctl --user -M other@ daemon-reload", f"{USR} daemon-reload"],
+        )
+        self.assertEqual(p.s.target_user, USER)
+
+    def test_the_tick_while_off_judges_target_user_not_the_user_of_a_kept_record(self) -> None:
+        # A GameMode client runs (game_scratch's) and TARGET_USER is unset or names no account: 'on' would
+        # refuse, so the tick must not start cpu-game.service, whatever user a kept record is for.
+        for target in ("", "nobody-here"):
+            with self.subTest(target=target):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.paths.settings_warned)
+                p, out = self.kept_for_the_user(target)
+                self.systemd.actions = []
+                self.assertEqual(p.tick(), 0)
+                # The kept record was tried for the user it is for, and is still kept.
+                self.assertEqual(
+                    self.sets(self.systemd.actions), [f"{USR} set-property --runtime user.slice CPUWeight=30"]
+                )
+                self.assertTrue(os.path.exists(self.paths.leftovers))
+                self.assertNotIn("switching on", out.getvalue())
+                self.assertNotIn(f"{SYS} start --no-block cpu-game.service", self.systemd.actions)
+                self.assertIn("GameMode client running, profile not switched on: TARGET_USER", out.getvalue())
+                self.assertEqual(p.s.target_user, target)
+
+    def test_a_kept_record_whose_uid_has_no_account_is_never_undone_for_another_user(self) -> None:
+        # The record was kept for uid 1001, whose account is gone now; TARGET_USER is USER (another uid).
+        text = "cst-game-leftovers 1\nuser 1001\nprop usr app.slice MemoryZSwapWriteback existed yes\n"
+        self.no_game()
+        # Its user manager is still there (/run/user/1001/systemd): kept as it is, for that uid.
+        os.makedirs(os.path.join(self.paths.run_user, "1001", "systemd"))
+        for action in ("tick", "off"):
+            with self.subTest(action=action):
+                self.write(self.paths.leftovers, text)
+                p, out = self.accounts_profile(USER)
+                self.systemd.actions = []
+                self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
+                self.assertEqual(self.sets(self.systemd.actions), [])
+                self.assertEqual(self.read(self.paths.leftovers), text)
+                self.assertNotIn("undid", out.getvalue())
+                if action == "off":
+                    self.assertIn("off: could not undo app.slice MemoryZSwapWriteback=yes: kept in", out.getvalue())
+        # Its user manager is gone (a logout): nothing is left to undo, the record is done.
+        shutil.rmtree(os.path.join(self.paths.run_user, "1001"))
+        p, _ = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.sets(self.systemd.actions), [])
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_off_drops_game_state_s_user_manager_records_of_a_uid_no_account_has(self) -> None:
+        # 'on' acted for uid 1001, whose account is gone now; TARGET_USER is USER (another uid). Its user
+        # manager's records are not undone in USER's manager, nor kept for USER's uid: dropped, said once.
+        self.write(
+            self.state,
+            "prop sys user@1001.service MemoryLow existed 0\n"
+            "prop usr user.slice CPUWeight new -\n"
+            "prop usr app.slice CPUWeight existed 100\n",
+        )
+        user_override = self.ctrl("usr", "user.slice", "CPUWeight")  # USER's own override
+        self.write(user_override, "[Slice]\nCPUWeight=30\n")
+        self.systemd.fail_set.add(("usr", "app.slice"))
+        p, out = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual(
+            self.sets(self.systemd.actions), [f"{SYS} set-property --runtime user@1001.service MemoryLow=0"]
+        )
+        self.assertNotIn(f"{USR} daemon-reload", self.systemd.actions)
+        self.assertTrue(os.path.exists(user_override))
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertEqual(out.getvalue().count("dropped"), 1, out.getvalue())
+        self.assertIn(
+            "<4>game-profile: off: no account has uid 1001, the user 'on' acted for, now: 2 setting(s) of its user"
+            " manager dropped, not undone in another user's\n",
+            out.getvalue(),
+        )
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_a_transient_unit_that_is_gone_is_no_leftover(self) -> None:
+        # A Docker scope with an override of its own before the game, which ended before 'off'.
+        self.systemd.units["sys"] = ["docker-1.scope"]
+        self.set_now("sys", "docker-1.scope", Slice="system.slice", AllowedCPUs="0-23")
+        self.write(self.ctrl("sys", "docker-1.scope", "AllowedCPUs"), "[Scope]\nAllowedCPUs=0-23\n")
+        self.run_profile("on")
+        self.assertIn("prop sys docker-1.scope AllowedCPUs existed 0-23\n", self.read(self.state))
+        self.systemd.fail_set.add(("sys", "docker-1.scope"))
+        self.systemd.not_loaded.add(("sys", "docker-1.scope"))
+        out, actions = self.run_profile("off")
+        self.assertIn(f"{SYS} set-property --runtime docker-1.scope AllowedCPUs=0-23", actions)
+        self.assertNotIn("could not undo", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_fixed_unit_not_loaded_stays_a_leftover(self) -> None:
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        self.systemd.not_loaded.add(("sys", "machine.slice"))
+        self.run_profile("off")
+        self.assertIn("prop sys machine.slice CPUWeight existed 70\n", self.read(self.paths.leftovers))
+
+    def test_a_user_manager_gone_after_a_logout_is_no_leftover(self) -> None:
+        self.user_slice_override()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("usr", "user.slice"))
+        shutil.rmtree(os.path.join(self.tmp, "ru", UID, "systemd"))  # the logout took every runtime override
+        out, _ = self.run_profile("off")
+        self.assertNotIn("could not undo", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_an_undo_reports_its_failure(self) -> None:
+        from cpu.game.adapters.leftovers import Reloads
+
+        p, _ = self.profile()
+        reload = Reloads()
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        self.assertFalse(p.undo_record(("prop", "sys", "machine.slice", "CPUWeight", "existed", "70"), reload))
+        folder = os.path.join(self.tmp, "epp-folder")
+        os.makedirs(folder)  # a folder in place of the sysfs file
+        self.assertFalse(p.undo_record(("sysfs", folder, "x"), reload))
+        busy = self.ctrl("sys", "a.slice", "CPUWeight")
+        os.makedirs(os.path.join(busy, "inside"))  # a non-empty folder where the override file is: EISDIR
+        self.assertFalse(p.undo_record(("prop", "sys", "a.slice", "CPUWeight", "new", "-"), reload))
+        self.assertTrue(p.undo_record(("prop", "sys", "b.slice", "CPUWeight", "new", "-"), reload))  # not there
+        self.assertTrue(p.undo_record(("bogus",), reload))  # no record: nothing to undo
+
+    def test_an_override_that_cannot_be_removed_runs_no_daemon_reload(self) -> None:
+        # An 'off' kept machine.slice's IOWeight override, which cannot be removed (a non-empty folder in its
+        # place: EISDIR): the ticks that retry it keep it and reload no systemd for it (nothing was removed).
+        text = "cst-game-leftovers 1\nprop sys machine.slice IOWeight new -\n"
+        self.write(self.paths.leftovers, text)
+        os.makedirs(os.path.join(self.ctrl("sys", "machine.slice", "IOWeight"), "inside"))
+        self.no_game()
+        for _ in range(2):
+            _, actions = self.run_profile("tick")
+            self.assertNotIn(f"{SYS} daemon-reload", actions)
+            self.assertEqual(self.read(self.paths.leftovers), text)
+        # An 'off' with no game.state retries it the same way, and says it.
+        out, actions = self.run_profile("off")
+        self.assertIn("off: could not undo machine.slice IOWeight (its runtime override): kept in", out)
+        self.assertNotIn(f"{SYS} daemon-reload", actions)
+        self.assertEqual(self.read(self.paths.leftovers), text)
+
+    def test_a_file_whose_folder_is_gone_is_no_leftover(self) -> None:
+        # A cgroup file 'on' wrote, whose cgroup ended before 'off' (a logout took user@UID.service's tree).
+        gone = os.path.join(self.ucg, "user.slice", "cpuset.cpus")
+        self.run_profile("on")
+        with open(self.state, "a") as f:
+            f.write(f"cgw {gone} 0-23\n")
+        out, _ = self.run_profile("off")
+        self.assertNotIn("could not undo", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        # The same for a kept one, also an EPP file of a CPU taken offline; the folder made again later (the
+        # next login) does not get the old value.
+        epp_gone = self.paths.epp("7")
+        self.write(self.paths.leftovers, f"cst-game-leftovers 1\ncgw {gone} 0-23\nepp 7 balance_performance\n")
+        self.no_game()
+        out, _ = self.run_profile("tick")
+        self.assertEqual(out.count("undid"), 2, out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        os.makedirs(os.path.dirname(gone))
+        self.run_profile("tick")
+        self.assertFalse(os.path.exists(gone))
+        self.assertFalse(os.path.exists(epp_gone))
+        # A folder that is a file is no folder gone: that undo is kept (ENOTDIR).
+        self.write(os.path.join(self.tmp, "plain"), "a file\n")
+        self.write(self.paths.leftovers, f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n")
+        self.run_profile("tick")
+        self.assertEqual(self.read(self.paths.leftovers), f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n")
+
+    def test_a_file_that_cannot_be_written_is_said_lost_and_game_state_still_goes(self) -> None:
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+            out, _ = self.run_profile("off")
+        self.assertIn(
+            f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {self.paths.leftovers}: not undone\n",
+            out,
+        )
+        self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)  # none is kept
+        self.assertNotIn("kept in", out)  # said not undone, once: never kept first
+        self.assertFalse(os.path.exists(self.state))
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_tick_that_cannot_write_the_file_says_the_lost_ones_once(self) -> None:
+        # game.leftovers holds two records: machine.slice's undo works now, user.slice's fails again; /run is
+        # full. The old file goes (else both would be undone and said again at every tick), and the lost one
+        # is said once, in the tick's words.
+        self.prior_machine_weight()
+        text = (
+            "cst-game-leftovers 1\nprop sys machine.slice CPUWeight existed 70\n"
+            f"user {UID}\nprop usr user.slice CPUWeight existed 30\n"
+        )
+        self.write(self.paths.leftovers, text)
+        os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)
+        self.systemd.fail_set.add(("usr", "user.slice"))
+        self.no_game()
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+            out, _ = self.run_profile("tick")
+            self.assertEqual(
+                out,
+                f"<5>game-profile: undid machine.slice CPUWeight=70, kept in {self.paths.leftovers} by an earlier off\n"
+                f"<3>game-profile: could not keep user.slice CPUWeight=30 in {self.paths.leftovers}: not undone\n",
+            )
+            self.assertFalse(os.path.exists(self.paths.leftovers))
+            out, actions = self.run_profile("tick")
+            self.assertEqual((out, self.sets(actions)), ("", []))
+
+    def test_a_full_run_leaves_a_file_that_holds_no_record_undone_since(self) -> None:
+        # game.leftovers holds a record that still fails (a sysfs file under a plain file: ENOTDIR); /run is
+        # full during one tick, which undid nothing: the file is right as it is, so it stays, the tick says
+        # nothing, and the next tick retries the record.
+        self.write(os.path.join(self.tmp, "plain"), "a file\n")
+        text = f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n"
+        self.write(self.paths.leftovers, text)
+        self.no_game()
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full) as writes:
+            out, _ = self.run_profile("tick")
+        self.assertTrue(writes.called)
+        self.assertEqual(out, "")
+        self.assertEqual(self.read(self.paths.leftovers), text)
+        os.unlink(os.path.join(self.tmp, "plain"))  # the next tick, with room in /run: its folder is gone, done
+        out, _ = self.run_profile("tick")
+        self.assertIn(f"undid {self.tmp}/plain/knob = OLD", out)
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_full_run_at_off_keeps_the_old_file_and_says_the_rest_not_undone(self) -> None:
+        # The same in an 'off' whose own machine.slice record fails too: the old file still holds its record,
+        # which stays kept; machine.slice's, which it cannot hold, is said not undone.
+        self.write(os.path.join(self.tmp, "plain"), "a file\n")
+        text = f"cst-game-leftovers 1\nsysfs {self.tmp}/plain/knob OLD\n"
+        self.write(self.paths.leftovers, text)
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch("cpu.game.adapters.leftovers.write_atomic", side_effect=full):
+            out, _ = self.run_profile("off")
+        left = self.paths.leftovers
+        self.assertEqual(self.read(left), text)
+        self.assertIn(f"<4>game-profile: off: could not undo {self.tmp}/plain/knob = OLD: kept in {left}", out)
+        self.assertIn(f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {left}: not undone\n", out)
+        self.assertTrue(out.endswith(f"restored, except 2 setting(s): 1 kept in {left}, 1 not undone\n"), out)
+
+    def test_the_tick_prints_no_id_line_for_a_kept_record(self) -> None:
+        # Kept while TARGET_USER named no account (no "user" line); it still names none. The tick says nothing
+        # on stderr (id's "no such user" line is 'off''s alone: _lookup_uid); 'off' says it once.
+        self.no_game()
+        for action, said in (("tick", ""), ("off", "id: 'nobody-here': no such user\n")):
+            with self.subTest(action=action):
+                self.write(self.paths.leftovers, "cst-game-leftovers 1\nprop usr app.slice CPUWeight new -\n")
+                p, _ = self.accounts_profile("nobody-here")
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
+                self.assertEqual(err.getvalue(), said)
+
+    def test_a_kept_new_override_of_no_user_s_manager_is_dropped(self) -> None:
+        # Kept while TARGET_USER named no account (no "user" line), and it still names none: no user manager
+        # holds the override, so nothing is reloaded and nothing said undone; it is dropped, in one warning.
+        self.no_game()
+        for action, who in (("tick", ""), ("off", "off: ")):
+            with self.subTest(action=action):
+                self.write(self.paths.leftovers, "cst-game-leftovers 1\nprop usr app.slice CPUWeight new -\n")
+                p, out = self.accounts_profile("nobody-here")
+                self.systemd.actions = []
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(p.tick() if action == "tick" else p.off(), 0)
+                self.assertEqual(self.systemd.actions, [])
+                self.assertEqual(
+                    out.getvalue(),
+                    f"<4>game-profile: {who}could not undo app.slice CPUWeight (its runtime override): TARGET_USER"
+                    " names no account, no user manager to undo it in: dropped\n",
+                )
+                self.assertFalse(os.path.exists(self.paths.leftovers))
+
+    def test_a_newer_file_and_a_failed_undo_end_with_not_undone(self) -> None:
+        newer = "cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n"
+        self.write(self.paths.leftovers, newer)
+        self.prior_machine_weight()
+        self.run_profile("on")
+        self.systemd.fail_set.add(("sys", "machine.slice"))
+        out, _ = self.run_profile("off")
+        self.assertIn(f"<3>game-profile: off: could not keep machine.slice CPUWeight=70 in {self.paths.leftovers}", out)
+        self.assertNotIn("kept in", out)  # said not undone, once: never kept first
+        self.assertTrue(out.endswith("restored, except 1 setting(s) not undone\n"), out)
+        self.assertEqual(self.read(self.paths.leftovers), newer)
+
+    def test_a_newer_file_is_left_alone(self) -> None:
+        newer = "cst-game-leftovers 9\nprop sys machine.slice CPUWeight existed 70\n"
+        self.write(self.paths.leftovers, newer)
+        out, actions = self.run_profile("off")
+        self.assertIn(f"{self.paths.leftovers} is format 9 of the game-leftovers", out)
+        self.assertIn("left alone, neither undone nor removed", out)
+        self.assertEqual(self.sets(actions), [])
+        self.assertEqual(self.read(self.paths.leftovers), newer)
+        self.no_game()
+        out, actions = self.run_profile("tick")
+        self.assertEqual((out, self.sets(actions)), ("", []))
+
+    def test_a_file_that_cannot_be_read_is_left_alone(self) -> None:
+        # A folder in game.leftovers' place (also what an EIO or a denied read does): 'off' and the tick neither
+        # take it for a missing file nor remove it; 'off' still undoes game.state's records and removes it.
+        os.makedirs(os.path.join(self.paths.leftovers, "inside"))
+        self.prior_machine_weight()
+        self.run_profile("on")
+        out, _ = self.run_profile("off")
+        self.assertIn(
+            f"<4>game-profile: {self.paths.leftovers}: cannot be read (Is a directory): left alone, neither", out
+        )
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.now("sys", "machine.slice", "CPUWeight"), "70")
+        self.assertTrue(os.path.isdir(os.path.join(self.paths.leftovers, "inside")))
+        self.no_game()
+        out, actions = self.run_profile("tick")
+        self.assertEqual((out, self.sets(actions)), ("", []))
+        out, _ = self.run_profile("off")
+        self.assertIn("cannot be read (Is a directory): left alone", out)
+        self.assertTrue(os.path.isdir(os.path.join(self.paths.leftovers, "inside")))
+
+    def test_state_names_them(self) -> None:
+        self.failed_off()
+        out, _ = self.run_profile("state")
+        self.assertIn(
+            "  leftovers: 1 setting(s) 'off' could not undo, retried by the next off and tick: machine.slice CPUWeight\n",
+            out,
+        )
+
+    def test_an_off_whose_undos_all_work_writes_no_file(self) -> None:
+        self.prior_machine_weight()
+        self.run_profile("on")
+        out, _ = self.run_profile("off")
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertTrue(out.endswith("EPP settings restored\n"), out)
+        out, _ = self.run_profile("state")
+        self.assertNotIn("leftovers", out)
 
 
 class GameProfileWatchdogTest(GameProfileCase):

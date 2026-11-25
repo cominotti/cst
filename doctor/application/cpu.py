@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The cpu area of `cst doctor`: cpu.conf, the game profile's drift and leftover drop-ins, the user manager's
-boxes outside CST's rules."""
+"""The cpu area of `cst doctor`: cpu.conf, the game profile's drift, leftover drop-ins and the settings 'off'
+could not undo, the user manager's boxes outside CST's rules."""
 
 from collections.abc import Iterator
 from typing import Final
 
 from cst_core.domain.units import LoadState
-from cpu.game.domain import GameRecordKind, Record, intended_records, newer_intended, records, state_uid
+from cpu.game.domain import GamePaths, GameRecordKind, Record, intended_records, newer_intended, records, state_uid
+from cpu.game.domain.leftovers import leftover_entries, newer_leftovers, undo_text
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
     GAME_DROPIN,
     GAME_DROPIN_DIR,
     GAME_INTENDED,
+    GAME_LEFTOVERS,
     GAME_MANUAL,
     GAME_PROFILE_HOST,
     GAME_STATE,
@@ -241,6 +243,40 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(INFO, f"game profile: drift not checked for {', '.join(unknown)}")
     if not drifted and not checked and not unknown:
         yield Result(INFO, "game profile: ON, no recorded setting to compare")
+
+
+@check(CHECKS, "cpu")
+def check_game_leftovers(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN for the settings the game profile's 'off' could not undo, which game.leftovers keeps for the next
+    'off' and the watchdog's tick (they keep the game's value until one of them undoes it); info when the file
+    cannot be read or is of a format this CST does not read; nothing when it is not there or holds none.
+    Read with the profile's own reader."""
+    try:
+        with host.open_text(host.path(GAME_LEFTOVERS)) as f:
+            text = f.read()
+    except FileNotFoundError, NotADirectoryError:
+        return
+    except OSError as e:
+        yield Result(INFO, f"game profile: settings 'off' could not undo not checked ({GAME_LEFTOVERS}: {e.strerror})")
+        return
+    newer = newer_leftovers(GAME_LEFTOVERS, text)
+    if newer is not None:
+        yield Result(INFO, f"game profile: settings 'off' could not undo not checked ({newer})")
+        return
+    entries = leftover_entries(text)
+    if not entries:
+        return
+    epp = GamePaths().epp
+    what = ", ".join(undo_text(rec, epp, short=True) for _uid, rec in entries)
+    message = (
+        f"game profile: {len(entries)} setting(s) 'off' could not undo keep the game's value: {what} (kept in "
+        f"{GAME_LEFTOVERS}). The next 'off' and the watchdog's tick while the profile is off "
+        "(cpu-game-watchdog.timer, every 30 s) undo them again; the journal of 'off' names why each one failed"
+    )
+    if host.exists(host.path(GAME_STATE)):
+        yield Result(WARN, message + ". The profile is on: the next 'off' retries them")
+    else:
+        yield Result(WARN, message, f"sudo {GAME_PROFILE_HOST} off")
 
 
 def user_manager_cgroup(host: DoctorHostPort) -> HostPath | None:

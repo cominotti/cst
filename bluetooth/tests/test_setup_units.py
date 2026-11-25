@@ -6,17 +6,20 @@ check passes (the kernel ISO probe runs the real Python there), the waits of the
 the fake of setup_fakes.py; nothing real is touched.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import errno
 import json
 import os
 import re
 import shutil
 import time
+from typing import override
 import unittest
 from unittest import mock
 
 from bluetooth.adapters import LocalBluetoothHostAdapter
+from bluetooth.domain import parse_pending
 from bluetooth.setup import wiring
 from bluetooth.setup.adapters import LocalSetupFiles
 from bluetooth.setup.application.change import Change
@@ -27,6 +30,8 @@ from bluetooth.setup.domain import (
     Exit,
     Options,
     Paths,
+    backup_name_taken,
+    backup_order,
     bap_state,
     is_running,
     parse_command_line,
@@ -540,6 +545,334 @@ class StepDownTest(unittest.TestCase):
         )
 
 
+VENDOR = "[General]\n#Experimental = false\n"
+
+
+class InProcessCase(unittest.TestCase):
+    """Whole commands in process (Change.run_command) on the fake machine, with one fixed second on
+    the clock, on a machine where every check passes."""
+
+    NOW = 1_700_000_000.0
+
+    def machine(self) -> Machine:
+        m = Machine(self)
+        m.put(m.main_conf, VENDOR)
+        m.services()
+        m.adapter()  # every check passes: apply exits 0
+        m.flag("iso-socket")
+        m.put("pw-dump.json", json.dumps(pw_dump(rate=48000)))
+        m.put("wp-roles", "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n")
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        return m
+
+    def base(self, m: Machine) -> str:
+        return f"{m.main_conf}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.NOW))}"
+
+    def run_one(self, m: Machine, *args: str) -> tuple[int, str, str]:
+        log = os.path.join(m.state, "log")
+        if os.path.exists(log):
+            os.unlink(log)
+        run, console, _ = change(m, *args, doubles=SetupDoubles(now=self.NOW))
+        rc = run.run_command()
+        run.cleanup()
+        assert isinstance(rc, int), rc
+        return rc, console.stdout, console.stderr
+
+    def text(self, path: str) -> str:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def sudo_cps(self, m: Machine) -> list[str]:
+        return [c for c in m.read("log").splitlines() if c.startswith("sudo cp ")]
+
+
+class BackupNameTest(InProcessCase):
+    """main.conf's backups (apply and revert take one before they replace it): each has a name of its
+    own, main.conf.bak-YYYYmmdd-HHMMSS and then -1, -2, ... in the same second; none is replaced. The
+    runs here share one second (the clock is fixed); FAKE's sudo cp imitates GNU cp's
+    --update=none-fail (tests/e2e test_180 runs the real one)."""
+
+    def test_apply_then_revert_in_one_second(self) -> None:
+        # Before, revert's backup took apply's name and replaced the vendor text with apply's, so a
+        # second revert found Experimental = true in the oldest backup and wrote it back.
+        m = self.machine()
+        base = self.base(m)
+        rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"backup:    {base}\n", out)
+        self.assertEqual(self.sudo_cps(m), [f"sudo cp -p --update=none-fail {m.main_conf} {base}"])
+        self.assertEqual(self.text(base), VENDOR)
+        rc, out, err = self.run_one(m, "revert", "--yes", "--no-restart")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"backup:    {base}-1\n", out)
+        self.assertIn(f"           the two keys as in {base}\n", out)
+        self.assertEqual(self.text(base), VENDOR)
+        self.assertIn(f"KernelExperimental = {ISO}", self.text(base + "-1"))
+        self.assertNotIn("Experimental = true", self.text(m.main_conf))
+        rc, out, err = self.run_one(m, "revert", "--yes", "--no-restart")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"unchanged: Experimental and KernelExperimental are already as in {base}\n", out)
+        self.assertEqual(self.sudo_cps(m), [])
+        self.assertNotIn("Experimental = true", self.text(m.main_conf))
+
+    def test_the_names_taken_are_skipped(self) -> None:
+        m = self.machine()
+        base = self.base(m)
+        planted = {base: "first\n", base + "-1": "second\n"}
+        for path, text in planted.items():
+            m.put(path, text)
+            os.utime(path, (2_000_000_000, 2_000_000_000))  # newer than main.conf: never the oldest
+        rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"backup:    {base}-2\n", out)
+        self.assertEqual(self.sudo_cps(m), [f"sudo cp -p --update=none-fail {m.main_conf} {base}-2"])
+        self.assertEqual(self.text(base + "-2"), VENDOR)
+        for path, text in planted.items():
+            self.assertEqual((self.text(path), os.stat(path).st_mtime), (text, 2_000_000_000), path)
+
+    def test_a_name_another_run_takes_meanwhile(self) -> None:
+        # Free when apply looked, created by another run before the copy: left alone, the next name taken.
+        m = self.machine()
+        base = self.base(m)
+        m.flag("race-backup")
+        rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"backup:    {base}-1\n", out)
+        self.assertEqual(self.text(base), "another run's backup\n")
+        self.assertEqual(self.text(base + "-1"), VENDOR)
+        self.assertNotIn("cp:", out + err)
+        self.assertEqual(len(self.sudo_cps(m)), 2)
+
+    def test_a_copy_that_fails_stops_the_run(self) -> None:
+        m = self.machine()
+        m.put("fail-sudo-cp", "3")
+        rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
+        self.assertEqual(rc, 3, out + err)
+        self.assertTrue(
+            err.endswith(
+                "cst-t: stopped: a command failed (exit 3). Backup of main.conf: none taken. Undo: cst-t revert\n"
+            ),
+            err,
+        )
+        self.assertEqual(len(self.sudo_cps(m)), 1)
+        self.assertEqual(self.text(m.main_conf), VENDOR)
+
+    def test_a_copy_that_fails_half_way_stops_the_run(self) -> None:
+        # A full disk: cp leaves the start of the copy under the name it was given. That name is
+        # there now, but no other run took it: the run stops, and tries no other name.
+        m = self.machine()
+        base = self.base(m)
+        m.flag("partial-backup")
+        rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(f"cp: error writing '{base}': No space left on device\n", err)
+        self.assertTrue(err.endswith("Backup of main.conf: none taken. Undo: cst-t revert\n"), err)
+        self.assertEqual(self.sudo_cps(m), [f"sudo cp -p --update=none-fail {m.main_conf} {base}"])
+        self.assertFalse(os.path.exists(base + "-1"))
+        self.assertEqual(self.text(m.main_conf), VENDOR)
+
+    def test_no_free_name_stops_the_run(self) -> None:
+        # The second's name and -1 to -99 are taken: apply gives up before main.conf is written.
+        m = self.machine()
+        base = self.base(m)
+        planted = [base, *(f"{base}-{n}" for n in range(1, 100))]
+        for path in planted:
+            m.put(path, "taken\n")
+            os.utime(path, (2_000_000_000, 2_000_000_000))
+        rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(f"cst-t: ERROR: no free name for a backup of {m.main_conf} ({base} and 99 more are taken)\n", err)
+        self.assertEqual(self.sudo_cps(m), [])
+        calls = m.read("log").splitlines()
+        self.assertEqual([c for c in calls if c.startswith(("sudo install", "sudo mv"))], [])
+        self.assertFalse(os.path.exists(f"{base}-100"))
+        self.assertEqual(self.text(m.main_conf), VENDOR)
+        self.assertFalse(os.path.exists(m.pending))
+        for path in planted:
+            self.assertEqual(self.text(path), "taken\n", path)
+
+    def test_the_oldest_backup(self) -> None:
+        m = self.machine()
+        base = self.base(m)
+        keys = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
+        for name, text in ((f"{base}-10", VENDOR), (f"{base}-2", VENDOR)):
+            m.put(name, text)
+            os.utime(name, (1_000_000, 1_000_000))
+        m.put(m.main_conf, keys)
+        rc, out, _ = self.run_one(m, "revert", "--check")
+        self.assertEqual(rc, 10, out)
+        self.assertIn(f"would set the two keys as in {base}-2:\n", out)  # before, -10 came first (as text)
+        os.utime(f"{base}-10", (999_999, 999_999))  # older: it wins, whatever the names
+        rc, out, _ = self.run_one(m, "revert", "--check")
+        self.assertIn(f"would set the two keys as in {base}-10:\n", out)
+
+    def test_backup_name_taken(self) -> None:
+        self.assertTrue(backup_name_taken("cp: not replacing '/e/main.conf.bak-1'\n"))
+        self.assertTrue(backup_name_taken("cp: cannot create regular file '/e/x': File exists\n"))
+        self.assertFalse(backup_name_taken("cp: error writing '/e/x': No space left on device\n"))
+        self.assertFalse(backup_name_taken("sudo: a password is required\n"))
+        self.assertFalse(backup_name_taken(""))
+
+    def test_backup_order(self) -> None:
+        stamp = "/e/main.conf.bak-20261124-101010"
+        self.assertEqual(backup_order(5.9, stamp), (5, stamp, 0, stamp))
+        self.assertEqual(backup_order(5, stamp + "-7"), (5, stamp, 7, stamp + "-7"))
+        names = [stamp + "-10", stamp + "-2", stamp, stamp + "-1"]
+        self.assertEqual(
+            sorted(names, key=lambda n: backup_order(5, n)), [stamp, stamp + "-1", stamp + "-2", stamp + "-10"]
+        )
+        # Every other name sorts as before (time, then name): the old script's, another .bak-*.
+        old = ["/e/main.conf.bak-x", "/e/main.conf.bak-20240101-000000", "/e/main.conf.bak-20250101-000000-x"]
+        self.assertEqual(sorted(old, key=lambda n: backup_order(5, n)), sorted(old))
+        self.assertEqual(backup_order(5, "/e/main.conf.bak-x"), (5, "/e/main.conf.bak-x", 0, "/e/main.conf.bak-x"))
+        # A bare stamp is never read as a shorter stamp and a number; a digit that is not ASCII is no number.
+        self.assertEqual(backup_order(1, "/e/main.conf.bak-20261124")[2], 0)
+        self.assertEqual(backup_order(1, stamp + "-\u0663")[1:3], (stamp + "-\u0663", 0))
+        self.assertLess(backup_order(1, stamp + "-99"), backup_order(2, stamp))
+
+
+class SavingHost(LocalBluetoothHostAdapter):
+    """The host adapter with each save of the record of restarts owed noted (the units it was given);
+    fail: each save raises OSError instead, as a ~/.local/state that cannot be written does."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.saves: list[tuple[str, ...]] = []
+        self.fail = fail
+
+    @override
+    def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
+        if save:
+            self.saves.append(tuple(skipped))
+            if self.fail:
+                raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+        return super().restart_pending(path, ids, skipped, save=save)
+
+
+class Stopped(BaseException):
+    """The run stopped at a save of the record, as a SIGTERM would stop it."""
+
+
+class StagedHost(SavingHost):
+    """SavingHost with a script for its saves (numbered from 0): one in fail_at raises OSError (a
+    ~/.local/state that cannot be written that once); after(n) runs once the n-th save is written (a
+    service that restarts by itself then); stop_when() true at a save stops the run there (Stopped),
+    before it is noted or written."""
+
+    def __init__(
+        self,
+        *,
+        fail_at: frozenset[int] = frozenset(),
+        after: Callable[[int], None] = lambda _n: None,
+        stop_when: Callable[[], bool] = lambda: False,
+    ) -> None:
+        super().__init__()
+        self.fail_at = fail_at
+        self.after = after
+        self.stop_when = stop_when
+
+    @override
+    def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
+        if not save:
+            return super().restart_pending(path, ids, skipped, save=save)
+        if self.stop_when():
+            raise Stopped
+        n = len(self.saves)
+        self.fail = n in self.fail_at
+        out = super().restart_pending(path, ids, skipped, save=save)
+        self.after(n)
+        return out
+
+
+class OwedBeforeTheWriteUnitTest(InProcessCase):
+    """The record of restarts owed is written before each write that needs a restart, never for a
+    renewal of comments; a record that cannot be written is warned of once, and the run goes on."""
+
+    def run_with(self, m: Machine, host: SavingHost, *args: str) -> tuple[int, str, str]:
+        log = os.path.join(m.state, "log")
+        if os.path.exists(log):
+            os.unlink(log)
+        run, console, _ = change(m, *args, doubles=SetupDoubles(host=host, now=self.NOW))
+        rc = run.run_command()
+        run.cleanup()
+        assert isinstance(rc, int), rc
+        return rc, console.stdout, console.stderr
+
+    def test_a_renewal_of_comments_owes_nothing(self) -> None:
+        m = self.machine()
+        self.run_one(m, "apply", "--yes")
+        for path in (m.wp_conf, m.le_conf):
+            m.put(path, self.text(path).replace("# managed-by", "# an older comment\n# managed-by", 1))
+        host = SavingHost()
+        rc, out, err = self.run_with(m, host, "apply", "--yes")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"adopted:   {m.wp_conf} (comments renewed, settings unchanged: no restart)\n", out)
+        self.assertIn(f"adopted:   {m.le_conf} (comments renewed, no restart)\n", out)
+        self.assertIn("== restarts\nnone needed\n", out)
+        self.assertEqual(host.saves, [])
+        shows = [c for c in m.read("log").splitlines() if c.startswith("systemctl") and "InvocationID" in c]
+        self.assertEqual(len(shows), 2, shows)  # plan's look at each service, no other
+        self.assertFalse(os.path.exists(m.pending))
+
+    def test_a_record_it_cannot_write(self) -> None:
+        m = self.machine()
+        host = SavingHost(fail=True)
+        rc, out, err = self.run_with(m, host, "apply", "--yes")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(err.count("WARNING: could not record the restarts still owed"), 1, err)
+        self.assertIn(f"KernelExperimental = {ISO}", self.text(m.main_conf))
+        calls = m.read("log").splitlines()
+        self.assertIn("sudo systemctl restart bluetooth", calls)
+        self.assertIn("systemctl --user restart wireplumber", calls)
+        # Each write tries again (main.conf; the rule; the drop-in) with every unit owed so far, then
+        # the restarts', then the clearing one.
+        bt, wp = "bluetooth.service", "wireplumber.service"
+        self.assertEqual(host.saves, [(bt, wp), (bt, wp), (bt, wp), (wp, bt), ()])
+
+    def stopped_apply(self, m: Machine, host: SavingHost) -> None:
+        """apply --yes, stopped by host (Stopped) at a save of the record."""
+        log = os.path.join(m.state, "log")
+        if os.path.exists(log):
+            os.unlink(log)
+        run, _console, _ = change(m, "apply", "--yes", doubles=SetupDoubles(host=host, now=self.NOW))
+        self.addCleanup(run.cleanup)
+        with self.assertRaises(Stopped):
+            run.run_command()
+
+    def test_a_failed_save_is_in_the_next_one(self) -> None:
+        # The save before main.conf's write fails once; the one before the rule's write still owes
+        # bluetoothd. The run stops at the restarts' save. Before, that save owed WirePlumber alone,
+        # and bluetoothd stayed on the old main.conf with nothing owing its restart.
+        m = self.machine()
+        host = StagedHost(fail_at=frozenset({0}), stop_when=lambda: os.path.exists(m.le_conf))
+        self.stopped_apply(m, host)
+        bt, wp = "bluetooth.service", "wireplumber.service"
+        self.assertEqual(host.saves[:2], [(bt, wp), (bt, wp)])
+        self.assertIn(f"KernelExperimental = {ISO}", self.text(m.main_conf))
+        self.assertEqual([c for c in m.read("log").splitlines() if " restart " in f" {c} "], [])
+        self.assertEqual(
+            parse_pending(self.text(m.pending)),
+            {bt: m.unit_inv("system", "bluetooth"), wp: m.unit_inv("user", "wireplumber")},
+        )
+
+    def test_a_service_that_restarted_since_an_earlier_save(self) -> None:
+        # WirePlumber restarts by itself right after the save before main.conf's write (it reads the
+        # old rule); the save before the rule's write owes it again, under its new invocation. The run
+        # stops at the restarts' save. Before, that save was skipped (the record owed WirePlumber
+        # already, under the old invocation), so nothing owed its restart after the stop.
+        m = self.machine()
+
+        def restarted_by_itself(n: int) -> None:
+            if n == 0:
+                m.unit("user", "wireplumber", inv="wp-by-itself")
+
+        host = StagedHost(after=restarted_by_itself, stop_when=lambda: os.path.exists(m.le_conf))
+        self.stopped_apply(m, host)
+        self.assertEqual(parse_pending(self.text(m.pending)).get("wireplumber.service"), "wp-by-itself")
+        rc, out, _ = self.run_one(m, "plan")
+        self.assertEqual(rc, 10, out)
+        self.assertEqual(out.count("(still owed: an earlier run did not restart it)"), 2, out)
+
+
 class SetupModelParityTest(unittest.TestCase):
     """SetupModel (setup_fakes) answers apply and revert as FAKE does: the same command lines in the
     same order, the same output, the same files, from two start states."""
@@ -599,6 +932,15 @@ class SetupModelParityTest(unittest.TestCase):
                     with open(p, encoding="utf-8", errors="replace") as f:
                         out[os.path.relpath(p, m.tmp)] = f.read()
         return out
+
+    def test_a_raced_backup_name_as_fake_does(self) -> None:
+        fake, model = self.machine(), self.machine()
+        for m in (fake, model):
+            m.flag("race-backup")
+            os.utime(m.main_conf, (1_000_000, 1_000_000))  # its backup is the oldest, whatever the clock
+        self.assertEqual(self.runs(model, model=True), self.runs(fake, model=False))
+        self.assertEqual(self.files(model), self.files(fake))
+        self.assertIn("another run's backup\n", self.files(model).values())
 
     def test_apply_then_revert_as_fake_does(self) -> None:
         fake, model = self.machine(), self.machine()
