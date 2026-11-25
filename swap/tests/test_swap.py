@@ -965,6 +965,7 @@ class FakeSwapSystem:
         self._swapon_text = swapon_text
         self._on_sleep = on_sleep
         self.modprobes: list[str] = []
+        self.blkid_calls: list[tuple[str, bool]] = []
         self.sysctl_calls: list[tuple[str, str | None]] = []
         self.zram_resets = 0
         self.sleeps: list[float] = []
@@ -973,8 +974,8 @@ class FakeSwapSystem:
         del dev_path
         return str(self._size_bytes)
 
-    def blkid_type(self, dev_path: str) -> str:
-        del dev_path
+    def blkid_type(self, dev_path: str, *, cache: bool = True) -> str:
+        self.blkid_calls.append((dev_path, cache))
         return self._part_type
 
     def modprobe(self, module: str) -> None:
@@ -3311,6 +3312,61 @@ class SwapApplyBranchesTest(_SwapScratch):
                 self.assertIn(
                     PlanItem("REFUSE", "cst/swap.conf", note).format_line(), self._plan_text(self.env).splitlines()
                 )
+
+    def _plan_with(self, system: FakeSwapSystem, *, mapper_present: bool = False) -> list[str]:
+        fs = self._fs(mapper_present=mapper_present)
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            system,
+            installer=swap_installer(),
+        )
+        out = io.StringIO()
+        render_plan(service.plan_report(), out=out)
+        return out.getvalue().splitlines()
+
+    def test_plan_shows_apply_s_signature_refusal_where_apply_checks_it(self) -> None:
+        # Before, plan had no row: apply alone found the signature, after modprobe and its other checks.
+        target = f"partition {self.spec.partuuid[:8]}..."
+        refuse = PlanItem("REFUSE", target, "has a 'ext4' signature: apply refuses to overwrite it").format_line()
+        ask = PlanItem("?", target, "its signature needs root (blkid): on the host, cst swap plan --root").format_line()
+        cases: tuple[tuple[str, bool, bool, bool, str | None, list[tuple[str, bool]]], ...] = (
+            # (label, as_root, in a container, swap0 open, the row, blkid's calls)
+            ("the host's root", True, False, False, refuse, [(self.spec.device_path, False)]),
+            ("a user", False, False, False, ask, []),
+            ("root in a toolbox", True, True, False, ask, []),
+            ("swap0 open: apply does not look", True, False, True, None, []),
+        )
+        for label, as_root, container, mapper, row, calls in cases:
+            with self.subTest(label):
+                self.env = dataclasses.replace(self.env, as_root=as_root, in_container=container)
+                system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, part_type="ext4")
+                lines = self._plan_with(system, mapper_present=mapper)
+                rows = [ln for ln in lines if ln.lstrip().startswith(("REFUSE", "?")) and target in ln]
+                self.assertEqual(rows, [] if row is None else [row])
+                self.assertEqual(system.blkid_calls, calls)
+        self.env = dataclasses.replace(self.env, as_root=True, in_container=False)
+        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, part_type="swap")
+        self.assertNotIn(refuse, self._plan_with(system))
+
+    def test_plan_shows_a_compressor_missing_from_proc_crypto_and_loads_no_module(self) -> None:
+        crypto = os.path.join(self.env.proc_dir, "crypto")
+        row = PlanItem(
+            "?",
+            "compressor zstd",
+            "not in /proc/crypto now: apply loads its module (modprobe) and stops if it is still missing",
+        ).format_line()
+        for label, text, want in (
+            ("missing", "name         : deflate\n", True),
+            ("there", "name         : zstd\n", False),
+        ):
+            with self.subTest(label):
+                with open(crypto, "w", encoding="utf-8") as f:
+                    f.write(text)
+                system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+                self.assertEqual(row in self._plan_with(system), want)
+                self.assertEqual(system.modprobes, [])
 
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the

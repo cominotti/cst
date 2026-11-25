@@ -29,6 +29,8 @@ from swap.application.memory_tuning import (
 )
 from swap.domain import (
     NOT_REGULAR_NOTE,
+    crypto_has_algorithm,
+    is_safe_partition_type,
     MACHINE_SLICE,
     WSF_EXPERIMENT,
     CgroupSwapRow,
@@ -479,7 +481,45 @@ class SwapReports:
         tier_change = any(st in (OwnedState.MISSING, OwnedState.CHANGE) for st in (c_state, f_state))
         return file_items, tier_change
 
-    def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:
+    def _signature_item(self, spec: SwapHardwareSpec, verb: str) -> PlanItem | None:
+        """apply's signature check, where apply makes it (the partition found with its size, swap0 not open):
+        as the host's root, blkid with no cache file (plan writes nothing; /run/blkid is blkid's cache), and
+        REFUSE for a signature apply would not overwrite; anyone else gets "?" (blkid needs root)."""
+        if self._fs.is_block_device(spec.mapper_path):
+            return None
+        target = f"partition {spec.partuuid[:8]}..."
+        if not self._env.host_root:
+            return PlanItem(
+                "?", target, f"its signature needs root (blkid): on the host, {self._env.prog} {verb} --root"
+            )
+        part_type = self._system.blkid_type(spec.device_path, cache=False)
+        if is_safe_partition_type(part_type):
+            return None
+        return PlanItem("REFUSE", target, f"has a '{part_type}' signature: apply refuses to overwrite it")
+
+    def _compressor_item(self) -> PlanItem | None:
+        """apply's compressor check without its modprobe (plan loads nothing): "?" when the compressor of
+        swap/tmpfiles is not in /proc/crypto now."""
+        comp = next(
+            (
+                val
+                for name, val in parse_tmpfiles_params(self._desired_text(self._env.src_tmpfiles))
+                if name == "compressor"
+            ),
+            "",
+        )
+        crypto_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "crypto"), "") or ""
+        if not comp or crypto_has_algorithm(crypto_text, comp):
+            return None
+        return PlanItem(
+            "?",
+            f"compressor {comp}",
+            "not in /proc/crypto now: apply loads its module (modprobe) and stops if it is still missing",
+        )
+
+    def _partition_items(
+        self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool, verb: str
+    ) -> list[PlanItem]:
         """The rows of the partition and of swap0 (swaps_text: /proc/swaps)."""
         runtime_items: list[PlanItem] = []
         part = self._partition_size_sysfs(spec.device_path)
@@ -489,6 +529,9 @@ class SwapReports:
                 runtime_items.append(
                     PlanItem("ok", f"partition {spec.partuuid[:8]}...", f"{dev}, {size} bytes as expected")
                 )
+                signature = self._signature_item(spec, verb)
+                if signature is not None:
+                    runtime_items.append(signature)
             else:
                 runtime_items.append(
                     PlanItem(
@@ -575,7 +618,12 @@ class SwapReports:
             file_items.append(record)
 
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
-        runtime_items = [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change)
+        runtime_items = (
+            [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change, verb=verb)
+        )
+        compressor = self._compressor_item()
+        if compressor is not None:
+            runtime_items.append(compressor)
         runtime_items.append(self._zram_runtime_item(swaps_text))
 
         return ConfigSectionReport(

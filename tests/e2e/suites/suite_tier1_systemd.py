@@ -15068,3 +15068,63 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP, E2ETag.DOCTOR)
+    def test_276_swap_plan_and_doctor_name_a_crypttab_that_is_not_a_regular_file_and_a_missing_compressor(self) -> None:
+        """cst swap plan --root and cst doctor as root on the container's /etc (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup), nothing applied yet. (1) No /etc/cst/swap.conf, as on a machine an older CST
+        set up, and a FIFO that nothing writes to at /etc/crypttab: plan's row of cst/swap.conf is "REFUSE ...
+        not written yet, and /etc/crypttab is not a regular file ...: apply stops", and doctor's line says the
+        same, both at once (timeout 60). Before, both said "no swap partition configured" / "not configured".
+        (2) swap.conf in place, crypttab back, and the scratch /proc/crypto (CST_SWAP_PROC) without zstd:
+        plan's row "? compressor zstd not in /proc/crypto now: apply loads its module ...". Before, plan had no
+        row and only apply found it. The trap lets a reader that waits go and removes the FIFO before
+        swap_cleanup copies crypttab back."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+release() {
+    if [[ -p /etc/crypttab ]]; then timeout 2 sh -c 'exec 3>"$1"' sh /etc/crypttab || true; rm -f /etc/crypttab; fi
+}
+trap 'release; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+bounded() {
+    rc=0
+    timeout 60 "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "$* blocked at /etc/crypttab"
+}
+
+rm -f /etc/cst/swap.conf
+mv /etc/crypttab "$W/crypttab.e2e276" 2>/dev/null || true
+mkfifo -m 0600 /etc/crypttab
+bounded "$CST" swap plan --root
+grep -qE "^ *REFUSE +cst/swap.conf +not written yet, and /etc/crypttab is not a regular file \(a FIFO, a device, a folder, or a link to one\): apply stops$" \
+    <<<"$out" || fail "plan's settings row"
+bounded env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor
+grep -qF "WARN   swap partition: /etc/cst/swap.conf not written yet, and /etc/crypttab is not a regular file" <<<"$out" ||
+    fail "doctor's line"
+[[ "$out" != *"swap partition: not configured"* ]] || fail "doctor took the FIFO for no settings"
+release
+if [[ -e "$W/crypttab.e2e276" ]]; then mv "$W/crypttab.e2e276" /etc/crypttab; fi
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+cp "$W/proc/crypto" "$W/crypto.e2e276"
+printf 'name         : deflate\ndriver       : deflate-generic\n' >"$W/proc/crypto"
+swap_run plan --root
+cp "$W/crypto.e2e276" "$W/proc/crypto"
+[[ $rc == 0 ]] || fail "plan exited $rc"
+grep -qE "^ *\? +compressor zstd +not in /proc/crypto now: apply loads its module \(modprobe\) and stops if it is still missing$" \
+    <<<"$out" || fail "plan's compressor row"
+if grep -qs '^modprobe ' "$W/calls"; then fail "plan ran modprobe"; fi
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
