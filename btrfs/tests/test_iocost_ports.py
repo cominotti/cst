@@ -541,7 +541,8 @@ class _PortsContract(unittest.TestCase):
         self.assertEqual(q.read(), f"{LINE_ON}\n")
         q.write(LINE_OFF)  # the same device: its line is replaced
         self.assertEqual(q.read(), f"{LINE_OFF}\n")
-        self.assertIsNot(q.read(), q.read())
+        first, second = q.read(), q.read()
+        self.assertIsNot(first, second)
 
     def test_a_write_the_kernel_refuses_raises(self) -> None:
         self.side.qos_present()
@@ -556,7 +557,8 @@ class _PortsContract(unittest.TestCase):
         m.save(frozenset())  # none there, none to save: nothing
         m.save(frozenset({"259:1", "8:0"}))
         self.assertEqual(m.read(), frozenset({"259:1", "8:0"}))
-        self.assertIsNot(m.read(), m.read())
+        first_set, second_set = m.read(), m.read()
+        self.assertIsNot(first_set, second_set)
         m.save(frozenset({"259:1"}))
         self.assertEqual(m.read(), frozenset({"259:1"}))
         m.save(frozenset())
@@ -614,7 +616,9 @@ class _PortsContract(unittest.TestCase):
         answer = UdevProperties({"IOCOST_SOLUTIONS": " isolation ", "USEC_INITIALIZED": "1"})
         self.side.udev_answer("nvme0n1", answer)
         self.assertEqual(u.properties("nvme0n1"), answer)
-        self.assertIsNot(u.properties("nvme0n1").props, u.properties("nvme0n1").props)
+        first_props = u.properties("nvme0n1").props
+        second_props = u.properties("nvme0n1").props
+        self.assertIsNot(first_props, second_props)
         self.side.udev_answer("sda", UdevProperties(None, "Unknown device"))
         self.assertEqual(u.properties("sda"), UdevProperties(None, "Unknown device"))
 
