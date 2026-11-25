@@ -177,7 +177,7 @@ class GcPaths:
 def protected_registries(value: str) -> tuple[str, ...]:
     """DOCKER_GC_PROTECT (comma-separated registries) as the prefixes a reference starts with (ASCII
     blanks trimmed: an item with another blank beside it is a problem, item_blank_problems)."""
-    return tuple(strip_ascii_blanks(r) + "/" for r in value.split(",") if strip_ascii_blanks(r))
+    return tuple(r + "/" for r in map(strip_ascii_blanks, value.split(",")) if r)
 
 
 # ---- inside a toolbox or container ------------------------------------------------------
@@ -255,7 +255,7 @@ class Protection:
 
 def registries_of(value: str) -> tuple[str, ...]:
     """DOCKER_GC_PROTECT's registries, ASCII blanks and empty items dropped, in order."""
-    return tuple(strip_ascii_blanks(r).removesuffix("/") for r in value.split(",") if strip_ascii_blanks(r))
+    return tuple(r.removesuffix("/") for r in map(strip_ascii_blanks, value.split(",")) if r)
 
 
 def item_blank_problems(value: str) -> list[str]:
