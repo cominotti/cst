@@ -26,6 +26,7 @@ from bluetooth.setup.application.change import Change, ReRun
 from bluetooth.setup.application.survey import SetupMachine
 from bluetooth.setup.domain import SETUP_SCRIPT, Config, Exit, Options, Paths
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner, c_locale
 from cst_core.adapters.runtime import SYSTEM_PYTHON, checkout_root, lc_ctype_handover, undo_python_start
 from cst_core.adapters.files import read_text
@@ -149,6 +150,7 @@ def build(opts: Options, cfg: Config, where: Paths, *, container: bool, bt_timeo
             host=LocalBluetoothHostAdapter(),
             container=container,
             bt_timeout=bt_timeout,
+            records=JsonInstallRecord(),
             lc_ctype=lc_ctype_handover().split("=", 1)[1],
             c_locale=c_locale_words(),
             python=SYSTEM_PYTHON,

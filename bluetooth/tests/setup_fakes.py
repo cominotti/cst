@@ -164,6 +164,11 @@ case "$me" in
                 [[ -e "$S/hang-show" ]] && exec /usr/bin/sleep 30  # systemd does not answer
                 # term-show-when names a path: a look while it exists sends SIGTERM to the program.
                 if [[ -e "$S/term-show-when" && -e "$(cat "$S/term-show-when")" ]]; then kill -TERM "$PPID"; exit 1; fi
+                if [[ "$*" == *UnitPath* ]]; then  # the manager's own: unit-path's, else systemd's default
+                    [[ -e "$S/no-unit-path" ]] && exit 1
+                    if [[ -e "$S/unit-path" ]]; then cat "$S/unit-path"; else echo "$HOME/.config/systemd/user.control $HOME/.config/systemd/user /etc/systemd/user /usr/lib/systemd/user"; fi
+                    exit 0
+                fi
                 u="$(unit "$scope" "${!#}")"
                 case "$*" in
                     *ActiveState*)   # systemd prints ActiveState= before InvocationID=
@@ -702,8 +707,14 @@ class SetupModel:
     def show(self, scope: str, args: list[str]) -> Answer:
         if self.has("term-show-when"):
             raise AssertionError("SetupModel: term-show-when is FAKE's alone")
-        u = self.prefix(scope, args[-1])
         joined = " ".join(args)
+        if "UnitPath" in joined:  # the manager's own, as FAKE answers it
+            if self.has("no-unit-path"):
+                return 1, "", ""
+            home = os.path.join(self.m.home, ".config", "systemd")
+            default = f"{home}/user.control {home}/user /etc/systemd/user /usr/lib/systemd/user\n"
+            return 0, _text_or_none(self.state("unit-path")) or default, ""
+        u = self.prefix(scope, args[-1])
         if "ActiveState" in joined:
             inv = (_text_or_none(u + ".inv") or "").strip()
             return 0, f"ActiveState={self.active_state(u)}\nInvocationID={inv}\n", ""

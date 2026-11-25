@@ -41,6 +41,7 @@ from bluetooth.tests.setup_fakes import DEV, ISO, MAC, REPO, Machine, SetupModel
 from bluetooth.tests.test_ldac_watch import cards, pw_dump
 from cst_core.domain.files import OwnedState
 from cst_core.adapters import SystemctlAdapter
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.ports import CommandRunnerPort, SystemctlHost
 
@@ -133,6 +134,7 @@ def change(
         host=LocalBluetoothHostAdapter() if d.host is None else d.host,
         container=container,
         bt_timeout=5,
+        records=JsonInstallRecord(),
         lc_ctype="",
         c_locale=wiring.c_locale_words(),
         python="/usr/bin/python3",
@@ -327,8 +329,15 @@ class WatcherInstallTest(unittest.TestCase):
         run.lw_install()
         self.assertIn(f"unchanged: {m.lw_prog}\nunchanged: {m.lw_unit} (LDAC to 48000 Hz)\n", console.stdout)
         self.assertIn("unchanged: cst-bt-ldac48.service enabled and active\n", console.stdout)
+        # Neither a reload nor a restart: only the looks (is-active, and the unit's folder, UnitPath).
+        looks = ("is-", "show -p UnitPath")
         self.assertEqual(
-            [c for c in m.read("log").splitlines()[before:] if c.startswith("systemctl --user") and "is-" not in c], []
+            [
+                c
+                for c in m.read("log").splitlines()[before:]
+                if c.startswith("systemctl --user") and not any(w in c for w in looks)
+            ],
+            [],
         )
 
 

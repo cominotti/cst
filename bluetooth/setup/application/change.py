@@ -26,6 +26,7 @@ from bluetooth.domain import (
     revert_general,
     settings_set,
 )
+from bluetooth.setup.application import watcher_unit
 from bluetooth.setup.application.checks import Checks
 from bluetooth.setup.application.inputs import is_cst_rule
 from bluetooth.setup.application.survey import StepFailed
@@ -365,7 +366,7 @@ class Change(Checks):
             raise self.die(f"{p.le_conf} was not written by CST: move it away, then run apply again.")
         if self.lw_want:
             if self.lw_unit_st == OwnedState.CONFLICT:
-                raise self.die(f"{p.lw_unit_file} was not written by CST: move it away, then run apply again.")
+                raise self.die(f"{self.lw_unit_file} was not written by CST: move it away, then run apply again.")
             if self.lw_prog_st == OwnedState.CONFLICT:
                 raise self.die(f"{p.lw_prog} was not written by CST: move it away, then run apply again.")
 
@@ -503,6 +504,7 @@ class Change(Checks):
         (its `written:` lines), not what plan saw, decides the daemon-reload and the restart: a file
         that changed after plan (a git pull meanwhile) is still taken up."""
         p, unit = self.p, LDAC_UNIT
+        self.lw_remove_stale()
         if self.lw_prog_st not in (OwnedState.OK, OwnedState.ADOPT):
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
         r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch", output=OutputMode.CAPTURE)
@@ -512,7 +514,7 @@ class Change(Checks):
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
         said = self.checked(
-            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", Component.BLUETOOTH_LDAC],
+            ["text", "--home", p.home, self.lw_unit_file, "0644", "--component", Component.BLUETOOTH_LDAC],
             input_text=render_unit(self.c.device, self.c.ldac_rate),
         )
         self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
@@ -536,13 +538,29 @@ class Change(Checks):
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
 
+    def lw_remove_stale(self) -> None:
+        """An older CST's copies of the watcher's unit (lw_stale: recorded where the user manager does not
+        read units) removed through the installer, which forgets them in the record too; a file there
+        that CST did not write is left alone and only forgotten, with a warning. The manager never
+        loaded them: no disable, no reload. With --check: only said."""
+        for path in self.lw_stale:
+            if self.o.check:
+                self.out(f"would remove {path} (an older CST's copy)\n")
+            elif not watcher_unit.is_ours_or_gone(self.m.files, path):
+                self.checked(["forget-text", "--home", self.p.home, path])
+                self.err(f"WARNING: {path} was not written by CST: left alone (forgotten from the install record)\n")
+            else:
+                said = self.checked(["remove-text", "--home", self.p.home, path])
+                self.out(f"{said.rstrip(chr(10))} (an older CST's copy)\n" if said else f"forgotten: {path}\n")
+
     def lw_remove(self) -> None:
         """The watcher stopped, disabled and removed, if CST installed it (with --check: only said)."""
         p, unit = self.p, LDAC_UNIT
+        self.lw_remove_stale()
         if not self.lw_ours_present():
             self.out("unchanged: not installed\n")
             if self.lw_unit_st == OwnedState.CONFLICT:
-                self.err(f"WARNING: {p.lw_unit_file} was not written by CST: left alone\n")
+                self.err(f"WARNING: {self.lw_unit_file} was not written by CST: left alone\n")
             if self.lw_prog_st == OwnedState.CONFLICT:
                 self.err(f"WARNING: {p.lw_prog} was not written by CST: left alone\n")
             return
@@ -551,8 +569,8 @@ class Change(Checks):
             return
         if self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE):
             self.out(self.m.user_systemd.disable(UnitName(unit), now=True, output=OutputMode.STDOUT).stdout)
-            self.checked(["remove-text", "--home", p.home, p.lw_unit_file])
-            self.out(f"removed:   {p.lw_unit_file} (stopped and disabled)\n")
+            self.checked(["remove-text", "--home", p.home, self.lw_unit_file])
+            self.out(f"removed:   {self.lw_unit_file} (stopped and disabled)\n")
             self._must_result(self.m.user_systemd.daemon_reload_result(output=OutputMode.INHERIT))
         if self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
             self.checked(["remove", "--home", p.home, "bluetooth/bt-ldac-watch"])
@@ -580,7 +598,7 @@ class Change(Checks):
         wp, le = self.revert_files()
         self.out(f"== LDAC rate watcher: {LDAC_UNIT}\n")
         self.lw_plan()
-        lw = self.lw_ours_present()
+        lw = self.lw_ours_present() or bool(self.lw_stale)
         self.lw_remove()
         bt = changed_mc or self.bt_owed
         restart = bt or wp or le or self.wp_owed  # a bluetoothd restart takes WirePlumber's endpoints

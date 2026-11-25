@@ -14,7 +14,7 @@ import os.path
 import re
 from typing import Final, Literal
 
-from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
+from bluetooth.domain import LDAC_PROG, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.files import OwnedState
 from cst_core.domain.install import InstallReportWord
@@ -36,6 +36,9 @@ SETUP_SCRIPT: Final = MODULE_BY_NAME["bluetooth"].script  # the shell front cst 
 REFUSED_CONFLICT_NOTE: Final = "not written by CST: apply refuses; move it away by hand"
 LDAC_WATCHER_LABEL: Final = "LDAC rate watcher"  # the watcher's row in plan and status
 LE_AUDIO_LABEL: Final = "LE Audio"  # LE Audio's row in plan and status (and status's section)
+# The row of an older CST's copy of the watcher's unit, under the shell's XDG_CONFIG_HOME.
+LW_STALE_NOTE: Final = "an older CST's copy, where your user manager does not read units: apply removes it"
+LW_STALE_FOREIGN_NOTE: Final = "recorded as CST's, not written by CST: left alone; apply drops its record line"
 # plan's reasons for bluetoothd's restart: main.conf changes, or only the record owes it (an earlier run
 # that did not restart it: --no-restart, --force --no-restart, a question answered no, a stopped run).
 _BT_RESTART_DROPS: Final = "apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
@@ -328,10 +331,6 @@ class Paths:
     def lw_prog(self) -> str:
         """The watcher's program, where the unit's ExecStart (bluetooth.domain.LDAC_PROG, %h/...) names it."""
         return self.home + LDAC_PROG.removeprefix("%h")
-
-    @property
-    def lw_unit_file(self) -> str:
-        return f"{self.config}/systemd/user/{LDAC_UNIT}"
 
     @property
     def pending(self) -> str:

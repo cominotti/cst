@@ -16,6 +16,7 @@ from bluetooth.setup import wiring as bt_wiring
 from bluetooth.setup.domain import Config, Options, Paths, parse_command_line, resolve
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.domain.files import UnitFileState
+from cst_core.domain.units import UNIT_PATH_PROP
 from cst_core.ports import CommandResult, OutputMode, UnitName
 from swap import wiring as swap_wiring
 from toolchains.adapters import units as tc_units
@@ -115,6 +116,7 @@ class SystemctlReachTest(unittest.TestCase):
                 run.unit_show("bluetooth.service", user=False)
                 run.unit_show("wireplumber.service", user=True)
                 run.m.user_systemd_host.show_value(UnitName("wireplumber"), "MainPID", output=OutputMode.STDOUT)
+                run.m.user_systemd_host.show_value(None, UNIT_PATH_PROP)  # the watcher unit's folder
                 run.m.user_systemd_host.is_enabled(UnitName("cst-bt-ldac48.service"), output=OutputMode.STDOUT)
                 run.m.user_systemd_host.is_active(UnitName("cst-bt-ldac48.service"), output=OutputMode.STDOUT)
                 run.m.user_systemd.show_environment()
@@ -127,6 +129,7 @@ class SystemctlReachTest(unittest.TestCase):
                 self.assertEqual(
                     reach(seen),
                     [
+                        ("show", container),
                         ("show", container),
                         ("show", container),
                         ("show", container),

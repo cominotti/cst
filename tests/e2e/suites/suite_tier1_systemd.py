@@ -11475,7 +11475,12 @@ EOF
         show-environment names the other folder. (d) tester, `systemctl --user set-environment
         XDG_CONFIG_HOME=...` and a daemon-reload: ~/.config/systemd/user, though show-environment names
         the other folder. So CST names the folder after UnitPath (cst_core's user_unit_dir), not after
-        show-environment or the shell. tester's manager is never restarted; e2e220's account goes."""
+        show-environment or the shell. Then cst bluetooth as tester with XDG_CONFIG_HOME in the shell
+        only and an older CST's copy of the watcher's unit recorded under it: apply writes the unit to
+        ~/.config/systemd/user, the manager loads it from there (FragmentPath), enables and starts it,
+        the older copy is removed and forgotten, plan says the unit is up to date, revert removes it
+        (before, apply wrote under the shell's folder and stopped at `systemctl --user enable`). tester's
+        manager is never restarted; e2e220's account goes."""
         c = self.SYSTEMD_CONTAINER
         if exec_bash(c, "getent passwd e2e220 || getent passwd 1220 || true").stdout.strip():
             self.skipTest("the account e2e220 or the uid 1220 is taken")
@@ -11566,6 +11571,60 @@ EOF
             same d "$T/.config/systemd/user" tester@
             [[ "$(env_xdg tester@)" == "$T/xdgD" ]] || { echo "(d) show-environment: $(env_xdg tester@)" >&2; exit 1; }
             systemctl --user -M tester@ unset-environment XDG_CONFIG_HOME
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Part 2: cst bluetooth as tester with XDG_CONFIG_HOME in the shell only, and an older CST's copy
+        # of the watcher's unit written and recorded under it: apply writes the unit where the manager
+        # reads units (~/.config/systemd/user), which then loads, enables and starts it, and removes the
+        # older copy; plan has nothing left to say of the unit; revert removes it. Before, apply wrote
+        # under $XDG_CONFIG_HOME/systemd/user and stopped at `systemctl --user enable`.
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "XDG_CONFIG_HOME=/home/tester/xdg220 /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1; "
+            "rm -rf /home/tester/xdg220",
+            check=False,
+        )
+        exec_bash(c, "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf")
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_220
+            trap 'echo "test_220 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            X="$H/xdg220"
+            unit="$H/.config/systemd/user/cst-bt-ldac48.service"
+            old="$X/systemd/user/cst-bt-ldac48.service"
+            rec="$H/.local/state/cst/installed.json"
+            mkdir -p "$X/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_RATE=48000\nLE_AUDIO=off\n' >"$X/cst/bluetooth.conf"
+            export XDG_CONFIG_HOME="$X"
+            python3 -I -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from bluetooth.domain import render_unit; print(render_unit("00:11:22:33:44:55", "48000"), end="")' |
+                python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old" 0644 --component bluetooth:ldac >/dev/null
+            [[ -f "$old" ]]
+            grep -qF "\"$old\"" "$rec"
+            [[ ! -e "$unit" ]] || { echo "the unit is there already" >&2; exit 1; }
+            step apply apply --yes --no-restart
+            [[ -f "$unit" ]] || { echo "the unit is not in ~/.config/systemd/user" >&2; exit 1; }
+            grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
+            [[ ! -e "$old" ]]
+            if grep -qF "\"$old\"" "$rec"; then echo "the older copy is still recorded" >&2; exit 1; fi
+            [[ "$(systemctl --user show -P LoadState cst-bt-ldac48.service)" == loaded ]]
+            [[ "$(systemctl --user show -P FragmentPath cst-bt-ldac48.service)" == "$unit" ]]
+            [[ "$(systemctl --user is-enabled cst-bt-ldac48.service)" == enabled ]]
+            systemctl --user is-active --quiet cst-bt-ldac48.service
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show plan "$out"
+            grep -qE '^  ok +systemd/user/cst-bt-ldac48.service +up to date' <<<"$out"
+            if grep -qF "older CST" <<<"$out"; then echo "plan still names an older copy" >&2; exit 1; fi
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show revert "$out"
+            [[ ! -e "$unit" ]]
             echo E2E-OK
             """,
         ).stdout

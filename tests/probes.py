@@ -78,6 +78,6 @@ class NoUnitQueries:
         del output
         raise AssertionError("not asked here: show-environment")
 
-    def show_value(self, unit: UnitName, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+    def show_value(self, unit: UnitName | None, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         del output
         raise AssertionError(f"not asked here: show -p {prop} --value {unit}")

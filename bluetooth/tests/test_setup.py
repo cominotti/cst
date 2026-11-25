@@ -195,6 +195,9 @@ LW = "cst-bt-ldac48.service"
 BT_MAIN_CONF_ROW = "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
 BT_OWED_ROW = "still owed: an earlier run did not restart it; apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
 OWED = "(still owed: an earlier run did not restart it)"
+# The rows of an older CST's copy of the watcher's unit (where the user manager does not read units).
+LW_STALE = "an older CST's copy, where your user manager does not read units: apply removes it"
+LW_STALE_FOREIGN = "recorded as CST's, not written by CST: left alone; apply drops its record line"
 
 
 def row(word: str, label: str, note: str = "") -> str:
@@ -1695,6 +1698,85 @@ class WatcherTest(SetupCase):
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
         self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), m.run("plan").stdout)
 
+    def test_the_unit_goes_where_the_user_manager_reads_units(self) -> None:
+        # XDG_CONFIG_HOME in the shell only: the user manager reads ~/.config/systemd/user (its UnitPath,
+        # FAKE's default here), so the unit goes there. Before, it went to $XDG_CONFIG_HOME/systemd/user,
+        # which the manager never loaded (tier 1 test_220: `systemctl --user enable` then fails).
+        m = self.machine(DONE)
+        xdg = os.path.join(m.home, "xdg")
+        m.put(os.path.join(xdg, "cst", "bluetooth.conf"), f"DEVICE={MAC}\nLDAC_RATE=48000\n")
+        env = {"XDG_CONFIG_HOME": xdg}
+        r = m.run("apply", "--no-restart", env=env)
+        self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
+        self.assertIn("systemctl --user show -p UnitPath --value", r.calls)
+        self.assertFalse(os.path.exists(os.path.join(xdg, "systemd")), r.text)
+        self.assertIn(m.lw_unit, json.loads(self.text(m.record))["files"])
+        self.assertIn(row("ok", f"systemd/user/{LW}", "up to date (LDAC to 48000 Hz)"), m.run("plan", env=env).stdout)
+
+    def test_the_unit_follows_the_folder_the_manager_names(self) -> None:
+        # A manager with XDG_CONFIG_HOME of its own (UnitPath names it first): there. One that does not
+        # answer: ~/.config/systemd/user, systemd's default.
+        for answer, folder in (
+            ("y/systemd/user /etc/systemd/user\n", "y/systemd/user"),
+            (None, ".config/systemd/user"),
+        ):
+            with self.subTest(answer=answer):
+                m = self.machine(DONE, "LDAC_RATE=48000\n")
+                if answer is None:
+                    m.flag("no-unit-path")
+                else:
+                    m.put("unit-path", f"{m.home}/{answer}")
+                unit = os.path.join(m.home, folder, LW)
+                r = m.run("apply", "--no-restart")
+                self.assertIn(f"written:   {unit} (LDAC to 48000 Hz)\n", r.stdout)
+                self.assertTrue(os.path.isfile(unit))
+                self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, unit]))
+
+    def test_an_older_copy_elsewhere_is_removed(self) -> None:
+        # The upgrade: an older CST wrote and recorded the unit under the shell's XDG_CONFIG_HOME
+        # (here: an apply while the manager named that folder). Now the manager reads ~/.config: plan
+        # shows the older copy's removal, apply removes it through the installer and writes the new
+        # one, a second apply changes nothing, revert removes the new one.
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        self.assertTrue(os.path.isfile(old))
+        os.unlink(m.state + "/unit-path")
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(row("remove", "~/xdg/systemd/user/" + LW, LW_STALE), r.stdout)
+        self.assertIn(row("write", f"systemd/user/{LW}", "the LDAC rate watcher (LDAC_RATE=48000)"), r.stdout)
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"removed:   {old} (an older CST's copy)\n", r.stdout)
+        self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual(sorted(json.loads(self.text(m.record))["files"]), sorted([m.lw_prog, m.lw_unit]))
+        r = m.run("apply", "--no-restart")
+        self.assertNotIn("older CST", r.stdout)
+        self.assertIn(f"unchanged: {LW} enabled and active\n", r.stdout)
+        self.assertNotIn(LW_STALE, m.run("plan").stdout)
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
+        self.assertEqual(json.loads(self.text(m.record))["files"], {})
+
+    def test_an_older_copy_cst_did_not_write_is_left_alone(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        m.put(old, "[Unit]\nDescription=mine\n")
+        r = m.run("plan")
+        self.assertIn(row("forget", "~/xdg/systemd/user/" + LW, LW_STALE_FOREIGN), r.stdout)
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertIn(
+            f"WARNING: {old} was not written by CST: left alone (forgotten from the install record)\n", r.stderr
+        )
+        self.assertEqual(self.text(old), "[Unit]\nDescription=mine\n")
+        self.assertEqual(json.loads(self.text(m.record))["files"], {})
+        self.assertNotIn(LW_STALE_FOREIGN, m.run("plan").stdout)
+
     def test_apply_adopts_a_current_watcher_the_record_does_not_list(self) -> None:
         """A current program and unit missing from the install record (installed before it existed)
         are added to it, with no write, no daemon-reload and no restart."""
@@ -2028,7 +2110,8 @@ class StatusTest(SetupCase):
 
 class EnvironmentTest(SetupCase):
     """The commands get the caller's environment: nothing added, LC_CTYPE as it was; only the
-    `systemctl show` of a unit's state (cst_core's SystemdPort.show) adds LC_ALL=C."""
+    `systemctl show` of a unit's state (cst_core's SystemdPort.show) and of the user manager's UnitPath
+    (show_value of the manager itself, which CST reads) add LC_ALL=C."""
 
     def test_no_leak(self) -> None:
         m = self.machine(DONE)
@@ -2043,7 +2126,7 @@ class EnvironmentTest(SetupCase):
             shows: list[set[str]] = []
             for line in m.env_log().splitlines():
                 call, words = line.split("\t", 1)
-                if call.startswith("systemctl") and "show -p ActiveState" in call:
+                if call.startswith("systemctl") and ("show -p ActiveState" in call or "show -p UnitPath" in call):
                     shows.append(set(words.split()))
                 else:
                     seen |= set(words.split())

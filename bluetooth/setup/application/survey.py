@@ -9,6 +9,7 @@ runs, their arguments and where their output goes are bluetooth-setup.sh's.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from functools import cached_property
 import re
 from typing import Literal
 
@@ -60,12 +61,21 @@ from bluetooth.setup.domain import (
     watcher_prog_state,
     wp_word,
 )
+from bluetooth.setup.application import watcher_unit
 from bluetooth.setup.application.inputs import rule_headsets
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
 from cst_core.domain.units import ActiveState, EnablementState
-from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
+from cst_core.ports import (
+    ClockPort,
+    CommandResult,
+    CommandRunnerPort,
+    InstallRecordPort,
+    OutputMode,
+    SystemdPort,
+    UnitName,
+)
 
 
 class StepFailed(Exception):
@@ -90,6 +100,7 @@ class SetupMachine:
     host: BluetoothHostPort
     container: bool
     bt_timeout: int
+    records: InstallRecordPort  # the user's install record, read only (the watcher's older copies)
     lc_ctype: str  # what CST_LC_CTYPE hands the installer ("" or "=VALUE")
     c_locale: tuple[str, ...]  # env's words for the C locale (cst_core's c_locale): a command sudo runs
     python: str  # the system Python the installer runs on
@@ -134,6 +145,7 @@ class Survey:
         self.le_change = False
         self.bearer_state = BearerState.NONE
         self.lw_want = False
+        self.lw_stale: tuple[str, ...] = ()  # an older CST's copies of the watcher's unit, elsewhere
         self.lw_unit_st: OwnedState | Literal[""] = ""
         self.lw_prog_st: OwnedState | Literal[""] = ""
         self.lw_enabled = ""
@@ -453,8 +465,9 @@ class Survey:
         f = self.m.files
         self.lw_want = bool(self.c.ldac_rate) and self.headset  # the watcher is for one headset
         self.lw_unit_st = self.file_state(
-            self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
+            self.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
+        self.lw_stale = watcher_unit.older_copies(self.m.records, self.p.home, self.lw_unit_file)
         self.lw_prog_st = self._lw_prog_state() if f.exists(self.p.lw_prog) else OwnedState.MISSING
         u = self.m.user_systemd_host
         self.lw_enabled = u.is_enabled(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
@@ -462,9 +475,14 @@ class Survey:
         if self.lw_want:
             want = (OwnedState.OK, OwnedState.OK, "enabled", ActiveState.ACTIVE)
             done = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) == want
-            self.lw_change = not done
+            self.lw_change = not done or bool(self.lw_stale)
         else:
-            self.lw_change = self.lw_ours_present()
+            self.lw_change = self.lw_ours_present() or bool(self.lw_stale)
+
+    @cached_property
+    def lw_unit_file(self) -> str:
+        """The watcher's unit file, where the user manager reads units (watcher_unit): asked once, on first use."""
+        return watcher_unit.unit_file(self.m.user_systemd_host, self.p.home)
 
     def _lw_prog_state(self) -> OwnedState:
         """The watcher's program by the installer's plan (watcher_prog_state; a failed plan's error on stderr)."""
@@ -616,6 +634,8 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
+        for row in watcher_unit.stale_rows(self.m.files, self.lw_stale, self.tilde):
+            self.item(*row)
         if self.lw_enabled != EnablementState.ENABLED or self.lw_active != ActiveState.ACTIVE:
             why = (
                 f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it"
@@ -639,6 +659,8 @@ class Survey:
             self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
         if self.lw_prog_st == OwnedState.CONFLICT:
             self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
+        for row in watcher_unit.stale_rows(self.m.files, self.lw_stale, self.tilde):
+            self.item(*row)
 
     def lw_last_failure(self) -> bool:
         """The watcher's last outcome in its log was a failure (sets lw_fail)."""
@@ -719,7 +741,7 @@ class Survey:
             self.diff(self.p.le_conf, render_le_off())
         if self.lw_want and self.lw_unit_st == OwnedState.CHANGE:
             self.section(f"{self.lw_unit_label()}, as apply would write it")
-            self.diff(self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate))
+            self.diff(self.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate))
         self.out("\n")
         if (
             self.mc_changed

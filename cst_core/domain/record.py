@@ -211,6 +211,12 @@ def without_files(rec: InstallRecord, dests: list[str]) -> InstallRecord:
     return InstallRecord(out, _named_states(out, rec.components))
 
 
+def component_dests(rec: InstallRecord, component: str) -> list[str]:
+    """The destinations rec lists for component, sorted (generated text too: a setup command that writes
+    one finds the copies an older CST left elsewhere)."""
+    return sorted(d for d, f in rec.files.items() if f.component == component)
+
+
 def _named_states(files: Mapping[str, RecordedFile], states: Mapping[str, ComponentState]) -> dict[str, ComponentState]:
     """The states of the components some file in files names (no state without a file)."""
     left = {f.component for f in files.values()}

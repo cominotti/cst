@@ -46,6 +46,7 @@ from cst_core.domain.record import (
     InstallRecord,
     RecordedFile,
     RecordFormatError,
+    component_dests,
     parse_record,
     render_record,
     with_files,
@@ -141,6 +142,14 @@ class MemoryRecord:
 
 
 class RecordDomainTest(unittest.TestCase):
+    def test_component_dests(self) -> None:
+        rec = InstallRecord(
+            {"/h/b": _f(component="m:t"), "/h/a": _f(component="m:t"), "/etc/c": _f(component="m:u")}, {}
+        )
+        self.assertEqual(component_dests(rec, "m:t"), ["/h/a", "/h/b"])
+        self.assertEqual(component_dests(rec, "m:none"), [])
+        self.assertEqual(component_dests(EMPTY_RECORD, "m:t"), [])
+
     def test_render_and_parse_give_back_the_same_record(self) -> None:
         rec = InstallRecord({"/etc/a": _f(), "/etc/t": _f("bb")}, {"m:t": ComponentState.DONE})
         self.assertEqual(parse_record(render_record(rec)), rec)
