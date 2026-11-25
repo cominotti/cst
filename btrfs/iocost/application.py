@@ -5,8 +5,9 @@ apply (not live-only) installs btrfs:iocost, writes io.cost.qos, reloads systemd
 reloads the udev rules and only then marks the component done; the first step that fails stops there.
 revert (not live-only) marks it pending, stops the service, removes the component, reloads systemd and
 udev, then resets the devices CST manages. A full apply or revert holds the component lock from its
-first step to its last; every read, write and save of io.cost.qos and the managed-devices file happens
-under the io.cost.qos lock. Every read and write goes through the ports (ports.py).
+first step to its last; their reads, writes and saves of io.cost.qos and the managed-devices file
+happen under the io.cost.qos lock (status and plan read both without it: they change nothing). Every
+read and write goes through the ports (ports.py).
 """
 
 from __future__ import annotations
