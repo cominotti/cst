@@ -111,16 +111,20 @@ class _Output:
         except OSError, ValueError:  # not a pipe (a test's bytes)
             self.fd = None
 
+    def _line_end(self) -> int | None:
+        """Where the first whole line of pending ends (the rest, at the end of the output), or None."""
+        end = self.pending.find(b"\n")
+        if end >= 0:
+            return end + 1
+        return len(self.pending) if self.ended and self.pending else None
+
     def line(self) -> str | None:
         """The first whole line of pending (the rest at the end of the output), or None."""
-        end = self.pending.find(b"\n")
-        if end < 0 and not (self.ended and self.pending):
-            return None
-        return self.pending[: end + 1 if end >= 0 else len(self.pending)].decode(errors="replace")
+        end = self._line_end()
+        return None if end is None else self.pending[:end].decode(errors="replace")
 
     def drop_line(self) -> None:
-        end = self.pending.find(b"\n")
-        del self.pending[: end + 1 if end >= 0 else len(self.pending)]
+        del self.pending[: self._line_end() or len(self.pending)]
 
     def fill(self, timeout: float | None = None) -> bool:
         """More of the output into pending, once there is some (or its end); False when timeout seconds
