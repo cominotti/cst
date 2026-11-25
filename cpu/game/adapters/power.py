@@ -6,33 +6,17 @@ import os
 import re
 from typing import Final
 
-from cst_core.adapters.files import read_text
 from cst_core.domain.text import group
-from cpu.game.adapters.host import read_stripped, write_sysfs_line
+from cpu.game.adapters.host import read_stripped
+from cpu.game.adapters.kernel import GameSysValues
 from cpu.game.domain.sysfs import card_number, is_card
 
 _DRI_FD_RE: Final = re.compile(r"^/dev/dri/(renderD[0-9]+|card[0-9]+)")
 _CONNECTED_STATE: Final = "connected"
 
 
-class GameSysfsFiles:
+class GameSysfsFiles(GameSysValues):
     """sysfs and the processes' DRM file descriptors, as files."""
-
-    def read_text(self, path: str) -> str | None:
-        """The file's text; None when it cannot be read."""
-        return read_text(path)
-
-    def read_stripped(self, path: str) -> str | None:
-        """The file's text without its last newlines; None when it cannot be read."""
-        return read_stripped(path)
-
-    def writable(self, path: str) -> bool:
-        """The file can be written."""
-        return os.access(path, os.W_OK)
-
-    def is_dir(self, path: str) -> bool:
-        """The folder is there."""
-        return os.path.isdir(path)
 
     def list_dir(self, path: str) -> list[str]:
         """The names in the folder."""
@@ -89,7 +73,3 @@ class GameSysfsFiles:
             if card is not None:
                 cards.add(card)
         return cards
-
-    def write(self, path: str, value: str) -> bool:
-        """value and a newline written to the file; False when the write failed."""
-        return write_sysfs_line(path, value)

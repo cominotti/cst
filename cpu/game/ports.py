@@ -116,8 +116,9 @@ class GameUnitFilesPort(Protocol):
         ...
 
 
-class GameKernelPort(Protocol):
-    """The cgroup tree and /proc as the profile reads and writes them, and the files its undo writes back."""
+class GameSysValuesPort(Protocol):
+    """The kernel's files that hold one value (the cgroup tree, /proc and sysfs), as the profile reads and
+    writes them: what its kernel and power ports share."""
 
     def read_text(self, path: str) -> str | None:
         """The file's text; None when it cannot be read."""
@@ -127,20 +128,28 @@ class GameKernelPort(Protocol):
         """The file's text without its last newlines; None when it cannot be read."""
         ...
 
-    def exists(self, path: str) -> bool:
-        """The file is there."""
-        ...
-
-    def lexists(self, path: str) -> bool:
-        """The path is there (a link counts, wherever it points)."""
-        ...
-
     def is_dir(self, path: str) -> bool:
         """The folder is there."""
         ...
 
     def writable(self, path: str) -> bool:
         """The file can be written."""
+        ...
+
+    def write(self, path: str, value: str) -> bool:
+        """value and a newline written to the file; False when the write failed."""
+        ...
+
+
+class GameKernelPort(GameSysValuesPort, Protocol):
+    """The cgroup tree and /proc as the profile reads and writes them, and the files its undo writes back."""
+
+    def exists(self, path: str) -> bool:
+        """The file is there."""
+        ...
+
+    def lexists(self, path: str) -> bool:
+        """The path is there (a link counts, wherever it points)."""
         ...
 
     def holds(self, path: str, needle: str) -> bool:
@@ -160,29 +169,9 @@ class GameKernelPort(Protocol):
         read: a caller that stops early reads no more."""
         ...
 
-    def write(self, path: str, value: str) -> bool:
-        """value and a newline written to the file; False when the write failed."""
-        ...
 
-
-class GamePowerPort(Protocol):
+class GamePowerPort(GameSysValuesPort, Protocol):
     """sysfs as the profile's power steps read and write it: EPP, cpuidle and the GPU's power files."""
-
-    def read_text(self, path: str) -> str | None:
-        """The file's text; None when it cannot be read."""
-        ...
-
-    def read_stripped(self, path: str) -> str | None:
-        """The file's text without its last newlines; None when it cannot be read."""
-        ...
-
-    def writable(self, path: str) -> bool:
-        """The file can be written."""
-        ...
-
-    def is_dir(self, path: str) -> bool:
-        """The folder is there."""
-        ...
 
     def list_dir(self, path: str) -> list[str]:
         """The names in the folder (OSError when it cannot be listed)."""
@@ -198,10 +187,6 @@ class GamePowerPort(Protocol):
 
     def connected_cards(self, sys_drm: str, cards: list[str]) -> list[str]:
         """The cards with a connected display, in the order of cards."""
-        ...
-
-    def write(self, path: str, value: str) -> bool:
-        """value and a newline written to the file; False when the write failed."""
         ...
 
 

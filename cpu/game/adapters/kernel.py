@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The cgroup tree and /proc as the game profile reads and writes them (cpu.game.ports.GameKernelPort)."""
+"""The cgroup tree and /proc as the game profile reads and writes them (cpu.game.ports.GameKernelPort), and the
+kernel's one-value files the power adapter reads and writes the same way (GameSysValues)."""
 
 from collections.abc import Iterator
 import glob
@@ -10,8 +11,9 @@ from cst_core.adapters.files import read_text
 from cpu.game.adapters.host import holds, read_stripped, write_sysfs_line
 
 
-class GameKernelFiles:
-    """The cgroup tree and /proc as files."""
+class GameSysValues:
+    """The kernel's files that hold one value (the cgroup tree, /proc, sysfs) as files
+    (cpu.game.ports.GameSysValuesPort)."""
 
     def read_text(self, path: str) -> str | None:
         """The file's text; None when it cannot be read."""
@@ -21,14 +23,6 @@ class GameKernelFiles:
         """The file's text without its last newlines; None when it cannot be read."""
         return read_stripped(path)
 
-    def exists(self, path: str) -> bool:
-        """The file is there."""
-        return os.path.exists(path)
-
-    def lexists(self, path: str) -> bool:
-        """The path is there (a link counts)."""
-        return os.path.lexists(path)
-
     def is_dir(self, path: str) -> bool:
         """The folder is there."""
         return os.path.isdir(path)
@@ -36,6 +30,22 @@ class GameKernelFiles:
     def writable(self, path: str) -> bool:
         """The file can be written."""
         return os.access(path, os.W_OK)
+
+    def write(self, path: str, value: str) -> bool:
+        """value and a newline written to the file; False when the write failed."""
+        return write_sysfs_line(path, value)
+
+
+class GameKernelFiles(GameSysValues):
+    """The cgroup tree and /proc as files."""
+
+    def exists(self, path: str) -> bool:
+        """The file is there."""
+        return os.path.exists(path)
+
+    def lexists(self, path: str) -> bool:
+        """The path is there (a link counts)."""
+        return os.path.lexists(path)
 
     def holds(self, path: str, needle: str) -> bool:
         """The file holds needle (grep -qsF)."""
@@ -58,7 +68,3 @@ class GameKernelFiles:
                 subdirs.clear()
             if "cgroup.procs" in files:
                 yield read_text(os.path.join(d, "cgroup.procs")) or ""
-
-    def write(self, path: str, value: str) -> bool:
-        """value and a newline written to the file; False when the write failed."""
-        return write_sysfs_line(path, value)
