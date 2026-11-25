@@ -895,6 +895,38 @@ class SpaceGuardTest(Base):
                     )
                     self.assertEqual(self.core_calls(), [])
 
+    def test_a_valid_emergency_limit_still_purges_when_another_guard_setting_is_invalid(self) -> None:
+        # At or below a valid EMERGENCY_AT_OR_BELOW_GIB the purge runs, as it did before the guard's
+        # settings were checked first; the run then stops for the invalid setting (exit 1, its line). An
+        # invalid emergency limit itself stops the run with no purge: no number to purge at.
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        for key, value, purged in (
+            ("SKIP_AT_OR_BELOW_GIB", "250GiB", True),
+            ("RESUME_ABOVE_GIB", "abc", True),
+            ("RESUME_ABOVE_GIB", "\N{NO-BREAK SPACE}270", True),
+            ("EMERGENCY_AT_OR_BELOW_GIB", "150GiB", False),
+        ):
+            with self.subTest(key=key, value=value):
+                shutil.rmtree(self.state, ignore_errors=True)
+                self.conf(**{key: value})
+                self.machine(free=[100 * GIB, 110 * GIB])
+                self.forget_calls()
+                r = self.run_prog("hourly")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(
+                    log(
+                        3,
+                        f"{key}={value!r} in {conf}: not a number of GiB the space guard can hold at: no "
+                        "snapshot until it is fixed",
+                    ),
+                    self.lines(r.stdout),
+                )
+                want = [self.prune_call("--allow-mass-delete", policy="24h 3d")] if purged else []
+                self.assertEqual(self.core_calls(), want)
+                self.assertEqual(os.path.exists(self.state_file("emergency")), purged)
+                if purged:
+                    self.assertIn(log(4, "emergency purge done (rc=0); free now 110 GiB"), self.lines(r.stdout))
+
     def test_emergency_purge(self) -> None:
         self.machine(free=[150 * GIB, 160 * GIB])
         self.core(prune={"out": log(5, "home: deleted 3") + "\n"})

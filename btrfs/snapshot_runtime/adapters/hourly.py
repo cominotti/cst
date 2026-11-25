@@ -142,10 +142,11 @@ class RunStopped(Exception):
 
 
 def guard_limits(m: SnapshotRun) -> dict[str, int]:
-    """The space guard's settings (GUARD_KEYS) as numbers of GiB, as bash arithmetic computes them
-    (guard_number), read before the guard looks at the free space. A setting it cannot compute (250GiB,
-    abc, 1 x, a no-break space) stops the run, with exit 1 and a line naming each such setting and its
-    value, whether this run's comparison would read it or not: the run never goes on with no limit."""
+    """The space guard's settings (GUARD_KEYS) that it can hold at, as numbers of GiB, as bash arithmetic
+    computes them (guard_number), read before the guard looks at the free space. Each setting it cannot
+    compute (250GiB, abc, 1 x, a no-break space) gets a line naming it and its value, and is left out:
+    after_conversions then stops the run (exit 1), whether this run's comparison would read it or not,
+    once a valid emergency limit has had its purge: the run never goes on with no limit."""
     limits: dict[str, int] = {}
     for key in GUARD_KEYS:
         value = m.settings[key]
@@ -158,8 +159,6 @@ def guard_limits(m: SnapshotRun) -> dict[str, int]:
                 f"{key}={value!r} in {m.conf}: not a number of GiB the space guard can hold at: no snapshot "
                 "until it is fixed",
             )
-    if len(limits) < len(GUARD_KEYS):
-        raise RunStopped
     return limits
 
 
@@ -248,8 +247,15 @@ def after_conversions(m: SnapshotRun) -> int:
         m.log(3, "cannot read free space")
         return 1
     paused = os.path.exists(f"{m.state}/paused")
-    if free <= limits["EMERGENCY_AT_OR_BELOW_GIB"] * GIB:
-        return emergency(m, free)
+    stopped = len(limits) < len(GUARD_KEYS)
+    # A valid emergency limit still purges when another guard setting is invalid: the purge is what
+    # frees a nearly full disk. The run then stops for the other setting (exit 1).
+    emergency_at = limits.get("EMERGENCY_AT_OR_BELOW_GIB")
+    if emergency_at is not None and free <= emergency_at * GIB:
+        rc = emergency(m, free)
+        return 1 if stopped else rc
+    if stopped:
+        raise RunStopped
     m.rm_f(f"{m.state}/emergency")
     skip, resume = limits["SKIP_AT_OR_BELOW_GIB"], limits["RESUME_ABOVE_GIB"]
     if free <= skip * GIB or (paused and free <= resume * GIB):

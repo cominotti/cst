@@ -9482,6 +9482,11 @@ echo test_110-ok
         names the setting and its value, and the core is never asked for a snapshot. Before, bash's error
         line and a false test: the snapshot was made with no limit. RESUME_ABOVE_GIB=abc, not paused, from
         a shell: the same stop. With valid values the same run makes its snapshot (cannot bite otherwise).
+        Last, 100 GiB free (at or below the valid EMERGENCY_AT_OR_BELOW_GIB=150) with RESUME_ABOVE_GIB=abc:
+        the emergency purge still runs (the core is asked for a prune with --allow-mass-delete, the
+        emergency mark is set), then the run stops for RESUME_ABOVE_GIB (exit 1, its line); with
+        EMERGENCY_AT_OR_BELOW_GIB='150GiB' itself, no purge. The alert, with no btrfs-notify, is kept in
+        the pending folder, which is set aside and put back.
         A fake cannot show that the installed front hands hourly to the runtime under a real unit and that
         the unit fails, which is what the health check and cst doctor see."""
         d = "/var/tmp/e2e-snapshot-guard"
@@ -9489,12 +9494,17 @@ echo test_110-ok
         inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         files = "btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot"
         core = "/usr/local/sbin/btrfs-snapshot-core"
+        notify = "/usr/local/sbin/btrfs-notify"
+        pending = "/var/lib/cst-alerts/pending"
         found = exec_bash(self.SYSTEMD_CONTAINER, f"[ ! -e {core} ]", check=False)
         self.assertEqual(found.returncode, 0, f"a btrfs-snapshot-core is already installed ({core}) {found.stderr}")
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
             f"{inst} remove {files} >/dev/null 2>&1; rm -f {core}; systemctl reset-failed e2e-217-hourly.service; "
+            f"if [ -e {d}/notify.bak ]; then mv -f {d}/notify.bak {notify}; fi; "
+            f"if [ -e {d}/pending.bak ]; then rm -rf {pending}; mv {d}/pending.bak {pending}; "
+            f"elif [ -e {d}/made-pending ]; then rm -rf {pending}; fi; "
             f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock; "
             f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
             check=False,
@@ -9504,17 +9514,20 @@ echo test_110-ok
             rf"""
 set -E
 trap 'echo "test_217 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
-d={d} conf={conf} core={core}
+d={d} conf={conf} core={core} notify={notify} pending={pending}
 S=/usr/local/sbin/btrfs-snapshot
 rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock
 install -d -m 0755 "$d" "$d/bin" /etc/btrfs-setup
 if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+if [ -e "$notify" ]; then mv "$notify" "$d/notify.bak"; fi
+if [ -e "$pending" ]; then mv "$pending" "$d/pending.bak"; else touch "$d/made-pending"; fi
 {inst} install {files} >/dev/null
 # The fake core writes down what it was asked for, then succeeds.
 printf '%s\n' '#!/bin/bash' "echo \"\$*\" >>$d/core-args" 'exit 0' >"$core"
 chmod 0755 "$core"
-# The fake btrfs: 300 GiB free, above every default limit.
-printf '%s\n' '#!/bin/bash' 'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     322122547200      (min: 322122547200)"; fi' 'exit 0' \
+# The fake btrfs: 300 GiB free, above every default limit (or the bytes in $d/free), and subvolume sync.
+printf '%s\n' '#!/bin/bash' "f=\$(cat $d/free 2>/dev/null || echo 322122547200)" \
+    'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     $f      (min: $f)"; fi' 'exit 0' \
     >"$d/bin/btrfs"
 chmod 0755 "$d/bin/btrfs"
 P="$d/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
@@ -9547,6 +9560,28 @@ rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
 cat "$d/out" "$d/core-args"
 [ "$rc" = 0 ]
 grep -q '^snapshot' "$d/core-args"
+
+# 4. 100 GiB free, at or below the valid EMERGENCY_AT_OR_BELOW_GIB=150, and RESUME_ABOVE_GIB=abc: the
+# emergency purge still runs, then the run stops for RESUME_ABOVE_GIB (exit 1, its line).
+rm -rf /var/lib/btrfs-snapshot; : >"$d/core-args"
+echo 107374182400 >"$d/free"
+base "RESUME_ABOVE_GIB=abc" "EMERGENCY_AT_OR_BELOW_GIB=150"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out" "$d/core-args"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: RESUME_ABOVE_GIB='abc' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+grep -q '^prune .*--allow-mass-delete' "$d/core-args"
+if grep -q '^snapshot' "$d/core-args"; then exit 1; fi
+[ -e /var/lib/btrfs-snapshot/emergency ]
+# An invalid EMERGENCY_AT_OR_BELOW_GIB gives no number to purge at: no purge.
+rm -rf /var/lib/btrfs-snapshot; : >"$d/core-args"
+base "EMERGENCY_AT_OR_BELOW_GIB=150GiB"
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 1 ]
+grep -qF "<3>btrfs-snapshot: EMERGENCY_AT_OR_BELOW_GIB='150GiB' in $conf: not a number of GiB the space guard can hold at" "$d/out"
+[ ! -s "$d/core-args" ]
+[ ! -e /var/lib/btrfs-snapshot/emergency ]
 echo test_217-ok
 """,
         ).stdout
