@@ -695,6 +695,50 @@ def is_unit_file(dest: str) -> bool:
     return dest.endswith(_UNIT_SUFFIXES) and not os.path.dirname(dest).endswith(".d")
 
 
+# The folders a manager loads the unit files and drop-ins CST installs from (recorded_unit): the system
+# manager's, the user managers' that root installs, and the user's own under the home.
+_SYSTEM_UNIT_FOLDER = "/etc/systemd/system"
+_USER_UNIT_FOLDER = "/etc/systemd/user"
+_USER_UNIT_REL = ".config/systemd/user"
+
+
+def _unit_folder_scope(folder: str, home: str) -> UnitScope | None:
+    """Whose manager loads units from folder (home: the user's, "" for root's record), or None."""
+    if folder == _SYSTEM_UNIT_FOLDER:
+        return UnitScope.SYSTEM
+    if folder == _USER_UNIT_FOLDER or (home and folder == os.path.join(home.rstrip("/"), _USER_UNIT_REL)):
+        return UnitScope.USER
+    return None
+
+
+def recorded_unit(dest: str, home: str) -> tuple[UnitScope, str] | None:
+    """(the manager, the unit name) of a recorded path that is a unit file (FOLDER/NAME) or a drop-in
+    (FOLDER/NAME.d/FILE.conf) in a folder a manager loads units from; None for anything else (a
+    *.wants link, a file of NAME.d that is no .conf, a drop-in of a manager's own settings such as
+    journald.conf.d, /run). home: the user's, for ~/.config/systemd/user; "" for root's record."""
+    folder, base = os.path.split(dest)
+    scope = _unit_folder_scope(folder, home)
+    if scope is not None:
+        return (scope, base) if base.endswith(_UNIT_SUFFIXES) else None
+    parent, sub = os.path.split(folder)
+    scope = _unit_folder_scope(parent, home)
+    name = sub.removesuffix(".d")
+    if scope is None or name == sub or not name.endswith(_UNIT_SUFFIXES) or not base.endswith(".conf"):
+        return None
+    return scope, name
+
+
+def unit_applies(name: str, unit_id: str) -> bool:
+    """A recorded unit name applies to a loaded unit's Id: the same name, or a template's (p@.t) to each
+    of its instances (p@i.t). Prefix drop-ins (a-.slice.d) and type-wide ones (service.d) are not matched:
+    CST installs none."""
+    stem, at, suffix = name.partition("@")
+    if not (at and stem and suffix.startswith(".")):
+        return unit_id == name
+    head = f"{stem}@"
+    return unit_id.startswith(head) and unit_id.endswith(suffix) and len(unit_id) > len(head) + len(suffix)
+
+
 def unit_exec_paths(text: str, home: str) -> list[str]:
     """The CST programs a unit runs: every word of its command lines (ExecStart= and the like) under
     /usr/local/ or %h/ (%h as home), in order, without the prefixes systemd allows before the command

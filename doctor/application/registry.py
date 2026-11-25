@@ -27,11 +27,15 @@ def wired_checks(vm_tools: VmToolsPort, installed: InstalledFilesPort | None = N
     def install_check(host: DoctorHostPort) -> Iterator[Result]:
         return install.check_install(host, installed=installed)
 
+    def units_loaded_check(host: DoctorHostPort) -> Iterator[Result]:
+        return install.check_units_loaded(host, installed=installed)
+
     wired: dict[CheckFn, CheckFn] = {}
     for fn, bound in (
         (vm.check_vm_hardware, vm_hardware),
         (vm.check_vm_image_dirs, vm_image_dirs),
         (install.check_install, install_check),
+        (install.check_units_loaded, units_loaded_check),
     ):
         bound.__name__ = fn.__name__  # a crash names the check, as unwired
         wired[fn] = bound
