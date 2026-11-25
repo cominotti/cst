@@ -1993,10 +1993,12 @@ class CompressWorld(FaultPoints):
     The points named in torn take effect first and then fail, as the real adapter can (btrfs/tests/
     test_compress_faults.py, AdapterFailureTest): /etc/fstab renamed into place before its folder's sync
     failed, or a put-back after a failed reload that failed too; an `rpm-ostree kargs` that timed out after
-    its transaction started; a top-mount unit whose put-back failed. With lagging_kargs, a torn kargs change
+    its transaction started; a remount that the kernel made before mount(8) failed (it could not update its
+    mount table, or it was killed after the call); a top-mount unit whose put-back failed. With lagging_kargs, a torn kargs change
     is staged only when its transaction ends: at read_settled_kargs (which, with stuck_kargs, answers that one
     still runs and stages nothing) or settle(). After a failed point named in unreadable_after, its layer's
-    read cannot answer (read_fstab, read_top_mount: None; read_kargs: ok False) until the test clears
+    read cannot answer (read_fstab, read_proc_mounts, read_top_mount: None; read_kargs: ok False) until the
+    test clears
     unreadable. Reads are no points.
 
     update_kargs is rpm-ostree's: each `--delete=OLD` removes that exact argument and each `--append=NEW`
@@ -2040,7 +2042,7 @@ class CompressWorld(FaultPoints):
         return None if "fstab write" in self.unreadable else self.fstab
 
     def read_proc_mounts(self) -> str | None:
-        return self.mounts
+        return None if "remount" in self.unreadable else self.mounts
 
     def read_proc_cmdline(self) -> str | None:
         return self.cmdline
@@ -2135,4 +2137,8 @@ class CompressWorld(FaultPoints):
             )
             return True, ""
 
-        return self.step("remount", remounted, lambda err: (False, str(err.strerror)))
+        def failed(err: OSError) -> tuple[bool, str]:
+            self._torn("remount", remounted)
+            return False, str(err.strerror)
+
+        return self.step("remount", remounted, failed)

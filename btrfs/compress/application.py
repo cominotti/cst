@@ -9,6 +9,7 @@ from btrfs.compress.domain import (
     FSTAB_PATH,
     FSTAB_UNREAD,
     PROC_MOUNTS_PATH,
+    REMOUNT_UNREAD,
     TOP_MOUNT_UNIT_PATH,
     TOP_MOUNT_UNREAD,
     CoherenceReport,
@@ -189,6 +190,18 @@ class CompressService:
             return None
         ok, rerr = self._host.remount(plan.remount_target, plan.target_option)
         if not ok:
+            # mount(8) can answer a failure after the kernel changed the mount (it could not update its mount
+            # table, or it was killed after the call): a mount that shows the new value is undone with the
+            # rest; mounts that cannot be read back are named.
+            now = self._host.read_proc_mounts()
+            if now is None:
+                prog.unknown.append(REMOUNT_UNREAD)
+            else:
+                prog.remounted = any(
+                    e.target == plan.remount_target
+                    and matches_target_spec(effective_compress_spec(e.options), plan.target_mode, plan.target_level)
+                    for e in pick_root_mounts(parse_proc_mounts(now))
+                )
             return f"Failed to remount {plan.remount_target} with {plan.target_option}: {rerr}"
         prog.remounted = True
         after_roots = pick_root_mounts(parse_proc_mounts(self._host.read_proc_mounts() or ""))

@@ -34,6 +34,7 @@ TOP_MOUNT_UNIT_NAME: Final[str] = r"var-mnt-btrfs\x2dtop.mount"
 # What ROLLBACK INCOMPLETE says of a layer that cannot be read back after its step failed.
 FSTAB_UNREAD: Final[str] = f"fstab: cannot read {FSTAB_PATH} back, its state is unknown"
 TOP_MOUNT_UNREAD: Final[str] = f"top-mount: cannot read {TOP_MOUNT_UNIT_PATH} back, its state is unknown"
+REMOUNT_UNREAD: Final[str] = "remount: cannot read the live mounts back, their state is unknown"
 # After a kargs change that answered a failure, how long the run waits for rpm-ostree to end the transaction
 # the change may have started (a client that timed out while the daemon went on), and how often it asks.
 KARGS_SETTLE_TIMEOUT_S: Final = 3 * MINUTE

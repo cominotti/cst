@@ -62,6 +62,7 @@ from btrfs.compress.domain import (
     KARGS_SETTLE_POLL_S,
     KARGS_SETTLE_TIMEOUT_S,
     KARGS_STILL_RUNNING,
+    REMOUNT_UNREAD,
     ROOTFLAGS_PREFIX,
     TOP_MOUNT_UNREAD,
     TopMountInfo,
@@ -330,15 +331,17 @@ class CompressWorldTest(unittest.TestCase):
     def test_a_torn_point_takes_effect_and_then_fails(self) -> None:
         w = self.world()
         w.fstab = OLD_FSTAB
-        w.torn = frozenset({"fstab write", "kargs", "top-mount"})
-        w.plan.arm(*((FaultMode.FAIL, n) for n in range(1, 4)))
+        w.torn = frozenset({"fstab write", "kargs", "remount", "top-mount"})
+        w.plan.arm(*((FaultMode.FAIL, n) for n in range(1, 5)))
         with self.assertRaises(OSError):
             w.write_fstab(NEW_FSTAB)
         self.assertEqual(w.update_kargs([("quiet", "loud")]), (False, "No space left on device"))
+        self.assertEqual(w.remount("/var", "commit=60"), (False, "No space left on device"))
         with self.assertRaises(OSError):
             w.update_top_mount(UUID, NEW_TOP_OPTIONS)
         self.assertEqual(w.fstab, NEW_FSTAB)
         self.assertIn("loud", w.kargs)
+        self.assertIn("commit=60", w.mounts or "")
         self.assertEqual(w.top, TopMountInfo(installed=True, uuid=UUID, options=NEW_TOP_OPTIONS))
 
 
@@ -346,8 +349,9 @@ class CompressWorldTest(unittest.TestCase):
 
 HOME_UUID = "0b5e6a1d-0000-4000-8000-00000000cafe"
 INCOMPLETE = "ROLLBACK INCOMPLETE"
-# The points whose failure can take effect first (AdapterFailureTest): a remount that fails changes nothing.
-TORN_POINTS = frozenset({"fstab write", "kargs", "top-mount"})
+# The points whose failure can take effect first (AdapterFailureTest; a remount that mount(8) answers a failure
+# for after the kernel made it).
+TORN_POINTS = frozenset({"fstab write", "kargs", "remount", "top-mount"})
 # The words an incomplete rollback names each layer with.
 LAYER_WORDS = ("fstab:", "kargs:", "remount:", "top-mount:")
 
@@ -398,9 +402,9 @@ def _top(spec: str) -> str:
 ZSTD, FORCED = "compress=zstd:1", "compress-force=zstd:1"
 STARTS: tuple[Start, ...] = (
     # P1: Fedora's default, every layer compress=zstd:1.
-    Start("P1", Tool.COMPRESS, Command.APPLY, ZSTD, ZSTD, ZSTD, ZSTD, points=4, fail_then_later=6, torn_then_kill=7),
+    Start("P1", Tool.COMPRESS, Command.APPLY, ZSTD, ZSTD, ZSTD, ZSTD, points=4, fail_then_later=6, torn_then_kill=10),
     # P2: an apply killed after its fstab write.
-    Start("P2", Tool.COMPRESS, Command.APPLY, FORCED, ZSTD, ZSTD, ZSTD, points=3, fail_then_later=3, torn_then_kill=4),
+    Start("P2", Tool.COMPRESS, Command.APPLY, FORCED, ZSTD, ZSTD, ZSTD, points=3, fail_then_later=3, torn_then_kill=6),
     # P3: not rpm-ostree booted, no top mount, a separate btrfs /var/home: two layers.
     Start(
         "P3",
@@ -412,11 +416,11 @@ STARTS: tuple[Start, ...] = (
         None,
         points=2,
         fail_then_later=1,
-        torn_then_kill=1,
+        torn_then_kill=3,
         separate_home=True,
     ),
     # P4: the live mounts without compress (the rollback remounts with compress=no).
-    Start("P4", Tool.COMPRESS, Command.APPLY, ZSTD, ZSTD, "", ZSTD, points=4, fail_then_later=6, torn_then_kill=7),
+    Start("P4", Tool.COMPRESS, Command.APPLY, ZSTD, ZSTD, "", ZSTD, points=4, fail_then_later=6, torn_then_kill=10),
     # P5: revert from fully applied.
     Start(
         "P5",
@@ -428,11 +432,11 @@ STARTS: tuple[Start, ...] = (
         FORCED,
         points=4,
         fail_then_later=6,
-        torn_then_kill=7,
+        torn_then_kill=10,
     ),
     # P6: a revert killed after its kargs (fstab and kargs back), the rest still forced.
     Start(
-        "P6", Tool.COMPRESS, Command.REVERT, ZSTD, ZSTD, FORCED, FORCED, points=2, fail_then_later=1, torn_then_kill=2
+        "P6", Tool.COMPRESS, Command.REVERT, ZSTD, ZSTD, FORCED, FORCED, points=2, fail_then_later=1, torn_then_kill=3
     ),
     # C1: no commit= anywhere (30 s), a separate btrfs /var/home.
     Start(
@@ -445,7 +449,7 @@ STARTS: tuple[Start, ...] = (
         "",
         points=4,
         fail_then_later=6,
-        torn_then_kill=7,
+        torn_then_kill=10,
         separate_home=True,
     ),
     # C2: commit=90 everywhere (the undo remounts with commit=90).
@@ -459,7 +463,7 @@ STARTS: tuple[Start, ...] = (
         ",commit=90",
         points=4,
         fail_then_later=6,
-        torn_then_kill=7,
+        torn_then_kill=10,
     ),
     # C3: an apply killed after its kargs (fstab and kargs at 60).
     Start(
@@ -472,7 +476,7 @@ STARTS: tuple[Start, ...] = (
         "",
         points=2,
         fail_then_later=1,
-        torn_then_kill=2,
+        torn_then_kill=3,
     ),
     # C4: revert from 60 everywhere.
     Start(
@@ -485,10 +489,10 @@ STARTS: tuple[Start, ...] = (
         ",commit=60",
         points=4,
         fail_then_later=6,
-        torn_then_kill=7,
+        torn_then_kill=10,
     ),
     # C5: the live mounts at 60, the files reverted.
-    Start("C5", Tool.COMMIT, Command.REVERT, "", "", ",commit=60", "", points=1, fail_then_later=0, torn_then_kill=0),
+    Start("C5", Tool.COMMIT, Command.REVERT, "", "", ",commit=60", "", points=1, fail_then_later=0, torn_then_kill=1),
 )
 BY_NAME = {s.name: s for s in STARTS}
 
@@ -1090,7 +1094,11 @@ class UnreadableAfterFailureTest(unittest.TestCase):
         for s in STARTS:
             w = start_world(s)
             forward = cut_points(w.plan, functools.partial(run_tool, s, w, s.command))
-            for point, words in (("fstab write", FSTAB_UNREAD), ("top-mount", TOP_MOUNT_UNREAD)):
+            for point, words in (
+                ("fstab write", FSTAB_UNREAD),
+                ("remount", REMOUNT_UNREAD),
+                ("top-mount", TOP_MOUNT_UNREAD),
+            ):
                 if point not in forward:
                     continue
                 done = forward[: forward.index(point)]
@@ -1109,7 +1117,7 @@ class UnreadableAfterFailureTest(unittest.TestCase):
                         w.torn = frozenset()
                         self.assertEqual(run_tool(s, w, s.command)[0], 0)
                         self.assertTrue(coherent(s, w), s.name)
-        self.assertEqual(cases, 32)
+        self.assertEqual(cases, 54)
 
 
 class KargsStillStagingTest(unittest.TestCase):

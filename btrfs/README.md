@@ -1585,7 +1585,9 @@ the kernel arguments, then `/etc/fstab`). That includes a step that
 reported a failure but changed its layer anyway: an `/etc/fstab` whose
 folder could not be synced after the rename (or that could not be put back
 after a failed reload), an `rpm-ostree kargs` that timed out after its
-transaction started, a top-mount unit that could not be put back. The run
+transaction started, a remount that `mount` reported as failed after the
+kernel made it (it could not update its mount table, or it was killed after
+the call), a top-mount unit that could not be put back. The run
 reads that layer again after the failure and undoes it with the others (the
 top-mount unit first). For the kernel arguments it first waits, up to 3
 minutes, until `rpm-ostree status --json` names no running transaction: a

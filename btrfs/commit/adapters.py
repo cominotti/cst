@@ -28,6 +28,7 @@ from btrfs.compress.domain import (
     FSTAB_PATH,
     FSTAB_UNREAD,
     PROC_MOUNTS_PATH,
+    REMOUNT_UNREAD,
     TOP_MOUNT_UNIT_PATH,
     TOP_MOUNT_UNREAD,
     extract_rootflags_tokens,
@@ -167,6 +168,17 @@ def _step_remount(run: _Run) -> str | None:
     target = plan.remount_target
     ok, rerr = host.remount(target, opt)
     if not ok:
+        # mount(8) can answer a failure after the kernel changed the mount (it could not update its mount table,
+        # or it was killed after the call): a mount that shows the new value is undone with the rest; mounts
+        # that cannot be read back are named.
+        now = host.read_proc_mounts()
+        if now is None:
+            run.undo.append(_unknown(REMOUNT_UNREAD))
+        elif any(
+            m.target == target and effective_commit_seconds(m.options) == plan.target_seconds
+            for m in pick_root_mounts(parse_proc_mounts(now))
+        ):
+            run.undo.append(lambda: _undo_remount(host, target, prev_sec))
         return f"Failed to remount {target} with {opt}: {rerr}"
     run.undo.append(lambda: _undo_remount(host, target, prev_sec))
     after_roots = pick_root_mounts(parse_proc_mounts(host.read_proc_mounts() or ""))
