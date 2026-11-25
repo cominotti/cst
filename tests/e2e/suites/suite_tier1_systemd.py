@@ -11705,7 +11705,8 @@ EOF
         revert removes the unit in ~/.config and keeps that copy and its record line; with the real systemctl
         the next revert removes it. (4) A link of the unit's name in the older copy's wants folder to a unit of
         tester's own elsewhere (~/mine222), not to the copy: plan and revert --check name no removal of it, and
-        apply and revert remove the copy and leave the link and that unit as they are. Before: apply left the
+        apply and revert remove the copy and leave the link and that unit as they are. After each apply (with its
+        restarts), plan exits 0 with nothing to do: a second run changes nothing. Before: apply left the
         enable link; apply removed the live unit through the link and wrote it again; revert removed the copy
         with no answer to say where the manager reads units."""
         c = self.SYSTEMD_CONTAINER
@@ -11734,6 +11735,16 @@ EOF
             alias="$H/cfg222/systemd/user/$lw"
             rec="$H/.local/state/cst/installed.json"
             recorded() { grep -qF "\"$1\"" "$rec"; }
+            settled() {  # settled LABEL: plan exits 0 with no row of a change (a second run changes nothing)
+                local rc=0 p
+                p="$(bt plan 2>&1)" || rc=$?
+                show "$1" "$p"
+                if [[ $rc != 0 ]] || ! grep -qxF "Nothing to do." <<<"$p" ||
+                    grep -qE '^  (remove|forget|write|update|adopt|set|restart|enable|CONFLICT) ' <<<"$p"; then
+                    echo "$TEST $1: plan exits $rc, or names a change" >&2
+                    return 1
+                fi
+            }
             plant() {  # plant DEST: the watcher's unit written and recorded there by the real installer
                 python3 -I -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from bluetooth.domain import render_unit; print(render_unit("00:11:22:33:44:55", "48000"), end="")' |
                     python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$1" 0644 --component bluetooth:ldac >/dev/null
@@ -11752,7 +11763,7 @@ EOF
             [[ $rc == 10 ]]
             grep -qE "^  remove +~/xdg222/systemd/user/$lw +an older CST's copy" <<<"$out"
             grep -qE "^  remove +~/xdg222/systemd/user/default.target.wants/$lw +the enable link" <<<"$out"
-            step apply1 apply --yes --no-restart
+            step apply1 apply --yes
             grep -qF "removed:   $old (an older CST's copy)" <<<"$out"
             grep -qF "removed:   $link (its enable link)" <<<"$out"
             [[ ! -e "$old" && ! -L "$link" ]]
@@ -11760,6 +11771,7 @@ EOF
             [[ "$(systemctl --user show -P FragmentPath "$lw")" == "$unit" ]]
             [[ "$(systemctl --user is-enabled "$lw")" == enabled ]]
             systemctl --user is-active --quiet "$lw"
+            settled settled1
             # (2) The live unit recorded once more through a link to ~/.config.
             ln -s .config "$H/cfg222"
             plant "$alias"
@@ -11774,6 +11786,7 @@ EOF
             [[ "$(stat -c '%i %Y' "$unit")" == "$before" ]]
             if recorded "$alias"; then echo "the other path is still recorded" >&2; exit 1; fi
             recorded "$unit"
+            settled settled2
             rm "$H/cfg222"
             # (3) No answer to UnitPath: the recorded copies are kept.
             plant "$old"
@@ -11817,7 +11830,7 @@ EOF
                 grep -qF "would remove $old (an older CST's copy)" <<<"$out"
                 if grep -qF "$link" <<<"$out"; then echo "revert --check names the link to tester's unit" >&2; exit 1; fi
                 if [[ $cmd == apply ]]; then
-                    step apply4 apply --yes --no-restart
+                    step apply4 apply --yes
                 else
                     out="$(bt revert --yes --no-restart 2>&1)"
                     show revert5 "$out"
@@ -11826,6 +11839,7 @@ EOF
                 if grep -qF "$link" <<<"$out"; then echo "$cmd names the link to tester's unit" >&2; exit 1; fi
                 [[ ! -e "$old" && "$(readlink "$link")" == "$mine" ]]
                 [[ "$(cat "$mine")" == "$(printf '[Unit]\nDescription=mine')" ]]
+                if [[ $cmd == apply ]]; then settled settled4; fi
             done
             echo E2E-OK
             """,
