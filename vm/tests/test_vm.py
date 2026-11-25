@@ -478,6 +478,23 @@ class PartsTest(unittest.TestCase):
                 f.write("VM_CPU_DISABLE=''\n")
             self.assertEqual(vm_adapters.cpu_disable_list(replace(PATHS, cpu_conf=conf)), [])
 
+    def test_cpu_disable_list_splits_at_ascii_blanks_only(self) -> None:
+        # A no-break space or another Unicode blank stays inside a feature name, as bash keeps it.
+        cases = (
+            ("pdpe1gb x2apic", ["pdpe1gb", "x2apic"]),
+            ("pdpe1gb\tx2apic   cet-ss", ["pdpe1gb", "x2apic", "cet-ss"]),
+            ("pdpe1gb\N{NO-BREAK SPACE}x2apic", ["pdpe1gb\N{NO-BREAK SPACE}x2apic"]),
+            ("a\N{IDEOGRAPHIC SPACE}b", ["a\N{IDEOGRAPHIC SPACE}b"]),
+            ("a\x1cb c", ["a\x1cb", "c"]),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "c.conf")
+            for value, words in cases:
+                with self.subTest(value=value):
+                    with open(conf, "w", encoding="utf-8") as f:
+                        f.write(f"VM_CPU_DISABLE='{value}'\n")
+                    self.assertEqual(vm_adapters.cpu_disable_list(replace(PATHS, cpu_conf=conf)), words)
+
 
 class BackupTest(Scratch):
     def test_reflink_backup(self) -> None:

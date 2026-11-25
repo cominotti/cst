@@ -842,7 +842,9 @@ class VmPinCliTest(unittest.TestCase):
         "VM_CPU_DISABLE": "cet-ss cet-ibt",
     }
 
-    def run_vm_pin(self, argv: list[str], xml: str) -> tuple[int, str, list[tuple[str, ...]]]:
+    def run_vm_pin(
+        self, argv: list[str], xml: str, conf: dict[str, str] | None = None
+    ) -> tuple[int, str, list[tuple[str, ...]]]:
         calls: list[tuple[str, ...]] = []
 
         def fake_virsh(*args: str, check: bool = True) -> str:
@@ -857,7 +859,7 @@ class VmPinCliTest(unittest.TestCase):
         with (
             unittest.mock.patch.object(cpu_cli, "virsh", fake_virsh),
             # autospec: a call that does not fit vm_pin_settings(path, action) fails.
-            unittest.mock.patch.object(cpu_cli, "vm_pin_settings", autospec=True, return_value=dict(self.CONF)),
+            unittest.mock.patch.object(cpu_cli, "vm_pin_settings", autospec=True, return_value=dict(conf or self.CONF)),
             contextlib.redirect_stdout(out),
         ):
             rc = cpu_cli.vm_pin(argv, doc="DOC")
@@ -953,6 +955,21 @@ class VmPinCliTest(unittest.TestCase):
         after = cpu_domain.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", ["cet-ss", "cet-ibt"])
         _, out, _ = self.run_vm_pin(["status"], after)
         self.assertIn("; disabled: cet-ss cet-ibt", out)
+
+    def test_vm_cpu_disable_splits_at_ascii_blanks_only(self) -> None:
+        # A no-break space or another Unicode blank stays inside a feature name, as bash keeps it.
+        cases = (
+            ("cet-ss\tcet-ibt", "cet-ss cet-ibt"),
+            ("a\N{NO-BREAK SPACE}b", "a\N{NO-BREAK SPACE}b"),
+            ("a\N{IDEOGRAPHIC SPACE}b", "a\N{IDEOGRAPHIC SPACE}b"),
+            ("a\x1cb", "a\x1cb"),
+        )
+        for value, shown in cases:
+            with self.subTest(value=value):
+                _, out, _ = self.run_vm_pin(
+                    ["status", "box"], SAMPLE_DOMAIN_XML, {**self.CONF, "VM_CPU_DISABLE": value}
+                )
+                self.assertIn(f"NOT disabled yet: {shown} (fix:", out)
 
     def test_refuses_vcpu_tied_elements_and_unknown_actions(self) -> None:
         bad_xml = "<domain><name>win11-devbox</name><vcpu>4</vcpu><cputune><vcpusched/></cputune></domain>"

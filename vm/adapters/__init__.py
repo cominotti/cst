@@ -33,6 +33,7 @@ from cst_core.domain.text import (
     first_line,
     parse_shell_assignments,
     parse_snapshots_conf,
+    split_ascii_blanks,
     strip_ascii_blanks,
 )
 from vm.domain import (
@@ -256,8 +257,8 @@ def cpu_disable_list(paths: VmPaths) -> list[str]:
     when set there (also empty), else vm-pin's default (cpu.domain)."""
     conf = read_conf(paths.cpu_conf, nas_conf=paths.nas_conf, bash_sourced=True)
     if "VM_CPU_DISABLE" in conf:
-        return conf["VM_CPU_DISABLE"].split()
-    return CPU_DISABLE_DEFAULT.split()
+        return split_ascii_blanks(conf["VM_CPU_DISABLE"])
+    return split_ascii_blanks(CPU_DISABLE_DEFAULT)
 
 
 def package_versions() -> dict[str, str]:
