@@ -9781,7 +9781,11 @@ echo E2E-OK
         crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply wrote crypttab and fstab,
         started swap0's step, set zswap, masked zram and ran sysctl first, and failed at the copy with
         "Is a directory"; with the FIFO, plan blocked in its open. With the image's file back, the same
-        apply works and a second one changes nothing."""
+        apply works and a second one changes nothing. Last, on a machine not yet applied again
+        (swap_cleanup, then swap_setup), a link there to /dev/null (a masked vendor file) and no .bak:
+        plan's row is "update", apply exits 0 with an empty regular .pre-swap-config.bak of mode 0644
+        and CST's file in place, and a second apply changes nothing; the image's file is put back.
+        Before, plan said "?" there too and apply refused the link."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
@@ -9849,6 +9853,43 @@ swap_run apply
 [[ $rc == 0 ]] || fail "a second apply exited $rc"
 [[ "$out" != *"written:"* ]] || fail "a second apply wrote"
 [[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+
+# A link at $CONF to /dev/null (a masked vendor file), no .bak, on a machine not yet applied
+# (swap_cleanup, then swap_setup again): plan's row is "update"; apply copies it aside as an empty
+# 0644 .bak, reading nothing from the device, writes CST's file and exits 0; a second apply changes
+# nothing. Before, plan said "?" and apply refused it as a link to anything but a file.
+BAK="$CONF.pre-swap-config.bak"
+swap_cleanup
+swap_setup
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -d "$CONF" && ! -L "$CONF" && ! -e "$BAK" && ! -L "$BAK" ]] || fail "$CONF or its .bak is not as the test left it"
+if [[ -e "$CONF" ]]; then mv "$CONF" "$W/uresourced.real"; fi
+ln -s /dev/null "$CONF"
+conf_made=1
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a link to /dev/null in its place exited $rc"
+grep -qE "^  update +uresourced\.conf " <<<"$out" || fail "plan's row of $CONF with a link to /dev/null"
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with a link to /dev/null in its place exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written with a link to /dev/null"
+[[ -f "$BAK" && ! -L "$BAK" && ! -s "$BAK" ]] || fail "$BAK is not an empty file"
+[[ "$(stat -c %a "$BAK")" == 644 ]] || fail "$BAK's mode is $(stat -c %a "$BAK")"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file after apply"
+cmp -s "$SRC/units/uresourced.conf" "$CONF" || fail "$CONF is not CST's file"
+s2="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply after the link to /dev/null exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply after the link to /dev/null wrote"
+[[ "$(snap)" == "$s2" ]] || fail "a second apply after the link to /dev/null changed /etc or the scratch tree"
+# What the test found back in place (the image's file, or none); swap_cleanup removes the .bak.
+conf_back
+conf_made=""
+if [[ -e "$W/orig/uresourced.conf" ]]; then
+    cmp -s "$W/orig/uresourced.conf" "$CONF" || fail "$CONF is not the image's file again"
+else
+    [[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there, where the image had none"
+fi
 echo E2E-OK
 """,
             check=False,
