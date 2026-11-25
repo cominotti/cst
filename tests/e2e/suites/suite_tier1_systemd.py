@@ -11571,6 +11571,63 @@ EOF
         self.assertIn("E2E-CRYPTTAB-GENERATOR-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_256_btrfs_compress_and_commit_catch_up_reload_waits_at_most_a_minute(self) -> None:
+        """`cst btrfs compress-force apply` and `commit-interval apply` with every layer at its target, and a
+        systemctl stand-in whose `show` of the mount units gives no answer and whose daemon-reload never ends (a
+        PID 1 that does not answer): each run reloads, gives up after the catch-up reload's minute and ends
+        with exit 0 and the warning line that names the timed-out reload, /etc/fstab unchanged. Before the fix
+        the reload had no limit and the run waited for it (here the test's own 300 s stops it)."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-catch-up-timeout"
+        kargs_host_guard(self, c, w)
+        out = exec_bash(
+            c,
+            f"""
+            {kargs_host_scaffold(w, "compress-force=zstd:1,commit=60")}
+            systemctl daemon-reload
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"deployments": [], "transaction": null}}'; exit 0; fi
+exit 1
+EOF
+            {kargs_findmnt_stub(w)}
+            {kargs_mount_stub(w)}
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMPRESS_PROC="{w}/proc" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            for tool in "compress-force" "commit-interval"; do
+                /opt/cst-rw/cst btrfs "$tool" apply --yes | grep -qF "nothing to do" \
+                    || {{ echo "the test cannot bite: $tool is not at its target" >&2; exit 1; }}
+            done
+
+            # systemctl: the show of the mount units fails (no answer); a daemon-reload never ends.
+            cat >{w}/bin/systemctl <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" *.mount "* ]]; then echo "Failed to connect to bus: Connection timed out" >&2; exit 1; fi
+if [[ " $* " == *" daemon-reload "* ]]; then touch {w}/reload-started; exec sleep 600; fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/bin/systemctl
+            for tool in "compress-force" "commit-interval"; do
+                rm -f {w}/reload-started
+                cp /etc/fstab {w}/fstab.before
+                start=$SECONDS
+                run_out="$(timeout 300 /opt/cst-rw/cst btrfs "$tool" apply --yes 2>&1)" \
+                    || {{ echo "$tool apply failed: $run_out" >&2; exit 1; }}
+                took=$(( SECONDS - start ))
+                [[ -e {w}/reload-started ]] || {{ echo "the test cannot bite: $tool ran no daemon-reload" >&2; exit 1; }}
+                (( took >= 55 && took < 150 )) || {{ echo "$tool took $took s: $run_out" >&2; exit 1; }}
+                grep -qF "warning: systemctl daemon-reload failed: timed out after 60s; systemctl could not say whether systemd had loaded /etc/fstab as it is on disk either" <<<"$run_out" \
+                    || {{ echo "$tool: $run_out" >&2; exit 1; }}
+                cmp -s /etc/fstab {w}/fstab.before
+            done
+            echo E2E-CATCH-UP-TIMEOUT-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CATCH-UP-TIMEOUT-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_244_btrfs_compress_and_commit_undo_keeps_the_old_fstab_when_its_reload_fails(self) -> None:
         """`cst btrfs compress-force apply` and `commit-interval apply` with an rpm-ostree whose first change fails with
         no effect (later calls are honest) and a systemctl whose second daemon-reload of the run fails (the undo's):

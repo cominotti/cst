@@ -230,10 +230,11 @@ def loaded_mount_units(runner: CommandRunnerPort, *, from_toolbox: bool) -> list
     return SystemctlAdapter(runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
 
 
-def reload_failure(runner: CommandRunnerPort) -> str | None:
-    """`systemctl daemon-reload` here, never on the host: None when it worked, else why it failed
-    ("systemctl daemon-reload failed: ..."). CacheSystemd and LinuxCompressHostAdapter reload with it."""
-    res = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+def reload_failure(runner: CommandRunnerPort, *, timeout: float | None = None) -> str | None:
+    """`systemctl daemon-reload` here, never on the host, at most timeout seconds (None: no limit): None when
+    it worked, else why it failed ("systemctl daemon-reload failed: ...", "timed out after Ns" for one that
+    did not end in time). CacheSystemd and LinuxCompressHostAdapter reload with it."""
+    res = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL, timeout=timeout).daemon_reload_result()
     return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
 
 

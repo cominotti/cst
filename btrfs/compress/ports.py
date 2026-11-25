@@ -61,7 +61,8 @@ class CompressHostPort(Protocol):
         ...
 
     def daemon_reload(self) -> str | None:
-        """`systemctl daemon-reload`: None, or why it failed."""
+        """The catch-up `systemctl daemon-reload`, at most a minute: None, or why it failed (a reload that did
+        not end in time is a failed one)."""
         ...
 
     def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:

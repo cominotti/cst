@@ -33,6 +33,7 @@ from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService
 from cst_core.domain.install import INSTALL_MANIFEST, Component
 from cst_core.domain.record import ROOT_RECORD
+from cst_core.domain.values import MINUTE
 from cst_core.ports import (
     ClockPort,
     CommandFailed,
@@ -45,6 +46,9 @@ from cst_core.ports import (
 )
 
 _DEFAULT_PROC_DIR: Final[str] = "/proc"
+_FSTAB_CATCH_UP_TIMEOUT_S: Final = MINUTE
+"""How long the catch-up daemon-reload (CompressHostPort.daemon_reload) waits: a PID 1 that does not answer
+must not hold a run that has nothing else to do forever (scrub-limit's catch-up reload waits as long)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +215,7 @@ class LinuxCompressHostAdapter:
         return loaded_mount_units(self._runner, from_toolbox=self._ctx.is_container())
 
     def daemon_reload(self) -> str | None:
-        return reload_failure(self._runner)
+        return reload_failure(self._runner, timeout=_FSTAB_CATCH_UP_TIMEOUT_S)
 
     def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
         """Update `rootflags=` in a single `rpm-ostree kargs` invocation."""

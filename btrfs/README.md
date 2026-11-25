@@ -1630,9 +1630,11 @@ say `daemon-reload: systemd has not loaded /etc/fstab as it is on disk`,
 and `apply` or `revert` says `reloaded: systemd had not loaded /etc/fstab
 as it is on disk (an earlier run stopped)` (or, when `systemctl show`
 gives no answer, `reloaded: systemctl could not say ...`) before the other
-layers. A reload that fails stops the run with exit 1 and changes nothing
-else; one that fails when `systemctl show` gave no answer either is a
-`warning:` line, and the run goes on. Only the `NeedDaemonReload` of the
+layers. Such a catch-up reload waits at most a minute, so a PID 1 that does
+not answer cannot hold a run that has nothing else to do; one that has not
+ended by then is a failed reload. A reload that fails stops the run with
+exit 1 and changes nothing else; one that fails when `systemctl show` gave
+no answer either is a `warning:` line, and the run goes on. Only the `NeedDaemonReload` of the
 units systemd loaded from `/etc/fstab` counts. `commit-interval` does the
 same.
 

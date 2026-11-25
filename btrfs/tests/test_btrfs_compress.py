@@ -1249,6 +1249,16 @@ class CompressSystemdAdapterTest(unittest.TestCase):
                 self.assertEqual(argv, ["systemctl", "daemon-reload"])
                 self.assertFalse(kw.get("on_host", False))
 
+    def test_the_catch_up_reload_waits_at_most_a_minute(self) -> None:
+        # A PID 1 that does not answer: the runner stops the reload after its timeout and says so.
+        runner = _SystemctlRunner(reload_error="timed out after 60s")
+        self.assertEqual(
+            self._adapter(runner, container=False).daemon_reload(),
+            "systemctl daemon-reload failed: timed out after 60s",
+        )
+        [(_, kw)] = runner.calls
+        self.assertEqual(kw.get("timeout"), 60)
+
 
 class CompressCatchUpStatusTest(unittest.TestCase):
     """compress-force status names the catch-up reload the next run would do, just before its overall line."""
