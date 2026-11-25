@@ -145,13 +145,15 @@ NAS_PROPERTIES: Final = (
     "unreachableNoOverlay",
     "noStacking",
     "tornHandled",
+    "tornHandledFull",
     "indexClean",
     "goodKept",
+    "goodKeptFull",
     "keepKept",
     "consistentRead",
     "indexInRepo",
 )
-NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed")
+NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial")
 CHECKS: Final[tuple[Check, ...]] = (
     *(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES),
     *(Check(NAS_SPEC, main, NAS_PROPERTIES) for main in NAS_INSTANCES),
@@ -160,8 +162,8 @@ CHECKS: Final[tuple[Check, ...]] = (
 # to each witness a random walk rarely reaches (the seed and the bounds fix which one): a "never..."
 # value of the spec, or the negation of a step's label for a call with no witness of its own.
 NOCOW_WITNESSES: Final = (
-    ("recovered", "nocow_a", "neverRecovered", 45),
-    ("recover_failed", "nocow_a", "neverRecoverFailed", 40),
+    ("recovered", "nocow_a", "neverRecovered", 50),
+    ("recover_failed", "nocow_a", "neverRecoverFailed", 80),
     ("old_removed", "nocow_a", "neverOldRemoved", 40),
     ("twin_removed", "nocow_a", "neverTwinRemoved", 20),
     ("rolled_back", "nocow_a", "neverRolledBack", 30),
@@ -169,8 +171,10 @@ NOCOW_WITNESSES: Final = (
     ("gave_up_flag_kept", "nocow_a", "neverGaveUpFlagKept", 30),
     ("converged", "nocow_a", "neverConverged", 30),
     ("install_forgot", "nocow_a", 'not(step.name == "forget_attempts")', 20),
+    ("forget_failed", "nocow_a", 'not(step.name == "forget_attempts" and step.outcome == "fail")', 20),
     ("reset_failed", "nocow_a", 'not(step.name == "save_attempts" and step.outcome == "fail")', 20),
     ("label_failed", "nocow_a", 'not(step.name == "reference_label" and step.outcome == "fail")', 20),
+    ("copy_failed", "nocow_a", 'not(step.name == "copy" and step.outcome == "fail")', 20),
     ("copy_mismatch", "nocow_a", 'not(step.name == "copy" and step.outcome == "mismatch")', 20),
     ("copy_killed", "nocow_a", 'not(step.name == "copy" and step.outcome == "killed")', 25),
     ("power_loss_partial", "nocow_a", "neverPowerLossPartial", 20),
@@ -197,9 +201,17 @@ NAS_WITNESSES: Final = (
     ("ready_failed", "nas_mixed", "neverReadyFailed"),
     ("listings_unreadable", "nas_mixed", "neverListingsUnreadable"),
     ("live_listing_unreadable", "nas_mixed", "neverLiveListingUnreadable"),
+    ("inactive_listing_unreadable", "nas_mixed", "neverInactiveListingUnreadable"),
     ("remove_failed", "nas_mixed", "neverRemoveFailed"),
+    ("overlay_removed", "nas_mixed", "neverOverlayRemoved"),
+    ("partial_refused", "nas_partial", "neverPartialRefused"),
+    ("partial_stop_dropped", "nas_partial", "neverPartialStopDropped"),
+    ("partial_ok", "nas_partial", "neverPartialOk"),
     ("stop_after_commit", "nas_mixed", "neverStopAfterCommit"),
     ("retention_failed", "nas_mixed", "neverRetentionFailed"),
+    ("stop_after_commit_recorded", "nas_shutoff", "neverStopAfterCommitRecorded"),
+    ("stop_answered", "nas_shutoff", "neverStopAnswered"),
+    ("stop_held_check", "nas_shutoff", "neverStopHeldCheck"),
     ("started_during_read", "nas_shutoff", "neverStartedDuringRead"),
     ("shut_off_same", "nas_shutoff", "neverShutOffSame"),
     ("torn_forget_failed", "nas_shutoff", "neverTornForgetFailed"),

@@ -6,7 +6,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Protocol
 
-from btrfs.docker_volumes_nocow.domain import PostponedRecord, StoredPostponed, TreeScan, VolumeLeftovers
+from btrfs.docker_volumes_nocow.domain import (
+    OutcomeRead,
+    OutcomeRecord,
+    PostponedRecord,
+    StoredPostponed,
+    TreeScan,
+    VolumeLeftovers,
+)
 from cst_core.ports import CommandResult
 
 
@@ -68,7 +75,8 @@ class VolumeTreePort(Protocol):
 
 
 class NocowStatePort(Protocol):
-    """The helper's files: the migration flag, the attempts counter, the record of postponed boots."""
+    """The helper's files: the migration flag, the attempts counter, the record of postponed boots and
+    the outcome record (why no migration is scheduled)."""
 
     def flag_exists(self) -> bool: ...
 
@@ -101,6 +109,16 @@ class NocowStatePort(Protocol):
     def write_postponed(self, record: PostponedRecord) -> None: ...
 
     def clear_postponed(self) -> None: ...
+
+    def read_outcome(self) -> OutcomeRead: ...
+
+    def write_outcome(self, record: OutcomeRecord) -> None:
+        """Durably (file and folder fsynced), world-readable; OSError when that fails."""
+        ...
+
+    def clear_outcome(self) -> None:
+        """Remove the record if there is one; OSError for any other failure."""
+        ...
 
 
 class DockerDaemonPort(Protocol):

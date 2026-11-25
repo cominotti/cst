@@ -18,6 +18,8 @@ from btrfs.docker_volumes_nocow.domain import (
     NEW_SUFFIX,
     OLD_MARK,
     NocowPaths,
+    OutcomeRead,
+    OutcomeRecord,
     PostponedRecord,
     StoredPostponed,
     TreeScan,
@@ -25,9 +27,10 @@ from btrfs.docker_volumes_nocow.domain import (
     daemon_args,
     is_stored_postponed,
     oldest_first,
+    parse_outcome,
     service_wait_reason,
 )
-from cst_core.adapters.files import CounterFile, write_atomic
+from cst_core.adapters.files import CounterFile, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
@@ -260,7 +263,7 @@ class LocalVolumeTree:
 
 
 class NocowStateFiles:
-    """NocowStatePort over the flag, the attempts counter and the postponed record."""
+    """NocowStatePort over the flag, the attempts counter, the postponed record and the outcome record."""
 
     def __init__(self, paths: NocowPaths) -> None:
         self.paths = paths
@@ -321,6 +324,22 @@ class NocowStateFiles:
     def clear_postponed(self) -> None:
         with contextlib.suppress(FileNotFoundError):  # nothing postponed
             os.remove(self.paths.postponed)
+
+    def read_outcome(self) -> OutcomeRead:
+        # One open tells a file that is not there (None) from one there that cannot be read (a folder in
+        # its place, no permission: "", which no record parses as); bytes that are not UTF-8 become
+        # U+FFFD, as cst doctor reads the record.
+        return parse_outcome(read_text(self.paths.outcome, unreadable=""), self.paths.outcome)
+
+    def write_outcome(self, record: OutcomeRecord) -> None:
+        # write_atomic creates a missing folder 0755, whatever the umask (sudo keeps the user's).
+        # 0644: status and cst doctor read it as the user. Durable: a reset right after a give-up
+        # must not lose why no migration is scheduled.
+        write_atomic(self.paths.outcome, json.dumps(record) + "\n", mode=0o644, relabel=False)
+
+    def clear_outcome(self) -> None:
+        with contextlib.suppress(FileNotFoundError):  # none recorded
+            os.remove(self.paths.outcome)
 
 
 def is_dockerd(proc: str) -> bool:

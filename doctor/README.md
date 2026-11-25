@@ -64,7 +64,7 @@ cst doctor help
 | `vm` | A disk of a VM that points to an overlay of a NAS backup (`<image>.cst-overlay-<time>`, in the running VM or in its definition): `cst vm backup --nas` could not merge it back | `WARN`, fix by case: still running on the overlay: `virsh blockcommit`; only the definition names a stale overlay: `virsh edit` (never `qemu-img commit`); shut off on a newer overlay: `qemu-img commit`; unclear: a command that only looks (see [section 7](#7-the-vm-checks)); `info` while that backup is still running |
 | `vm` | `/var/lib/cst/vm-backups.json` of a newer format than this checkout's `cst vm` reads (its `"version"`; written by a newer CST) | `WARN` (no fix line: use the `cst vm` of that CST); the virtualization packages row then says `last backup: unknown` |
 | `vm` | `/var/lib/cst/vm-backups.json` there but not readable as an index (not JSON, a byte that is not UTF-8 included, as `cst vm` reads it; no `"backups"` list; a read error) | `WARN` naming the reason: `cst vm` refuses to back up or list with it; move it aside to start a new index. The virtualization packages row then counts no backup from it (`last backup: never`) |
-| `vm` | `/var/lib/cst/vm-nas-torn.json` names restic snapshots a failed NAS backup recorded as torn (no backup: incomplete, or not consistent; vm/README.md, section 10.2) | `WARN` naming each VM, short ID and time: the next `cst vm backup VM --nas` to the same repository forgets them (or drops those already forgotten) before its retention, and skips the retention until then; fix: or by hand, `restic forget ID`, and for a VM or repository with no more NAS backups, or an older `cst-vm` the weekly timer runs, vm/README.md, section 10.6. The same file of a newer format, or not readable as the record (not JSON, no `"torn"` list, a read error): `WARN` (`cst vm backup --nas` refuses to run with it). An empty record or none: no row. Only the file is read: no restic |
+| `vm` | `/var/lib/cst/vm-nas-torn.json` names restic snapshots a failed NAS backup recorded as torn (no backup: incomplete, not consistent, or saved by restic before a stop ended it; a stopped backup forgets nothing, so its snapshot stays recorded until the next NAS backup; vm/README.md, section 10.2) | `WARN` naming each VM, short ID and time: the next `cst vm backup VM --nas` to the same repository forgets them (or drops those already forgotten) before its retention, and skips the retention until then; fix: or by hand, `restic forget ID`, and for a VM or repository with no more NAS backups, or an older `cst-vm` the weekly timer runs, vm/README.md, section 10.6. The same file of a newer format, or not readable as the record (not JSON, no `"torn"` list, a read error): `WARN` (`cst vm backup --nas` refuses to run with it). An empty record or none: no row. Only the file is read: no restic |
 | `vm` | The weekly NAS backup timer of each VM (`cst-vm-backup@VM.timer`) | `info`: on or off. Never `WARN` |
 | `vm` | A VM's weekly NAS backup timer is on, but `/usr/local/sbin/btrfs-notify` (which a failed backup alerts through) is missing, as `cst btrfs uninstall` leaves it when snapshots are not set up: a failed backup then reaches no desktop, only the journal and the pending alerts (the `alerts` rows) | `WARN`, fix: `cst btrfs install` (it installs `btrfs-notify` with the alerts kept for the next login); nothing when no timer is on |
 | `responsiveness` | Live responsiveness probes shared with [perf/README.md](../perf/README.md) for each axis (`memory` / `cpu` / `io` / `gpu`) whose CST module (`swap`, `cpu`, or `btrfs`) is installed or configured on the host: memory headroom/reclaim stalls/THP/MGLRU/zswap/`session.slice` floors, cpuidle latency/`ntsync`/`irqbalance`/IRQ overlap on `BUILD_CPUS`, `blk-iocost`/NVMe APST/dirty writeback/btrfs commit latency/`SCRUB_LIMIT`, and connected GPU runtime PM / AMD game power profile | `WARN` on `BOTTLENECK` or findings with a `fix:` command (`cst swap apply`, `cst btrfs install`, `cst btrfs scrub-limit set 500M`, `cst btrfs iocost apply`, `cst cpu install`, `cst cpu irq apply`, `cst cpu game off && cst cpu game on`, `sudo systemctl restart cpu-game.service`); `INFO` for advisory items; nothing for axes without CST files installed (`cst perf` always checks all four axes unconditionally) |
@@ -78,6 +78,7 @@ cst doctor help
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check: those of the installed `btrfs-health-check`, the one that alerts (its `btrfs/health_check/domain.py` inside the zipapp, or the text of a bash version), else of this checkout's `btrfs/health_check/domain.py`; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 | `btrfs` | Snapshots left writable (see [section 6.1](#61-snapshots-left-writable)): names in `/var/lib/btrfs-snapshot/core-unfinished` (an hourly run stopped between taking a snapshot and making it read-only), and writable entries named like CST's snapshots in `/var/lib/btrfs-snapshot/core-writable` that no run left | `WARN`; fix: `sudo systemctl start btrfs-snapshot.service` for the first, `sudo btrfs subvolume show <path>` (it only looks) for the second; `ok` when there are none; `info` when the lists cannot be read; nothing when snapshots were never set up |
 | `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks), or for a `/etc/docker/daemon.json` that cannot be read `sudo dockerd --validate --config-file /etc/docker/daemon.json` (it only checks the file); `info` for one boot, or when the record cannot be read; nothing when there is no record |
+| `btrfs` | A Docker volumes NOCOW migration no boot will ask for (see [section 6.3](#63-docker-volumes-nocow-migration-that-no-boot-will-schedule)): with `docker-volumes-nocow` installed and no flag `/etc/btrfs-setup/docker-nocow-pending`, the `not-scheduled` record an install left in `/var/lib/docker-volumes-nocow/outcome`, or a count of boots left in `/var/lib/docker-volumes-nocow/attempts` | `WARN` with the install's time and reason, or with the count; fix: `cst btrfs install`; `info` when the record or the flag cannot be read; nothing beside a flag, for a give-up's record (its alert and `status` show it), or when the helper is not installed |
 | `btrfs` | Root btrfs (the filesystem of `/sysroot`, else `/`, else `/var`, whose UUID picks the root's `UUID=` lines in `/etc/fstab`; a separate btrfs `/home` is left out) compression option coherence across `/etc/fstab`, `rpm-ostree kargs` (falling back to `/proc/cmdline`), live mounts, and `/etc/systemd/system/var-mnt-btrfs\x2dtop.mount` when installed (`btrfs.compress.domain.assess_coherence`) | `ok` when all active layers agree on `compress=...` or `compress-force=...`; `WARN` with `fix: cst btrfs compress-force apply` (or `revert`) when layers disagree; `info` when no compression option is set anywhere; nothing when no root btrfs source is present |
 | `btrfs` | Root btrfs `commit=` interval coherence across `/etc/fstab`, `rpm-ostree kargs` (falling back to `/proc/cmdline`), live mounts, and `var-mnt-btrfs\x2dtop.mount` (`btrfs.commit.domain.assess_commit_coherence`) | `ok` when all active layers agree on a custom `commit=N` interval; `WARN` with `fix: cst btrfs commit-interval apply [N]` (or `revert`) when layers disagree; nothing at kernel default `30 s` or when no root btrfs source is present |
 | `btrfs` | The dedicated NVMe cache drive's mounts (`/var/mnt/cache`, `/var/mnt/scratchpad`), `/etc/crypttab` `nofail` (the drive's mapping is the one behind a base's source, `/dev/mapper/NAME` or the name of `/dev/dm-N` in `/sys/class/block/dm-N/dm/name`, or one of the default names `cache`, `cache-*`, `luks-cache*`; the root disks' `luks-*` lines are left alone), absence of `flushoncommit`, and per-user bind mounts managed by `cst btrfs cache` (`btrfs.cache.domain.health.assess_cache_mount_health`) | `ok` when active mounts and managed bindings are healthy without `flushoncommit`; `WARN` on `flushoncommit`, missing `nofail` in `/etc/crypttab`, non-btrfs/unmounted base, an unmounted managed binding, or a managed target whose mount is not CST's bind (another device; where findmnt shows a root for the bind, another folder than `<base root>/<user>`, a base shown without one being at the drive's top level; a bind shown without a root under a base shown with one, which is the drive's top level; with no root shown at all, only `/proc/mounts`, it cannot tell and says nothing; fix: `cst btrfs cache status --user NAME`); `WARN` when systemd has not loaded `/etc/fstab` as it is on disk (`systemctl show '*.mount'`: a unit loaded from `/etc/fstab` says `NeedDaemonReload=yes`, or a managed line's target has a unit systemd took from `/proc/self/mountinfo`: an edit, or an attach or detach that stopped before its daemon-reload; fix: `sudo systemctl daemon-reload`; nothing when systemctl cannot be asked; asked only where the cache is set up, `/var/mnt/cache`, `/var/mnt/scratchpad` or a `btrfs-cache` line in `/etc/fstab` or `/proc/mounts`, so a hand edit of `/etc/fstab` on a machine without the cache warns of nothing); nothing when unconfigured |
@@ -247,9 +248,12 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   its fix line. It never opens the snapshot folder (root-only) and runs no
   command. The names of those two files come from the `btrfs.snapshot`
   package of the same CST copy (what btrfs-snapshot-core writes).
-- The Docker NOCOW check reads `/var/lib/docker-volumes-nocow/postponed`
-  (world-readable, written by `docker-volumes-nocow` at boot). It never opens
-  Docker's folders (root-only) and runs no command.
+- The Docker NOCOW checks read `/var/lib/docker-volumes-nocow/postponed`,
+  `outcome` and `attempts` (world-readable, written by `docker-volumes-nocow`
+  at boot and by `install`), and look whether the flag
+  `/etc/btrfs-setup/docker-nocow-pending` and the installed helper
+  `/usr/local/sbin/docker-volumes-nocow` exist. They never open Docker's
+  folders (root-only) and run no command.
 - Which alerts you have already seen comes from your record in
   `~/.local/state/cst-alerts/delivered` (written by `cst-pending-alerts` at
   login; the older `~/.local/state/f44-alerts` is read when the new one does
@@ -361,6 +365,40 @@ and what to do are in
 == btrfs
   WARN   Docker volumes NOCOW: the boot-time migration was postponed at 3 boot(s) in a row, last 2026-11-15 08:02: Docker is running; the volumes keep copy-on-write data (and new ones may too) until a boot where nothing uses them
          fix: journalctl -b -u docker-volumes-nocow
+```
+
+### 6.3 Docker volumes: NOCOW migration that no boot will schedule
+
+A boot asks for the migration only when the volumes folder has no `+C`.
+When `install` finds the folder with `+C` already (a give-up removed the
+flag and kept `+C`, or an older install stopped between its `+C` and its
+flag) and cannot write the request, no boot asks again; `install`
+then records it in `/var/lib/docker-volumes-nocow/outcome`
+(`not-scheduled`, with its time and reason). A count of boots left in
+`/var/lib/docker-volumes-nocow/attempts` with no flag means an install or a
+boot could not reset it. A request resets such a count before it writes its
+flag, and fails while it cannot, so no migration is asked for until the
+count can be reset
+([btrfs/README.md, section 4.10](../btrfs/README.md#410-docker-volumes-without-copy-on-write-nocow)).
+The doctor cannot look at `+C` itself (Docker's folders are root's only),
+so it reads what the helper leaves on disk, with the helper installed and no
+flag (a flag is a scheduled migration):
+
+- a `not-scheduled` record is a `WARN` with the install's time and reason;
+- else a count above 0 is a `WARN` naming it;
+- both have the fix `cst btrfs install`, once the cause is fixed;
+- a record or a flag that cannot be read is `info`.
+
+It says nothing beside a flag, for a give-up's record (the give-up's alert,
+kept for the next login, and `status` show it), when the helper is not
+installed, and when neither file is there. An older install that was
+stopped half-way and left no record is shown by `cst btrfs status` only
+(`no boot asks for it`).
+
+```
+== btrfs
+  WARN   Docker volumes NOCOW: /var/lib/docker/volumes keeps copy-on-write data and no boot will migrate it (the folder has +C already, and a boot asks only for one without it), and the install at 2026-11-24 10:15 failed: cannot schedule the migration: [Errno 30] Read-only file system: '/etc/btrfs-setup/docker-nocow-pending'; fix that, then run the install
+         fix: cst btrfs install
 ```
 
 ## 7. The vm checks
@@ -677,6 +715,8 @@ The code is split into four layers under `doctor/`:
   `registry.py` holds `AREAS` (the area modules in their output order),
   `CHECKS` (their checks, in that order), `wired_checks` and `run_checks`.
   `findmnt.py` holds the btrfs area's two `findmnt` probes (the live mounts as /proc/mounts lines).
+  `docker_nocow.py` holds the btrfs area's Docker volumes NOCOW checks, which `btrfs.py` registers in
+  their place among its own.
   `shared.py` holds what several areas use: the `@check` decorator, the settings-file readers, and `DoctorFacts`: what
   several checks ask (rpm-ostree with every deployment, through cst_core's
   one query `cst_core.domain.ostree`, the libvirt domains, each VM's
@@ -727,7 +767,7 @@ The tests use fixture outputs of `rpm-ostree status --json` and
 built per test, fixture `systemctl show` answers and game profile records,
 a fixture cgroup tree of the user manager and leftover game drop-ins,
 fixture lists of snapshots left writable, fixture records of postponed
-Docker NOCOW migrations,
+Docker NOCOW migrations and of migrations no boot will schedule,
 and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
 `virsh` and `flatpak-spawn` programs that log every call. They check the tricky
 names, the fix command, the btrfs levels and layouts, the exit codes, the

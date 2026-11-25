@@ -436,6 +436,14 @@ class ChecksTest(unittest.TestCase):
                 self.assertIn(check.main, modules)
                 self.assertTrue(check.invariants)
 
+    def test_the_nas_checks_name_the_full_properties_and_the_instance_without_atomic(self) -> None:
+        nas = [c for c in M.CHECKS if c.spec == M.NAS_SPEC]
+        self.assertIn("nas_partial", [c.main for c in nas])
+        for check in nas:
+            with self.subTest(check=check.main):
+                for invariant in ("tornHandledFull", "goodKeptFull", "tornHandled", "goodKept", "consistentRead"):
+                    self.assertIn(invariant, check.invariants)
+
     def test_every_spec_has_its_traces_folder_and_its_replay(self) -> None:
         specs = {c.spec for c in M.CHECKS} | {job.spec for job in M.TRACE_JOBS}
         self.assertEqual(set(M.TRACES_DIR), specs)

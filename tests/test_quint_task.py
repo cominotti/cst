@@ -97,6 +97,7 @@ class QuintCiPathsTest(unittest.TestCase):
             "btrfs/tests/quint/traces/walk_ab.itf.json",
             "btrfs/tests/test_docker_volumes_nocow_replay.py",
             "vm/application/nas.py",
+            "vm/application/nas_torn.py",
             "vm/adapters/restic.py",
             "vm/adapters/backup.py",
             "vm/domain/backup.py",
