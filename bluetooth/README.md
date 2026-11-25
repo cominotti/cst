@@ -304,9 +304,13 @@ folder (`DEVICE`, `LDAC_QUALITY`, `BEARER`, `LE_AUDIO`, `LDAC_RATE`). To change 
 write the lines you want to change into `~/.config/cst/bluetooth.conf`, in
 the same `KEY=value` format (a line that is not one, a value with `$`, a
 backtick or a backslash outside single quotes, or a value with a no-break
-space or another Unicode blank at its start or end, `LE_AUDIO='on<no-break space>'`,
+space or another Unicode blank at its start or end, `BEARER='le<no-break space>'`,
 is ignored with a warning naming the line, and that setting keeps its
-default: CST never trims such a blank); that file wins over the defaults, and the
+default: CST never trims such a blank; such a `DEVICE` or `LE_AUDIO` line
+instead stops every command with exit 2 and the words of a bad value, and
+nothing is written, unless `--device` or `--le-audio` (or `le-audio on|off`)
+sets that value: apply would otherwise save the headset of CST's LDAC rule
+over your `DEVICE` line, or turn LE Audio off); that file wins over the defaults, and the
 command line options win over both. `BEARER` is empty by default: the
 headset's own setting is left alone. `LE_AUDIO` is `off` by default (`on`
 or `off`; see [LE Audio: off by default](#le-audio-off-by-default)).

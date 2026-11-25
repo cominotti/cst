@@ -382,6 +382,57 @@ class HeadsetTest(SetupCase):
         self.assertTrue(os.path.exists(rule), "revert removed the rule of a headset that is not set")
         self.assertEqual(self.text(m.settings), "DEVICE=\n")
 
+    def test_a_device_or_le_audio_line_that_sets_nothing_stops_the_run(self) -> None:
+        # Owner choice r27.7. A DEVICE or LE_AUDIO line that sets nothing (a no-break space at the
+        # value's end) stops the run (exit 2) with the words a bad value has, and nothing is written:
+        # apply used to warn, take the headset of CST's LDAC rule and save it over the user's DEVICE
+        # line. Another key's problem line, a later DEVICE line that counts, or the option that
+        # sets the value still only warn.
+        nbsp = "\N{NO-BREAK SPACE}"
+        device = (
+            f"the device must be a MAC address like AA:BB:CC:DD:EE:FF (got 'AA:BB:CC:DD:EE:FF{nbsp}'; "
+            "set DEVICE in {} or use --device)"
+        )
+        le = f"LE Audio must be on or off (got 'off{nbsp}'; LE_AUDIO in the settings or --le-audio)"
+        for settings, cmd, said in (
+            (f"LE_AUDIO=off\nDEVICE='AA:BB:CC:DD:EE:FF{nbsp}'\n", ("apply", "--yes", "--no-restart"), device),
+            (f"LE_AUDIO=off\nDEVICE=AA:BB:CC:DD:EE:FF{nbsp}\n", ("apply", "--yes", "--no-restart"), device),
+            (f"DEVICE=AA:BB:CC:DD:EE:FF{nbsp}\n", ("plan",), device),
+            (f"LE_AUDIO=off{nbsp}\n", ("apply", "--yes", "--no-restart"), le),
+        ):
+            with self.subTest(settings=settings, cmd=cmd[0]):
+                m = self.machine(DONE, settings, headset=False)
+                rule = self.old_rule(m)
+                with open(rule, encoding="utf-8") as f:
+                    rule_text = f.read()
+                r = m.run(*cmd, env={"CST_PROG": "cst-t"})
+                self.assertEqual(r.returncode, 2, r.text)
+                self.assertTrue(r.stderr.endswith(f"cst-t {cmd[0]}: {said.format(m.settings)}\n"), r.stderr)
+                self.assertNotIn("written:", r.stdout)
+                self.assertEqual(self.text(m.settings), settings, "the run rewrote the settings")
+                self.assertEqual(self.text(rule), rule_text)
+        for settings, args in (
+            (f"LE_AUDIO=off\nNOT_A_KEY=x{nbsp}\n", ()),
+            (f"LE_AUDIO=off\nBEARER=bredr{nbsp}\n", ()),
+            (f"DEVICE=AA:BB:CC:DD:EE:FF{nbsp}\nDEVICE={MAC}\n", ()),
+            (f"DEVICE=AA:BB:CC:DD:EE:FF{nbsp}\n", ("--device", MAC)),
+            (f"LE_AUDIO=off{nbsp}\n", ("--le-audio", "on")),
+        ):
+            with self.subTest(settings=settings, args=args):
+                m = self.machine(DONE, settings, headset=False)
+                self.old_rule(m)
+                r = m.run("plan", *args, env={"CST_PROG": "cst-t"})
+                self.assertIn(r.returncode, (0, 10), r.text)
+                self.assertIn(f"Headset {MAC} (", r.stdout)
+                self.assertEqual(self.text(m.settings), settings)
+                problems = r.stderr.count("(the line is ignored)\n")
+                self.assertEqual(problems, 1, r.stderr)
+        m = self.machine(DONE, f"LE_AUDIO=off\nNOT_A_KEY=x{nbsp}\n", headset=False)
+        self.old_rule(m)
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertIn(f"written:   ~/.config/cst/bluetooth.conf: DEVICE={MAC}\n", r.stdout, r.text)
+        self.assertEqual(self.text(m.settings), f"LE_AUDIO=off\nNOT_A_KEY=x{nbsp}\nDEVICE={MAC}\n")
+
     def test_your_device_wins_over_a_rule_and_is_not_rewritten(self) -> None:
         m = self.machine(DONE, "DEVICE=AA:BB:CC:DD:EE:FF\n", headset=False)
         rule = self.old_rule(m)

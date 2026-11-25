@@ -1012,6 +1012,45 @@ echo E2E-OK
 """
 )
 
+BT_PROBLEM_LINE_SCRIPT = (
+    BT_STEPS
+    + r"""
+set -E
+TEST=test_280
+trap 'echo "test_280 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+H=/home/tester
+wp="$H/.config/wireplumber/wireplumber.conf.d"
+rule="$wp/50-bluez-0A_1B_2C_3D_4E_5F.conf"
+conf="$H/.config/cst/bluetooth.conf"
+mkdir -p "$wp" "$(dirname "$conf")"
+cp /opt/cst-rw/tests/fixtures/legacy/50-bluez-0A_1B_2C_3D_4E_5F.conf@535aea1 "$rule"
+r0="$(sha256sum <"$rule")"
+# refused LABEL WORDS...: apply exits 2 with the words, writes nothing, and the settings and the rule
+# keep their bytes.
+refused() {
+    local c0 rc=0
+    c0="$(sha256sum <"$conf")"
+    out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+    show "$1" "$out"
+    [[ "$rc" == 2 ]]
+    for words in "${@:2}"; do grep -qF "$words" <<<"$out"; done
+    no_writes "$1" "$out"
+    [[ "$(sha256sum <"$conf")" == "$c0" && "$(sha256sum <"$rule")" == "$r0" ]]
+}
+
+# 1. A DEVICE line with a no-break space at its end, next to CST's LDAC rule for another headset.
+printf 'LE_AUDIO=off\nDEVICE=AA:BB:CC:DD:EE:FF\xc2\xa0\n' >"$conf"
+refused device "the device must be a MAC address like AA:BB:CC:DD:EE:FF (got 'AA:BB:CC:DD:EE:FF" \
+    "'; set DEVICE in $conf or use --device)"
+
+# 2. The same for LE_AUDIO.
+printf 'LE_AUDIO=off\xc2\xa0\n' >"$conf"
+refused le-audio "LE Audio must be on or off (got 'off" "'; LE_AUDIO in the settings or --le-audio)"
+echo E2E-OK
+"""
+)
+
 
 # test_151, test_200: helpers for their bash steps, and cst vm's torn-snapshot steps (vm/application/nas_torn.py)
 # over the real restic; argv[1] the step. "summary" and "ids" read restic's JSON on stdin; "record",
@@ -5385,6 +5424,24 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf",
         )
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_HEADSET_SCRIPT).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_280_bluetooth_apply_refuses_a_device_or_le_audio_line_that_sets_nothing(self) -> None:
+        """Owner choice r27.7. As tester with the real user manager and WirePlumber, CST's LDAC rule
+        of main's install (tests/fixtures/legacy) and a settings file whose DEVICE line, then whose
+        LE_AUDIO line, ends with a no-break space (a line that sets nothing): `cst bluetooth apply`
+        exits 2 with the words of a bad value, writes nothing, and the settings file and the rule
+        keep their sha256. Before, apply warned that the line is ignored and saved the rule's
+        headset over the DEVICE line: run against the old code, this test fails at that write."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "rm -f /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.config/wireplumber/wireplumber.conf.d/50-bluez-0A_1B_2C_3D_4E_5F.conf",
+            check=False,
+        )
+        out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_PROBLEM_LINE_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BLUETOOTH)

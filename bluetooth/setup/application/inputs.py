@@ -11,20 +11,25 @@ from bluetooth.setup.domain import (
     Config,
     Exit,
     OLD_WP_MARKER,
+    Options,
     Paths,
+    problem_refusal,
+    problem_values,
     read_settings_output,
     rule_device,
+    usage_error,
 )
 from bluetooth.setup.ports import SetupFilesPort
 
 
 def read_bluetooth_settings(
-    host: BluetoothHostPort, paths: Paths
+    host: BluetoothHostPort, paths: Paths, opts: Options, prog: str
 ) -> tuple[dict[str, str], tuple[str, ...], str] | Exit:
     """(the merged settings, the keys the user's file sets, what to print on stderr). As
     bluetooth-setup.sh's two bt-helper calls (settings, then settings-keys), each names a file
     it cannot read: the first leaves the settings empty, the second (the user's file) ends the
-    run with exit 1."""
+    run with exit 1. A DEVICE or LE_AUDIO line that sets nothing ends it with exit 2
+    (problem_refusal), after the warnings."""
     files: list[tuple[str, str]] = []
     user: str | None = None
     try:
@@ -41,6 +46,9 @@ def read_bluetooth_settings(
             user = host.read_or_none(paths.user_settings) or ""
         except (OSError, ValueError) as e:
             return Exit(1, err=f"{said}bt-helper: {e}\n")
+    refusal = problem_refusal(opts, problem_values(t for _, t in files), paths)
+    if refusal is not None:
+        return Exit(2, err=said + usage_error(opts, prog, refusal).err)
     return read_settings_output(shown), tuple(set_keys(user)), said
 
 
