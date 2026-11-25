@@ -339,8 +339,11 @@ What `apply` does, in order:
    To get past a refusal of one of the files it writes whole, or of the
    paths of steps 4 and 5, move what is in the way aside (keep it if it
    holds settings of yours), or remove it, then run `apply` again: it
-   writes CST's file there. On a machine an older CST set up, it then writes
-   `/etc/cst/swap.conf` (section 5).
+   writes CST's file in place of a file it writes whole, puts its link to
+   `/dev/null` at `/etc/systemd/zram-generator.conf` (step 4) and leaves
+   the legacy `/etc/sysctl.d/99-zram-tuning.conf` absent (step 5). On a
+   machine an older CST set up, it then writes `/etc/cst/swap.conf`
+   (section 5).
 2. **swap0**: the marked lines in `/etc/crypttab` (mode 0600) and
    `/etc/fstab`. A marked line is replaced **in place**; a second marked line
    is removed; with none, the line is appended. The file is replaced
