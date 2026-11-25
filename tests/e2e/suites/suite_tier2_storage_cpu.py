@@ -1646,7 +1646,9 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
         )
 
     def test_04_btrfs_bulk_real_subvolume_and_nocow(self) -> None:
-        """btrfs-bulk creates ~/Bulk subvolume, links items, sets +C NOCOW, and supports keep/unkeep."""
+        """btrfs-bulk creates ~/Bulk subvolume, links items, sets +C NOCOW, and supports keep/unkeep. First
+        `cst btrfs bulk apply` with a folder where its count of boot attempts belongs: exit 1, its line, and
+        nothing moved; with the folder gone, the same apply moves the items."""
         as_tester_bash(
             self.PRIV_CONTAINER,
             """
@@ -1659,6 +1661,19 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             """
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk keep models steam
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk plan >/dev/null
+            # The count of boot attempts cannot be reset (a folder in its place): apply stops before it
+            # moves anything, and cst btrfs bulk apply passes its exit 1 and its line on.
+            count=/var/lib/btrfs-bulk/boot-attempts
+            trap 'rmdir "$count" 2>/dev/null || true' EXIT
+            install -d -m 0755 "$count"
+            rc=0; out="$(SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk apply 2>&1)" || rc=$?
+            [[ "$rc" == 1 ]] || { echo "bulk apply with the count a folder: rc=$rc $out" >&2; exit 1; }
+            grep -qF "btrfs-bulk: cannot reset the count of boot attempts: [Errno 21] Is a directory: '$count'; nothing was moved" <<<"$out"
+            test ! -L /home/tester/.android/avd
+            test -f /home/tester/.android/avd/pixel.qcow2
+            test -d "$count"
+            rmdir "$count"
+            # The count can be reset again: the same apply moves the items.
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs bulk apply
             btrfs subvolume show /home/tester/Bulk >/dev/null
             test -L /home/tester/.android/avd
