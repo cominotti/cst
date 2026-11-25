@@ -7143,13 +7143,19 @@ PY
         journal and keeps exactly the two records in game.leftovers; 'state' lists them. A tick while off
         keeps both (the file byte for byte); once the folder is a folder, the next tick writes the old value
         and keeps only the CPUWeight record, which the next 'off' keeps too. The old 'off' removed game.state
-        with both records in it and kept nothing."""
+        with both records in it and kept nothing. With TARGET_USER unset and a GameMode client running, a tick
+        tries a kept record of tester's user manager for tester and still does not start cpu-game.service (a
+        stub): the old tick then acted for tester and started it."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
             """
             printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
             python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-182-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            rm -f /tmp/e2e-182-client.pid /tmp/e2e-182-ready /tmp/e2e-182-starts /tmp/e2e-182-libgamemode.so
             rm -f /etc/cpu-setup/cpu-setup.conf
             if [[ -e /tmp/e2e-182-conf.bak ]]; then mv /tmp/e2e-182-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rmdir /etc/cpu-setup 2>/dev/null || true
@@ -7208,6 +7214,34 @@ PY
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
             rm -f "$lo"
             rm -rf /run/e2e182
+            # The tick while off judges TARGET_USER as it is, not the user of a kept record: with TARGET_USER
+            # unset and a GameMode client running, a kept record of tester's user manager that the real
+            # systemd still refuses is tried for tester, and cpu-game.service (a stub that records its starts)
+            # is not started. The old tick acted for tester from then on and started it ('on' then refused).
+            uid=$(id -u tester)
+            urec='prop usr user.slice CPUWeight existed bogus'
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-182-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-182-libgamemode.so /tmp/e2e-182-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-182-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-182-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-182-client.pid)/maps"
+            printf '%s\n' "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            printf 'cst-game-leftovers 1\nuser %s\n%s\n' "$uid" "$urec" >"$lo"
+            got=$(gp tick 2>&1)
+            grep -qF 'GameMode client running, profile not switched on: TARGET_USER not set' <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            if grep -q 'switching on' <<<"$got"; then echo "the tick switched on: $got" >&2; exit 1; fi
+            sleep 1
+            test ! -e /tmp/e2e-182-starts || { echo "cpu-game.service was started" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "user $uid"$'\n'"$urec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            kill "$(cat /tmp/e2e-182-client.pid)"
+            rm -f "$stub" "$lo" /run/cpu-setup/settings-warned
+            systemctl daemon-reload
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
             echo E2E-OK
             """,
         ).stdout

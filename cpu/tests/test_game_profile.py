@@ -2567,6 +2567,41 @@ class LeftoversTest(GameProfileCase):
         self.assertEqual(self.sets(self.systemd.actions), [f"{USR} set-property --runtime user.slice CPUWeight=30"])
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
+    def kept_for_the_user(self, target: str) -> tuple[GameProfile, io.StringIO]:
+        """A game.leftovers whose record of the user manager, for USER, still fails; a profile whose
+        TARGET_USER is target (USER's account found by its uid, no other account)."""
+        self.write(self.paths.leftovers, f"cst-game-leftovers 1\nuser {UID}\nprop usr user.slice CPUWeight existed 30\n")
+        self.systemd.fail_set.add(("usr", "user.slice"))
+        os.makedirs(os.path.join(self.paths.run_user, UID, "systemd"), exist_ok=True)  # USER is logged in
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            dataclasses.replace(self.settings, target_user=target),
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "",
+            name_of=lambda uid: USER if uid == UID else "",
+            out=out,
+        )
+        return p, out
+
+    def test_the_tick_while_off_judges_target_user_not_the_user_of_a_kept_record(self) -> None:
+        # A GameMode client runs (game_scratch's) and TARGET_USER is unset or names no account: 'on' would
+        # refuse, so the tick must not start cpu-game.service, whatever user a kept record is for.
+        for target in ("", "nobody-here"):
+            with self.subTest(target=target):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.paths.settings_warned)
+                p, out = self.kept_for_the_user(target)
+                self.systemd.actions = []
+                self.assertEqual(p.tick(), 0)
+                # The kept record was tried for the user it is for, and is still kept.
+                self.assertEqual(self.sets(self.systemd.actions), [f"{USR} set-property --runtime user.slice CPUWeight=30"])
+                self.assertTrue(os.path.exists(self.paths.leftovers))
+                self.assertNotIn("switching on", out.getvalue())
+                self.assertNotIn(f"{SYS} start --no-block cpu-game.service", self.systemd.actions)
+                self.assertIn("GameMode client running, profile not switched on: TARGET_USER", out.getvalue())
+                self.assertEqual(p.s.target_user, target)
+
     def test_a_transient_unit_that_is_gone_is_no_leftover(self) -> None:
         # A Docker scope with an override of its own before the game, which ended before 'off'.
         self.systemd.units["sys"] = ["docker-1.scope"]

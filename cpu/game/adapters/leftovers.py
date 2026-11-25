@@ -97,16 +97,22 @@ def unit_gone(profile: GameProfile, mgr: Manager, unit: str) -> bool:
 def retry_kept(profile: GameProfile, *, say: bool) -> None:
     """Undo game.leftovers' entries again ('off' with no game.state, say: each one that fails again is said;
     the tick with the profile off, quietly): one notice line per entry undone now, then the file holds the
-    rest (removed when none is left)."""
+    rest (removed when none is left). The profile acts for TARGET_USER again afterwards: each kept record of
+    the user manager is undone for the user it names, and what the tick decides next (switching on) is
+    TARGET_USER's."""
     kept = read_kept(profile, say=say)
     if kept is None or not kept:
         return
-    reload = {"sys": False, "usr": False}
-    failed = undo_entries(profile, kept, reload, say=say)
-    still = {rec for _uid, rec in failed}
-    for _uid, rec in kept:
-        if rec not in still:
-            what = undo_text(rec, profile.paths.epp)
-            profile.log(5, f"undid {what}, kept in {profile.paths.leftovers} by an earlier off")
-    profile.reload_managers(reload)
-    keep(profile, failed, readable=True)
+    settings = profile.s
+    try:
+        reload = {"sys": False, "usr": False}
+        failed = undo_entries(profile, kept, reload, say=say)
+        still = {rec for _uid, rec in failed}
+        for _uid, rec in kept:
+            if rec not in still:
+                what = undo_text(rec, profile.paths.epp)
+                profile.log(5, f"undid {what}, kept in {profile.paths.leftovers} by an earlier off")
+        profile.reload_managers(reload)
+        keep(profile, failed, readable=True)
+    finally:
+        profile.s = settings

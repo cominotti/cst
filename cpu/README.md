@@ -908,7 +908,10 @@ kept in /run/cpu-setup/game.leftovers by an earlier off` for each one that
 works now) and keep only those that fail again; the file is removed when
 none is left. A user manager's record keeps the user it was for (a `user
 UID` line before it), so it is undone for that user whatever
-`TARGET_USER` says later. A record whose unit is gone is done, not kept: a
+`TARGET_USER` says later; what the tick then decides (switching the profile
+on for a running game) is still judged for `TARGET_USER` as the settings
+file has it, so a kept record never makes the tick start a
+`cpu-game.service` whose `on` refuses. A record whose unit is gone is done, not kept: a
 transient unit that is no longer loaded, or a user manager whose runtime
 folder is gone (a logout), took its runtime override with it. A fixed unit's
 override outlives the unit, so it stays kept. `cst cpu game state` lists the
