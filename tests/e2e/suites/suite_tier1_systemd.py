@@ -8070,7 +8070,8 @@ echo E2E-OK
         under its uid, never undone in tester's manager (the old 'off' dropped them as undone); a tick keeps
         them, and once that manager is stopped the next tick drops them. (c) With that game.state still there, a
         tick sets nothing in tester's manager (a Steam-named scope there gets no MemoryLow and no record) and
-        says why once; the old tick acted in tester's manager."""
+        says why once; the old tick acted in tester's manager. cst doctor (as root) compares no drift of that
+        uid's user manager in tester's, and says why; the old doctor warned of a drift in tester's manager."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -8170,6 +8171,11 @@ echo E2E-OK
             if grep -qF "$steam" "$st"; then echo "game.state has a record of tester's Steam scope" >&2; exit 1; fi
             got=$(gp tick 2>&1)
             if grep -qF "not handled" <<<"$got"; then echo "said twice: $got" >&2; exit 1; fi
+            # cst doctor compares no drift of that uid's user manager in tester's either, and says why.
+            d=$(/opt/cst-rw/cst doctor 2>&1 || true)
+            grep -qF "drift not checked for user.slice (no account has uid $ub, the user 'on' acted for)" <<<"$d" \
+                || { echo "doctor: $d" >&2; exit 1; }
+            if grep -qF "(the profile set idle)" <<<"$d"; then echo "doctor compared tester's manager: $d" >&2; exit 1; fi
             tester_untouched "(c)"
             systemctl --user -M tester@ stop "$steam" e2e205-steam-launch.service 2>/dev/null || true
             got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }

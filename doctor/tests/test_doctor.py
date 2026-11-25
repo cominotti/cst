@@ -2702,10 +2702,10 @@ class GameProfileTest(Scratch):
     def test_the_user_game_state_names_is_asked_not_a_changed_target_user(self) -> None:
         # 'on' acted for the user whose user@UID.service it recorded first; TARGET_USER names another
         # user now (results() sets tester). The profile's tick and 'state' ask the user game.state
-        # names, and so does the doctor; a uid that names no account leaves TARGET_USER's.
+        # names, and so does the doctor.
         me = pwd.getpwuid(os.getuid()).pw_name
         state = os.path.join(self.run_dir, "game.state")
-        for uid, asked in ((os.getuid(), me), (999999, "tester")):
+        for uid, asked in ((os.getuid(), me),):
             with self.subTest(uid=uid):
                 self.profile_on()
                 with open(state, "w") as f:
@@ -2720,6 +2720,25 @@ class GameProfileTest(Scratch):
                 calls = self.calls()[before:]
                 self.assertIn(f"systemctl --user -M {asked}@ show -p LoadState -p CPUWeight user.slice", calls)
                 self.assertEqual([c for c in calls if " -M " in c and f"-M {asked}@" not in c], [])
+
+    def test_the_user_manager_of_a_recorded_uid_with_no_account_is_not_compared(self) -> None:
+        # No account has the uid game.state records, and TARGET_USER names another user (tester): the tick leaves
+        # that uid's user manager alone and 'state' compares no drift of it, so the doctor compares none either,
+        # and says why. The old doctor compared game.intended's records with tester's manager, and warned of a
+        # drift the tick never repairs.
+        self.profile_on()
+        with open(os.path.join(self.run_dir, "game.state"), "w") as f:
+            f.write("prop sys user@999999.service MemoryLow new -\n")
+        self.show("usr", "user.slice", CPUWeight="30")  # tester's: not the user 'on' acted for
+        before = len(self.calls())
+        res = self.results()
+        self.assertEqual([c for c in self.calls()[before:] if "--user" in c], [])
+        self.assertEqual([r.status for r in res], [doc_domain.OK, doc_domain.INFO], res)
+        self.assertIn("the 7 settings it made still hold", res[0].message)
+        self.assertEqual(
+            res[1].message,
+            "game profile: drift not checked for user.slice (no account has uid 999999, the user 'on' acted for)",
+        )
 
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()

@@ -227,7 +227,12 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   its tick and `cst cpu game state` ask: the user whose `user@UID.service`
   `game.state` names (`on` records it first), so a `TARGET_USER` changed while
   the profile is on does not move the check to another user; `TARGET_USER`
-  when `game.state` names none (or its uid names no account). When the
+  when `game.state` names none. When no account has the uid `game.state`
+  names, the user manager's units are not compared (`info`: `drift not
+  checked for UNIT (no account has uid UID, the user 'on' acted for)`), as
+  the tick and `state` leave that side alone: `TARGET_USER`'s manager is
+  another user's (versions before 2026-11 compared them there, and warned of
+  a drift the tick never repairs). When the
   profile is for another user than the one running the doctor, the user
   manager's units are skipped (`info`). A `cpuset.cpus` file the profile wrote directly is read under
   `/sys/fs/cgroup`. While the profile is off it lists
