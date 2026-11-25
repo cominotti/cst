@@ -1780,6 +1780,7 @@ this is harmless.
 | `game/domain/boxes.py` | The watchdog's check of the boxes it handled, no I/O: whether a recorded setting still holds as systemd shows it (`MemoryLow` by its bytes, `AllowedCPUs` as a set of CPUs, `CPUWeight`), and the journal's words when it sets one again |
 | `game/adapters/boxes.py` | `set_again`: a handled box's recorded settings read back (one `systemctl show`) and each one that does not hold set again, with no new record |
 | `game/domain/leftovers.py` | The format of `game.leftovers` (7.4), no I/O: the records `off` could not undo with the user each is for, how `off` merges them with `game.state`'s, and the journal's and `state`'s words for them |
+| `game/adapters/drift.py` | `repair_drift`: the watchdog sets again each setting of `game.intended` that `GameProfile.drift` lists as no longer holding, straight with `set-property` |
 | `game/adapters/leftovers.py` | `game.leftovers` on the machine: read, undo again (the next `off`, the tick while off), write back what still fails, and whether a failed unit is gone |
 | `game/adapters/report.py` | `state`'s report (`show_state`): what is applied now and which settings drifted, read from one snapshot of the state files, with no lock |
 | `game/adapters/power.py` | Dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`), AMD `3D_FULL_SCREEN` activation, P-core EPP, and per-game C-state caps |

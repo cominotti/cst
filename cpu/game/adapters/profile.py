@@ -32,6 +32,7 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
+from cpu.game.adapters.drift import repair_drift
 from cpu.game.adapters.leftovers import Reloads, drop_unowned, keep, read_kept, retry_kept, undo_entries, unit_gone
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
@@ -67,12 +68,10 @@ from cpu.game.domain import (
     intended_props,
     intended_records,
     newer_intended,
-    manager_of,
     on_text,
     PropUndo,
     record_line,
     records,
-    repaired_text,
     unreadable_lines,
     show_values,
     state_uid,
@@ -621,34 +620,7 @@ class GameProfile:
                 now[mgr, unit] = vals
         return drifted(recs, now, lambda f: (read_stripped(f) or "") if os.path.exists(f) else None)
 
-    def repair_drift(self) -> None:
-        """Set again what drift() lists, straight with set-property: not with setp, which would add
-        a second record to game.state and make 'off' restore the profile's own value. A game.intended
-        of a newer CST is not read (its records may mean something else), and a setting game.state holds
-        no record of is not set again ('off' could not undo it): each said in the journal once per boot
-        (again when the text changes, and when it comes back after a tick that had nothing to say: _say_unheld)."""
-        text, newer = self.intended()
-        if newer is not None:
-            said = f"drift not repaired: {newer}"
-            self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
-            return
-        drifts = self.drift(text)
-        skipped = unheld(drifts, records(self.state_text()))
-        self._say_unheld(skipped)
-        for d in drifts:
-            if d in skipped:
-                continue
-            r = d.record
-            if d.is_cgroup_file:
-                ok = write_sysfs_line(r[1], r[2])
-            else:
-                ok = (
-                    self.ctl(manager_of(r[1]) or "usr", "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True)
-                    == 0
-                )
-            self.log(*repaired_text(d, ok=ok))
-
-    def _say_unheld(self, skipped: Sequence[Drift]) -> None:
+    def say_unheld(self, skipped: Sequence[Drift]) -> None:
         """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
         notice; with none, forget the mark, so a later one is said again."""
         if not skipped:
@@ -661,7 +633,7 @@ class GameProfile:
             for line in said.split("\n"):
                 self.log(5, line)
 
-        self._say_once(self.paths.drift_warned, said, emit)
+        self.say_once(self.paths.drift_warned, said, emit)
 
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
@@ -687,7 +659,7 @@ class GameProfile:
         else:
             self._say_refusal("profile on, its user manager's side not handled", why)
         apply_game_gpu(self)
-        self.repair_drift()  # settings a daemon-reload or uresourced undid
+        repair_drift(self)  # settings a daemon-reload or uresourced undid
         return 0
 
     def _tick_while_off(self) -> None:
@@ -714,7 +686,7 @@ class GameProfile:
         """The watchdog's word on a TARGET_USER 'on' refuses (target_refusal's why), once per boot, in the
         mark of the settings file's problem lines (_forget_fixed_settings)."""
         said = f"{what}: {why}{_ONCE}"
-        self._say_once(self.paths.settings_warned, said, lambda: self.log(4, said))
+        self.say_once(self.paths.settings_warned, said, lambda: self.log(4, said))
 
     def _forget_fixed_settings(self) -> None:
         """With no problem line: forget what the watchdog said about the settings (a line or a name that
@@ -748,10 +720,10 @@ class GameProfile:
         them (and again when they or the word change, or after a tick found the file fixed), then quiet
         until the next boot (the mark is in /run); the watchdog's unit does not fail on them."""
         said = "\n".join([what, *self.problem_lines()])  # another word on the same lines is said too
-        self._say_once(self.paths.settings_warned, said, lambda: self._log_problems(4, what, "; said once per boot"))
+        self.say_once(self.paths.settings_warned, said, lambda: self._log_problems(4, what, "; said once per boot"))
 
     @staticmethod
-    def _say_once(mark: str, said: str, emit: Callable[[], None]) -> None:
+    def say_once(mark: str, said: str, emit: Callable[[], None]) -> None:
         """emit() unless the mark holds said (it was said already this boot: the mark is in /run); then
         the mark holds said, so another text is said again."""
         if read_text(mark) == said:
