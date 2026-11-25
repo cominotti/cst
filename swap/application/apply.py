@@ -152,7 +152,7 @@ class SwapApplicationService(SwapReports):
         if not self._fs.exists(path):
             self._fs.write_atomic(path, "", mode)
         self._fs.copy_if_absent(path, f"{path}.pre-swap-config.bak")
-        existing = self._fs.read_text(path, "") or ""
+        existing = self._fs.read_text(path, "", regular_only=True) or ""
         self._fs.write_atomic(path, line_spec.render_updated(existing), mode)
 
         if st == OwnedState.ADOPT:

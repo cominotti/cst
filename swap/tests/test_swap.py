@@ -30,7 +30,7 @@ from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import ArtifactKind, Owner
 from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
-from tests.probes import NoUnitQueries
+from tests.probes import NoUnitQueries, time_bound
 from swap.application.apply import SwapApplicationService
 from swap.application.memory_tuning import MM_TMPFILES_ENTRY, URESOURCED_ENTRY, effective_uresourced_memory_min
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
@@ -1545,6 +1545,8 @@ def file_tree(root: str) -> dict[str, bytes]:
             p = os.path.join(d, name)
             if os.path.islink(p):
                 out[p] = os.readlink(p).encode()
+            elif not os.path.isfile(p):  # a FIFO (its open would wait), a device: its type only
+                out[p] = stat.filemode(os.lstat(p).st_mode).encode()
             else:
                 with open(p, "rb") as f:
                     out[p] = f.read()
@@ -3080,6 +3082,65 @@ class SwapApplyBranchesTest(_SwapScratch):
                         f.write("# not a folder\n")
                 for verb, rows in self._file_rows().items():
                     self.assertEqual(rows[target], ("?", note.format(path=path)), verb)
+
+    def test_a_fifo_at_a_file_swap_reads_is_one_it_cannot_read_and_nothing_blocks(self) -> None:
+        # A FIFO (its open waits for a writer) at each file apply writes whole, at crypttab and at fstab, as
+        # root on the host: plan's and status's row of that file is "?" with the root note, and apply refuses
+        # before its first write with "<path>: cannot be read: nothing was changed". Before, plan blocked in
+        # the FIFO's open (bounded here: CallBlocked).
+        time_bound(self, 20)
+        note = "cannot be read, even as root: apply refuses before it writes anything"
+        lines = {"crypttab": "crypttab: swap0 line", "fstab": "fstab: /dev/mapper/swap0 line"}
+        written_whole = [os.path.relpath(dest, self.env.etc_dir) for _src, dest in self.env.managed_files]
+        for which in [*written_whole, "crypttab", "fstab"]:
+            tmp = self._fresh_scratch()
+            self.env = dataclasses.replace(self.env, as_root=True)
+            path = getattr(self.env, which) if which in lines else os.path.join(self.env.etc_dir, which)
+            with self.subTest(path=which):
+                if os.path.lexists(path):
+                    os.remove(path)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                os.mkfifo(path)
+                for verb, rows in self._file_rows().items():
+                    target = lines.get(which) or next(t for t in rows if t.endswith(os.path.basename(path)))
+                    self.assertEqual({t: r for t, r in rows.items() if r[0] == "?"}, {target: ("?", note)}, verb)
+                before = file_tree(tmp)
+                self._assert_refused_before_any_write(
+                    self._apply_on(self._fs()), f"cst swap: ERROR: {path}: cannot be read: nothing was changed"
+                )
+                self.assertEqual(file_tree(tmp), before)
+
+    def test_a_fifo_at_the_settings_file_stops_apply_and_nothing_blocks(self) -> None:
+        # Before, plan and apply blocked in the FIFO's open (bounded here: CallBlocked).
+        time_bound(self, 5)
+        tmp = self._fresh_scratch()
+        os.remove(self.env.settings_path)
+        os.mkfifo(self.env.settings_path)
+        before = file_tree(tmp)
+        plan = self._plan_text(self.env)
+        self.assertIn("  REFUSE    cst/swap.conf                          not a regular file: apply stops\n", plan)
+        self._assert_refused_before_any_write(
+            self._apply_on(self._fs()), f"cst swap: ERROR: {self.env.settings_path}: not a regular file: apply stops."
+        )
+        self.assertEqual(file_tree(tmp), before)
+
+    def test_a_link_to_dev_null_at_crypttab_is_refused(self) -> None:
+        # Not a regular file (through the link, a character device): one apply cannot read. Before, it read as
+        # an empty crypttab, and apply replaced the link with a file.
+        tmp = self._fresh_scratch()
+        os.remove(self.env.crypttab)
+        os.symlink(os.devnull, self.env.crypttab)
+        self.env = dataclasses.replace(self.env, as_root=True)
+        rows = self._file_rows()["plan"]
+        self.assertEqual(
+            rows["crypttab: swap0 line"], ("?", "cannot be read, even as root: apply refuses before it writes anything")
+        )
+        before = file_tree(tmp)
+        self._assert_refused_before_any_write(
+            self._apply_on(self._fs()), f"cst swap: ERROR: {self.env.crypttab}: cannot be read: nothing was changed"
+        )
+        self.assertEqual(file_tree(tmp), before)
+        self.assertEqual(os.readlink(self.env.crypttab), os.devnull)
 
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the

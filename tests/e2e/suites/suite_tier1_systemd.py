@@ -11547,3 +11547,74 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_212_swap_plan_and_apply_refuse_a_fifo_at_once(self) -> None:
+        """cst swap plan and apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup
+        trap set before swap_setup) with /etc/cst/swap.conf in place and nothing applied yet, and a FIFO
+        where /etc/tmpfiles.d/zswap.conf goes, which nothing ever writes to. Each run is bounded by
+        timeout(1) at 30 s: before this change plan opened the FIFO and waited for a writer for ever
+        (exit 124 here). Now plan exits 0 at once and its row of that path is "?" with "cannot be read,
+        even as root: apply refuses before it writes anything"; apply exits 1 at once with "...: cannot
+        be read: nothing was changed" and changes nothing (every file, link, mode and owner under /etc
+        and the scratch tree, the install record; no .pre-swap-config.bak, no sysctl run). With the FIFO
+        removed (the test's trap removes it too, before swap_cleanup runs) the same apply works and a
+        second one changes nothing."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/tmpfiles.d/zswap.conf
+trap 'if [[ -p "$CONF" ]]; then rm -f "$CONF"; fi; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+bounded() {
+    rc=0
+    timeout 30 "$CST" swap "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "swap $* blocked on the FIFO"
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "the container's $CONF is not as the test expects"
+mkdir -p "$(dirname "$CONF")"
+mkfifo -m 0644 "$CONF"
+
+bounded plan
+[[ $rc == 0 ]] || fail "plan with a FIFO at $CONF exited $rc"
+grep -qE '^  \?  +tmpfiles\.d/zswap\.conf +cannot be read, even as root: apply refuses before it writes anything$' \
+    <<<"$out" || fail "plan's row of the FIFO"
+s0="$(snap)"
+r0="$(record)"
+: >"$W/calls"
+bounded apply
+[[ $rc == 1 ]] || fail "apply with a FIFO at $CONF exited $rc"
+grep -qF "swap: ERROR: $CONF: cannot be read: nothing was changed" <<<"$err" || fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply with a FIFO wrote before it refused"
+[[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+[[ -p "$CONF" ]] || fail "apply replaced the FIFO"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+[[ "$(record)" == "$r0" ]] || fail "a refused apply changed the install record"
+if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply ran sysctl"; fi
+
+# The FIFO removed: the same apply works, and a second one changes nothing.
+rm -f "$CONF"
+bounded apply
+[[ $rc == 0 ]] || fail "apply without the FIFO exited $rc"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+s1="$(snap)"
+bounded apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

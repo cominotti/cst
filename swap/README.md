@@ -121,8 +121,10 @@ compressor later creates a second pool that lives until the old one drains).
   A `/etc/cst/swap.conf` that is there but cannot be read is never treated
   as missing: as a user who may not read it (its mode or owner, or a folder
   above it the user may not enter) `plan` and `status` show `?` and ask for
-  `--root`; one that is not a regular file, or that root cannot read, is
-  `REFUSE`, and `apply` stops before it changes anything. Root inside a
+  `--root`; one that is not a regular file (a folder, a FIFO, a device, or
+  through a link one of those), or that root cannot read, is `REFUSE`, and
+  `apply` stops before it changes anything. A FIFO there is never opened in
+  a way that waits: `plan` and `apply` answer at once. Root inside a
   toolbox counts as a user here: the host's root-only files may be closed
   to it, and `--root` on the host reads them.
   On sophia it reads:
@@ -308,7 +310,7 @@ The words in the first column of `plan` and `status`:
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
-| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. Also, for any user: a folder in place of `/etc/systemd/zram-generator.conf` or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, or a name above a file `apply` writes whole that is not a folder (step 1 below): the row says that `apply` refuses it before it writes anything. |
+| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole, also when a folder, a FIFO or a device is in place of one): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. Also, for any user: a folder in place of `/etc/systemd/zram-generator.conf` or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, or a name above a file `apply` writes whole that is not a folder (step 1 below): the row says that `apply` refuses it before it writes anything. |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:
@@ -317,7 +319,11 @@ What `apply` does, in order:
    section 2.3), that zswap exists, that the `zstd` compressor loads, and the
    partition (exists, exact size, no filesystem signature), that no `swap0`
    line was written by hand, that `/etc/crypttab` and `/etc/fstab` can
-   be read (a folder in place of one is refused with
+   be read (anything but a regular file there counts as one it cannot read:
+   a folder, a FIFO or a device, and a link to one, `/dev/null` included,
+   which an older CST read as an empty file and replaced with a file; none
+   of them is opened in a way that waits, so `plan` and `apply` never block
+   on a FIFO; such a file is refused with
    `<file>: cannot be read: nothing was changed`, the words of the files it
    writes whole; a file found unreadable only later, when `/etc/cst/swap.conf`
    or `/etc/crypttab` may have been written already, is refused with
@@ -326,7 +332,7 @@ What `apply` does, in order:
    `/etc/tmpfiles.d/cst-mm-responsiveness.conf`,
    `/etc/sysctl.d/99-swap-tuning.conf`, `/etc/uresourced.conf`, which
    step 7 copies aside first, and the `machine.slice` drop-in) can be read
-   (a folder in place of one is refused with
+   (a folder, a FIFO or a device in place of one is refused, at once, with
    `<file>: cannot be read: nothing was changed`; so is a link at
    `/etc/uresourced.conf` to anything but a file or a character device it
    can read, such as a folder or a FIFO, while step 7 has still to copy it
