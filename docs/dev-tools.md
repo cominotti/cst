@@ -142,7 +142,8 @@ Some protocols must survive a process that dies or a disk that fills up
 halfway: docker-volumes-nocow's boot migration, `cst btrfs scrub-limit set`
 and `off` with their rollback, `cst btrfs iocost apply`'s "done last",
 `cst btrfs cache attach` and `detach` (no line in /etc/fstab for a bind
-that is not mounted), `cst toolchains prune apply rust:build` (a folder
+that is not mounted), `cst btrfs compress-force` and `commit-interval`
+`apply` and `revert` with their rollback over four layers, `cst toolchains prune apply rust:build` (a folder
 renamed to the trash before it is deleted, the leftovers of a run that
 died), `cst bluetooth apply` and `revert` with their restarts and the
 record of the restarts still owed, and btrfs-bulk's moves of an item into
@@ -180,12 +181,15 @@ run (recovery), and at the end (the same command again converges).
 - Wrap each mutating call: subclass the real adapter and send each method
   through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
   send each mutating method of an in-memory fake of a use case's ports
-  through it (`ScrubWorld`, `IocostWorld` and `CacheWorld` in `btrfs/tests/fakes.py`,
-  which `btrfs/tests/test_scrub_limit_faults.py`,
-  `btrfs/tests/test_iocost_faults.py` and `btrfs/tests/test_cache_faults.py` drive;
+  through it (`ScrubWorld`, `IocostWorld`, `CacheWorld` and `CompressWorld` in
+  `btrfs/tests/fakes.py`, which `btrfs/tests/test_scrub_limit_faults.py`,
+  `btrfs/tests/test_iocost_faults.py`, `btrfs/tests/test_cache_faults.py` and
+  `btrfs/tests/test_compress_faults.py` drive;
   a contract test runs the same body on the fake and on the real adapter, so the
   fake cannot drift: `btrfs/tests/test_scrub_limit_ports.py`,
-  `btrfs/tests/test_iocost_ports.py`, `btrfs/tests/test_cache_ports.py`),
+  `btrfs/tests/test_iocost_ports.py`, `btrfs/tests/test_cache_ports.py`;
+  `CompressWorld`'s failures that take effect first, its torn points, rest on
+  `AdapterFailureTest`, which pins what the real adapter gives in each),
   put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
   `os` as it is: `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
@@ -245,14 +249,18 @@ a Steam undo's, or the switch's when the source changed) must converge too, beca
 copy is renamed to `<target>.bulk-new.bulk-drop` before it is deleted and a
 repair deletes a marked copy without the "written to" check.
 
-**Cost.** The eight modules (`tests.test_fault_injection`,
+**Cost.** The nine modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
 `btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
 `btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
-`bluetooth.tests.test_setup_faults`, `btrfs.tests.test_btrfs_bulk_faults`)
-together: 10.5 to 10.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
--I -B tests/run_unit.py --jobs 4` on the eight, 3 runs, on a workstation
-whose load average was 3 to 4 on 16 CPUs; 6.5 to 10.1 s there without the
+`bluetooth.tests.test_setup_faults`, `btrfs.tests.test_btrfs_bulk_faults`,
+`btrfs.tests.test_compress_faults`)
+together: 11.9 to 12.6 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
+-I -B tests/run_unit.py --jobs 4` on the nine, 3 runs, on a workstation
+whose load average was 5 to 6 on 16 CPUs; compress-force's and
+commit-interval's alone, in memory, 0.7 s wall and 1.8 s of CPU; 10.5 to
+10.8 s for the first eight at an earlier measurement under a load average of
+3 to 4, 6.5 to 10.1 s there without the
 Steam undo's classes, and 4.3 to 4.8 s at an earlier measurement under a
 load average of 20). btrfs-bulk's alone is about 20 s of CPU in 30
 classes: the Steam undo's three take about 9.5 s of it (SteamUndoKillTest,

@@ -1,31 +1,79 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Fault injection on `cst btrfs compress-force` and `cst btrfs commit-interval` apply and revert.
+"""Exhaustive fault injection on `cst btrfs compress-force` and `cst btrfs commit-interval` apply and revert
+(tests/fault_injection.py), over CompressWorld.
+
+compress-force (btrfs/compress/application.py, CompressService.execute_change) and commit-interval
+(btrfs/commit/adapters.py, execute_commit_change) share one port, CompressHostPort, and run here over
+CompressWorld (btrfs/tests/fakes.py), its in-memory fake: /etc/fstab, the staged kernel arguments, the live
+mounts and the top-mount unit. Each mutating call is a point of a FaultPlan: "fstab write", "kargs",
+"remount" and "top-mount" (the forward steps and the rollback's undos alike).
+
+Start states (STARTS): compress-force apply from Fedora's default, after an apply killed after its fstab
+write, on a host that is not rpm-ostree booted with no top mount, and with live mounts without compress;
+revert from fully applied and after a revert killed after its kargs; commit-interval apply 60 from no
+commit=, from commit=90, after an apply killed after its kargs; revert from 60 and from live at 60 with the
+files reverted. For each, every mode at every point, and every FAIL followed by a KILL or a second FAIL at
+each later point of that run (the rollback's calls included), checked:
+- I1: a run that returns 1 without "ROLLBACK INCOMPLETE" left every layer as at the start; one that says
+  it names each layer that differs from the start; a run that returns 0 left every layer at the target;
+- I2: after any fault, each layer holds its start value or the target, never a third; the /etc/fstab lines
+  CST does not manage keep their bytes; a separate btrfs /var/home is never remounted;
+- I3: the same command again, with no fault, returns 0 with every layer at the target and status coherent,
+  and a third run says "nothing to do" and makes no mutating call;
+- I3b: the opposite command from the state the fault left converges too;
+- I4 (the question whether a formal spec is worth it): a fault that leaves the next boot's two layers
+  disagreeing (/etc/fstab's root lines and the last rootflags= of the staged kernel arguments) must be
+  followed by a run again that converges. CST_FAULT_REPORT=1 prints every such case.
 
 AdapterFailureTest pins what the real adapter (btrfs/compress/adapters.py, LinuxCompressHostAdapter) gives
-when a step fails after it changed its layer: those outcomes are what CompressWorld's torn points
-(btrfs/tests/fakes.py) stand for. CompressWorldTest pins the world's own rules.
+when a step fails after it changed its layer: those outcomes are what CompressWorld's torn points stand for.
+CompressWorldTest pins the world's own rules.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+import copy
+from dataclasses import dataclass
 from enum import StrEnum
 import errno
+import functools
 import os
 import shutil
+import sys
 import tempfile
-from typing import override
+from typing import ClassVar, override
 import unittest
 from unittest import mock
 
+from btrfs.commit.adapters import execute_commit_change, read_commit_snapshot
+from btrfs.commit.domain import (
+    CommitAction,
+    CommitParsedArgs,
+    assess_commit_coherence,
+    effective_commit_seconds,
+    format_commit_label,
+    has_explicit_commit,
+)
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
-from btrfs.compress.domain import TopMountInfo, parse_top_mount_unit
+from btrfs.compress.application import CompressService
+from btrfs.compress.domain import (
+    ROOTFLAGS_PREFIX,
+    TopMountInfo,
+    effective_compress_spec,
+    extract_rootflags_tokens,
+    parse_fstab_root_entries,
+    parse_proc_mounts,
+    parse_top_mount_unit,
+    pick_root_mounts,
+)
+from btrfs.compress.domain.args import CompressArgs, CompressCommand
 from btrfs.tests.fakes import CompressWorld, kernel_remount_options
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.application.install import InstallRequest, InstallService
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandFailed, CommandResult
-from tests.fault_injection import FaultMode, FaultPlan, FaultyRunner, no_space
+from tests.fault_injection import Fault, FaultMode, FaultPlan, FaultyRunner, Killed, cut_points, every_fault, no_space
 from tests.repo_files import REPO
 
 UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
@@ -286,3 +334,612 @@ class CompressWorldTest(unittest.TestCase):
         self.assertEqual(w.fstab, NEW_FSTAB)
         self.assertIn("loud", w.kargs)
         self.assertEqual(w.top, TopMountInfo(installed=True, uuid=UUID, options=NEW_TOP_OPTIONS))
+
+
+# ---- the fault matrix ----------------------------------------------------------------------------------
+
+HOME_UUID = "0b5e6a1d-0000-4000-8000-00000000cafe"
+INCOMPLETE = "ROLLBACK INCOMPLETE"
+# The words an incomplete rollback names each layer with.
+LAYER_WORDS = ("fstab:", "kargs:", "remount:", "top-mount:")
+
+
+class Tool(StrEnum):
+    """Which use case runs."""
+
+    COMPRESS = "compress-force"
+    COMMIT = "commit-interval"
+
+
+class Command(StrEnum):
+    APPLY = "apply"
+    REVERT = "revert"
+
+
+@dataclass(frozen=True)
+class Start:
+    """A state before the run: the tool and command, the layers' options (None: the layer is not there), and
+    the pinned numbers of points and of FAIL then a later fault cases (the same count for a KILL and for a
+    FAIL as the second fault)."""
+
+    name: str
+    tool: Tool
+    command: Command
+    root: str  # the options of the root's fstab lines and of the live root mounts
+    kargs: str | None  # the rootflags= value; None: not rpm-ostree booted
+    live: str
+    top: str | None
+    points: int
+    fail_then_later: int
+    separate_home: bool = False
+
+
+def _compress_opts(spec: str) -> str:
+    return f"subvol=root,degraded,{spec},noatime,flushoncommit".replace(",,", ",")
+
+
+def _commit_opts(commit: str) -> str:
+    return f"subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit{commit}"
+
+
+def _top(spec: str) -> str:
+    return f"subvolid=5,noatime,degraded,{spec},ssd,flushoncommit".replace(",,", ",")
+
+
+ZSTD, FORCED = "compress=zstd:1", "compress-force=zstd:1"
+STARTS: tuple[Start, ...] = (
+    # P1: Fedora's default, every layer compress=zstd:1.
+    Start("P1", Tool.COMPRESS, Command.APPLY, ZSTD, ZSTD, ZSTD, ZSTD, points=4, fail_then_later=6),
+    # P2: an apply killed after its fstab write.
+    Start("P2", Tool.COMPRESS, Command.APPLY, FORCED, ZSTD, ZSTD, ZSTD, points=3, fail_then_later=3),
+    # P3: not rpm-ostree booted, no top mount, a separate btrfs /var/home: two layers.
+    Start("P3", Tool.COMPRESS, Command.APPLY, ZSTD, None, ZSTD, None, points=2, fail_then_later=1, separate_home=True),
+    # P4: the live mounts without compress (the rollback remounts with compress=no).
+    Start("P4", Tool.COMPRESS, Command.APPLY, ZSTD, ZSTD, "", ZSTD, points=4, fail_then_later=6),
+    # P5: revert from fully applied.
+    Start("P5", Tool.COMPRESS, Command.REVERT, FORCED, FORCED, FORCED, FORCED, points=4, fail_then_later=6),
+    # P6: a revert killed after its kargs (fstab and kargs back), the rest still forced.
+    Start("P6", Tool.COMPRESS, Command.REVERT, ZSTD, ZSTD, FORCED, FORCED, points=2, fail_then_later=1),
+    # C1: no commit= anywhere (30 s), a separate btrfs /var/home.
+    Start("C1", Tool.COMMIT, Command.APPLY, "", "", "", "", points=4, fail_then_later=6, separate_home=True),
+    # C2: commit=90 everywhere (the undo remounts with commit=90).
+    Start(
+        "C2",
+        Tool.COMMIT,
+        Command.APPLY,
+        ",commit=90",
+        ",commit=90",
+        ",commit=90",
+        ",commit=90",
+        points=4,
+        fail_then_later=6,
+    ),
+    # C3: an apply killed after its kargs (fstab and kargs at 60).
+    Start("C3", Tool.COMMIT, Command.APPLY, ",commit=60", ",commit=60", "", "", points=2, fail_then_later=1),
+    # C4: revert from 60 everywhere.
+    Start(
+        "C4",
+        Tool.COMMIT,
+        Command.REVERT,
+        ",commit=60",
+        ",commit=60",
+        ",commit=60",
+        ",commit=60",
+        points=4,
+        fail_then_later=6,
+    ),
+    # C5: the live mounts at 60, the files reverted.
+    Start("C5", Tool.COMMIT, Command.REVERT, "", "", ",commit=60", "", points=1, fail_then_later=0),
+)
+BY_NAME = {s.name: s for s in STARTS}
+
+type Layers = tuple[tuple[str, ...], str | None, tuple[str, ...], str | None]
+
+
+def start_world(s: Start) -> CompressWorld:
+    """The machine a start state describes."""
+    opts = _compress_opts if s.tool == Tool.COMPRESS else _commit_opts
+    live = _compress_opts if s.tool == Tool.COMPRESS else _commit_opts
+    w = CompressWorld(is_ostree=s.kargs is not None, root_uuid=UUID)
+    home_fstab = (
+        f"UUID={HOME_UUID} /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0\n"
+        if s.separate_home
+        else f"UUID={UUID} /var/home btrfs {opts(s.root).replace('subvol=root', 'subvol=home')} 0 0\n"
+    )
+    w.fstab = (
+        "# Static header comment\n"
+        f"UUID={UUID} /\t\tbtrfs   {opts(s.root)} 0 0\n"
+        f"UUID={UUID} /var btrfs {opts(s.root).replace('subvol=root', 'subvol=var')} 0 0\n"
+        + home_fstab
+        + "UUID=1111-2222        /boot/efi       vfat    umask=0077,shortname=winnt 0 2\n"
+        + "UUID=dead-beef        /mnt/backup     btrfs   defaults,compress=zstd:3,noauto 0 0\n"
+    )
+    if s.kargs is not None:
+        w.kargs = f"ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={UUID} rw rootflags={opts(s.kargs)} log_buf_len=4M\n"
+        w.cmdline = w.kargs
+    live_opts = (
+        live(s.live)
+        .replace("subvol=root,degraded,", "rw,seclabel,noatime,degraded,")
+        .replace(",noatime,flushoncommit", ",ssd,flushoncommit")
+    )
+    home_mount = (
+        "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0\n"
+        if s.separate_home
+        else f"/dev/dm-0 /var/home btrfs {live_opts},subvol=/home 0 0\n"
+    )
+    w.mounts = (
+        f"/dev/dm-0 /sysroot btrfs {live_opts.replace('rw,', 'ro,', 1)},subvol=/root 0 0\n"
+        f"/dev/dm-0 /var btrfs {live_opts},subvol=/var 0 0\n" + home_mount
+    )
+    if s.top is not None:
+        top = (
+            _top(s.top)
+            if s.tool == Tool.COMPRESS
+            else f"subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit{s.top}"
+        )
+        w.top = TopMountInfo(installed=True, uuid=UUID, options=top)
+    return w
+
+
+def _value(tool: Tool, options: str) -> str:
+    """What one layer's options say, in the tool's terms."""
+    if tool == Tool.COMPRESS:
+        spec = effective_compress_spec(options)
+        return spec.raw if spec is not None else "(none)"
+    return format_commit_label(effective_commit_seconds(options), explicit=has_explicit_commit(options))
+
+
+def layers(tool: Tool, w: CompressWorld) -> Layers:
+    """(fstab's root lines, the last rootflags= of the staged kernel arguments, the live root mounts, the
+    top-mount unit), each as _value reads it (None: the layer is not there)."""
+    fstab = tuple(_value(tool, e.options) for e in parse_fstab_root_entries(w.fstab or "", UUID))
+    flags = extract_rootflags_tokens(w.kargs) if w.ostree else ()
+    kargs = _value(tool, flags[-1].removeprefix(ROOTFLAGS_PREFIX)) if flags else None
+    live = tuple(_value(tool, m.options) for m in pick_root_mounts(parse_proc_mounts(w.mounts or "")))
+    top = _value(tool, w.top.options) if w.top is not None else None
+    return fstab, kargs, live, top
+
+
+def next_boot_disagrees(tool: Tool, w: CompressWorld) -> bool:
+    """The next boot's /etc/fstab root lines and its rootflags= say different things."""
+    fstab, kargs, _live, _top = layers(tool, w)
+    return kargs is not None and any(v != kargs for v in fstab)
+
+
+def run_tool(s: Start, w: CompressWorld, command: Command) -> tuple[int, str, str]:
+    """One run of the tool's command over the world: (exit, every line, the error)."""
+    if s.tool == Tool.COMPRESS:
+        cmd = CompressCommand.REVERT if command == Command.REVERT else CompressCommand.APPLY
+        res = CompressService(w).execute_change(CompressArgs(cmd, yes=True))
+        return res.exit_code, "\n".join((*res.messages, res.error)), res.error
+    args = (
+        CommitParsedArgs(CommitAction.REVERT, seconds=30, revert=True, yes=True)
+        if command == Command.REVERT
+        else CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True)
+    )
+    rc, lines = execute_commit_change(w, args)
+    return rc, "\n".join(lines), lines[-1] if rc else ""
+
+
+def coherent(s: Start, w: CompressWorld) -> bool:
+    """What status says of the layers."""
+    if s.tool == Tool.COMPRESS:
+        return CompressService(w).gather_status().coherence.coherent
+    return assess_commit_coherence(read_commit_snapshot(w)[0]).coherent
+
+
+def unmanaged_lines(w: CompressWorld) -> list[str]:
+    """The /etc/fstab lines that are not the root filesystem's."""
+    roots = {(e.source, e.target) for e in parse_fstab_root_entries(w.fstab or "", UUID)}
+    return [ln for ln in (w.fstab or "").splitlines(keepends=True) if tuple(ln.split()[:2]) not in roots]
+
+
+class CompressFaultBase(unittest.TestCase):
+    """The fixture and the checks; each subclass names its start state."""
+
+    start: ClassVar[Start]
+    torn: ClassVar[frozenset[str]] = frozenset()
+    disagreeing: ClassVar[list[str]]
+
+    @override
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.disagreeing = []
+
+    @override
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if os.environ.get("CST_FAULT_REPORT") == "1":
+            for line in cls.disagreeing:
+                sys.stderr.write(f"{cls.start.name}: next boot disagrees: {line}\n")
+
+    @override
+    def setUp(self) -> None:
+        self.world = self.fresh()
+
+    def fresh(self, *, torn: frozenset[str] = frozenset()) -> CompressWorld:
+        self.world = start_world(self.start)
+        self.world.torn = torn
+        return self.world
+
+    def run_once(self, *faults: Fault, command: Command | None = None) -> tuple[int, str, str] | None:
+        """One run with these faults: (exit, its lines, its error); None when killed."""
+        self.world.plan.arm(*faults)
+        try:
+            return run_tool(self.start, self.world, command or self.start.command)
+        except Killed:
+            return None
+
+    def target(self) -> Layers:
+        w = self.fresh()
+        rc, out, _err = run_tool(self.start, w, self.start.command)
+        self.assertEqual(rc, 0, out)
+        return layers(self.start.tool, w)
+
+    def check(self, *faults: Fault, torn: frozenset[str] = frozenset()) -> None:
+        when = f"{self.start.name} {faults} torn={sorted(torn)}"
+        tool = self.start.tool
+        target = self.target()
+        w = self.fresh(torn=torn)
+        start = layers(tool, w)
+        kept = unmanaged_lines(w)
+        result = self.run_once(*faults)
+        now = layers(tool, w)
+        self.check_undo_order(faults, torn, killed=result is None)
+        # I1
+        if result is not None:
+            rc, out, err = result
+            if rc == 0:
+                self.assertEqual(now, target, f"{when}: exit 0: {out}")
+            else:
+                self.assertEqual(rc, 1, f"{when}: {out}")
+                if INCOMPLETE not in err:
+                    self.assertEqual(now, start, f"{when}: exit 1 without {INCOMPLETE}: {err}")
+                else:
+                    for layer, word in zip(range(4), LAYER_WORDS, strict=True):
+                        if now[layer] != start[layer]:
+                            self.assertIn(word, err, f"{when}: a layer that differs is not named: {err}")
+        # I2
+        for layer in range(4):
+            self.assertIn(now[layer], (start[layer], target[layer]), f"{when}: layer {layer} holds a third value")
+        self.assertEqual(unmanaged_lines(w), kept, f"{when}: a line CST does not manage changed")
+        if self.start.separate_home:
+            self.assertNotIn("/var/home", [t for t, _o in w.remounts], when)
+        disagrees = next_boot_disagrees(tool, w)
+        left = copy.deepcopy(w)
+        # I3
+        w.torn = frozenset()
+        again = self.run_once()
+        converged = again is not None and again[0] == 0 and layers(tool, w) == target
+        if disagrees:
+            self.disagreeing.append(f"{when}: {layers(tool, left)}, the run again converges: {converged}")
+        self.assertTrue(converged, f"{when}: the run again: {again}")  # I4: no disagreement that stays
+        self.assertTrue(coherent(self.start, w), f"{when}: status after the run again")
+        w.calls.clear()
+        third = self.run_once() or (None, "", "")
+        self.assertEqual(third[0], 0, f"{when}: the third run: {third}")
+        self.assertIn("nothing to do", third[1], f"{when}: the third run")
+        self.assertEqual(w.calls, [], f"{when}: the third run changed something")
+        # I3b
+        self.world = left
+        left.torn = frozenset()
+        other = Command.REVERT if self.start.command == Command.APPLY else Command.APPLY
+        back = self.run_once(command=other)
+        self.assertEqual((back or (None,))[0], 0, f"{when}: {other} from the state left: {back}")
+        self.assertTrue(coherent(self.start, left), f"{when}: status after {other}")
+        self.assertIn("nothing to do", (self.run_once(command=other) or (None, "", ""))[1], when)
+
+    def check_undo_order(self, faults: tuple[Fault, ...], torn: frozenset[str], *, killed: bool) -> None:
+        """I5: after the first failure (at call k), the rollback's calls undo the calls before it that took
+        effect (and the failed one when it took effect anyway, a torn point), in reverse; a run killed while it
+        rolls back made the first ones of them."""
+        mode, k = faults[0]
+        if mode == FaultMode.KILL:
+            return
+        calls = self.world.plan.calls
+        done = calls[:k] if calls[k - 1] in torn else calls[: k - 1]
+        expected = list(reversed(done))
+        undone = calls[k:]
+        when = f"{self.start.name} {faults} torn={sorted(torn)}: the rollback's calls"
+        if killed:
+            self.assertEqual(undone, expected[: len(undone)], when)
+        else:
+            self.assertEqual(undone, expected, when)
+
+    def points(self, *faults: Fault, torn: frozenset[str] = frozenset()) -> list[str]:
+        """The mutating calls of one run from the start state with these faults."""
+        self.fresh(torn=torn)
+        if not faults:
+            return cut_points(self.world.plan, self.run_once)
+        self.run_once(*faults)
+        return list(self.world.plan.calls)
+
+    def every(self, mode: FaultMode) -> None:
+        calls = self.points()
+        self.assertEqual(len(calls), self.start.points, calls)
+        for fault in every_fault(len(calls), (mode,)):
+            with self.subTest(fault=fault, call=calls[fault[1] - 1]):
+                self.check(fault)
+
+    def every_failure_then(self, mode: FaultMode) -> None:
+        """Every FAIL, then a second fault of MODE at each later point of that run (a kill or a failure
+        while it rolls back)."""
+        cases = 0
+        for fail in every_fault(self.start.points, (FaultMode.FAIL,)):
+            for then in every_fault(len(self.points(fail)), (mode,), after=fail[1]):
+                with self.subTest(fault=fail, then=then):
+                    cases += 1
+                    self.check(fail, then)
+        self.assertEqual(cases, self.start.fail_then_later)
+
+
+class P1FaultTest(CompressFaultBase):
+    """compress-force apply from Fedora's default (compress=zstd:1 everywhere)."""
+
+    start = BY_NAME["P1"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class P2FaultTest(CompressFaultBase):
+    """compress-force apply after one killed after its fstab write."""
+
+    start = BY_NAME["P2"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class P3FaultTest(CompressFaultBase):
+    """compress-force apply on a host that is not rpm-ostree booted, with no top mount and a separate /var/home."""
+
+    start = BY_NAME["P3"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class P4FaultTest(CompressFaultBase):
+    """compress-force apply with live mounts without compress."""
+
+    start = BY_NAME["P4"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class P5FaultTest(CompressFaultBase):
+    """compress-force revert from fully applied."""
+
+    start = BY_NAME["P5"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class P6FaultTest(CompressFaultBase):
+    """compress-force revert after one killed after its kargs."""
+
+    start = BY_NAME["P6"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class C1FaultTest(CompressFaultBase):
+    """commit-interval apply 60 from no commit= anywhere, with a separate /var/home."""
+
+    start = BY_NAME["C1"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class C2FaultTest(CompressFaultBase):
+    """commit-interval apply 60 from commit=90 everywhere."""
+
+    start = BY_NAME["C2"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class C3FaultTest(CompressFaultBase):
+    """commit-interval apply 60 after one killed after its kargs."""
+
+    start = BY_NAME["C3"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class C4FaultTest(CompressFaultBase):
+    """commit-interval revert from 60 everywhere."""
+
+    start = BY_NAME["C4"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class C5FaultTest(CompressFaultBase):
+    """commit-interval revert from live mounts at 60 and the files reverted."""
+
+    start = BY_NAME["C5"]
+
+    def test_every_kill(self) -> None:
+        self.every(FaultMode.KILL)
+
+    def test_every_failure(self) -> None:
+        self.every(FaultMode.FAIL)
+
+    def test_every_full_disk(self) -> None:
+        self.every(FaultMode.FAIL_FROM)
+
+    def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
+
+
+class VerificationFailureTest(unittest.TestCase):
+    """A remount that answers it worked while the mounts do not show the option: the verification after it
+    fails, the remount is undone with the others in reverse, the layers are as at the start and a run
+    again converges."""
+
+    def test_a_remount_the_mounts_do_not_show_is_undone_too(self) -> None:
+        cases = 0
+        for s in STARTS:
+            w = start_world(s)
+            forward = cut_points(w.plan, functools.partial(run_tool, s, w, s.command))
+            if "remount" not in forward:
+                continue
+            with self.subTest(start=s.name):
+                cases += 1
+                w = start_world(s)
+                start = layers(s.tool, w)
+                w.ignored_remounts = 1
+                rc, out, err = run_tool(s, w, s.command)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("Post-remount verification failed", err)
+                self.assertTrue(err.endswith("; previous configuration restored."), err)
+                done = forward[: forward.index("remount") + 1]
+                self.assertEqual(w.calls, [*done, *reversed(done)])
+                self.assertEqual(layers(s.tool, w), start)
+                self.assertEqual(run_tool(s, w, s.command)[0], 0)
+        self.assertEqual(cases, len(STARTS))
+
+
+class AlreadyAtTheTargetTest(unittest.TestCase):
+    """N: a run from the target has no point and makes no mutating call."""
+
+    def test_no_point_and_no_call(self) -> None:
+        for s in STARTS:
+            with self.subTest(start=s.name):
+                w = start_world(s)
+                self.assertEqual(run_tool(s, w, s.command)[0], 0)
+                w.calls.clear()
+                self.assertEqual(cut_points(w.plan, functools.partial(run_tool, s, w, s.command)), [])
+                self.assertEqual(w.calls, [])

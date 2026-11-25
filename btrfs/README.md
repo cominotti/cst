@@ -1579,7 +1579,19 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
    `Options=` changes; its other options stay as they are (the live `/var`'s
    options are not copied in).
 
-On failure at any step, prior changes are rolled back so the layers never drift.
+**When a step fails:** a step that fails stops the run before the later
+layers, and the earlier ones are undone in reverse (the live remount, then
+the kernel arguments, then `/etc/fstab`). The error ends with
+`previous configuration restored.`, or with `ROLLBACK INCOMPLETE (...)`
+naming each layer that could not be put back. In `compress-force`, a failed
+`/etc/fstab` write, the first step, ends with its own error only: nothing
+was changed before it.
+A run that is killed (or loses power) between its steps can leave the
+layers disagreeing. The next boot still boots: every value is a valid mount
+option, and the previous deployment stays in the boot menu. `status` and
+`cst doctor` show the drift, and running the same command again (or
+`revert`) converges. `btrfs/tests/test_compress_faults.py` checks this at
+every step, for `commit-interval` (section 9.3) too.
 
 **Only the root filesystem:** `apply` and `revert` (here and in
 `commit-interval`, section 9.3) change only the root btrfs filesystem's

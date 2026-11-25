@@ -1998,7 +1998,9 @@ class CompressWorld(FaultPoints):
     update_kargs is rpm-ostree's: each `--delete=OLD` removes that exact argument and each `--append=NEW`
     adds one at the end, all or nothing (an OLD that is not there fails the whole call, with no effect). A
     remount changes every mount of the remounted device, and only those, as the kernel shows them
-    (kernel_remount_options); remounts lists each (target, option) asked for, a failed one too."""
+    (kernel_remount_options); remounts lists each (target, option) asked for, a failed one too; the next
+    ignored_remounts remounts answer that they worked and change nothing, as a kernel whose mounts do not
+    show the option asked for (the use cases' verification after the remount catches it)."""
 
     def __init__(self, *, is_ostree: bool = True, root_uuid: str = "") -> None:
         super().__init__()
@@ -2012,6 +2014,7 @@ class CompressWorld(FaultPoints):
         self.confirm_answer = True
         self.torn: frozenset[str] = frozenset()
         self.remounts: list[tuple[str, str]] = []
+        self.ignored_remounts = 0  # the next ones answer (True, "") and change nothing (the verification's case)
 
     # ---- CompressHostPort: reads ---------------------------------------------------------------------
     def is_ostree(self) -> bool:
@@ -2089,6 +2092,9 @@ class CompressWorld(FaultPoints):
         def remounted() -> tuple[bool, str]:
             if device is None:
                 return False, f"mount: {target}: not mounted."
+            if self.ignored_remounts > 0:
+                self.ignored_remounts -= 1
+                return True, ""
             self.mounts = "".join(
                 " ".join([f[0], f[1], f[2], kernel_remount_options(f[3], option), *f[4:]]) + "\n"
                 if f[0] == device
