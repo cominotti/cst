@@ -379,6 +379,21 @@ def rewrite_kargs_options(kargs_stdout: str, option_rewriter: Callable[[str], st
     return tuple(edits)
 
 
+def kargs_edits_staged(read: tuple[bool, str, str], edits: Sequence[tuple[str, str]]) -> bool:
+    """Whether `rpm-ostree kargs`'s answer (read_kargs's `(ok, stdout, err)`) already holds each new
+    `rootflags=` token of edits and none of the old ones: a change that answered a failure but was staged
+    (rpm-ostree runs a transaction it started to its end). False when the read fails."""
+    ok, text, _err = read
+    toks = set(extract_rootflags_tokens(text)) if ok else set()
+    return bool(edits) and all(new in toks and old not in toks for old, new in edits)
+
+
+def top_mount_changed(top: TopMountInfo | None, new_options: str | None) -> bool:
+    """Whether the installed top-mount unit holds new_options: an update that failed and could not put
+    the previous unit back."""
+    return top is not None and new_options is not None and top.options == new_options
+
+
 def rewrite_kargs_rootflags(kargs_stdout: str, target_option: str) -> tuple[tuple[str, str], ...]:
     """Return `(old_token, new_token)` pairs for any `rootflags=` token needing an update."""
     return rewrite_kargs_options(kargs_stdout, lambda val: rewrite_mount_options(val, target_option))

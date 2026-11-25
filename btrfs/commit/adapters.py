@@ -29,8 +29,10 @@ from btrfs.compress.domain import (
     PROC_MOUNTS_PATH,
     TOP_MOUNT_UNIT_PATH,
     extract_rootflags_tokens,
+    kargs_edits_staged,
     parse_proc_mounts,
     pick_root_mounts,
+    top_mount_changed,
 )
 from btrfs.compress.ports import CompressHostPort
 from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines, format_status_note_lines
@@ -40,6 +42,9 @@ from cst_core.ports import CommandFailed, WriteFailed
 
 SEAM_COMMIT_PROC: Final = "CST_BTRFS_COMMIT_PROC"
 SEAM_COMMIT_ROOT: Final = "CST_BTRFS_COMMIT_ROOT"
+
+# What updating the top-mount unit can raise (the port's adapter: installing, marking, reloading).
+_TOP_MOUNT_ERRORS: Final = (OSError, Refused, CommandFailed, WriteFailed, ValueError)
 
 
 def _host_for_env(env: ManagedCliEnv) -> tuple[CompressHostPort, str, dict[str, str]]:
@@ -113,6 +118,9 @@ def _step_fstab(run: _Run) -> str | None:
     try:
         host.write_fstab(plan.new_fstab_text)
     except (OSError, CommandFailed) as exc:
+        # A write that failed after the new text was in place is undone like one that worked.
+        if host.read_fstab() == plan.new_fstab_text:
+            run.undo.append(lambda: _undo_fstab(host, prev_fstab))
         return f"Failed to update {FSTAB_PATH}: {exc}"
     run.undo.append(lambda: _undo_fstab(host, prev_fstab))
     run.msgs.append(f"Updated {FSTAB_PATH} (commit={plan.target_seconds}s) and reloaded systemd.")
@@ -124,9 +132,12 @@ def _step_kargs(run: _Run) -> str | None:
     if not plan.kargs_edits:
         return None
     ok, kerr = host.update_kargs(plan.kargs_edits)
-    if not ok:
-        return f"Failed to update rpm-ostree kargs: {kerr}"
     edits = plan.kargs_edits
+    if not ok:
+        # rpm-ostree can stage the change and still answer a failure (a timed-out client).
+        if kargs_edits_staged(host.read_kargs(), edits):
+            run.undo.append(lambda: _undo_kargs(host, edits))
+        return f"Failed to update rpm-ostree kargs: {kerr}"
     run.undo.append(lambda: _undo_kargs(host, edits))
     run.msgs.append(f"Updated rpm-ostree kargs (commit={plan.target_seconds}s for next boot).")
     return None
@@ -152,6 +163,14 @@ def _step_remount(run: _Run) -> str | None:
     return None
 
 
+def _undo_top_mount(host: CompressHostPort, uuid: str, options: str) -> str | None:
+    try:
+        host.update_top_mount(uuid, options)
+    except _TOP_MOUNT_ERRORS as exc:
+        return f"top-mount: {exc}"
+    return None
+
+
 def _step_top_mount(run: _Run) -> str | None:
     top, options = run.snap.top_mount, run.plan.new_top_mount_options
     if options is None or top is None:
@@ -161,7 +180,11 @@ def _step_top_mount(run: _Run) -> str | None:
         return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
     try:
         run.host.update_top_mount(uuid, options)
-    except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
+    except _TOP_MOUNT_ERRORS as exc:
+        # A failure whose put-back failed too leaves the new unit: it is undone with the rest.
+        if top_mount_changed(run.host.read_top_mount(), options):
+            host, prev = run.host, top.options
+            run.undo.append(lambda: _undo_top_mount(host, uuid, prev))
         return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
     run.msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")
     return None

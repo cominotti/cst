@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+import errno
 import io
 import json
 import os
@@ -212,6 +213,37 @@ def _rewrite_fake_mounts(cur: str, option: str, target: str = "/var") -> str:
             case _:
                 updated.append(ln)
     return "".join(updated)
+
+
+class _TornCompressHost(_FakeHost):
+    """The first call of one step changes its layer and then reports a failure, as the adapter can
+    (btrfs/tests/test_compress_faults.py, AdapterFailureTest): torn names it ("fstab", "kargs" or "top")."""
+
+    def __init__(self, torn: str) -> None:
+        super().__init__()
+        self.torn = torn
+
+    def _first(self, prefix: str) -> bool:
+        return sum(1 for c in self.calls if c.startswith(prefix)) == 1
+
+    @override
+    def write_fstab(self, text: str) -> None:
+        super().write_fstab(text)
+        if self.torn == "fstab" and self._first("write_fstab"):
+            raise OSError(errno.EIO, "Input/output error")
+
+    @override
+    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
+        answer = super().update_kargs(edits)
+        if self.torn == "kargs" and self._first("update_kargs"):
+            return False, "timed out"
+        return answer
+
+    @override
+    def update_top_mount(self, uuid: str, options: str) -> None:
+        super().update_top_mount(uuid, options)
+        if self.torn == "top" and self._first("update_top_mount"):
+            raise OSError(errno.ENOSPC, "No space left on device")
 
 
 class _RecordingRunner:
@@ -788,6 +820,38 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(host.s.kargs_text, SAMPLE_KARGS)
             self.assertNotIn("compress-force", host.s.proc_mounts or "")
             self.assertIn("previous configuration restored", err.getvalue())
+
+    def test_a_failed_step_that_changed_its_layer_is_undone_too(self) -> None:
+        # /etc/fstab in place before its folder's sync failed, rpm-ostree staged before it timed out, a
+        # top-mount unit whose put-back failed: each is undone with the earlier layers.
+        start = _FakeState()
+        for torn, undone in (
+            ("fstab", ["write_fstab", "write_fstab"]),
+            ("kargs", ["write_fstab", "update_kargs", "update_kargs", "write_fstab"]),
+            (
+                "top",
+                [
+                    "write_fstab",
+                    "update_kargs",
+                    "remount",
+                    "update_top_mount",
+                    "update_top_mount",
+                    "remount",
+                    "update_kargs",
+                    "write_fstab",
+                ],
+            ),
+        ):
+            with self.subTest(torn=torn):
+                host = _TornCompressHost(torn)
+                res = CompressService(host).execute_change(CompressArgs(CompressCommand.APPLY, yes=True))
+                self.assertEqual(res.exit_code, 1)
+                self.assertTrue(res.error.endswith("; previous configuration restored."), res.error)
+                self.assertEqual([c.split(":", 1)[0] for c in host.calls], undone)
+                self.assertEqual(host.s.fstab, start.fstab)
+                self.assertEqual(host.s.kargs_text, start.kargs_text)
+                self.assertEqual(host.s.top_mount, start.top_mount)
+                self.assertEqual(host.s.proc_mounts, start.proc_mounts)
 
     def test_non_ostree_status_and_plan(self) -> None:
         host = _FakeHost(_FakeState(is_ostree=False, top_mount=None))

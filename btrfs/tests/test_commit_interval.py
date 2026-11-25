@@ -5,10 +5,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+import errno
 import io
 import os
 import shutil
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -179,6 +181,37 @@ class _FakeHost:
         if self.s.confirm_answer is None:
             raise Refused("apply asks for confirmation: run it in a terminal")
         return self.s.confirm_answer
+
+
+class _TornCommitHost(_FakeHost):
+    """The first call of one step changes its layer and then reports a failure, as the adapter can
+    (btrfs/tests/test_compress_faults.py, AdapterFailureTest): torn names it ("fstab", "kargs" or "top")."""
+
+    def __init__(self, torn: str) -> None:
+        super().__init__()
+        self.torn = torn
+
+    def _first(self, prefix: str) -> bool:
+        return sum(1 for c in self.calls if c.startswith(prefix)) == 1
+
+    @override
+    def write_fstab(self, text: str) -> None:
+        super().write_fstab(text)
+        if self.torn == "fstab" and self._first("write_fstab"):
+            raise OSError(errno.EIO, "Input/output error")
+
+    @override
+    def update_kargs(self, edits: Sequence[tuple[str, str]]) -> tuple[bool, str]:
+        answer = super().update_kargs(edits)
+        if self.torn == "kargs" and self._first("update_kargs"):
+            return False, "timed out"
+        return answer
+
+    @override
+    def update_top_mount(self, uuid: str, options: str) -> None:
+        super().update_top_mount(uuid, options)
+        if self.torn == "top" and self._first("update_top_mount"):
+            raise OSError(errno.ENOSPC, "No space left on device")
 
 
 class CommitDomainTests(unittest.TestCase):
@@ -420,6 +453,38 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             self.assertEqual(bad_host.s.kargs_text, SAMPLE_KARGS)
             self.assertNotIn("commit=60", bad_host.s.proc_mounts or "")
             self.assertIn("previous configuration restored", "\n".join(out_b))
+
+    def test_a_failed_step_that_changed_its_layer_is_undone_too(self) -> None:
+        # /etc/fstab in place before its folder's sync failed, rpm-ostree staged before it timed out, a
+        # top-mount unit whose put-back failed: each is undone with the earlier layers.
+        start = _FakeState()
+        for torn, undone in (
+            ("fstab", ["write_fstab", "write_fstab"]),
+            ("kargs", ["write_fstab", "update_kargs", "update_kargs", "write_fstab"]),
+            (
+                "top",
+                [
+                    "write_fstab",
+                    "update_kargs",
+                    "remount",
+                    "update_top_mount",
+                    "update_top_mount",
+                    "remount",
+                    "update_kargs",
+                    "write_fstab",
+                ],
+            ),
+        ):
+            with self.subTest(torn=torn):
+                host = _TornCommitHost(torn)
+                rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+                self.assertEqual(rc, 1, out)
+                self.assertTrue(out[-1].endswith("; previous configuration restored."), out[-1])
+                self.assertEqual([c.split(":", 1)[0] for c in host.calls], undone)
+                self.assertEqual(host.s.fstab, start.fstab)
+                self.assertEqual(host.s.kargs_text, start.kargs_text)
+                self.assertEqual(host.s.top_mount, start.top_mount)
+                self.assertEqual(host.s.proc_mounts, start.proc_mounts)
 
     def test_a_failed_step_stops_the_run_before_the_later_layers(self) -> None:
         # A failed kargs step runs no remount; no failure is followed by a top-mount update; every earlier layer

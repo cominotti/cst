@@ -1581,11 +1581,17 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
 
 **When a step fails:** a step that fails stops the run before the later
 layers, and the earlier ones are undone in reverse (the live remount, then
-the kernel arguments, then `/etc/fstab`). The error ends with
+the kernel arguments, then `/etc/fstab`). That includes a step that
+reported a failure but changed its layer anyway: an `/etc/fstab` whose
+folder could not be synced after the rename (or that could not be put back
+after a failed reload), an `rpm-ostree kargs` that timed out after its
+transaction started, a top-mount unit that could not be put back. The run
+reads that layer again after the failure and undoes it with the others (the
+top-mount unit first). The error ends with
 `previous configuration restored.`, or with `ROLLBACK INCOMPLETE (...)`
 naming each layer that could not be put back. In `compress-force`, a failed
-`/etc/fstab` write, the first step, ends with its own error only: nothing
-was changed before it.
+`/etc/fstab` write that left the old text, the first step, ends with its
+own error only: nothing was changed before it.
 A run that is killed (or loses power) between its steps can leave the
 layers disagreeing. The next boot still boots: every value is a valid mount
 option, and the previous deployment stays in the boot menu. `status` and
