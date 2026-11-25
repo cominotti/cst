@@ -60,9 +60,9 @@ def repair_drift(profile: GameProfile, *, user_manager: bool = True) -> None:
             if after not in {"", r[5], d.now}:
                 profile.append_intended(*r[:5], after)
         if ok:
-            profile.log(*repaired_text(d, ok=ok))
+            profile.log(*repaired_text(d, ok=True))
         else:  # one that fails for good (systemd refuses the value) is said once per boot, not every 30 s
-            failed.append(repaired_text(d, ok=ok))
+            failed.append(repaired_text(d, ok=False))
     profile.say_unheld(skipped, failed)
 
 

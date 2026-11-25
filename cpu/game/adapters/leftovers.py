@@ -110,8 +110,13 @@ def no_user_manager(profile: GameProfile, rec: Record, *, say: bool) -> bool:
     """The record is a new runtime override of the user manager while TARGET_USER names no account (the entry
     names no user): no user's runtime folder holds it and no user manager can be reloaded, so it is dropped,
     never undone (say: see GameProfile.undo_record)."""
+    return _new_override(rec, "usr") and not profile.uid(say=say)
+
+
+def _new_override(rec: Record, mgr: Manager) -> bool:
+    """The record's undo removes a runtime override of that manager (mode new): a daemon-reload is due after."""
     undo = state_undo(rec)
-    return isinstance(undo, PropUndo) and undo.mgr == "usr" and undo.mode == "new" and not profile.uid(say=say)
+    return isinstance(undo, PropUndo) and undo.mgr == mgr and undo.mode == "new"
 
 
 def user_side(profile: GameProfile, uid: str | None, *, say: bool) -> UserSide:
@@ -133,6 +138,11 @@ def _key(entry: Entry) -> Entry | Record:
     return entry if reload_of(entry[1]) is not None else entry[1]
 
 
+def _write_leftovers(profile: GameProfile, entries: Sequence[Entry]) -> None:
+    """game.leftovers holds the entries (an OSError when it cannot be written: the caller decides)."""
+    write_atomic(profile.paths.leftovers, leftovers_text(entries), mode=0o644, durable=False, relabel=False)
+
+
 def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | None, *, off: bool = True) -> int:
     """game.leftovers holds the failed entries afterwards (removed when there are none); how many of them it
     holds, each said kept in a warning line, after the write worked (off: 'off' says them; the tick does not).
@@ -149,7 +159,7 @@ def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | 
     held: set[Entry | Record] = set()
     if kept is not None:
         try:
-            write_atomic(path, leftovers_text(failed), mode=0o644, durable=False, relabel=False)
+            _write_leftovers(profile, failed)
         except OSError:
             still = {_key(e) for e in failed}
             if all(_key(e) in still for e in kept):
@@ -189,12 +199,6 @@ def unit_gone(profile: GameProfile, mgr: Manager, unit: str) -> bool:
     return res.returncode == 0 and show_values(res.stdout).get("LoadState", LoadState.LOADED) != LoadState.LOADED
 
 
-def _new_override(rec: Record, mgr: Manager) -> bool:
-    """The record's undo removes a runtime override of that manager (mode new): a daemon-reload is due after."""
-    undo = state_undo(rec)
-    return isinstance(undo, PropUndo) and undo.mgr == mgr and undo.mode == "new"
-
-
 def _name_for(profile: GameProfile, uid: str) -> str:
     """The name of the user with that uid that a user manager's call goes to ("" when no account has it),
     leaving the user the profile acts for as it was."""
@@ -230,15 +234,16 @@ def _premark(profile: GameProfile, kept: Sequence[Entry], todo: Sequence[Entry],
     if not marks:
         return
     with contextlib.suppress(OSError):
-        write_atomic(profile.paths.leftovers, leftovers_text([*kept, *marks]), mode=0o644, durable=False, relabel=False)
+        _write_leftovers(profile, [*kept, *marks])
 
 
-def _run_reloads(profile: GameProfile, reload: Reloads, due: Sequence[Entry], skipped: set[Entry]) -> list[Entry]:
+def _run_reloads(profile: GameProfile, reload: Reloads, due: Sequence[Entry]) -> tuple[list[Entry], set[Entry]]:
     """daemon-reload each manager an undo removed a file in (reload) and each one a kept entry says is due
-    (due): the system manager, then each user's; the reloads that failed, as reload-due entries. A user
-    manager that is not running needs none (its entry goes, into skipped); one of a uid no account has now
-    is not reached by name: kept while it runs."""
+    (due): the system manager, then each user's; the reloads that failed, as reload-due entries, and the
+    reload-due entries of the user managers that are not running (they need none: their entries go). One
+    of a uid no account has now is not reached by name: kept while it runs."""
     failed: list[Entry] = []
+    skipped: set[Entry] = set()
     system = reload.system or any(reload_of(rec) == "sys" for _uid, rec in due)
     if system and profile.ctl("sys", "daemon-reload") != 0:
         failed.append(reload_entry("sys", None))
@@ -254,7 +259,7 @@ def _run_reloads(profile: GameProfile, reload: Reloads, due: Sequence[Entry], sk
         user = name or _name_for(profile, uid)
         if not user or profile.ctl("usr", "daemon-reload", user=user) != 0:
             failed.append(entry)
-    return failed
+    return failed, skipped
 
 
 def undo_pass(
@@ -272,9 +277,8 @@ def undo_pass(
         _premark(profile, kept, todo, dropins=bool(dropins), say=say)
     reload = Reloads(system=profile.remove_game_dropins())
     failed, dropped = undo_entries(profile, todo, reload, say=say)
-    skipped: set[Entry] = set()
-    failed += _run_reloads(profile, reload, due, skipped)
-    return failed, dropped, skipped
+    not_run, skipped = _run_reloads(profile, reload, due)
+    return failed + not_run, dropped, skipped
 
 
 def retry_kept(profile: GameProfile, *, say: bool) -> None:
@@ -288,11 +292,11 @@ def retry_kept(profile: GameProfile, *, say: bool) -> None:
     if kept is None:
         profile.remove_leftover_dropins()
         return
-    if not kept and not profile.game_dropins():
+    dropins = bool(profile.game_dropins())
+    if not kept and not dropins:
         return
     settings = profile.s
     try:
-        dropins = bool(profile.game_dropins())
         failed, dropped, skipped = undo_pass(profile, kept, kept, say=say)
         if dropins:
             profile.log(4, LEFTOVER_DROPINS_TEXT)
