@@ -467,7 +467,7 @@ class Survey:
         self.lw_unit_st = self.file_state(
             self.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
-        self.lw_stale = watcher_unit.older_copies(self.m.records, self.p.home, self.lw_unit_file)
+        self.lw_stale = watcher_unit.older_copies(self.m.records, self.p.home, self.lw_unit_file, self.lw_unit_path)
         self.lw_prog_st = self._lw_prog_state() if f.exists(self.p.lw_prog) else OwnedState.MISSING
         u = self.m.user_systemd_host
         self.lw_enabled = u.is_enabled(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
@@ -480,9 +480,14 @@ class Survey:
         self.lw_change = ours_change or bool(self.lw_stale)
 
     @cached_property
+    def lw_unit_path(self) -> str | None:
+        """The user manager's UnitPath (watcher_unit): asked once, on first use."""
+        return watcher_unit.unit_path(self.m.user_systemd_host)
+
+    @cached_property
     def lw_unit_file(self) -> str:
-        """The watcher's unit file, where the user manager reads units (watcher_unit): asked once, on first use."""
-        return watcher_unit.unit_file(self.m.user_systemd_host, self.p.home)
+        """The watcher's unit file, where the user manager reads units (watcher_unit)."""
+        return watcher_unit.unit_file(self.lw_unit_path, self.p.home)
 
     def _lw_prog_state(self) -> OwnedState:
         """The watcher's program by the installer's plan (watcher_prog_state; a failed plan's error on stderr)."""

@@ -2,7 +2,7 @@
 """systemd units: their files as CST writes them (header comment lines, then sections), the answer
 of `systemctl show` (parse_show_props, parse_show_units), the question of every loaded unit of a glob
 (show_units_argv) and of a property of the manager itself (show_manager_value_argv), the folder a user
-manager reads the user's own units from (user_unit_dir), and systemd's ActiveState words (ActiveState).
+manager reads the user's own units from (user_unit_dir; named_user_unit_dir when it must have said so), and systemd's ActiveState words (ActiveState).
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])
 
@@ -59,24 +59,29 @@ def show_manager_value_argv(head: Sequence[str], prop: str) -> list[str]:
     return [*head, "show", "-p", prop, "--value"]
 
 
-def user_unit_dir(unit_path: str | None, home: str) -> str:
-    """The folder a user manager loads the user's own unit files from, by its UnitPath (the answer of
+def named_user_unit_dir(unit_path: str | None) -> str | None:
+    """The folder a user manager names for the user's own unit files in its UnitPath (the answer of
     show -p UnitPath --value: absolute folders, space separated): the first entry that ends in
     /systemd/user, which is $XDG_CONFIG_HOME/systemd/user only when the manager itself has that variable
     (one set in a shell, in environment.d or with set-environment does not move it), else
-    ~/.config/systemd/user. HOME/.config/systemd/user, systemd's default, when there is no answer
-    (None), no such entry, or the answer cannot be split safely (systemd does not quote the entries: a
-    folder with a space gives a relative piece, or lands on a folder of the system's)."""
-    default = posixpath.join(home, USER_UNIT_DIR_REL)
+    ~/.config/systemd/user. None when there is no answer (None), no such entry, or the answer cannot be
+    split safely (systemd does not quote the entries: a folder with a space gives a relative piece, or
+    lands on a folder of the system's): the manager has not said where it reads them."""
     if unit_path is None:
-        return default
+        return None
     entries = unit_path.split()
     if any(not e.startswith("/") for e in entries):
-        return default
+        return None
     found = next((e for e in entries if e.endswith("/" + CONFIG_UNIT_DIR_REL)), None)
     if found is None or found.startswith(_SYSTEM_UNIT_ROOTS):
-        return default
+        return None
     return posixpath.normpath(found)
+
+
+def user_unit_dir(unit_path: str | None, home: str) -> str:
+    """The folder a user manager loads the user's own unit files from, by its UnitPath: the one it names
+    (named_user_unit_dir), else HOME/.config/systemd/user, systemd's default."""
+    return named_user_unit_dir(unit_path) or posixpath.join(home, USER_UNIT_DIR_REL)
 
 
 def render_unit_file(header: Sequence[str], sections: Sequence[tuple[str, Sequence[str]]]) -> str:

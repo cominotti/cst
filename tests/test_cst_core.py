@@ -58,7 +58,13 @@ from cst_core.domain.values import (
     parse_integer,
     parse_whole_number,
 )
-from cst_core.domain.units import ActiveState, UNIT_PATH_PROP, show_manager_value_argv, user_unit_dir
+from cst_core.domain.units import (
+    ActiveState,
+    UNIT_PATH_PROP,
+    named_user_unit_dir,
+    show_manager_value_argv,
+    user_unit_dir,
+)
 from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -360,6 +366,23 @@ class UserUnitDirTest(unittest.TestCase):
         self.assertEqual(user_unit_dir(spaced, "/home/u"), default)
         # A piece of a split that is still absolute lands on a system folder: not the user's.
         self.assertEqual(user_unit_dir("/home/u/x /etc/systemd/user", "/home/u"), default)
+
+    def test_the_folder_named_or_none(self) -> None:
+        # named_user_unit_dir: the folder only when the answer names it; None where user_unit_dir guesses
+        # systemd's default (also for an answer that names ~/.config/systemd/user, it is named).
+        self.assertEqual(named_user_unit_dir(self.SYSTEMD_262), "/var/home/u/.config/systemd/user")
+        self.assertEqual(named_user_unit_dir("/srv/u/cfg//systemd/user /etc/systemd/user"), "/srv/u/cfg/systemd/user")
+        for answer in (
+            None,
+            "",
+            "\n",
+            "/etc/systemd/user /usr/lib/systemd/user",
+            "/run/user/1/systemd/user",
+            "/home/u/my cfg/systemd/user /etc/systemd/user",
+            "/home/u/x /etc/systemd/user",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNone(named_user_unit_dir(answer))
 
 
 class ManagedFilesTest(unittest.TestCase):

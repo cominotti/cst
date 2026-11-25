@@ -1760,6 +1760,33 @@ class WatcherTest(SetupCase):
         self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\n", r.stdout)
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
 
+    def test_older_copies_are_kept_when_the_manager_names_no_folder(self) -> None:
+        # The manager's UnitPath cannot be read (no answer): the unit's folder is only systemd's default,
+        # and the copy the record lists elsewhere may be the one the manager loads. plan shows no removal,
+        # revert removes nothing there and keeps its record line. Before, both called it an older copy
+        # and revert removed it, with no stop, disable or reload.
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        old = os.path.join(m.home, "xdg", "systemd", "user", LW)
+        m.put("unit-path", f"{os.path.dirname(old)} /etc/systemd/user\n")
+        m.run("apply", "--no-restart")
+        os.unlink(m.state + "/unit-path")
+        for answer in ("no answer", "a split that is not safe"):
+            with self.subTest(answer=answer):
+                if answer == "no answer":
+                    m.flag("no-unit-path")
+                else:
+                    os.unlink(m.state + "/no-unit-path")
+                    m.put("unit-path", f"{m.home}/my cfg/systemd/user /etc/systemd/user\n")
+                r = m.run("plan")
+                self.assertNotIn(LW_STALE, r.stdout)
+                self.assertNotIn("older CST", r.stdout)
+                r = m.run("revert", "--check")
+                self.assertNotIn("older CST", r.stdout)
+                r = m.run("revert", "--yes", "--no-restart")
+                self.assertNotIn("older CST", r.stdout)
+                self.assertTrue(os.path.isfile(old))
+                self.assertIn(old, json.loads(self.text(m.record))["files"])
+
     def test_a_home_not_written_plainly_still_plans(self) -> None:
         # HOME as a shell or pam_env can leave it. A trailing slash: the record is read where the
         # installer writes it (record_file), so the older copy is still shown. One with a "." in it,
