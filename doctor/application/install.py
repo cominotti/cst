@@ -277,9 +277,9 @@ def _recorded_units(host: DoctorHostPort, installed: InstalledFilesPort) -> dict
             continue
         home = host.home if owner == Owner.USER else ""
         for dest in sorted(rec.files):
-            unit = recorded_unit(dest, home)
-            if unit is not None:
-                out.setdefault(unit[0], {}).setdefault(unit[1], []).append(dest)
+            if (unit := recorded_unit(dest, home)) is not None:
+                scope, name = unit
+                out.setdefault(scope, {}).setdefault(name, []).append(dest)
     return out
 
 
