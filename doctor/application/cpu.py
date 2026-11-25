@@ -5,7 +5,7 @@ could not undo, the user manager's boxes outside CST's rules."""
 from collections.abc import Iterator
 from typing import Final
 
-from cst_core.domain.units import LoadState
+from cst_core.domain.units import LoadState, user_manager_head
 from cpu.game.domain import GamePaths, GameRecordKind, Record, intended_records, newer_intended, records, state_uid
 from cpu.game.domain.leftovers import leftover_entries, newer_leftovers, undo_text
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
@@ -115,7 +115,7 @@ def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
     if host.uid == 0:
         if not target:
             return None, f"no TARGET_USER in {CPU_CONF}"
-        return ["systemctl", "--user", "-M", f"{target}@"], ""
+        return user_manager_head(target), ""
     me = host.user_name(host.uid)
     if target and me and target != me:
         return None, f"the profile is for {target}, this is {me}"
