@@ -151,8 +151,19 @@ class SwapApplicationService(SwapReports):
 
         if not self._fs.exists(path):
             self._fs.write_atomic(path, "", mode)
+        # Read before the backup and the write: the file is there now, so None is one that cannot be read
+        # now (replaced by a FIFO, an I/O error). It is never replaced by the marked line alone.
+        existing = self._fs.read_text(path, regular_only=True)
+        if existing is None:
+            events.append(
+                ApplyEvent(
+                    "err",
+                    ApplyEventKind.ERROR,
+                    f"{self._env.prog}: ERROR: {path}: cannot be read: its {name} entry was not written",
+                )
+            )
+            return False, False, False
         self._fs.copy_if_absent(path, f"{path}.pre-swap-config.bak")
-        existing = self._fs.read_text(path, "", regular_only=True) or ""
         self._fs.write_atomic(path, line_spec.render_updated(existing), mode)
 
         if st == OwnedState.ADOPT:

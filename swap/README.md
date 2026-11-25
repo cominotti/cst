@@ -372,7 +372,12 @@ What `apply` does, in order:
    is removed; with none, the line is appended. The file is replaced
    atomically (temporary file in the same folder, then a rename), then
    `restorecon` fixes the SELinux label. A copy of the file before the first
-   change stays as `<file>.pre-swap-config.bak`. After any rewrite, even a
+   change stays as `<file>.pre-swap-config.bak`. The file is read again
+   right before its backup and its write; if it cannot be read then (it
+   became a FIFO, a read error), `apply` stops with
+   `<file>: cannot be read: its swap0 entry was not written` and leaves it,
+   and has no backup of it, as it is: it is never replaced by the marked line
+   alone. After any rewrite, even a
    renewed comment, `systemctl daemon-reload` runs: systemd builds the
    `swap0` units from these files and would otherwise show them as "changed
    on disk" until the next reboot. A reload restarts nothing. If an entry

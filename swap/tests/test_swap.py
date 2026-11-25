@@ -772,6 +772,21 @@ class _ClosedFolder(SwapTempFileSystem):
         return default if self._inside(path) else super().read_text(path, default, regular_only=regular_only)
 
 
+class _UnreadableAtTheWrite(SwapTempFileSystem):
+    """A marked file that inspection reads and apply's read right before its write cannot (it became a FIFO,
+    or the read failed with EIO, in between): read_text of path from _apply_marked_line gives None."""
+
+    def __init__(self, block_links: Mapping[str, str], *, path: str) -> None:
+        super().__init__(block_links)
+        self._path = path
+
+    @override
+    def read_text(self, path: str, default: str | None = None, *, regular_only: bool = False) -> str | None:
+        if path == self._path and sys._getframe(1).f_code.co_name == "_apply_marked_line":
+            return None
+        return super().read_text(path, default, regular_only=regular_only)
+
+
 class _BufferedToPipe(io.StringIO):
     """A stdout on a pipe: what is written reaches the pipe only when flushed."""
 
@@ -2628,6 +2643,29 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertNotIn("== swap0: crypttab and fstab", out)
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_a_marked_file_apply_cannot_read_at_its_write_is_never_replaced_by_the_line_alone(self) -> None:
+        # Before, the read's None became "", and the file was replaced by the swap0 line alone (data loss).
+        for name in ("crypttab", "fstab"):
+            with self.subTest(name):
+                with open(self.env.crypttab, "w", encoding="utf-8") as f:
+                    f.write("other /dev/sdz none\n")
+                with open(self.env.fstab, "w", encoding="utf-8") as f:
+                    f.write("UUID=1 / btrfs defaults 0 0\n")
+                path = self.env.crypttab if name == "crypttab" else self.env.fstab
+                with open(path, encoding="utf-8") as f:
+                    before = f.read()
+                links = {self.spec.device_path: "/dev/nvme0n1p5"}
+                rc, _out, err, systemd, _system = self._apply_on(_UnreadableAtTheWrite(links, path=path))
+                self.assertEqual(rc, 1)
+                with open(path, encoding="utf-8") as f:
+                    self.assertEqual(f.read(), before)
+                self.assertFalse(os.path.exists(f"{path}.pre-swap-config.bak"))
+                self.assertIn(f"cst swap: ERROR: {path}: cannot be read: its swap0 entry was not written\n", err)
+                self.assertEqual(systemd.daemon_reloads, 0)
+                for p in (self.env.crypttab, self.env.fstab):
+                    if os.path.exists(f"{p}.pre-swap-config.bak"):
+                        os.remove(f"{p}.pre-swap-config.bak")
 
     def test_an_unreadable_fstab_stops_apply_before_it_writes_crypttab(self) -> None:
         with open(self.env.fstab, "w", encoding="utf-8") as f:
