@@ -49,9 +49,9 @@ from typing import ClassVar, override
 import unittest
 
 from btrfs.scrub_limit.domain import render_scrub_dropin, update_snapshots_conf_scrub_limit
-from btrfs.tests.fakes import ScrubWorld
+from btrfs.tests.fakes import FakeScrubDropin, FakeScrubSystemd, ScrubWorld
 from cst_core.domain.record import ComponentState
-from tests.fault_injection import Fault, FaultMode, Killed, cut_points, every_fault, no_space
+from tests.fault_injection import Fault, FaultMode, FaultPlan, Killed, cut_points, every_fault, no_space
 
 DROPIN_500M = render_scrub_dropin("500M")
 NOT_LOADED = "systemd has not loaded them"
@@ -422,3 +422,28 @@ class ScrubLimitWriteFailureTest(unittest.TestCase):
                 world.reload_timeouts.clear()
                 rc, lines = world.service().apply(limit)
                 self.assertEqual((rc, world.reload_timeouts), (0, [60]), lines)
+
+
+class ScrubWorldFailTest(unittest.TestCase):
+    """A call failed through ScrubWorld.fail() goes through its FaultPlan too: the plan records it, and
+    after a KILL a dead process runs it no more."""
+
+    def test_a_call_failed_by_fail_is_a_point_of_the_plan(self) -> None:
+        world = ScrubWorld()
+        world.fail("systemctl daemon-reload", OSError(errno.EACCES, "Access denied"))
+        r = FakeScrubSystemd(world).daemon_reload(timeout=60)
+        self.assertEqual((r.returncode, r.stderr), (1, "Access denied\n"))
+        self.assertEqual(world.plan.calls, ["systemctl daemon-reload"])
+        self.assertEqual(world.reload_timeouts, [60])  # asked for, and it failed
+
+    def test_after_a_kill_a_call_failed_by_fail_never_runs(self) -> None:
+        world = ScrubWorld()
+        world.plan = FaultPlan(dead_after_kill=True).arm((FaultMode.KILL, 1))
+        world.fail("systemctl daemon-reload", OSError(errno.EACCES, "Access denied"), times=1)
+        with self.assertRaises(Killed):
+            FakeScrubDropin(world).write(render_scrub_dropin("500M"))
+        with self.assertRaises(Killed):
+            FakeScrubSystemd(world).daemon_reload(timeout=60)
+        self.assertEqual(world.plan.calls, ["drop-in text"])
+        self.assertEqual(world.reload_timeouts, [])  # a dead process asks for no reload
+        self.assertEqual(world.failing["systemctl daemon-reload"][1], 1)  # still armed: it never ran

@@ -536,15 +536,21 @@ class ScrubWorld:
         self.failing[point] = (err, times)
 
     def step[T](self, point: str, effect: Callable[[], T], failed: Callable[[OSError], T] | None = None) -> T:
-        """One mutating call: recorded, then failed by fail(), else run through plan."""
+        """One mutating call: recorded, then run through plan, its effect failed by fail() when one is armed
+        there (so plan records it too, and a process the plan has killed runs it no more)."""
         self.calls.append(point)
         err, left = self.failing.get(point, (None, 0))
-        if err is not None and (left is None or left > 0):
-            self.failing[point] = (err, None if left is None else left - 1)
+        if err is None or left == 0:
+            return self.plan.step(point, effect, failed)
+        armed = err
+
+        def fails() -> T:
+            self.failing[point] = (armed, None if left is None else left - 1)
             if failed is None:
-                raise err
-            return failed(err)
-        return self.plan.step(point, effect, failed)
+                raise armed
+            return failed(armed)
+
+        return self.plan.step(point, fails, failed)
 
     def build(self) -> Callable[[bool], ScrubLimit]:
         """What run_scrub_limit_cli's build takes: this world's use cases, whatever read_only it is asked
@@ -688,13 +694,14 @@ class FakeScrubSystemd:
     def daemon_reload(self, *, timeout: float | None) -> CommandResult:
         w = self.world
         argv = ("systemctl", "daemon-reload")
-        w.reload_timeouts.append(timeout)
 
         def reload() -> CommandResult:
+            w.reload_timeouts.append(timeout)
             w.loaded, w.dirty = w.dropin, False
             return CommandResult(0, "", "", argv=argv)
 
         def failed(err: OSError) -> CommandResult:
+            w.reload_timeouts.append(timeout)  # asked for, and it failed
             return CommandResult(1, "", f"{err.strerror}\n", argv=argv)
 
         return w.step("systemctl daemon-reload", reload, failed)
