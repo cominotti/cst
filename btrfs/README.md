@@ -1626,7 +1626,10 @@ its `/etc/fstab` write and the `systemctl daemon-reload` after it leaves
 systemd with the old text loaded (a unit made from `/etc/fstab` says
 `NeedDaemonReload=yes`). A later run that writes no `/etc/fstab` then
 reloads systemd first, as `cache` does (section 9.4): `plan` and `status`
-say `daemon-reload: systemd has not loaded /etc/fstab as it is on disk`,
+say `daemon-reload: systemd has not loaded /etc/fstab as it is on disk` (or,
+when `systemctl show` gives no answer, `daemon-reload: systemctl cannot say
+whether systemd has loaded /etc/fstab as it is on disk`, since a run then
+reloads too),
 and `apply` or `revert` says `reloaded: systemd had not loaded /etc/fstab
 as it is on disk (an earlier run stopped)` (or, when `systemctl show`
 gives no answer, `reloaded: systemctl could not say ...`) before the other

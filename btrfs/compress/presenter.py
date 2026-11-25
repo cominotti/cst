@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TextIO
 
-from btrfs.compress.application import FSTAB_RELOAD_PENDING, CompressChangeResult, CompressPlanResult
+from btrfs.compress.application import CompressChangeResult, CompressPlanResult
 from btrfs.compress.domain import (
     CompressPlan,
     CompressStatusView,
@@ -91,7 +91,7 @@ def render_compress_status(view: CompressStatusView, out: TextIO) -> int:
     for line in format_status_note_lines(view.left_alone_notes):
         print(line, file=out)
     if view.reload_pending:
-        print(f"  {FSTAB_RELOAD_PENDING}", file=out)
+        print(f"  {view.reload_pending}", file=out)
     print(f"  overall         {view.coherence.summary}", file=out)
     return 0
 
@@ -106,7 +106,7 @@ def render_compress_plan(res: CompressPlanResult, prog: str, out: TextIO, err: T
         return res.exit_code
     _render_plan(res.plan, out)
     if res.reload_pending:
-        print(FSTAB_RELOAD_PENDING, file=out)
+        print(res.reload_pending, file=out)
     if not res.plan.has_changes and not res.reload_pending:
         print(f"Already at {res.plan.target_option} across all active layers; nothing to do.", file=out)
         return 0

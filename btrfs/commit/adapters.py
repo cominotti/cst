@@ -22,12 +22,11 @@ from btrfs.commit.domain import (
 )
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
 from btrfs.compress.application import (
-    FSTAB_RELOAD_PENDING,
     LayerRun,
     LayerStep,
     RemountStep,
     catch_up_reload,
-    fstab_behind,
+    reload_pending_line,
     run_layers,
     step_fstab,
     step_kargs,
@@ -127,8 +126,8 @@ def execute_commit_change(
     plan = build_commit_plan(snap, target_seconds=parsed.seconds, revert=parsed.revert)
     if not plan.has_changes:
         cause, reloaded = catch_up_reload(host, None)
-        pending = cause is not None or bool(reloaded)
-        lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc, reload_pending=pending)
+        said = cause or "\n".join(reloaded)
+        lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc, reload_pending=said)
         return (1, [*lines, f"ERROR: {cause}"]) if cause is not None else (0, [*lines, *reloaded])
     lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc)
     refused = None if parsed.yes else _not_confirmed(host, plan, lines)
@@ -188,10 +187,11 @@ def format_commit_status(
 
 
 def format_commit_plan_lines(
-    plan: CommitPlan, prog: str, *, dry_run: bool, seam_proc: str = "", reload_pending: bool = False
+    plan: CommitPlan, prog: str, *, dry_run: bool, seam_proc: str = "", reload_pending: str = ""
 ) -> list[str]:
-    """Render plan lines for `plan`, `apply`, and `revert`; reload_pending: the run reloads systemd first
-    (a dry run names it; a run with nothing else to do then says no "nothing to do")."""
+    """Render plan lines for `plan`, `apply`, and `revert`; reload_pending: the run reloads systemd first, ""
+    when not: what a dry run says of it (reload_pending_line), what an apply or revert's reload said (a run
+    with nothing else to do then says no "nothing to do")."""
     out: list[str] = []
     if seam_proc:
         out.append(f"test seam (CST_BTRFS_COMMIT_PROC): /proc in {seam_proc}, not the kernel's")
@@ -201,7 +201,7 @@ def format_commit_plan_lines(
         )
     )
     if dry_run and reload_pending:
-        out.append(FSTAB_RELOAD_PENDING)
+        out.append(reload_pending)
     if not plan.has_changes and not reload_pending:
         out.append(f"Already at {plan.target_seconds}s across all active layers; nothing to do.")
         return out
@@ -223,15 +223,15 @@ def dispatch_commit_cli_action(parsed: CommitParsedArgs, env: ManagedCliEnv, *, 
             lines = format_commit_status(
                 snap, kargs_ok=kargs_ok, kargs_error=kargs_err, proc_cmdline=cmdline, seam_proc=seam_proc
             )
-            if fstab_behind(host) is True:
-                lines.insert(-1, f"  {FSTAB_RELOAD_PENDING}")  # before the overall line, as compress-force says it
+            if reload := reload_pending_line(host):
+                lines.insert(-1, f"  {reload}")  # before the overall line, as compress-force says it
             return 0, lines
         case CommitAction.PLAN:
             snap, kargs_ok, kargs_err = read_commit_snapshot(host)
             if not kargs_ok:
                 return 1, [f"ERROR: cannot inspect rpm-ostree kargs: {kargs_err}"]
             plan = build_commit_plan(snap, target_seconds=parsed.seconds, revert=parsed.revert)
-            pending = plan.core.new_fstab_text is None and fstab_behind(host) is True
+            pending = reload_pending_line(host) if plan.core.new_fstab_text is None else ""
             return 0, format_commit_plan_lines(plan, prog, dry_run=True, seam_proc=seam_proc, reload_pending=pending)
         case _:
             return execute_commit_change(host, parsed, prog=prog, seam_proc=seam_proc)

@@ -58,7 +58,7 @@ from btrfs.commit.domain import (
     has_explicit_commit,
 )
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
-from btrfs.compress.application import FSTAB_RELOAD_PENDING, CompressService
+from btrfs.compress.application import FSTAB_RELOAD_PENDING, FSTAB_RELOAD_UNKNOWN, CompressService
 from btrfs.compress.domain import (
     FSTAB_UNREAD,
     KARGS_SETTLE_POLL_S,
@@ -77,7 +77,7 @@ from btrfs.compress.domain import (
     transaction_running,
 )
 from btrfs.compress.domain.args import CompressArgs, CompressCommand
-from btrfs.compress.presenter import render_compress_plan
+from btrfs.compress.presenter import render_compress_plan, render_compress_status
 from btrfs.compress.domain.rpm_ostree import kargs_refused
 from btrfs.tests.fakes import RELOAD_FAILED, CompressWorld, kernel_remount_options
 from cst_core.adapters.files import LocalFileSystemAdapter
@@ -1267,23 +1267,31 @@ class CatchUpReloadTest(unittest.TestCase):
                     self.assertEqual(layers(s.tool, w), before)
                     self.assertEqual(w.systemd.current(w.fstab_id), not fails)
 
+    def _plan_and_status(self, s: Start, w: CompressWorld) -> tuple[str, str]:
+        """What plan and status print, as the commands run them (commit-interval's through its dispatch)."""
+        if s.tool == Tool.COMPRESS:
+            plan, status, err = io.StringIO(), io.StringIO(), io.StringIO()
+            svc = CompressService(w)
+            self.assertEqual(
+                render_compress_plan(svc.build_change_plan(CompressArgs(CompressCommand.PLAN)), "cst", plan, err), 0
+            )
+            self.assertEqual(render_compress_status(svc.gather_status(), status), 0)
+            return plan.getvalue(), status.getvalue()
+        outputs: list[str] = []
+        for action in (CommitAction.PLAN, CommitAction.STATUS):
+            with mock.patch.object(commit_adapters, "_host_for_env", return_value=(w, "", {})):
+                rc, lines = dispatch_commit_cli_action(
+                    CommitParsedArgs(action, seconds=60), ManagedCliEnv(), read_only=True
+                )
+            self.assertEqual(rc, 0)
+            outputs.append("\n".join(lines))
+        return outputs[0], outputs[1]
+
     def test_a_reload_then_nothing_more_and_the_plan_names_it(self) -> None:
         for name in ("P1", "C1"):
             with self.subTest(start=name):
                 s, w = self._behind(name, at_target=True)
-                if s.tool == Tool.COMPRESS:
-                    out, err = io.StringIO(), io.StringIO()
-                    render_compress_plan(
-                        CompressService(w).build_change_plan(CompressArgs(CompressCommand.PLAN)), "cst", out, err
-                    )
-                    plan = out.getvalue()
-                else:
-                    with mock.patch.object(commit_adapters, "_host_for_env", return_value=(w, "", {})):
-                        plan_rc, plan_lines = dispatch_commit_cli_action(
-                            CommitParsedArgs(CommitAction.PLAN, seconds=60), ManagedCliEnv(), read_only=True
-                        )
-                    self.assertEqual(plan_rc, 0)
-                    plan = "\n".join(plan_lines)
+                plan, _ = self._plan_and_status(s, w)
                 self.assertIn(FSTAB_RELOAD_PENDING, plan)
                 self.assertIn("Dry run, nothing changed.", plan)
                 self.assertNotIn("nothing to do", plan)
@@ -1295,6 +1303,27 @@ class CatchUpReloadTest(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertIn("nothing to do", out)
                 self.assertEqual(w.calls, [])
+
+    def test_with_no_answer_plan_and_status_say_the_run_reloads(self) -> None:
+        # systemctl show gives no answer: apply reloads (test_each_answer_of_systemd), so plan and status say
+        # it, change nothing, and say no "nothing to do".
+        for name in ("P1", "C1"):
+            with self.subTest(start=name):
+                s = BY_NAME[name]
+                w = start_world(s)
+                self.assertEqual(run_tool(s, w, s.command)[0], 0)
+                w.show_fails = True
+                w.calls.clear()
+                plan, status = self._plan_and_status(s, w)
+                self.assertIn(FSTAB_RELOAD_UNKNOWN, plan.splitlines())
+                self.assertIn("Dry run, nothing changed.", plan)
+                self.assertNotIn("nothing to do", plan)
+                self.assertIn(f"  {FSTAB_RELOAD_UNKNOWN}", status.splitlines())
+                self.assertNotIn(FSTAB_RELOAD_PENDING, plan + status)
+                self.assertEqual(w.calls, [])
+                rc, out, _ = run_tool(s, w, s.command)
+                self.assertEqual((rc, w.calls), (0, ["systemctl daemon-reload"]))
+                self.assertIn(f"reloaded: {NO_ANSWER}", out)
 
     def test_the_reload_comes_before_the_other_layers(self) -> None:
         s, w = self._behind("C5", at_target=False)

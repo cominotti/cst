@@ -41,6 +41,10 @@ from cst_core.ports import CommandFailed
 
 FSTAB_RELOAD_PENDING: Final = f"daemon-reload: systemd has not loaded {FSTAB_PATH} as it is on disk"
 """What plan and status say when a run would reload systemd first (catch_up_reload)."""
+FSTAB_RELOAD_UNKNOWN: Final = (
+    f"daemon-reload: systemctl cannot say whether systemd has loaded {FSTAB_PATH} as it is on disk"
+)
+"""What plan and status say when systemctl gives no answer: a run then reloads systemd first too."""
 
 
 def fstab_behind(host: CompressHostPort) -> bool | None:
@@ -49,6 +53,16 @@ def fstab_behind(host: CompressHostPort) -> bool | None:
     systemctl gives no answer. Only that rule of cache's fstab_lines_unread: compress-force and
     commit-interval manage no bind line of their own."""
     return fstab_lines_unread(host.mount_units(), ())
+
+
+def reload_pending_line(host: CompressHostPort) -> str:
+    """What plan and status say of the catch-up reload a run would do (catch_up_reload, which reloads in both
+    cases): FSTAB_RELOAD_PENDING when systemd is behind /etc/fstab, FSTAB_RELOAD_UNKNOWN when systemctl gives
+    no answer, "" when it is not behind."""
+    behind = fstab_behind(host)
+    if behind is None:
+        return FSTAB_RELOAD_UNKNOWN
+    return FSTAB_RELOAD_PENDING if behind else ""
 
 
 def catch_up_reload(host: CompressHostPort, new_fstab_text: str | None) -> tuple[str | None, list[str]]:
@@ -254,7 +268,7 @@ class CompressPlanResult:
     plan: CompressPlan | None = None
     error: str = ""
     hint_cmd: CompressCommand = CompressCommand.APPLY
-    reload_pending: bool = False  # a run would reload systemd first (FSTAB_RELOAD_PENDING)
+    reload_pending: str = ""  # a run would reload systemd first: what plan says of it (reload_pending_line)
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,7 +367,7 @@ class CompressService:
             booted_diff=booted_diff,
             coherence=coherence,
             left_alone_notes=plan_view.left_alone_notes,
-            reload_pending=fstab_behind(self._host) is True,
+            reload_pending=reload_pending_line(self._host),
         )
 
     def build_change_plan(self, args: CompressArgs) -> CompressPlanResult:
@@ -364,7 +378,7 @@ class CompressService:
             return CompressPlanResult(1, self._seam_proc, error=f"cannot inspect rpm-ostree kargs: {kargs_err}")
         target_mode = CompressMode.COMPRESS if args.revert else CompressMode.COMPRESS_FORCE
         plan = build_plan(snap, target_mode=target_mode, level_override=args.level)
-        pending = plan.new_fstab_text is None and fstab_behind(self._host) is True
+        pending = reload_pending_line(self._host) if plan.new_fstab_text is None else ""
         return CompressPlanResult(0, self._seam_proc, plan=plan, hint_cmd=hint_cmd, reload_pending=pending)
 
     def _apply_layers(self, snap: CompressSnapshot, plan: CompressPlan) -> tuple[tuple[str, ...], str | None]:

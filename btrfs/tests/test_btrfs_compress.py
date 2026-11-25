@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
-from btrfs.compress.application import FSTAB_RELOAD_PENDING, CompressService
+from btrfs.compress.application import FSTAB_RELOAD_PENDING, FSTAB_RELOAD_UNKNOWN, CompressService
 from btrfs.compress.cli import CompressCliStreams, compress_cli
 from btrfs.compress.domain import (
     CompressMode,
@@ -1264,12 +1264,14 @@ class CompressCatchUpStatusTest(unittest.TestCase):
     """compress-force status names the catch-up reload the next run would do, just before its overall line."""
 
     def test_status_names_a_pending_reload_before_the_overall_line(self) -> None:
-        for behind in (True, False):
+        # (systemd behind /etc/fstab, None: systemctl gives no answer; the line status says, "": none)
+        for behind, said in ((True, FSTAB_RELOAD_PENDING), (None, FSTAB_RELOAD_UNKNOWN), (False, "")):
             with self.subTest(behind=behind):
                 out = io.StringIO()
                 svc = CompressService(_FakeHost(_FakeState(fstab_behind=behind)))
                 self.assertEqual(render_compress_status(svc.gather_status(), out), 0)
                 lines = out.getvalue().splitlines()
                 self.assertTrue(lines[-1].startswith("  overall "), lines)
-                self.assertEqual(lines[-2] == f"  {FSTAB_RELOAD_PENDING}", behind, lines)
-                self.assertEqual(sum(FSTAB_RELOAD_PENDING in line for line in lines), int(behind))
+                if said:
+                    self.assertEqual(lines[-2], f"  {said}")
+                self.assertEqual(sum("daemon-reload" in line for line in lines), int(bool(said)), lines)

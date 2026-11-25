@@ -179,7 +179,7 @@ class CompressStatusView:
     booted_diff: tuple[str, str] | None
     coherence: CoherenceReport
     left_alone_notes: tuple[str, ...]
-    reload_pending: bool = False  # systemd has not loaded /etc/fstab as it is on disk
+    reload_pending: str = ""  # what status says of the catch-up reload a run would do ("": none)
 
 
 def format_compress_option(mode: CompressMode, level: int) -> str:
