@@ -35,6 +35,7 @@ from perf.presenter import render_perf_findings_block
 from cpu.game.adapters.host import holds, read_stripped
 from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
 from cpu.power.adapters import read_cpu_topology
+from cpu.setup.adapters.experiments import run_experiment
 from cpu.setup.domain import (
     CORE_COMPONENT,
     CPU_POWER_SERVICE,
@@ -53,9 +54,7 @@ from cpu.setup.domain import (
     SchedExtState,
     SetupPaths,
     cgroup_parent_shown,
-    current_choice,
     docker_slice_status,
-    experiment_line,
     first_arg,
     first_conf_lines,
     first_four_and_last,
@@ -563,72 +562,15 @@ class CpuSetup:
     # ---- experiments --------------------------------------------------------------------------------
     def experiment(self, args: Sequence[str]) -> int:
         """experiment list|on NAME|off NAME: runtime-only memory knobs."""
-        action = first_arg(args, "list")
-        name = args[1] if len(args) > 1 else ""
-        if action == "list":
-            return self._experiment_list()
-        if action not in ("on", "off"):
-            raise Halt(2, "experiment: list|on NAME|off NAME")
-        if not name:
-            raise Halt(1, "cpu-setup.sh: EXPERIMENTS: bad array subscript")
-        spec = self.paths.experiments.get(name)
-        if spec is None:
-            raise Halt(2, f"experiment: unknown '{name}' (see: {self.prog} experiment list)")
-        file, value = spec
-        saved = self.paths.saved(name)
-        if action == "on":
-            return self._experiment_on(name, file, value, saved)
-        return self._experiment_off(name, file, saved)
-
-    def _experiment_list(self) -> int:
-        """experiment list: each knob, its value now, and whether it is on."""
-        for exp, (file, value) in self.paths.experiments.items():
-            try:
-                with open(file, encoding="utf-8", errors="replace") as fh:
-                    now = fh.read().replace("\n", "")
-            except OSError as e:
-                self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
-                now = ""
-            self.say(experiment_line(exp, file, value, now, on=os.path.exists(self.paths.saved(exp))))
-        return 0
-
-    def _experiment_on(self, name: str, file: str, value: str, saved: str) -> int:
-        """experiment on NAME: the value it replaces saved (the first time), then VALUE into FILE."""
-        _make_run_dir(self.paths.run)
-        if not os.path.exists(saved):
-            self._save_choice(file, saved)
-        if not self._echo_to(file, value):
-            raise Halt(1)
-        self.say(
-            f"{name}: on ({file} = {value}; runtime only, reverted by '{self.prog} experiment off {name}' or a reboot)"
+        return run_experiment(
+            self.paths,
+            self.prog,
+            args,
+            say=self.say,
+            warn=self.warn,
+            echo_to=self._echo_to,
+            make_run_dir=_make_run_dir,
         )
-        return 0
-
-    def _experiment_off(self, name: str, file: str, saved: str) -> int:
-        """experiment off NAME: the saved value back into FILE."""
-        if not os.path.exists(saved):
-            self.say(f"{name}: not on")
-            return 0
-        old = read_text(saved) or ""
-        try:
-            with open(file, "w", encoding="utf-8") as fh:
-                fh.write(old)
-        except OSError as e:
-            self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
-            raise Halt(1, f"{name}: could not restore {old.rstrip('\n')} into {file}") from None
-        os.remove(saved)
-        self.say(f"{name}: off ({file} restored)")
-        return 0
-
-    def _save_choice(self, file: str, saved: str) -> None:
-        """The value an experiment replaces, for 'off' (sysfs THP shows "[current]" among the choices).
-        Read first: a value that cannot be read saves nothing (off then has nothing to put back)."""
-        try:
-            with open(file, encoding="utf-8", errors="replace") as fh:
-                value = current_choice(fh.read())
-        except OSError as e:
-            raise Halt(2, f"sed: can't read {file}: {e.strerror}") from None
-        write_atomic(saved, value, mode="umask", durable=False, relabel=False)
 
     # ---- game, vm-pin -----------------------------------------------------------------------------
     def game(self, args: Sequence[str]) -> int:
