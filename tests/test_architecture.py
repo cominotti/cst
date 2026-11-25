@@ -19,9 +19,9 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 - A package's `cli.py` is the outer layer that orchestrates a program's
   commands; in the modules without an application layer (all but swap,
-  doctor, cst_core, toolchains, vm, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow,
-  btrfs/scrub_limit and btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
-  size of each one: new logic goes into domain (pure) or adapters (I/O),
+  doctor, perf, cst_core, toolchains, vm, btrfs/bulk, btrfs/compress, btrfs/docker_gc,
+  btrfs/docker_volumes_nocow, btrfs/scrub_limit and btrfs/snapshot) it still does I/O directly.
+  CLI_CEILINGS caps the size of each one: new logic goes into domain (pure) or adapters (I/O),
   or into an application layer with ports.
 - Every package module has one role (`module_role`): domain, ports,
   application, adapters, presenter, wiring, cli or entry. A module with

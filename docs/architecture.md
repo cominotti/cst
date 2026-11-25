@@ -44,7 +44,7 @@ frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
 and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
-doctor, `perf`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, docker-gc,
+doctor, `perf`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, compress, docker-gc,
 docker-volumes-nocow, scrub-limit and snapshot have the full profile (the list is `HEXAGONAL_PACKAGES`); in the other packages `cli.py` orchestrates the commands and some
 still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
@@ -199,7 +199,7 @@ with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
 the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
-`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, toolchains, vm, `bluetooth/setup`, `cpu/setup`, `btrfs/bulk`, `btrfs/docker_gc`,
+`HEXAGONAL_PACKAGES` (swap, doctor, `perf`, cst_core, toolchains, vm, `bluetooth/setup`, `cpu/setup`, `btrfs/bulk`, `btrfs/compress`, `btrfs/docker_gc`,
 `btrfs/docker_volumes_nocow`, `btrfs/scrub_limit` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other
