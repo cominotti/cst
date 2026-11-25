@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 import time
 from typing import TypedDict, Unpack
 
-from cst_core.domain.units import parse_show_props, parse_show_units
+from cst_core.domain.units import LoadState, parse_show_props, parse_show_units
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode, StdinMode, SystemctlHost, UnitName
 
 
@@ -144,21 +144,24 @@ class SystemctlAdapter:
         """Remove what systemd keeps for unit (what: state, cache, logs, ...); its exit status and output."""
         return self._systemctl("clean", f"--what={what}", unit, output=output)
 
-    def _show(self, head: Sequence[str], props: Sequence[str], target: str) -> CommandResult:
-        """`systemctl show -p PROP... TARGET` as show and show_units run it: on_host as the adapter's policy
-        says for show, the C locale, 20 s at most or the adapter's timeout."""
-        argv = [*head, "show", *(a for p in props for a in ("-p", p)), target]
+    def _show(
+        self, head: Sequence[str], props: Sequence[str], target: str, *, options: Sequence[str] = ()
+    ) -> CommandResult:
+        """`systemctl show [OPTION...] -p PROP... TARGET` as show and show_units run it: on_host as the
+        adapter's policy says for show, the C locale, 20 s at most or the adapter's timeout."""
+        argv = [*head, "show", *options, *(a for p in props for a in ("-p", p)), target]
         timeout = 20 if self._timeout is None else self._timeout
         scope = _ScopeOptions(self._scope, on_host=self._show_on_host)
         return self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
 
     def show_units(self, pattern: str, props: Sequence[str]) -> list[dict[str, str]] | None:
-        """`systemctl show -p PROP... PATTERN`: one {prop: value} per unit the manager has loaded whose name
-        matches the glob (a glob loads no unit on demand, as a unit name or a path would; ask for `Id` to
-        know which unit each is), in systemctl's order; [] when it lists none; None when systemctl fails or
-        cannot start (no answer). As show: on the host from a toolbox unless the adapter's on_host is
-        LOCAL, the C locale, 20 s at most or the adapter's timeout."""
-        res = self._show(self._head, props, pattern)
+        """`systemctl show --state=loaded -p PROP... PATTERN`: one {prop: value} per unit the manager has
+        loaded (active or not: without --state=loaded a glob lists only the active ones) whose name matches
+        the glob (a glob loads no unit on demand, as a unit name or a path would; ask for `Id` to know which
+        unit each is), in systemctl's order; [] when it lists none; None when systemctl fails or cannot
+        start (no answer). As show: on the host from a toolbox unless the adapter's on_host is LOCAL, the C
+        locale, 20 s at most or the adapter's timeout."""
+        res = self._show(self._head, props, pattern, options=(f"--state={LoadState.LOADED}",))
         if res.returncode != 0:
             return None
         return parse_show_units(res.stdout)

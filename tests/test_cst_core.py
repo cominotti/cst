@@ -601,11 +601,37 @@ class AdaptersTest(unittest.TestCase):
             ],
         )
         argv, options = seen[0]
+        # --state=loaded: every loaded unit the glob names, active or not (a glob alone lists only the
+        # active ones).
         self.assertEqual(
-            argv, ["systemctl", "show", "-p", "Id", "-p", "SourcePath", "-p", "NeedDaemonReload", "*.mount"]
+            argv,
+            [
+                "systemctl",
+                "show",
+                "--state=loaded",
+                "-p",
+                "Id",
+                "-p",
+                "SourcePath",
+                "-p",
+                "NeedDaemonReload",
+                "*.mount",
+            ],
         )
         # As show: on the host from a toolbox (SHOW_ONLY, the default), the C locale, 20 s.
         self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
+        # The user manager's adapter asks it with --user first; show of one unit names no --state.
+        seen.clear()
+        user = SystemctlAdapter(Recording(CommandResult(0, "Id=a.mount\n", "")), user=True)
+        self.assertEqual(user.show_units("*.mount", ("Id",)), [{"Id": "a.mount"}])
+        user.show(UnitName("a.mount"), ("Id",))
+        self.assertEqual(
+            [a for a, _ in seen],
+            [
+                ["systemctl", "--user", "show", "--state=loaded", "-p", "Id", "*.mount"],
+                ["systemctl", "--user", "show", "-p", "Id", "a.mount"],
+            ],
+        )
         # An answer that lists no unit is [] (blank lines too); a systemctl that fails is no answer: None.
         self.assertEqual(SystemctlAdapter(Recording(CommandResult(0, "", ""))).show_units("*.mount", props), [])
         self.assertEqual(SystemctlAdapter(Recording(CommandResult(0, "\n\n", ""))).show_units("*.mount", props), [])

@@ -569,16 +569,19 @@ class FakeMountRunner:
         """Whether systemd has loaded the test root's /etc/fstab as it is on disk."""
         return self.loaded_fstab is None or self.loaded_fstab[0] == self._fstab_file()[0]
 
-    def _mount_units(self) -> CommandResult:
-        """`systemctl show -p ... '*.mount'`: a block per loaded unit. A unit of each line of the loaded
-        /etc/fstab (SourcePath=/etc/fstab, NeedDaemonReload=yes once the file changed since), and of each
-        other mount (SourcePath=/proc/self/mountinfo, as systemd loads a mount it did not start)."""
+    def _mount_units(self, *, every_loaded: bool) -> CommandResult:
+        """`systemctl show [--state=loaded] -p ... '*.mount'`: a block per loaded unit. A unit of each line
+        of the loaded /etc/fstab (SourcePath=/etc/fstab, NeedDaemonReload=yes once the file changed since),
+        mounted or not, and of each other mount (SourcePath=/proc/self/mountinfo, as systemd loads a mount
+        it did not start). As the real systemctl: only with every_loaded (--state=loaded or --all) does a
+        glob list the inactive units too; without it, only the units whose Where is mounted."""
         if self.show_fails:
             return CommandResult(1, "", "Failed to connect to bus")
         if not self.units_visible:
             return CommandResult(0, "", "")
         text = self.loaded_fstab[1] if self.loaded_fstab is not None else None
         need = "no" if self.view_current() else "yes"
+        mounted = {str(m["target"]) for m in self.mounts}
         units: dict[str, tuple[str, str]] = {}
         for line in (text or "").splitlines():
             fields = line.split()
@@ -590,6 +593,7 @@ class FakeMountRunner:
             f"Id={t.strip('/').replace('/', '-') or '-'}.mount\nLoadState=loaded\nSourcePath={src}\n"
             f"NeedDaemonReload={nd}\nWhere={t}\n"
             for t, (src, nd) in units.items()
+            if every_loaded or t in mounted
         ]
         return CommandResult(0, "\n".join(blocks), "")
 
@@ -619,7 +623,7 @@ class FakeMountRunner:
         if cmd == ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS]:
             return self._findmnt()
         if cmd[:2] == ["systemctl", "show"] and cmd[-1:] == ["*.mount"]:
-            return self._mount_units()
+            return self._mount_units(every_loaded=bool({"--state=loaded", "--all"} & set(cmd)))
         if cmd[-1:] == ["daemon-reload"]:
             return self._daemon_reload()
         if cmd[:2] == ["mount", "--bind"]:
