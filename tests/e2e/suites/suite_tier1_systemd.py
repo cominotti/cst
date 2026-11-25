@@ -5588,7 +5588,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         with no migration scheduled (fix: cst btrfs install). With the mount gone, mark writes the
         request (exit 2: tmpfs refuses +C) and doctor says nothing. Part 2: the record an install leaves
         when it finds +C and cannot write the request (planted through the helper's own writer: tmpfs
-        cannot hold +C): doctor warns with its line; beside a flag it says nothing; mark then writes the
+        cannot hold +C) under a umask of 077 with no state folder yet: the folder is 0755 (it was
+        0700, and doctor as the user could not read the record), and doctor warns with its line; beside a flag it says nothing; mark then writes the
         request and removes the record, and doctor is quiet; without the installed helper a planted
         record is silent too. Before, doctor said nothing in each case."""
         c = self.SYSTEMD_CONTAINER
@@ -5657,9 +5658,12 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ -e "$flag" ]]
             [[ "$(cat "$state/attempts")" == 0 ]]
             [[ -z "$(nocow_lines)" ]] || {{ echo "doctor still warns after the repair: $(nocow_lines)" >&2; exit 1; }}
-            # Part 2: the record an install leaves when it finds +C and cannot write the request.
-            rm -f "$flag" "$state/attempts"
-            /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from btrfs.docker_volumes_nocow.adapters import NocowStateFiles; from btrfs.docker_volumes_nocow.domain import NocowOutcome, NocowPaths, outcome_record; NocowStateFiles(NocowPaths()).write_outcome(outcome_record(NocowOutcome.NOT_SCHEDULED, at=1700000000, volumes=sys.argv[1], reason="cannot schedule the migration: planted"))' "$vols"
+            # Part 2: the record an install leaves when it finds +C and cannot write the request, with
+            # no state folder yet and sudo's umask of a user who set 077: the folder it creates is 0755.
+            rm -f "$flag"
+            rm -rf "$state"
+            ( umask 077; /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from btrfs.docker_volumes_nocow.adapters import NocowStateFiles; from btrfs.docker_volumes_nocow.domain import NocowOutcome, NocowPaths, outcome_record; NocowStateFiles(NocowPaths()).write_outcome(outcome_record(NocowOutcome.NOT_SCHEDULED, at=1700000000, volumes=sys.argv[1], reason="cannot schedule the migration: planted"))' "$vols" )
+            [[ "$(stat -c %a "$state")" == 755 ]] || {{ echo "the record's folder is $(stat -c %a "$state")" >&2; exit 1; }}
             [[ "$(stat -c %a "$state/outcome")" == 644 ]]
             d="$(nocow_lines)"
             echo "test_190 doctor, a not-scheduled record: $d" >&2

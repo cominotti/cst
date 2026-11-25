@@ -337,7 +337,7 @@ class NocowStateFiles:
         return parse_outcome(text, self.paths.outcome)
 
     def write_outcome(self, record: OutcomeRecord) -> None:
-        os.makedirs(os.path.dirname(self.paths.outcome), exist_ok=True)
+        # write_atomic creates a missing folder 0755, whatever the umask (sudo keeps the user's).
         # 0644: status and cst doctor read it as the user. Durable: a reset right after a give-up
         # must not lose why no migration is scheduled.
         write_atomic(self.paths.outcome, json.dumps(record) + "\n", mode=0o644, relabel=False)

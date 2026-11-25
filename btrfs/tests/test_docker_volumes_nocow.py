@@ -2478,6 +2478,27 @@ class OutcomeRecordTest(Base):
         self.assertEqual(read_attempts(self), "2")
         self.assertTrue(os.path.exists(self.flag))
 
+    def test_the_record_s_new_folder_is_0755_whatever_the_umask(self) -> None:
+        # The install runs under sudo, which keeps the user's umask (077, say), and the state folder is
+        # not there yet: the record's folder must still let cst doctor, as the user, read the record.
+        # A makedirs of its own made it 0700 before write_atomic's ensure_dir saw it.
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=True)
+        self.volume("cow")
+        state = os.path.dirname(self.outcome)
+        self.assertFalse(os.path.exists(state))
+        old = os.umask(0o077)
+        try:
+            rc, _out = self.call(self.cli.mark)
+        finally:
+            os.umask(old)
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.record()["outcome"], "not-scheduled")
+        self.assertEqual(stat.S_IMODE(os.stat(state).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(self.outcome).st_mode), 0o644)
+
     def test_status_shows_a_give_up_without_the_flag(self) -> None:
         self.fs.set(self.vols, nocow=True)
         self.volume("cow")
