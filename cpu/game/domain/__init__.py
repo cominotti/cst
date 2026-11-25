@@ -22,7 +22,7 @@ from typing import Final, Literal
 
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, first_line_version, state_format
 from cst_core.domain.text import enum_member, file_lines, group, printf_q, printf_q_words, strip_ascii_blanks
-from cst_core.domain.values import MINUTE
+from cst_core.domain.values import MINUTE, parse_whole_number
 
 # How long a writer under the run lock (/run/cpu-setup/lock: the game profile's on, off and tick,
 # cpu-power's apply and revert) waits for it before it gives up.
@@ -196,8 +196,9 @@ def parse_cstate_limit_us(raw: str, *, default_us: int) -> tuple[int | None, str
         return default_us, None
     if cleaned in _CSTATE_OFF_WORDS:
         return None, None
-    if re.fullmatch(r"[0-9]+", cleaned) and int(cleaned) > 0:
-        return int(cleaned), None
+    # ASCII digits within int()'s limit (parse_whole_number): more digits are no number, as any other word.
+    if (n := parse_whole_number(cleaned)) is not None and n > 0:
+        return n, None
     return default_us, f"{raw!r} must be a positive microsecond integer or 'off'"
 
 

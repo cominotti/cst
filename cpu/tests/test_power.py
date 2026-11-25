@@ -25,6 +25,7 @@ from cpu.power.cli import PowerCliDeps, run_power_cli
 from cpu.game.domain import parse_cstate_limit_us
 from cpu.power.domain import (
     GpuPmMode,
+    boot_cstate_limit_us,
     PowerAction,
     parse_gpu_pm_mode,
     format_power_plan,
@@ -90,6 +91,19 @@ class CpuSettingsWordsTest(unittest.TestCase):
                     parse_cstate_limit_us(value, default_us=200),
                     (200, f"{value!r} must be a positive microsecond integer or 'off'"),
                 )
+
+    def test_a_cstate_cap_past_ints_digit_limit_is_no_number(self) -> None:
+        # int() raised ValueError past 4300 digits, out of cpu-power status, plan and apply, the game
+        # profile's power step and cst perf. Such a value is no number: the default cap and the error.
+        huge = "1" * 5000
+        error = f"{huge!r} must be a positive microsecond integer or 'off'"
+        self.assertEqual(parse_cstate_limit_us(huge, default_us=200), (200, error))
+        self.assertEqual(boot_cstate_limit_us(huge, explicit=True, cpuidle_driver="intel_idle"), (200, error))
+        self.assertEqual(
+            parse_cstate_limit_us("0" * 5000, default_us=200),
+            (200, f"{'0' * 5000!r} must be a positive microsecond integer or 'off'"),
+        )
+        self.assertEqual(parse_cstate_limit_us("7" * 4300, default_us=200), (int("7" * 4300), None))
 
 
 class CpuPowerLifecycleTest(unittest.TestCase):
