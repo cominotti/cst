@@ -4039,6 +4039,59 @@ class InstallAreaTest(Scratch):
         self.assertEqual([r.status for r in res], [doc_domain.INFO], res)
         self.assertIn("btrfs:docker-gc: installed before the install record; 1 of 1 file(s) differ", res[0].message)
 
+    def unreadable(self, path: str, why: str) -> Result:
+        return Result(
+            doc_domain.WARN,
+            f"{path}: the install record cannot be read ({why}): every CST install and removal stops at it, "
+            "after it has changed its files; move it aside",
+        )
+
+    def test_a_folder_in_the_place_of_a_record_is_a_warning(self) -> None:
+        # The installer leaves such a record out and stops at its update, after its files were written.
+        os.makedirs(self.record)
+        self.assertEqual(self.warns(), [self.unreadable("/var/lib/cst/installed.json", "Is a directory")])
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("/var/lib/cst/installed.json: the install record cannot be read (Is a directory)", r.stdout)
+        os.rmdir(self.record)
+        user = self.root + self.env["HOME"] + "/.local/state/cst/installed.json"
+        os.makedirs(user)
+        self.assertEqual(
+            self.warns(), [self.unreadable(self.env["HOME"] + "/.local/state/cst/installed.json", "Is a directory")]
+        )
+
+    def test_a_file_in_the_place_of_the_records_folder_is_a_warning(self) -> None:
+        os.makedirs(os.path.dirname(os.path.dirname(self.record)), exist_ok=True)
+        open(os.path.dirname(self.record), "w").close()  # /var/lib/cst a file
+        self.assertEqual(self.warns(), [self.unreadable("/var/lib/cst/installed.json", "Not a directory")])
+
+    def test_a_read_error_is_a_warning_and_a_refusal_stays_info(self) -> None:
+        home_record = self.env["HOME"] + "/.local/state/cst/installed.json"
+        with mock.patch.object(self.files, "record", side_effect=OSError(errno.EIO, "Input/output error")):
+            res = self.results()
+        self.assertEqual(
+            res,
+            [
+                self.unreadable("/var/lib/cst/installed.json", "Input/output error"),
+                self.unreadable(home_record, "Input/output error"),
+            ],
+        )
+        # A record this user may not read (its folder's mode) is no fault: info, as before this check
+        # warned on a record that cannot be read (this assertion passes on the old code too).
+        with mock.patch.object(self.files, "record", side_effect=PermissionError(errno.EACCES, "Permission denied")):
+            res = self.results()
+        self.assertEqual(
+            res,
+            [
+                Result(doc_domain.INFO, "/var/lib/cst/installed.json: not readable as your user (Permission denied)"),
+                Result(doc_domain.INFO, f"{home_record}: not readable as your user (Permission denied)"),
+            ],
+        )
+
+    def test_an_absent_record_is_no_unreadable_record(self) -> None:
+        self.assertNotIn("cannot be read", "\n".join(r.message for r in self.results()))
+        self.assertNotIn("cannot be read", self.run_tool().stdout)
+
     def test_without_a_checkout_to_compare_with_nothing_is_said_to_differ(self) -> None:
         # desired_sha256 cannot say (no checkout): a plain-script copy is not reported as differing.
         gc = os.path.join(self.root, "usr/local/sbin/docker-gc")

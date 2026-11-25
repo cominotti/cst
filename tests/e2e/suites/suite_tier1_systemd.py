@@ -9929,6 +9929,72 @@ EOF
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_194_doctor_warns_on_an_install_record_that_cannot_be_read(self) -> None:
+        """Root's and tester's real install records (copied aside and put back), each made a folder in turn:
+        cst doctor as their owner has a WARN line naming the path and "Is a directory". With root's record a
+        file again and /var/lib/cst of mode 0700 (the real EACCES a fake only imitates), tester's doctor says
+        info "not readable as your user" for it and no WARN. With both folders removed (no record), no line
+        names either path as a record that cannot be read. Before, every one of these was info "not readable
+        as your user"."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        urec = "/home/tester/.local/state/cst/installed.json"
+        exec_bash(
+            c,
+            f"""rm -rf /var/tmp/e2e-194; mkdir /var/tmp/e2e-194
+            if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-194/rec; fi
+            if [[ -e {urec} ]]; then cp -p {urec} /var/tmp/e2e-194/urec; fi
+            if [[ -d /var/lib/cst ]]; then stat -c %a /var/lib/cst >/var/tmp/e2e-194/mode; fi""",
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            if [[ -e /var/tmp/e2e-194/mode ]]; then chmod "$(cat /var/tmp/e2e-194/mode)" /var/lib/cst; else chmod 0755 /var/lib/cst; fi
+            rm -rf {rec} {urec}
+            if [[ -e /var/tmp/e2e-194/rec ]]; then mv /var/tmp/e2e-194/rec {rec}; fi
+            if [[ -e /var/tmp/e2e-194/urec ]]; then mv /var/tmp/e2e-194/urec {urec}; fi
+            rm -rf /var/tmp/e2e-194""",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            doc() {{ "$@" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor 2>&1 || true; }}
+            unreadable() {{  # unreadable DOCTOR-OUTPUT PATH: a WARN line saying PATH cannot be read
+                grep -E '^ *WARN' <<<"$1" | grep -qF "$2: the install record cannot be read (Is a directory)" ||
+                    {{ echo "doctor did not warn for $2: $1" >&2; return 1; }}
+            }}
+            rm -f {urec}
+            ut mkdir -p {urec}
+            unreadable "$(doc ut env)" {urec}
+            rmdir {urec}
+            rm -f {rec}
+            mkdir -p {rec}
+            unreadable "$(doc env HOME=/root)" {rec}
+            rmdir {rec}
+            # A record tester may not read is no fault: info, never this WARN.
+            if [[ -e /var/tmp/e2e-194/rec ]]; then cp -p /var/tmp/e2e-194/rec {rec}; else printf '{{"format": 1, "files": {{}}, "components": {{}}}}\n' >{rec}; fi
+            chmod 0700 /var/lib/cst
+            d="$(doc ut env)"
+            grep -E '^ *info' <<<"$d" | grep -qF "{rec}: not readable as your user (Permission denied)" ||
+                {{ echo "tester's doctor did not say info for root's record: $d" >&2; exit 1; }}
+            if grep -E '^ *WARN' <<<"$d" | grep -qF "{rec}"; then echo "tester's doctor warned for root's record: $d" >&2; exit 1; fi
+            chmod 0755 /var/lib/cst
+            rm -f {rec}
+            for d in "$(doc ut env)" "$(doc env HOME=/root)"; do
+                if grep -qF 'the install record cannot be read' <<<"$d"; then echo "doctor without a record: $d" >&2; exit 1; fi
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_195_doctor_names_a_cst_user_unit_the_user_manager_has_not_loaded(self) -> None:
         """tester's real install record (copied aside and put back) with a drop-in of a running user unit
         written through the installer as tester (installer.py text --home /home/tester) and no

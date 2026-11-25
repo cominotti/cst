@@ -245,8 +245,17 @@ def check_install(host: DoctorHostPort, *, installed: InstalledFilesPort | None 
             why = "written by a newer CST: update this checkout (git pull)" if e.newer else "it is no install record"
             yield Result(WARN, f"{path}: {e}; {why}")
             continue
-        except OSError as e:
+        except PermissionError as e:
             yield Result(INFO, f"{path}: not readable as your user ({e.strerror or e})")
+            continue
+        except OSError as e:
+            # A folder in its place, a read error: every install and removal of CST stops at it, after it has
+            # changed its files (the record's update fails). No one command fixes it safely: no fix line.
+            yield Result(
+                WARN,
+                f"{path}: the install record cannot be read ({e.strerror or e}): every CST install and removal "
+                "stops at it, after it has changed its files; move it aside",
+            )
             continue
         if rec is None:
             yield from _without_record(host, installed, owner)
