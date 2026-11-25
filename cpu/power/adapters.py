@@ -110,11 +110,18 @@ def _uevent_values(path: str) -> tuple[str, str]:
     return driver, slot
 
 
-def _sorted_entries(folder: str, pattern: re.Pattern[str]) -> list[str]:
-    if not os.path.isdir(folder):
+def _folder_names(folder: str) -> list[str]:
+    """The names in a sysfs folder; none when it cannot be listed (gone since it was seen: a card unbound,
+    a CPU taken offline; not a folder; EACCES, EIO), as the reads beside it give none."""
+    try:
+        return os.listdir(folder)
+    except OSError:
         return []
+
+
+def _sorted_entries(folder: str, pattern: re.Pattern[str]) -> list[str]:
     return sorted(
-        (n for n in os.listdir(folder) if pattern.fullmatch(n) is not None),
+        (n for n in _folder_names(folder) if pattern.fullmatch(n) is not None),
         key=lambda n: _num_key(n, pattern),
     )
 
@@ -128,7 +135,7 @@ def _scan_gpu_cards(sys_drm: str) -> tuple[GpuPowerCard, ...]:
         prefix = f"{card}-"
         outputs = sorted(
             child[len(prefix) :]
-            for child in os.listdir(cdir)
+            for child in _folder_names(cdir)
             if child.startswith(prefix) and read_stripped(os.path.join(cdir, child, "status")) == _CONNECTED_VALUE
         )
         ctrl_path = os.path.join(dev_dir, "power", "control")
