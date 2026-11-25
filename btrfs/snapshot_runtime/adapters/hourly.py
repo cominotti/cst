@@ -144,7 +144,8 @@ class RunStopped(Exception):
 def guard_limits(m: SnapshotRun) -> dict[str, int]:
     """The space guard's settings (GUARD_KEYS) that it can hold at, as numbers of GiB, as bash arithmetic
     computes them (guard_number), read before the guard looks at the free space. Each setting it cannot
-    compute (250GiB, abc, 1 x, a no-break space) gets a line naming it and its value, and is left out:
+    compute (250GiB, abc, 1 x, a no-break space, or an operator _Arith does not read although bash would
+    compute it: 1<<8, ~5) gets a line naming it and its value, and is left out:
     after_conversions then stops the run (exit 1), whether this run's comparison would read it or not,
     once a valid emergency limit has had its purge: the run never goes on with no limit."""
     limits: dict[str, int] = {}

@@ -2720,8 +2720,11 @@ How it works, as a sequence:
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
 `RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`. Each limit is read as
 bash arithmetic reads it (`010` is 8, `2#1010` is 10; blanks are spaces,
-tabs and newlines). A value bash cannot compute (`250GiB`, `abc`, `1 x`,
-digits of another script, a no-break space), and a number past 2**63 - 1,
+tabs and newlines), in the part of it CST reads: integer constants, `+`,
+`-`, `*`, `/`, `%`, `**` and parentheses. A value bash cannot compute
+(`250GiB`, `abc`, `1 x`, digits of another script, a no-break space), one
+with an operator CST does not read although bash would compute it
+(`1<<8`, `~5`, `5>3`, `1?2:3`), and a number past 2**63 - 1,
 which bash's 64-bit arithmetic would wrap around (`18446744073709551866`
 would be 250, `9223372036854775808` a negative number, so no limit),
 **stops the hourly run**, with exit 1 and a journal line naming the setting
