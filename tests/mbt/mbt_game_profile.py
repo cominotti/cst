@@ -2,7 +2,7 @@
 """A state machine over the game profile's on, tick and off, with faults inside them (Hypothesis).
 
 It runs the real GameProfile (cpu/game/adapters/profile.py) through GameProfile.locked, as the units
-run it, on the unit tests' scratch (cpu/tests/test_game_profile.py game_scratch): a fake cgroup tree,
+run it, on the unit tests' scratch (cpu/tests/fakes.py game_scratch): a fake cgroup tree,
 /proc and sysfs, and their fake systemctl for both managers (FakeSystemd), here as ReloadingSystemd:
 each property has a base (the unit file's value); a daemon-reload sets every shown value from the
 zz-cst-game.conf drop-in for the system manager's MemoryLow when there is one (it wins over a
@@ -105,9 +105,18 @@ from cpu.game.domain import (
     unheld,
 )
 from cpu.game.domain.leftovers import leftover_entries
-from cpu.tests.test_game_profile import UID, USER, FakeSystemd, add_gamemode_pid, game_scratch, override_path
+from cpu.tests.fakes import (
+    MEMORY_LOW_BYTES,
+    UID,
+    USER,
+    Key,
+    ReloadingSystemd,
+    add_gamemode_pid,
+    game_scratch,
+    override_path,
+    override_value,
+)
 from cst_core.adapters.files import read_text
-from cst_core.ports import CommandResult
 from tests.fault_injection import FaultMode, FaultPlan, FaultyOs, FaultyRunner, Killed, stub_fsync
 from tests.mbt import profiles
 
@@ -115,7 +124,6 @@ profiles.load()
 
 SETTINGS: Final = GameSettings(target_user=USER, game_zswap_writeback="yes", p_cores="0-1")
 BUILD: Final = SETTINGS.build_cpus
-MEMORY_LOW_BYTES: Final = "17179869184"  # 16G as systemctl show gives it
 # The last point a fault is armed at: 'on' makes about 40 calls that are points, a tick or an 'off' a few.
 ON_POINTS: Final = 40
 FEW_POINTS: Final = 8
@@ -127,8 +135,6 @@ STEPS: Final = 30
 # ENOSPC, and the profile suppresses only the errors those calls give).
 KILL_ONLY_OS: Final = ("unlink", "truncate", "rmdir", "makedirs")
 
-type Key = tuple[str, str, str]  # (manager, unit, property)
-
 
 class ProfileFault(StrEnum):
     """What goes wrong in one call of the profile."""
@@ -136,64 +142,6 @@ class ProfileFault(StrEnum):
     NONE = "none"
     FAIL = "fail"
     KILL = "kill"
-
-
-def norm(value: str) -> str:
-    """A value as systemctl show gives it (16G in bytes)."""
-    return MEMORY_LOW_BYTES if value == "16G" else value
-
-
-def override_value(path: str) -> str:
-    """The value a runtime override file (or a drop-in) sets: its last KEY=VALUE line's VALUE."""
-    with open(path, encoding="utf-8") as fh:
-        line = [x for x in fh.read().splitlines() if "=" in x][-1]
-    return norm(line.split("=", 1)[1].strip())
-
-
-class ReloadingSystemd(FakeSystemd):
-    """FakeSystemd whose daemon-reload sets each shown value from the files, as systemd does."""
-
-    def __init__(self, root: str, unit_runtime: str) -> None:
-        super().__init__(root)
-        self.base: dict[Key, str] = {}
-        self.unit_runtime = unit_runtime
-
-    def set_base(self, mgr: str, unit: str, **props: str) -> None:
-        for prop, value in props.items():
-            self.base[mgr, unit, prop] = value
-        self.set_now(mgr, unit, **props)
-
-    @override
-    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
-        args = list(argv[1:])
-        mgr = "sys"
-        if args[:2] == ["--user", "-M"]:
-            mgr, args = "usr", args[3:]
-        if args[:1] == ["daemon-reload"]:
-            self.actions.append(" ".join(argv))
-            self.reload(mgr)
-            return CommandResult(0, "", "")
-        return super().run(argv, **kw)
-
-    def reload(self, mgr: str) -> None:
-        keys = {k for k in self.base if k[0] == mgr}
-        folder = os.path.join(self.store, mgr)
-        if os.path.isdir(folder):
-            for unit in os.listdir(folder):
-                keys.update((mgr, unit, prop) for prop in os.listdir(os.path.join(folder, unit)))
-        for m, unit, prop in sorted(keys):
-            value = self.base.get((m, unit, prop))
-            f = override_path(self.root, m, unit, prop)
-            if os.path.exists(f):
-                value = override_value(f)
-            dropin = os.path.join(self.unit_runtime, f"{unit}.d", "zz-cst-game.conf")
-            if m == "sys" and prop == "MemoryLow" and os.path.exists(dropin):
-                value = override_value(dropin)
-            if value is None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(os.path.join(self.store, m, unit, prop))
-            else:
-                self.set_now(m, unit, **{prop: norm(value)})
 
 
 class BufferedWrite:

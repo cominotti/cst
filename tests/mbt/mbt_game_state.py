@@ -7,7 +7,7 @@ cpu.game.domain.record_line) and read back as bash's `eval "rec=(${line})"` read
 files, and greps them for its own quoted form. A field is generated as bytes without NUL (what a
 bash variable can hold: ASCII, high bytes alone, and the UTF-8 of any character, mixed), decoded
 with surrogateescape, as the profile gets a cgroup folder's name from glob. Each example writes
-its files in a scratch folder of its own (cpu/tests/test_game_profile.py game_scratch).
+its files in a scratch folder of its own (cpu/tests/fakes.py game_scratch).
 
 Checked:
 - Q1, our writer, our reader: records appended with GameProfile.append_state and read with
@@ -64,7 +64,7 @@ from cpu.game.domain import (
     unreadable_lines,
 )
 from cpu.game.domain.boxes import shown_form
-from cpu.tests.test_game_profile import UID, FakeSystemd, game_scratch
+from cpu.tests.fakes import UID, FakeSystemd, game_scratch
 from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
 
