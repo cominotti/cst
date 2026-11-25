@@ -836,7 +836,11 @@ so if `on` stops halfway, `off` can still undo what was done. `on` sets the
 memory chain (7.1) first, `user@<uid>.service` before its parents, so the
 first line of `game.state` names the user it acts for, whatever step `on`
 stopped at (`off` acts for that user, 6.2, and so do the watchdog's `tick`
-and `state`, also when `TARGET_USER` names another user now). When the line
+and `state`, also when `TARGET_USER` names another user now). When no
+account has that uid any more, `off` never undoes the user manager's records
+of `game.state` in another user's manager, nor keeps them for one: it drops
+them, said in one line (`<4>off: no account has uid UID, the user 'on' acted
+for, now: N setting(s) of its user manager dropped, ...`). When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to
 /run/cpu-setup/game.state`; it carries on with the rest and still exits 0,

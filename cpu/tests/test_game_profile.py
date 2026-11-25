@@ -2688,6 +2688,35 @@ class LeftoversTest(GameProfileCase):
         self.assertEqual(self.sets(self.systemd.actions), [])
         self.assertFalse(os.path.exists(self.paths.leftovers))
 
+    def test_off_drops_game_state_s_user_manager_records_of_a_uid_no_account_has(self) -> None:
+        # 'on' acted for uid 1001, whose account is gone now; TARGET_USER is USER (another uid). Its user
+        # manager's records are not undone in USER's manager, nor kept for USER's uid: dropped, said once.
+        self.write(
+            self.state,
+            "prop sys user@1001.service MemoryLow existed 0\n"
+            "prop usr user.slice CPUWeight new -\n"
+            "prop usr app.slice CPUWeight existed 100\n",
+        )
+        user_override = self.ctrl("usr", "user.slice", "CPUWeight")  # USER's own override
+        self.write(user_override, "[Slice]\nCPUWeight=30\n")
+        self.systemd.fail_set.add(("usr", "app.slice"))
+        p, out = self.accounts_profile(USER)
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertEqual(
+            self.sets(self.systemd.actions), [f"{SYS} set-property --runtime user@1001.service MemoryLow=0"]
+        )
+        self.assertNotIn(f"{USR} daemon-reload", self.systemd.actions)
+        self.assertTrue(os.path.exists(user_override))
+        self.assertFalse(os.path.exists(self.paths.leftovers))
+        self.assertEqual(out.getvalue().count("dropped"), 1, out.getvalue())
+        self.assertIn(
+            "<4>game-profile: off: no account has uid 1001, the user 'on' acted for, now: 2 setting(s) of its user"
+            " manager dropped, not undone in another user's\n",
+            out.getvalue(),
+        )
+        self.assertFalse(os.path.exists(self.state))
+
     def test_a_transient_unit_that_is_gone_is_no_leftover(self) -> None:
         # A Docker scope with an override of its own before the game, which ended before 'off'.
         self.systemd.units["sys"] = ["docker-1.scope"]

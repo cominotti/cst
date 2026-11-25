@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.domain.units import LoadState
-from cpu.game.domain import Manager, Record, show_values, transient_unit
+from cpu.game.domain import Manager, Record, show_values, state_uid, transient_unit
 from cpu.game.domain.leftovers import (
     Entry,
     leftover_entries,
@@ -87,6 +87,20 @@ def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: Reloads
         failed.append((user, rec))
     failed.reverse()
     return failed
+
+
+def drop_unowned(profile: GameProfile, recs: Sequence[Record]) -> list[Record]:
+    """game.state's records without those of the user manager, for an 'off' when no account has the uid it
+    names: they are never undone in another user's manager (TARGET_USER's), nor kept for it; said in one
+    warning."""
+    mine = [r for r in recs if not of_user_manager(r)]
+    if len(mine) < len(recs):
+        profile.log(
+            4,
+            f"off: no account has uid {state_uid(recs)}, the user 'on' acted for, now: "
+            f"{len(recs) - len(mine)} setting(s) of its user manager dropped, not undone in another user's",
+        )
+    return mine
 
 
 def keep(profile: GameProfile, failed: Sequence[Entry], kept: Sequence[Entry] | None, *, off: bool = True) -> int:

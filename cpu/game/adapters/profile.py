@@ -32,7 +32,7 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
-from cpu.game.adapters.leftovers import Reloads, keep, read_kept, retry_kept, undo_entries, unit_gone
+from cpu.game.adapters.leftovers import Reloads, drop_unowned, keep, read_kept, retry_kept, undo_entries, unit_gone
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
 from cpu.game.domain.leftovers import merged_entries, off_text
@@ -532,7 +532,8 @@ class GameProfile:
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
         recs = records(text)
-        self.user_from_state(recs)
+        if not self.user_from_state(recs):
+            recs = drop_unowned(self, recs)
         kept = read_kept(self, say=True)
         failed = undo_entries(self, merged_entries(kept or [], recs), reload, say=True)
         self.reload_managers(reload)
@@ -551,13 +552,13 @@ class GameProfile:
         for user in reload.users:
             self.ctl("usr", "daemon-reload", user=user)
 
-    def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
+    def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> bool:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
         also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now.
         The tick and 'state' act for that user too, quietly (say False: neither the line below nor id's
         "no such user" line, which 'off' says once: _lookup_uid), so what the tick sets in the user
-        manager is what 'off' undoes."""
-        self.act_for(state_uid(recs), say=say)
+        manager is what 'off' undoes. False when no account has that uid now (act_for)."""
+        return self.act_for(state_uid(recs), say=say)
 
     def act_for(self, uid: str | None, *, say: bool = True) -> bool:
         """Act for the user with that uid in the user manager's side from now on (None: TARGET_USER as it
