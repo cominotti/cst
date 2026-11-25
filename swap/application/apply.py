@@ -314,19 +314,11 @@ class SwapApplicationService(SwapReports):
                 events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {dest}: {_FILE_CANNOT_BE_READ}"))
                 return None
         in_the_way = self._path_in_the_way()
+        if in_the_way is None and (dropin := self.slice_dropin_in_the_way()) is not None:
+            # Before the first write: each of apply's daemon-reloads would make PID 1 wait on it.
+            in_the_way = f"{dropin}: {SLICE_DROPIN_NOT_REGULAR}; nothing was changed"
         if in_the_way is not None:
             events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {in_the_way}"))
-            return None
-        dropin = self.slice_dropin_in_the_way()
-        if dropin is not None:
-            # Before the first write: each of apply's daemon-reloads would make PID 1 wait on it.
-            events.append(
-                ApplyEvent(
-                    "err",
-                    ApplyEventKind.ERROR,
-                    f"{prog}: ERROR: {dropin}: {SLICE_DROPIN_NOT_REGULAR}; nothing was changed",
-                )
-            )
             return None
         try:
             self._installer.check_record(self._env.install_record)
