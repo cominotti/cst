@@ -1,18 +1,31 @@
 # SPDX-License-Identifier: MPL-2.0
 """The game profile's systemd model and scratch machine, shared by its unit tests (cpu/tests/test_game_profile.py),
-its machines (tests/mbt/mbt_game_profile.py, mbt_game_state.py) and the contract of its adapters: a fake systemctl
-for both managers (FakeSystemd; ReloadingSystemd, whose daemon-reload sets each shown value from the files, as
-systemd does) and a fake cgroup tree, /proc and sysfs in a temporary folder (game_scratch)."""
+its machines (tests/mbt/mbt_game_profile.py, mbt_game_state.py) and the contract of its adapters
+(cpu/tests/test_game_ports.py): a fake systemctl for both managers (FakeSystemd; ReloadingSystemd, whose
+daemon-reload sets each shown value from the files, as systemd does) and a fake cgroup tree, /proc and sysfs in a
+temporary folder (game_scratch).
 
-from collections.abc import Sequence
+The Faulty* adapters are the real ones (cpu.game.adapters) with each mutating call one point of a FaultPlan
+(tests/fault_injection.py), named as the machine names them: "write PATH" for a file written (a failure raises
+ENOSPC with no effect; for a cgroup or sysfs write it answers False, as the real write does on an OSError), and
+"os.unlink", "os.truncate", "os.rmdir" and "os.makedirs" for the calls that are points of a kill only (an armed
+failure runs the call: the profile handles only the errors they give by themselves). A test injects them through
+GamePorts; nothing is patched."""
+
+from collections.abc import Callable, Sequence
 import contextlib
 import dataclasses
 import fnmatch
+import functools
 import os
 from typing import Final, override
 
+from cpu.game.adapters.leftovers import GameLeftoversFile
+from cpu.game.adapters.power import GameSysfsFiles
+from cpu.game.adapters.profile import GameKernelFiles, GameStateFiles, GameUnitFiles
 from cpu.game.domain import GamePaths, GameSettings
 from cst_core.ports import CommandResult
+from tests.fault_injection import FaultPlan
 
 USER = "testuser"
 UID = "999999"
@@ -229,3 +242,96 @@ class ReloadingSystemd(FakeSystemd):
                     os.unlink(os.path.join(self.store, m, unit, prop))
             else:
                 self.set_now(m, unit, **{prop: norm(value)})
+
+
+def _kill_only[T](plan: FaultPlan, name: str, effect: Callable[[], T]) -> T:
+    """A point of a kill only: a failure armed there runs the call."""
+    return plan.step(name, effect, lambda _err: effect())
+
+
+class FaultyStateFiles(GameStateFiles):
+    """game.state, game.intended and the marks, each write and removal a point of plan."""
+
+    def __init__(self, plan: FaultPlan) -> None:
+        self.plan = plan
+
+    @override
+    def create(self, path: str, text: str) -> None:
+        self.plan.step(f"write {path}", functools.partial(super().create, path, text))
+
+    @override
+    def append(self, path: str, text: str) -> None:
+        self.plan.step(f"write {path}", functools.partial(super().append, path, text))
+
+    @override
+    def replace(self, path: str, text: str) -> None:
+        self.plan.step(f"write {path}", functools.partial(super().replace, path, text))
+
+    @override
+    def truncate(self, path: str, size: int) -> None:
+        _kill_only(self.plan, "os.truncate", functools.partial(super().truncate, path, size))
+
+    @override
+    def remove(self, path: str) -> None:
+        _kill_only(self.plan, "os.unlink", functools.partial(super().remove, path))
+
+
+class FaultyLeftoversFile(GameLeftoversFile):
+    """game.leftovers, its write and removal points of plan."""
+
+    def __init__(self, plan: FaultPlan, path: str) -> None:
+        super().__init__(path)
+        self.plan, self.path = plan, path
+
+    @override
+    def write(self, text: str) -> None:
+        self.plan.step(f"write {self.path}", functools.partial(super().write, text))
+
+    @override
+    def remove(self) -> None:
+        _kill_only(self.plan, "os.unlink", super().remove)
+
+
+class FaultyUnitFiles(GameUnitFiles):
+    """The runtime unit files, each write, folder made and removal a point of plan."""
+
+    def __init__(self, plan: FaultPlan) -> None:
+        self.plan = plan
+
+    @override
+    def make_folder(self, path: str) -> None:
+        _kill_only(self.plan, "os.makedirs", functools.partial(super().make_folder, path))
+
+    @override
+    def write_dropin(self, path: str, text: str) -> None:
+        self.plan.step(f"write {path}", functools.partial(super().write_dropin, path, text))
+
+    @override
+    def remove(self, path: str) -> None:
+        _kill_only(self.plan, "os.unlink", functools.partial(super().remove, path))
+
+    @override
+    def remove_folder(self, path: str) -> None:
+        _kill_only(self.plan, "os.rmdir", functools.partial(super().remove_folder, path))
+
+
+class FaultyKernelFiles(GameKernelFiles):
+    """The cgroup tree, each write a point of plan (a failure answers False, as an OSError does)."""
+
+    def __init__(self, plan: FaultPlan) -> None:
+        self.plan = plan
+
+    @override
+    def write(self, path: str, value: str) -> bool:
+        return self.plan.step(f"write {path}", functools.partial(super().write, path, value), lambda _err: False)
+
+
+class FaultySysfsFiles(GameSysfsFiles):
+    """sysfs, each write a point of plan (a failure answers False, as an OSError does)."""
+
+    def __init__(self, plan: FaultPlan) -> None:
+        self.plan = plan
+
+    @override
+    def write(self, path: str, value: str) -> bool:
+        return self.plan.step(f"write {path}", functools.partial(super().write, path, value), lambda _err: False)

@@ -65,7 +65,6 @@ from cpu.game.domain import (
 )
 from cpu.game.domain.boxes import shown_form
 from cpu.tests.fakes import UID, FakeSystemd, game_scratch
-from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
 
 profiles.load()
@@ -157,10 +156,6 @@ class ShownSystemd(FakeSystemd):
 
 
 class GameStateFilesTest(profiles.MbtTestCase):
-    @override
-    def setUp(self) -> None:
-        stub_fsync(self)
-
     @contextlib.contextmanager
     def _profile(self, shown_value: str | None = None) -> Generator[GameProfile]:
         """A profile over a scratch folder of this example, removed after it; with shown_value, systemd
