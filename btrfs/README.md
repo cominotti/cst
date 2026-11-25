@@ -828,19 +828,30 @@ docker volume rm <name>         # or one volume by name
   cannot bring an old count back beside the new flag. When it cannot write
   either, the folder keeps no `+C`, the journal says why, and the next boot
   asks again. That holds only for a folder without `+C`: a boot asks only
-  for such a folder. When the folder has `+C` already (a give-up removed
+  for such a folder. Say the folder has `+C` already (a give-up removed
   the flag and kept `+C`, or an older install stopped between its `+C` and
-  its flag, below), no flag of an earlier
-  request is there and the request fails, no boot asks again: `mark` exits 2 with `... has +C already, so no boot asks
-  again: fix that, then run cst btrfs install`, and records it in
-  `/var/lib/docker-volumes-nocow/outcome` (`not-scheduled`), which `status`
-  shows as `migration not scheduled by the install at <time> (<why>)`. The
-  next `install` that can write the request removes it. `cst doctor` warns
-  about such a record, and about a count of boots left with no flag, with
-  the fix `cst btrfs install`
-  ([../doctor/README.md, section 6.3](../doctor/README.md#63-docker-volumes-nocow-migration-that-no-boot-will-schedule)). One gap is left: a container that writes into a volume during
-  the few milliseconds between mark's two looks at the volumes is asked for
-  after `+C` (still flushed), so a kill exactly there can lose that request.
+  its flag, below) and no flag of an earlier request is there. Then a
+  request that fails means no boot asks again: `mark` exits 2 with
+  `... has +C already, so no boot asks again: fix that, then run cst btrfs
+  install`, and records it in `/var/lib/docker-volumes-nocow/outcome`
+  (`not-scheduled`), which `status` shows as `migration not scheduled by
+  the install at <time> (<why>)`. The next `install` that can write the
+  request removes it. `cst doctor` warns about such a record, and about a
+  count of boots left with no flag, with the fix `cst btrfs install`
+  ([../doctor/README.md, section 6.3](../doctor/README.md#63-docker-volumes-nocow-migration-that-no-boot-will-schedule)).
+  The flag of an earlier request can still be there (a boot's copy
+  failed and kept it, with its count of boots). When `mark` cannot reset
+  that count, it also exits 2, but records nothing: that flag still asks
+  the next boot. Its journal line says what that boot does. Below two
+  boots, on a folder with `+C`: `... has +C and its volumes keep
+  copy-on-write data, and the earlier request stays: the next boot tries
+  again` (from the old count). At two boots already: `... an earlier
+  request is there with 2 boot(s) counted, so the next boot gives up
+  without a try: fix that, then run cst btrfs install` (that boot gives up
+  as below, and a later `install` starts afresh). One gap is left: a
+  container that writes into a volume during the few milliseconds between
+  mark's two looks at the volumes is asked for after `+C` (still flushed),
+  so a kill exactly there can lose that request.
   When no volume holds copy-on-write data, `mark` removes an old counter
   instead; if that fails (a folder in its place, a read-only `/var`), it
   sets no `+C`, exits 2 and the journal names the file (the next boot sets
