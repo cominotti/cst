@@ -293,34 +293,34 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertEqual((p.error, p.include_cache, p.include_scratchpad), (None, True, False))
 
     def test_names_after_the_rename(self) -> None:
-        u = CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")
+        u = CacheMountUser("tester", 1000, 1000, "/var/home/tester")
         line = plan_attach_fstab("", build_user_bindings(u))
         self.assertEqual(
             line.splitlines(),
             [
                 (
-                    "/var/mnt/cache/danilo /var/home/danilo/.cache none "
+                    "/var/mnt/cache/tester /var/home/tester/.cache none "
                     "bind,nofail,x-systemd.requires-mounts-for=/var/mnt/cache 0 0 "
-                    "# managed-by: btrfs-cache (CST) user=danilo kind=cache"
+                    "# managed-by: btrfs-cache (CST) user=tester kind=cache"
                 ),
                 (
-                    "/var/mnt/scratchpad/danilo /var/home/danilo/Scratchpad none "
+                    "/var/mnt/scratchpad/tester /var/home/tester/Scratchpad none "
                     "bind,nofail,x-systemd.requires-mounts-for=/var/mnt/scratchpad 0 0 "
-                    "# managed-by: btrfs-cache (CST) user=danilo kind=scratchpad"
+                    "# managed-by: btrfs-cache (CST) user=tester kind=scratchpad"
                 ),
             ],
         )
 
     def test_a_line_of_the_old_names_is_not_managed(self) -> None:
         old = (
-            "/var/mnt/scratch/danilo /var/home/danilo/Scratch none bind,nofail 0 0 "
-            "# managed-by: btrfs-scratch (CST) user=danilo kind=scratch\n"
-            "/var/mnt/cache/danilo /var/home/danilo/Scratch2 none bind,nofail 0 0 "
-            "# managed-by: btrfs-cache (CST) user=danilo kind=scratch\n"
+            "/var/mnt/scratch/tester /var/home/tester/Scratch none bind,nofail 0 0 "
+            "# managed-by: btrfs-scratch (CST) user=tester kind=scratch\n"
+            "/var/mnt/cache/tester /var/home/tester/Scratch2 none bind,nofail 0 0 "
+            "# managed-by: btrfs-cache (CST) user=tester kind=scratch\n"
         )
         self.assertEqual(parse_managed_fstab_entries(old), ())
         self.assertEqual(
-            plan_detach_fstab(old, "danilo", {CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD}),
+            plan_detach_fstab(old, "tester", {CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD}),
             old,
         )
 
@@ -328,7 +328,7 @@ class CacheMountDomainTests(unittest.TestCase):
         base_fstab = (
             "UUID=root-id / btrfs subvol=root 0 0\n/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,nofail 0 0\n"
         )
-        u1 = CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")
+        u1 = CacheMountUser("tester", 1000, 1000, "/var/home/tester")
         u2 = CacheMountUser("alice", 1001, 1001, "/var/home/alice")
         f1 = plan_attach_fstab(base_fstab, build_user_bindings(u1))
         f2 = plan_attach_fstab(f1, build_user_bindings(u2))
@@ -336,8 +336,8 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertEqual(
             [(e.user, e.kind, e.source, e.target) for e in entries],
             [
-                ("danilo", CacheMountKind.CACHE, "/var/mnt/cache/danilo", "/var/home/danilo/.cache"),
-                ("danilo", CacheMountKind.SCRATCHPAD, "/var/mnt/scratchpad/danilo", "/var/home/danilo/Scratchpad"),
+                ("tester", CacheMountKind.CACHE, "/var/mnt/cache/tester", "/var/home/tester/.cache"),
+                ("tester", CacheMountKind.SCRATCHPAD, "/var/mnt/scratchpad/tester", "/var/home/tester/Scratchpad"),
                 ("alice", CacheMountKind.CACHE, "/var/mnt/cache/alice", "/var/home/alice/.cache"),
                 ("alice", CacheMountKind.SCRATCHPAD, "/var/mnt/scratchpad/alice", "/var/home/alice/Scratchpad"),
             ],
@@ -347,7 +347,7 @@ class CacheMountDomainTests(unittest.TestCase):
         f3 = plan_detach_fstab(f2, "alice", {CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD})
         self.assertEqual(
             [(e.user, e.kind) for e in parse_managed_fstab_entries(f3)],
-            [("danilo", CacheMountKind.CACHE), ("danilo", CacheMountKind.SCRATCHPAD)],
+            [("tester", CacheMountKind.CACHE), ("tester", CacheMountKind.SCRATCHPAD)],
         )
         self.assertIn("UUID=root-id / btrfs subvol=root 0 0", f3)
 
@@ -359,12 +359,12 @@ class CacheMountDomainTests(unittest.TestCase):
         good_fstab = (
             "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0\n"
             "/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress=zstd:1,nofail 0 0\n"
-            f"/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 {CACHE_MOUNT_MARKER} user=danilo kind=cache\n"
+            f"/var/mnt/cache/tester /var/home/tester/.cache none bind,nofail 0 0 {CACHE_MOUNT_MARKER} user=tester kind=cache\n"
         )
         good_mounts = (
             f"/dev/mapper/cache {CACHE_BASE} btrfs rw,noatime,compress=zstd:1 0 0\n"
             f"/dev/mapper/cache {SCRATCHPAD_BASE} btrfs rw,noatime,compress=zstd:1 0 0\n"
-            "/dev/mapper/cache /var/home/danilo/.cache btrfs rw,noatime,compress=zstd:1 0 0\n"
+            "/dev/mapper/cache /var/home/tester/.cache btrfs rw,noatime,compress=zstd:1 0 0\n"
         )
         good_crypt = "cache UUID=abcd /etc/cryptsetup-keys.d/cache.key nofail,discard,no-read-workqueue\n"
         ok_res = assess_cache_mount_health(good_fstab, good_mounts, good_crypt)
@@ -372,7 +372,7 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertEqual(ok_res[0].severity, CacheMountFindingSeverity.OK)
 
         bad_mounts = good_mounts.replace("compress=zstd:1", "compress=zstd:1,flushoncommit", 1).replace(
-            "/dev/mapper/cache /var/home/danilo/.cache btrfs rw,noatime,compress=zstd:1 0 0\n", ""
+            "/dev/mapper/cache /var/home/tester/.cache btrfs rw,noatime,compress=zstd:1 0 0\n", ""
         )
         bad_crypt = "cache UUID=abcd /etc/cryptsetup-keys.d/cache.key discard\n"
         warns = assess_cache_mount_health(good_fstab, bad_mounts, bad_crypt)
@@ -380,7 +380,7 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertIn("flushoncommit", msgs)
         self.assertIn("missing 'nofail'", msgs)
         self.assertIn("in /etc/fstab but not mounted", msgs)
-        self.assertTrue(any(f.fix == "btrfs cache attach --user danilo" for f in warns))
+        self.assertTrue(any(f.fix == "btrfs cache attach --user tester" for f in warns))
 
 
 class CacheMountAdapterAndCliTests(unittest.TestCase):
@@ -391,12 +391,12 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp, "etc"), exist_ok=True)
         os.makedirs(os.path.join(self.tmp, "var", "mnt", "cache"), exist_ok=True)
         os.makedirs(os.path.join(self.tmp, "var", "mnt", "scratchpad"), exist_ok=True)
-        os.makedirs(os.path.join(self.tmp, "var", "home", "danilo"), exist_ok=True)
+        os.makedirs(os.path.join(self.tmp, "var", "home", "tester"), exist_ok=True)
         os.makedirs(os.path.join(self.tmp, "var", "home", "alice"), exist_ok=True)
         with open(os.path.join(self.tmp, "etc", "passwd"), "w", encoding="utf-8") as fh:
             fh.write(
                 "root:x:0:0:root:/root:/bin/bash\n"
-                "danilo:x:1000:1000:Danilo:/var/home/danilo:/bin/bash\n"
+                "tester:x:1000:1000:Tester:/var/home/tester:/bin/bash\n"
                 "alice:x:1001:1001:Alice:/var/home/alice:/bin/bash\n"
             )
         with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
@@ -411,7 +411,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             return fh.read()
 
     def _run(
-        self, argv: Sequence[str], *, user: str = "danilo", container: bool = False, root: bool = True
+        self, argv: Sequence[str], *, user: str = "tester", container: bool = False, root: bool = True
     ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         rc = run_cache_mount_cli(
@@ -430,9 +430,9 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
     def test_multi_user_attach_idempotent_and_detach(self) -> None:
         rc_ok, out_ok, err_ok = self._run(["attach"])
         self.assertEqual(rc_ok, 0, err_ok)
-        self.assertIn("Mounted /var/mnt/cache/danilo -> /var/home/danilo/.cache.", out_ok)
-        src_c = os.path.join(self.tmp, "var", "mnt", "cache", "danilo")
-        src_s = os.path.join(self.tmp, "var", "mnt", "scratchpad", "danilo")
+        self.assertIn("Mounted /var/mnt/cache/tester -> /var/home/tester/.cache.", out_ok)
+        src_c = os.path.join(self.tmp, "var", "mnt", "cache", "tester")
+        src_s = os.path.join(self.tmp, "var", "mnt", "scratchpad", "tester")
         self.assertEqual(stat.S_IMODE(os.stat(src_c).st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(os.stat(src_s).st_mode), 0o700)
         with open(os.path.join(src_s, CACHE_TAG), "rb") as fh:
@@ -441,13 +441,13 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.calls.clear()
         rc_again, out_again, _ = self._run(["attach"])
         self.assertEqual(rc_again, 0)
-        self.assertIn("Already attached for danilo; nothing to do.", out_again)
+        self.assertIn("Already attached for tester; nothing to do.", out_again)
 
         rc_alice, _, err_alice = self._run(["attach", "--user", "alice"])
         self.assertEqual(rc_alice, 0, err_alice)
         with open(os.path.join(self.tmp, "etc", "fstab"), encoding="utf-8") as fh:
             fstab = fh.read()
-        self.assertIn("user=danilo kind=cache", fstab)
+        self.assertIn("user=tester kind=cache", fstab)
         self.assertIn("user=alice kind=scratchpad", fstab)
 
         marker_file = os.path.join(self.tmp, "var", "mnt", "scratchpad", "alice", "build.log")
@@ -460,7 +460,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         with open(os.path.join(self.tmp, "etc", "fstab"), encoding="utf-8") as fh:
             fstab_after = fh.read()
         self.assertNotIn("user=alice", fstab_after)
-        self.assertIn("user=danilo kind=cache", fstab_after)
+        self.assertIn("user=tester kind=cache", fstab_after)
 
     def test_status_names_each_base_state_and_the_other_users(self) -> None:
         self.assertEqual(self._run(["attach", "--user", "alice"])[0], 0)
@@ -473,9 +473,9 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
                 "Dedicated cache drive mounts:",
                 "  /var/mnt/cache     in fstab (not mounted)",
                 "  /var/mnt/scratchpad not provisioned",
-                "  target user        danilo (uid=1000, home=/var/home/danilo)",
-                "  cache              /var/mnt/cache/danilo -> /var/home/danilo/.cache [not attached]",
-                "  scratchpad         /var/mnt/scratchpad/danilo -> /var/home/danilo/Scratchpad [not attached]",
+                "  target user        tester (uid=1000, home=/var/home/tester)",
+                "  cache              /var/mnt/cache/tester -> /var/home/tester/.cache [not attached]",
+                "  scratchpad         /var/mnt/scratchpad/tester -> /var/home/tester/Scratchpad [not attached]",
                 "  other fstab users  alice",
                 "",
             ],
@@ -502,11 +502,11 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertIn("/var/mnt/cache/alice -> /var/home/alice/.cache [not attached]", out)
 
     def test_a_bind_of_another_folder_of_the_drive_is_not_attached(self) -> None:
-        tgt = "/var/home/danilo/.cache"
+        tgt = "/var/home/tester/.cache"
         os.makedirs(os.path.join(self.tmp, tgt.lstrip("/")))
         self.runner.add_mount("/dev/mapper/cache", tgt, fsroot="/cache/alice", bind=True)
-        _, out, _ = self._run(["status", "--user", "danilo"])
-        self.assertIn(f"/var/mnt/cache/danilo -> {tgt} [mounted (other source!)]", out)
+        _, out, _ = self._run(["status", "--user", "tester"])
+        self.assertIn(f"/var/mnt/cache/tester -> {tgt} [mounted (other source!)]", out)
         rc_plan, out_plan, _ = self._run(["plan", "--no-scratchpad"])
         self.assertEqual(rc_plan, 0)
         self.assertIn(f"BLOCKED: {tgt} already has a mount CST did not make", out_plan)
@@ -518,8 +518,8 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
 
     def test_the_mount_on_top_decides(self) -> None:
-        tgt = "/var/home/danilo/.cache"
-        self.runner.add_mount("/dev/mapper/cache", tgt, fsroot="/cache/danilo", bind=True)
+        tgt = "/var/home/tester/.cache"
+        self.runner.add_mount("/dev/mapper/cache", tgt, fsroot="/cache/tester", bind=True)
         _, out, _ = self._run(["status"])
         self.assertIn(f"-> {tgt} [mounted (not in fstab)]", out)
         self.runner.add_mount("tmpfs", tgt, fsroot="/", uuid=None)
@@ -542,13 +542,13 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
 
     def test_an_unmanaged_fstab_line_on_a_target_blocks(self) -> None:
         with open(os.path.join(self.tmp, "etc", "fstab"), "a", encoding="utf-8") as fh:
-            fh.write("/x /var/home/danilo/.cache none bind 0 0\n")
+            fh.write("/x /var/home/tester/.cache none bind 0 0\n")
         before = self._fstab()
         _, out_s, _ = self._run(["status"])
-        self.assertIn("-> /var/home/danilo/.cache [fstab line CST does not manage (blocked)]", out_s)
+        self.assertIn("-> /var/home/tester/.cache [fstab line CST does not manage (blocked)]", out_s)
         _, out_p, _ = self._run(["plan"])
         self.assertIn(
-            "BLOCKED: /var/home/danilo/.cache has an /etc/fstab line CST does not manage; remove it first", out_p
+            "BLOCKED: /var/home/tester/.cache has an /etc/fstab line CST does not manage; remove it first", out_p
         )
         rc, _, err = self._run(["attach"])
         self.assertEqual(rc, 1)
@@ -562,25 +562,25 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         elsewhere = os.path.join(self.tmp, "elsewhere")
         os.mkdir(elsewhere, 0o755)
         os.chmod(elsewhere, 0o755)
-        os.symlink(elsewhere, os.path.join(self.tmp, "var", "mnt", "cache", "danilo"))
+        os.symlink(elsewhere, os.path.join(self.tmp, "var", "mnt", "cache", "tester"))
         before = self._fstab()
         _, out_s, _ = self._run(["status"])
-        self.assertIn("-> /var/home/danilo/.cache [source is a symlink (blocked)]", out_s)
+        self.assertIn("-> /var/home/tester/.cache [source is a symlink (blocked)]", out_s)
         _, out_p, _ = self._run(["plan"])
-        self.assertIn("BLOCKED: /var/mnt/cache/danilo is a symlink (refusing to follow it)", out_p)
+        self.assertIn("BLOCKED: /var/mnt/cache/tester is a symlink (refusing to follow it)", out_p)
         rc, _, err = self._run(["attach"])
         self.assertEqual(rc, 1)
         self.assertIn("is a symlink", err)
         self.assertEqual(stat.S_IMODE(os.stat(elsewhere).st_mode), 0o755)
         self.assertEqual(self._fstab(), before)
-        self.assertFalse(os.path.exists(os.path.join(self.tmp, "var", "home", "danilo", ".cache")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "var", "home", "tester", ".cache")))
 
     def test_a_file_at_the_target_blocks_even_with_allow_nonempty(self) -> None:
-        with open(os.path.join(self.tmp, "var", "home", "danilo", ".cache"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(self.tmp, "var", "home", "tester", ".cache"), "w", encoding="utf-8") as fh:
             fh.write("not a folder")
         before = self._fstab()
         _, out_p, _ = self._run(["plan", "--allow-nonempty"])
-        self.assertIn("BLOCKED: /var/home/danilo/.cache exists and is not a folder", out_p)
+        self.assertIn("BLOCKED: /var/home/tester/.cache exists and is not a folder", out_p)
         rc, _, err = self._run(["attach", "--allow-nonempty"])
         self.assertEqual(rc, 1)
         self.assertIn("exists and is not a folder", err)
@@ -607,7 +607,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         with open(path, "rb") as fh:
             data = fh.read()
         self.assertIn(b"# caf\xe9 \xff written by an old tool\n", data)
-        self.assertIn(b"user=danilo kind=cache", data)
+        self.assertIn(b"user=tester kind=cache", data)
 
     def test_a_link_put_in_place_of_a_folder_after_the_probe_fails_cleanly(self) -> None:
         elsewhere = os.path.join(self.tmp, "elsewhere")
@@ -616,7 +616,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         real_ensure_dir = cache_adapters.ensure_dir
 
         def swap(path: str, mode: int, *, relabel: bool) -> list[str]:
-            if path.endswith("/var/mnt/cache/danilo"):
+            if path.endswith("/var/mnt/cache/tester"):
                 os.symlink(elsewhere, path)
                 return []
             return real_ensure_dir(path, mode, relabel=relabel)
@@ -625,7 +625,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         with unittest.mock.patch.object(cache_adapters, "ensure_dir", side_effect=swap):
             rc, out, err = self._run(["attach"])
         self.assertEqual(rc, 1, out)
-        self.assertIn("ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache:", err)
+        self.assertIn("ERROR: cannot prepare /var/mnt/cache/tester and /var/home/tester/.cache:", err)
         self.assertNotIn("Traceback", out + err)
         self.assertEqual(stat.S_IMODE(os.stat(elsewhere).st_mode), 0o755)
         self.assertEqual(self._fstab(), before)
@@ -636,7 +636,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         victim = os.path.join(self.tmp, "victim")
         with open(victim, "w", encoding="utf-8") as fh:
             fh.write("secret\n")
-        tag = os.path.join(self.tmp, "var", "mnt", "scratchpad", "danilo", CACHE_TAG)
+        tag = os.path.join(self.tmp, "var", "mnt", "scratchpad", "tester", CACHE_TAG)
         real_replace = os.replace
         chowned: list[tuple[str, int, int]] = []
 
@@ -682,17 +682,17 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(calls[-1], "systemctl")
 
     def test_a_failed_mount_takes_back_the_binds_of_the_run(self) -> None:
-        self.runner.mount_fails.add("/var/home/danilo/Scratchpad")
+        self.runner.mount_fails.add("/var/home/tester/Scratchpad")
         before = self._fstab()
         rc, _, err = self._run(["attach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: mount --bind /var/mnt/scratchpad/danilo /var/home/danilo/Scratchpad failed: "
+            "ERROR: mount --bind /var/mnt/scratchpad/tester /var/home/tester/Scratchpad failed: "
             "mount: permission denied; mounts and /etc/fstab restored.",
             err,
         )
         self.assertEqual(self._mounted(), [])
-        self.assertIn(["umount", os.path.join(self.tmp, "var/home/danilo/.cache")], self.runner.calls)
+        self.assertIn(["umount", os.path.join(self.tmp, "var/home/tester/.cache")], self.runner.calls)
         self.assertEqual(self._fstab(), before)
 
     def test_a_failed_reload_without_fstab_before_leaves_no_fstab(self) -> None:
@@ -706,7 +706,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(os.path.join(self.tmp, "etc", "fstab")))
         self.assertEqual(self._mounted(), [])
         # Only the mounts and /etc/fstab are taken back: the folders and the tag it made stay.
-        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "var", "mnt", "scratchpad", "danilo", CACHE_TAG)))
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "var", "mnt", "scratchpad", "tester", CACHE_TAG)))
 
     def test_an_fstab_already_gone_counts_as_put_back(self) -> None:
         # With no /etc/fstab before, putting it back is removing CST's. When it is already gone, the
@@ -776,59 +776,59 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             err,
         )
         self.assertNotIn("restored.", err)
-        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        self.assertEqual(sorted(self._mounted()), ["/var/home/tester/.cache", "/var/home/tester/Scratchpad"])
 
     def test_a_bind_not_mounted_again_gets_no_line_back(self) -> None:
         # The put-back after a busy umount wrote every line back, also .cache's, whose bind could not
         # be mounted again: the next boot mounted a bind detach had dropped.
         self.assertEqual(self._run(["attach"])[0], 0)
         attached = self._fstab()
-        self.runner.umount_fails.add("/var/home/danilo/Scratchpad")  # after .cache's umount
-        self.runner.mount_fails.add("/var/home/danilo/.cache")  # mounting it again fails
+        self.runner.umount_fails.add("/var/home/tester/Scratchpad")  # after .cache's umount
+        self.runner.mount_fails.add("/var/home/tester/.cache")  # mounting it again fails
         rc, _, err = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: umount /var/home/danilo/Scratchpad failed: umount: target is busy; ROLLBACK INCOMPLETE "
-            "(mount --bind /var/mnt/cache/danilo /var/home/danilo/.cache failed: mount: permission denied)",
+            "ERROR: umount /var/home/tester/Scratchpad failed: umount: target is busy; ROLLBACK INCOMPLETE "
+            "(mount --bind /var/mnt/cache/tester /var/home/tester/.cache failed: mount: permission denied)",
             err,
         )
-        self.assertEqual(self._mounted(), ["/var/home/danilo/Scratchpad"])
-        self.assertEqual(self._fstab(), plan_detach_fstab(attached, "danilo", {CacheMountKind.CACHE}))
-        self.assertIn("user=danilo kind=scratchpad", self._fstab())
+        self.assertEqual(self._mounted(), ["/var/home/tester/Scratchpad"])
+        self.assertEqual(self._fstab(), plan_detach_fstab(attached, "tester", {CacheMountKind.CACHE}))
+        self.assertIn("user=tester kind=scratchpad", self._fstab())
         self.runner.umount_fails.clear()
         self.runner.mount_fails.clear()
         rc_again, _, err_again = self._run(["detach"])
         self.assertEqual(rc_again, 0, err_again)
         self.assertEqual(self._mounted(), [])
-        self.assertNotIn("user=danilo", self._fstab())
+        self.assertNotIn("user=tester", self._fstab())
 
     def test_detach_keeps_a_mount_cst_did_not_make(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
-        cache_tgt = os.path.join(self.tmp, "var/home/danilo/.cache")
+        cache_tgt = os.path.join(self.tmp, "var/home/tester/.cache")
         self.runner.run(["umount", cache_tgt])
-        self.runner.add_mount("tmpfs", "/var/home/danilo/.cache", fsroot="/", uuid=None)
+        self.runner.add_mount("tmpfs", "/var/home/tester/.cache", fsroot="/", uuid=None)
         self.runner.calls.clear()
         rc, out, err = self._run(["detach"])
         self.assertEqual(rc, 0, err)
-        self.assertIn("kept: /var/home/danilo/.cache has a mount CST did not make", out)
+        self.assertIn("kept: /var/home/tester/.cache has a mount CST did not make", out)
         self.assertNotIn(["umount", cache_tgt], self.runner.calls)
-        self.assertIn(["umount", os.path.join(self.tmp, "var/home/danilo/Scratchpad")], self.runner.calls)
-        self.assertNotIn("user=danilo", self._fstab())
+        self.assertIn(["umount", os.path.join(self.tmp, "var/home/tester/Scratchpad")], self.runner.calls)
+        self.assertNotIn("user=tester", self._fstab())
 
     def test_detach_refuses_when_another_mount_hides_csts_bind(self) -> None:
         # Only the top mount was looked at: detach said "kept", dropped the managed line and left CST's
         # bind mounted under the tmpfs, where no status could see it.
         self.assertEqual(self._run(["attach"])[0], 0)
         attached = self._fstab()
-        self.runner.add_mount("tmpfs", "/var/home/danilo/.cache", fsroot="/", uuid=None)
+        self.runner.add_mount("tmpfs", "/var/home/tester/.cache", fsroot="/", uuid=None)
         _, out_s, _ = self._run(["status"])
-        self.assertIn("-> /var/home/danilo/.cache [mounted (other source on top of CST's bind!)]", out_s)
+        self.assertIn("-> /var/home/tester/.cache [mounted (other source on top of CST's bind!)]", out_s)
         self.runner.calls.clear()
         rc, _, err = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: /var/home/danilo/.cache has a mount CST did not make on top of CST's bind of "
-            "/var/mnt/cache/danilo; unmount that one first, then run detach again",
+            "ERROR: /var/home/tester/.cache has a mount CST did not make on top of CST's bind of "
+            "/var/mnt/cache/tester; unmount that one first, then run detach again",
             err,
         )
         self.assertEqual(self._fstab(), attached)
@@ -841,12 +841,12 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         attached = self._fstab()
         self.runner.mounts = [m for m in self.runner.mounts if m["target"] != CACHE_BASE]
         _, out_s, _ = self._run(["status"])
-        self.assertIn("-> /var/home/danilo/.cache [mounted (source not checked: base not mounted)]", out_s)
+        self.assertIn("-> /var/home/tester/.cache [mounted (source not checked: base not mounted)]", out_s)
         self.runner.calls.clear()
         rc, _, err = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: /var/home/danilo/.cache has a mount and /var/mnt/cache is not mounted, so CST cannot "
+            "ERROR: /var/home/tester/.cache has a mount and /var/mnt/cache is not mounted, so CST cannot "
             "tell whether it is its bind; mount /var/mnt/cache and run detach again",
             err,
         )
@@ -864,11 +864,11 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("mounts and /etc/fstab restored.", err)
         self.assertEqual(self._fstab(), attached)
-        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        self.assertEqual(sorted(self._mounted()), ["/var/home/tester/.cache", "/var/home/tester/Scratchpad"])
         # The reload comes before any umount: a failed one leaves the binds alone.
         self.assertFalse(any(c[:1] == ["umount"] for c in self.runner.calls))
         _, out, _ = self._run(["status"])
-        self.assertIn("-> /var/home/danilo/.cache [active (fstab + mounted)]", out)
+        self.assertIn("-> /var/home/tester/.cache [active (fstab + mounted)]", out)
 
     def test_detach_writes_fstab_before_it_unmounts(self) -> None:
         # The binds were unmounted first: a detach killed before its fstab write left lines that
@@ -882,21 +882,21 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         steps = [c[0] if c[0] != "systemctl" else c[-1] for c in self.runner.calls if c[0] in ("umount", "systemctl")]
         self.assertEqual(steps, ["daemon-reload", "umount", "umount"])
         self.assertEqual(self._mounted(), [])
-        self.assertIn("Unmounted /var/home/danilo/.cache.", out)
+        self.assertIn("Unmounted /var/home/tester/.cache.", out)
 
     def test_a_busy_target_puts_the_fstab_lines_back(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
         attached = self._fstab()
-        self.runner.umount_fails.add("/var/home/danilo/Scratchpad")
+        self.runner.umount_fails.add("/var/home/tester/Scratchpad")
         self.runner.calls.clear()
         rc, _, err = self._run(["detach"])
         self.assertEqual(rc, 1)
         self.assertIn(
-            "ERROR: umount /var/home/danilo/Scratchpad failed: umount: target is busy; mounts and /etc/fstab restored.",
+            "ERROR: umount /var/home/tester/Scratchpad failed: umount: target is busy; mounts and /etc/fstab restored.",
             err,
         )
         self.assertEqual(self._fstab(), attached)
-        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        self.assertEqual(sorted(self._mounted()), ["/var/home/tester/.cache", "/var/home/tester/Scratchpad"])
         steps = [
             c[0] if c[0] != "systemctl" else c[-1]
             for c in self.runner.calls
@@ -909,7 +909,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         rc_again, _, err_again = self._run(["detach"])
         self.assertEqual(rc_again, 0, err_again)
         self.assertEqual(self._mounted(), [])
-        self.assertNotIn("user=danilo", self._fstab())
+        self.assertNotIn("user=tester", self._fstab())
 
     # ---- F-C2: a run killed between its /etc/fstab write and its daemon-reload ------------------
     def _reloads(self) -> int:
@@ -933,7 +933,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.calls.clear()
         rc, out, err = self._run(["attach"])
         self.assertEqual(rc, 0, err)
-        self.assertIn("Already attached for danilo; nothing to do.", out)
+        self.assertIn("Already attached for tester; nothing to do.", out)
         self.assertNotIn("reloaded:", out)
         self.assertEqual(self._reloads(), 0)
         self.assertIn(MOUNT_UNITS_SHOW, self.runner.calls)
@@ -951,7 +951,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         # A run with nothing pending reloads nothing.
         self.runner.calls.clear()
         rc, out, _ = self._run(["attach"])
-        self.assertIn("Already attached for danilo; nothing to do.", out)
+        self.assertIn("Already attached for tester; nothing to do.", out)
         self.assertEqual(self._reloads(), 0)
 
     def test_attach_reloads_when_systemctl_cannot_say(self) -> None:
@@ -976,7 +976,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         rc, out, err = self._run(["attach"])
         self.assertEqual(rc, 0, err)
         self.assertIn(warning, out)
-        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        self.assertEqual(sorted(self._mounted()), ["/var/home/tester/.cache", "/var/home/tester/Scratchpad"])
         # A detach killed after it took the lines out: the binds are still mounted, with no line.
         self.runner.show_fails = self.runner.reload_fails = False
         self._killed_at_reload(["detach"])
@@ -985,7 +985,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         rc, out, err = self._run(["detach"])
         self.assertEqual(rc, 0, err)
         self.assertIn(warning, out)
-        self.assertIn("Unmounted /var/home/danilo/.cache.", out)
+        self.assertIn("Unmounted /var/home/tester/.cache.", out)
         self.assertEqual(self._mounted(), [])
         # A positive answer that systemd is behind with a reload that fails stays an error
         # (test_a_failed_catch_up_reload_of_detach_unmounts_nothing).
@@ -996,7 +996,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.units_visible = False
         rc, out, err = self._run(["attach"])
         self.assertEqual(rc, 0, err)
-        self.assertIn("Already attached for danilo; nothing to do.", out)
+        self.assertIn("Already attached for tester; nothing to do.", out)
         self.assertEqual(self._reloads(), 0)
 
     def test_a_bind_whose_unit_is_not_from_fstab_while_its_line_is_there_reloads(self) -> None:
@@ -1017,12 +1017,12 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
             fh.write("# no base line\n")
         self._killed_at_reload(["attach"])
-        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+        for b in build_user_bindings(CacheMountUser("tester", 1000, 1000, "/var/home/tester")):
             self.runner.run(["umount", self.tmp + b.target])
         self.runner.calls.clear()
         rc, out, err = self._run(["attach"])
         self.assertEqual(rc, 0, err)
-        self.assertIn("Mounted /var/mnt/cache/danilo -> /var/home/danilo/.cache.", out)
+        self.assertIn("Mounted /var/mnt/cache/tester -> /var/home/tester/.cache.", out)
         self.assertIn("reloaded: systemd had not loaded /etc/fstab", out)
         self.assertTrue(self.runner.view_current())
 
@@ -1032,31 +1032,31 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         # had it read those lines it would have their units from /etc/fstab. No other unit says
         # NeedDaemonReload=yes (none of /etc/fstab is listed).
         self._killed_at_reload(["attach"])
-        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+        for b in build_user_bindings(CacheMountUser("tester", 1000, 1000, "/var/home/tester")):
             self.runner.run(["umount", self.tmp + b.target])
         self.runner.units_visible = False
         _, out, _ = self._run(["plan"])
         self.assertIn(
-            "danilo's lines are in /etc/fstab; systemd has not loaded /etc/fstab as it is on disk: "
+            "tester's lines are in /etc/fstab; systemd has not loaded /etc/fstab as it is on disk: "
             "attach runs systemctl daemon-reload after the mounts.",
             out,
         )
         self.runner.calls.clear()
         rc, out, err = self._run(["attach"])
         self.assertEqual(rc, 0, err)
-        self.assertIn("Mounted /var/mnt/cache/danilo -> /var/home/danilo/.cache.", out)
+        self.assertIn("Mounted /var/mnt/cache/tester -> /var/home/tester/.cache.", out)
         self.assertIn("reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)", out)
         self.assertEqual(self._reloads(), 1)
         self.assertTrue(self.runner.view_current())
         # Binds mounted before this run with no unit at all prove nothing (test_160's test root): no reload.
         self.runner.calls.clear()
         rc, out, _ = self._run(["attach"])
-        self.assertIn("Already attached for danilo; nothing to do.", out)
+        self.assertIn("Already attached for tester; nothing to do.", out)
         self.assertEqual(self._reloads(), 0)
 
     def test_plan_with_mounts_to_make_and_systemd_current_shows_no_reload(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
-        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+        for b in build_user_bindings(CacheMountUser("tester", 1000, 1000, "/var/home/tester")):
             self.runner.run(["umount", self.tmp + b.target])
         _, out, _ = self._run(["plan"])
         self.assertIn("mount --bind", out)
@@ -1070,7 +1070,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
     def test_plan_with_mounts_to_make_and_systemd_behind_shows_the_reload(self) -> None:
         # NeedDaemonReload=yes of the units systemd loaded from /etc/fstab (the base's), or no answer.
         self._killed_at_reload(["attach"])
-        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+        for b in build_user_bindings(CacheMountUser("tester", 1000, 1000, "/var/home/tester")):
             self.runner.run(["umount", self.tmp + b.target])
         self.runner.calls.clear()
         _, out, _ = self._run(["plan"])
@@ -1078,7 +1078,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.show_fails = True
         _, out, _ = self._run(["plan"])
         self.assertIn(
-            "danilo's lines are in /etc/fstab; systemctl cannot say whether systemd has loaded /etc/fstab: "
+            "tester's lines are in /etc/fstab; systemctl cannot say whether systemd has loaded /etc/fstab: "
             "attach runs systemctl daemon-reload after the mounts.",
             out,
         )
@@ -1117,14 +1117,14 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(self._reloads(), 0)
 
     def test_status_sees_a_stale_fstab_whose_units_are_all_unmounted(self) -> None:
-        # The bases are no /etc/fstab lines and danilo's binds are unmounted: every unit systemd loaded from
+        # The bases are no /etc/fstab lines and tester's binds are unmounted: every unit systemd loaded from
         # /etc/fstab (the binds') is inactive. A rewrite of /etc/fstab (the same bytes, a new file) flags
         # them all; only a question that lists inactive units sees it.
         fstab = os.path.join(self.tmp, "etc", "fstab")
         with open(fstab, "w", encoding="utf-8") as fh:
             fh.write("# no base line\n")
         self.assertEqual(self._run(["attach"])[0], 0)
-        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+        for b in build_user_bindings(CacheMountUser("tester", 1000, 1000, "/var/home/tester")):
             self.runner.run(["umount", self.tmp + b.target])
         _, out, _ = self._run(["status"])
         self.assertNotIn("  systemd  ", out)
@@ -1185,7 +1185,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual((self._fstab(), sorted(self._mounted())), (fstab, mounted))
         self.assertFalse(any(c[:1] in (["mount"], ["umount"]) for c in self.runner.calls))
         # With binds this run mounted: they are taken back.
-        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+        for b in build_user_bindings(CacheMountUser("tester", 1000, 1000, "/var/home/tester")):
             self.runner.run(["umount", self.tmp + b.target])
         rc, _, err = self._run(["attach"])
         self.assertEqual(rc, 1)
@@ -1200,13 +1200,13 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.calls.clear()
         rc, out, err = self._run(["detach"])
         self.assertEqual(rc, 0, err)
-        self.assertIn("Nothing attached for danilo; nothing to do.", out)
+        self.assertIn("Nothing attached for tester; nothing to do.", out)
         self.assertEqual(self._reloads(), 0)
 
     def test_detach_again_after_a_kill_at_its_reload_reloads_before_it_unmounts(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
         self._killed_at_reload(["detach"])
-        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        self.assertEqual(sorted(self._mounted()), ["/var/home/tester/.cache", "/var/home/tester/Scratchpad"])
         rc, out, err = self._run(["detach"])
         self.assertEqual(rc, 0, err)
         self.assertIn("reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)", out)
@@ -1216,7 +1216,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertTrue(self.runner.view_current())
         self.runner.calls.clear()
         rc, out, _ = self._run(["detach"])
-        self.assertIn("Nothing attached for danilo; nothing to do.", out)
+        self.assertIn("Nothing attached for tester; nothing to do.", out)
         self.assertEqual(self._reloads(), 0)
 
     def test_detach_again_with_its_binds_unmounted_after_a_kill_reloads(self) -> None:
@@ -1227,7 +1227,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             fh.write("# no base line\n")
         self.assertEqual(self._run(["attach"])[0], 0)
         self._killed_at_reload(["detach"])
-        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+        for b in build_user_bindings(CacheMountUser("tester", 1000, 1000, "/var/home/tester")):
             self.runner.run(["umount", self.tmp + b.target])
         self.runner.calls.clear()
         rc, out, err = self._run(["detach"])
@@ -1237,7 +1237,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertTrue(self.runner.view_current())
         self.runner.calls.clear()
         rc, out, _ = self._run(["detach"])
-        self.assertIn("Nothing attached for danilo; nothing to do.", out)
+        self.assertIn("Nothing attached for tester; nothing to do.", out)
         self.assertEqual(self._reloads(), 0)
 
     def test_detach_reloads_when_systemctl_cannot_say(self) -> None:
@@ -1274,14 +1274,14 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self._killed_at_reload(["attach"])
         _, out, _ = self._run(["plan"])
         self.assertIn(
-            "Already attached for danilo; systemd has not loaded /etc/fstab as it is on disk: "
+            "Already attached for tester; systemd has not loaded /etc/fstab as it is on disk: "
             "attach runs systemctl daemon-reload.",
             out,
         )
         self.runner.show_fails = True
         _, out, _ = self._run(["plan"])
         self.assertIn(
-            "Already attached for danilo; systemctl cannot say whether systemd has loaded /etc/fstab: "
+            "Already attached for tester; systemctl cannot say whether systemd has loaded /etc/fstab: "
             "attach runs systemctl daemon-reload.",
             out,
         )
@@ -1290,7 +1290,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.show_fails = False
         self.assertEqual(self._run(["attach"])[0], 0)
         _, out, _ = self._run(["plan"])
-        self.assertIn("Already attached for danilo; nothing to do.", out)
+        self.assertIn("Already attached for tester; nothing to do.", out)
         self.assertNotIn("daemon-reload", out)
 
     def test_a_home_through_a_link_is_named_by_its_real_path(self) -> None:
@@ -1346,7 +1346,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             self.assertEqual(rc, 1, argv)
             self.assertIn("ERROR: cannot list mounts", err)
         self.assertEqual(self._fstab(), before)
-        self.assertFalse(os.path.exists(os.path.join(self.tmp, "var", "mnt", "cache", "danilo")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "var", "mnt", "cache", "tester")))
         self.assertFalse(any(c[:1] in (["mount"], ["umount"]) for c in self.runner.calls))
 
     def test_a_findmnt_failure_is_worded_as_a_mount_failure(self) -> None:
@@ -1364,7 +1364,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertIn("  cannot list mounts: findmnt failed: exit 2", out)
 
     def test_safety_guards_nonempty_symlink_uuid_and_container(self) -> None:
-        cache_d = os.path.join(self.tmp, "var", "home", "danilo", ".cache")
+        cache_d = os.path.join(self.tmp, "var", "home", "tester", ".cache")
         os.makedirs(cache_d, exist_ok=True)
         with open(os.path.join(cache_d, "keep.bin"), "w", encoding="utf-8") as fh:
             fh.write("x")
@@ -1377,7 +1377,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
 
         rc_allow, out_allow, err_allow = self._run(["attach", "--allow-nonempty"])
         self.assertEqual(rc_allow, 0, err_allow)
-        self.assertIn("Mounted /var/mnt/cache/danilo -> /var/home/danilo/.cache.", out_allow)
+        self.assertIn("Mounted /var/mnt/cache/tester -> /var/home/tester/.cache.", out_allow)
 
         link_tgt = os.path.join(self.tmp, "var", "home", "alice", ".cache")
         os.symlink("/tmp/other", link_tgt)
