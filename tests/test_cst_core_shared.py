@@ -358,7 +358,6 @@ class AdaptersTest(unittest.TestCase):
         # link, what it leads to) cannot be read, and its open returns at once (bounded: without the
         # option a FIFO's open waits for a writer); no descriptor is left open; a regular file, a
         # missing path and a path through a file read as without the option.
-        time_bound(self, 5)
         fs = core_files.LocalFileSystemAdapter()
         fifo = self.path("fifo")
         os.mkfifo(fifo)
@@ -367,7 +366,7 @@ class AdaptersTest(unittest.TestCase):
         folder = self.path("folder")
         os.mkdir(folder)
         for path in (fifo, link, os.devnull, folder):
-            with self.subTest(path=path):
+            with self.subTest(path=path), time_bound(5):
                 before = open_fds()
                 self.assertEqual(fs.read_text(path, "d", regular_only=True), "d")
                 self.assertIsNone(fs.read_text(path, regular_only=True))

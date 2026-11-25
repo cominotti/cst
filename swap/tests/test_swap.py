@@ -3087,8 +3087,7 @@ class SwapApplyBranchesTest(_SwapScratch):
         # A FIFO (its open waits for a writer) at each file apply writes whole, at crypttab and at fstab, as
         # root on the host: plan's and status's row of that file is "?" with the root note, and apply refuses
         # before its first write with "<path>: cannot be read: nothing was changed". Before, plan blocked in
-        # the FIFO's open (bounded here: CallBlocked).
-        time_bound(self, 20)
+        # the FIFO's open (bounded here, each path on its own: CallBlocked).
         note = "cannot be read, even as root: apply refuses before it writes anything"
         lines = {"crypttab": "crypttab: swap0 line", "fstab": "fstab: /dev/mapper/swap0 line"}
         written_whole = [os.path.relpath(dest, self.env.etc_dir) for _src, dest in self.env.managed_files]
@@ -3096,7 +3095,7 @@ class SwapApplyBranchesTest(_SwapScratch):
             tmp = self._fresh_scratch()
             self.env = dataclasses.replace(self.env, as_root=True)
             path = getattr(self.env, which) if which in lines else os.path.join(self.env.etc_dir, which)
-            with self.subTest(path=which):
+            with self.subTest(path=which), time_bound(5):
                 if os.path.lexists(path):
                     os.remove(path)
                 os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -3112,15 +3111,16 @@ class SwapApplyBranchesTest(_SwapScratch):
 
     def test_a_fifo_at_the_settings_file_stops_apply_and_nothing_blocks(self) -> None:
         # Before, plan and apply blocked in the FIFO's open (bounded here: CallBlocked).
-        time_bound(self, 5)
         tmp = self._fresh_scratch()
         os.remove(self.env.settings_path)
         os.mkfifo(self.env.settings_path)
         before = file_tree(tmp)
-        plan = self._plan_text(self.env)
+        with time_bound(5):
+            plan = self._plan_text(self.env)
+            ran = self._apply_on(self._fs())
         self.assertIn("  REFUSE    cst/swap.conf                          not a regular file: apply stops\n", plan)
         self._assert_refused_before_any_write(
-            self._apply_on(self._fs()), f"cst swap: ERROR: {self.env.settings_path}: not a regular file: apply stops."
+            ran, f"cst swap: ERROR: {self.env.settings_path}: not a regular file: apply stops."
         )
         self.assertEqual(file_tree(tmp), before)
 

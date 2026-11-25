@@ -68,20 +68,25 @@ class CallBlocked(BaseException):
     a file it cannot read and go on) nor an Exception, so only unittest's own handler catches it."""
 
 
-def time_bound(test: unittest.TestCase, seconds: float) -> None:
-    """Until test's cleanups run, a SIGALRM after seconds, and again every second after that, raises
+@contextmanager
+def time_bound(seconds: float) -> Generator[None]:
+    """While the with block runs, a SIGALRM after seconds, and again every second after that, raises
     CallBlocked in the main thread: a call that blocks (an open that waits) ends with it, as an error,
-    and does not hang the run (a handler that raises ends the call's retry, PEP 475). The cleanups stop
-    the timer and put SIGALRM's disposition back (tests/run_unit.py fails a test that leaves one
-    changed)."""
+    and does not hang the run (a handler that raises ends the call's retry, PEP 475). Leaving the block
+    stops the timer, then puts SIGALRM's disposition back (tests/run_unit.py fails a test that leaves one
+    changed): nothing after it, such as the test's cleanups, runs with the timer armed. Bound each
+    subtest on its own, so the bound does not grow with their number."""
 
     def expired(_signum: int, _frame: FrameType | None) -> None:
         raise CallBlocked(f"still running after {seconds} s: a call blocked")
 
-    test.addCleanup(signal.signal, signal.SIGALRM, signal.getsignal(signal.SIGALRM))
-    signal.signal(signal.SIGALRM, expired)
-    test.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
-    signal.setitimer(signal.ITIMER_REAL, seconds, 1)
+    previous = signal.signal(signal.SIGALRM, expired)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds, 1)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def open_fds() -> int:
