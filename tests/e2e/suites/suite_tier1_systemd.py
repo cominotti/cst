@@ -5515,7 +5515,7 @@ EOF
             rc=0; out="$($prog mark 2>&1)" || rc=$?
             echo "test_114 mark: rc=$rc $out" >&2
             [[ "$rc" == 2 ]]
-            grep -qF "nothing marked (fix the file, then run it again)" <<<"$out"
+            grep -qF "/etc/docker/daemon.json: not JSON: the migration is requested, and mark sets no +C on the volumes folder: fix the file, and the first boot after that runs it" <<<"$out"
             [[ -e /etc/btrfs-setup/docker-nocow-pending ]] || { echo "mark wrote no request" >&2; exit 1; }
             [[ "$(cat /var/lib/docker-volumes-nocow/attempts)" == 0 ]] || { echo "the old count stayed" >&2; exit 1; }
             printf '{}' >/etc/docker/daemon.json
@@ -5909,6 +5909,115 @@ EOF
                 [[ -z "$d" ]] || {{ echo "doctor warns without the helper: $d" >&2; exit 1; }}
             fi
             rm -f "$state/outcome"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_215_docker_volumes_nocow_postponed_record_is_format_1_and_read_safely(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root) and cst doctor (as tester) on the record of
+        postponed boots, /var/lib/docker-volumes-nocow/postponed. migrate runs with an
+        /etc/docker/daemon.json that is not JSON (it postpones before any btrfs call); status runs with
+        the file naming a data root of the test's own on a tmpfs (status shows the record under its
+        volumes folder's line). The whole cycle of the state file: migrate writes format 1 ("v": 1,
+        mode 0644); a record of format 99 (a newer CST) is left byte for byte, migrate's line, status
+        and doctor name it; a format-1 record whose time no clock can show reads "?" in status and
+        "at an unknown time" in doctor (status stopped with a traceback, doctor's check failed); a file
+        in place of the state folder is no record for doctor (it said "cannot read" at every run); a
+        record of format 0, as the previous version wrote it, is counted on and rewritten as format
+        1."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-215-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /var/tmp/e2e-215-saved /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-215-made-docker ] && rm -rf /etc/docker || true; "
+            "rm -f /var/tmp/e2e-215-made-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_215 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            rec={state}/postponed
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            doctor() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}
+            broken() {{ printf '{{' >/etc/docker/daemon.json; }}
+            fixed() {{ printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json; }}
+            newer="$rec is format 99 of the docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST"
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-215-made-docker; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e {state} ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p {root}/volumes
+            # 1. Written as format 1.
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            echo "test_215 record: $(cat "$rec")" >&2
+            grep -qF '{{"v": 1, "reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown", "boots": 1,' "$rec"
+            [[ "$(stat -c %a "$rec")" == 644 ]]
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 1: $out" >&2
+            grep -qE '^  migration postponed at 1 boot[(]s[)] in a row, last [0-9-]+ [0-9:]+: /etc/docker/daemon.json: not JSON' <<<"$out"
+            # 2. A record of format 99: left as it is, and named.
+            printf '{{"v": 99, "reason": "r", "boots": 5, "first": 1, "last": 2, "boot_id": "b", "new": [1]}}\n' >"$rec"
+            cp -p "$rec" /var/tmp/e2e-215-saved
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate, format 99: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "$newer: left as it is, and this boot is not counted in it" <<<"$out"
+            cmp "$rec" /var/tmp/e2e-215-saved || {{ echo "migrate wrote over a record of a newer format" >&2; exit 1; }}
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 99: $out" >&2
+            grep -qxF "  $newer" <<<"$out"
+            d="$(doctor | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_215 doctor, format 99: $d" >&2
+            grep -qxF "  info   Docker volumes NOCOW: $newer" <<<"$d"
+            # 3. A time no clock can show.
+            printf '{{"v": 1, "reason": "r", "boots": 1, "first": 1, "last": 100000000000000000000, "boot_id": "b"}}\n' >"$rec"
+            rc=0; out="$($prog status 2>&1)" || rc=$?
+            echo "test_215 status, a time past the clock: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            if grep -qF Traceback <<<"$out"; then echo "status stopped with a traceback" >&2; exit 1; fi
+            grep -qxF "  migration postponed at 1 boot(s) in a row, last ?: r" <<<"$out"
+            d="$(doctor)"
+            echo "test_215 doctor, a time past the clock: $(grep -F "Docker volumes NOCOW" <<<"$d" || true)" >&2
+            if grep -qF "check_docker_nocow_postponed: the check itself failed" <<<"$d"; then echo "doctor's check failed" >&2; exit 1; fi
+            grep -qF "info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last at an unknown time: r;" <<<"$d"
+            # 4. A file in place of the state folder: no record.
+            rm -rf {state}
+            printf 'in the way\n' >{state}
+            d="$(doctor | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_215 doctor, the state folder a file: $d" >&2
+            if grep -qF "cannot read $rec" <<<"$d"; then echo "doctor took the file for a record it cannot read" >&2; exit 1; fi
+            rm -f {state}
+            # 5. A record of format 0, as the previous version wrote it: counted on, written as format 1.
+            mkdir -p {state}
+            printf '{{"reason": "r", "boots": 1, "first": 1700000000, "last": 1700000000, "boot_id": "old"}}\n' >"$rec"
+            broken
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_215 migrate, format 0: rc=$rc $out; record: $(cat "$rec")" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF '{{"v": 1, "reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown", "boots": 2, "first": 1700000000,' "$rec"
+            fixed
+            out="$($prog status 2>&1)"
+            echo "test_215 status, format 0 counted on: $out" >&2
+            grep -qF "  migration postponed at 2 boot(s) in a row, last " <<<"$out"
             echo E2E-OK
             """,
         ).stdout
