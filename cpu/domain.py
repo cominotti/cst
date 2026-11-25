@@ -540,8 +540,9 @@ def _window_seconds(val: str) -> int:
     return seconds
 
 
-# A limit's number: ASCII digits, a fraction and an exponent allowed, blanks around it (float() alone also
-# took every Unicode digit, Unicode blanks and 1_0).
+# A limit's number: ASCII digits, a fraction and an exponent allowed, blanks or tabs around it. float() alone
+# also took every Unicode digit, Unicode blanks, 1_0, a leading sign (+3) and whitespace other than blank and
+# tab (a newline, \r, \v, \f): this refuses them all (inf and nan fail the 0 < v < inf check of positive()).
 _LIMIT_NUMBER: Final = re.compile(r"[ \t]*(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?[ \t]*")
 
 
