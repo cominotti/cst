@@ -155,7 +155,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "cst_core FBT001": 2,
     "cst_core FBT002": 1,
     "cst_core FBT003": 2,
-    "cst_core N": 4,
+    "cst_core N": 5,
     "cst_core PLR0911": 2,
     "cst_core PLR0913": 5,
     "cst_core PLR2004": 7,

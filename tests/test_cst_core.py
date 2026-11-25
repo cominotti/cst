@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import errno
 import fcntl
 import io
 import json
@@ -24,6 +25,7 @@ from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on_host_argv, SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
+from cst_core.adapters import files as core_files
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import beside_program, lc_ctype_handover, restore_lc_ctype, undo_python_start
 from cst_core import wiring as core_wiring
@@ -66,7 +68,15 @@ from cst_core.domain.units import (
     user_manager_head,
     user_unit_dir,
 )
-from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
+from cst_core.ports import (
+    CommandFailed,
+    CommandFault,
+    CommandResult,
+    OutputMode,
+    ReplacedNotSynced,
+    SystemctlHost,
+    UnitName,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -122,6 +132,75 @@ class AsciiBlanksTest(unittest.TestCase):
                 self.assertEqual(strip_ascii_blanks(kept), kept)
                 self.assertNotEqual(kept.strip(), kept)  # what str.strip() would have trimmed
         self.assertEqual(strip_ascii_blanks(" \N{NO-BREAK SPACE}off\t"), "\N{NO-BREAK SPACE}off")
+
+
+class WriteAtomicReplacedNotSyncedTest(unittest.TestCase):
+    """write_atomic's ReplacedNotSynced: raised only when the rename was done and the folder's sync failed."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-wa-rns-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.dest = os.path.join(self.tmp, "fstab")
+        with open(self.dest, "wb") as fh:
+            fh.write(b"old\n")
+
+    def _failing_fsync(self, kind: Literal["folder", "file"], code: int) -> contextlib.AbstractContextManager[object]:
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            if stat.S_ISDIR(os.fstat(fd).st_mode) == (kind == "folder"):
+                raise OSError(code, os.strerror(code))
+            real_fsync(fd)
+
+        return mock.patch.object(core_files.os, "fsync", fsync)
+
+    def _content(self) -> bytes:
+        with open(self.dest, "rb") as fh:
+            return fh.read()
+
+    def test_the_signal_is_raised_only_after_the_rename_when_the_folder_sync_fails(self) -> None:
+        cases: tuple[
+            tuple[str, Literal["folder", "file"], int, bool | Literal["file"], type[OSError] | None, bytes], ...
+        ] = (
+            ("folder fsync EIO", "folder", errno.EIO, True, ReplacedNotSynced, b"new\n"),
+            ("file fsync EIO, before the rename", "file", errno.EIO, True, OSError, b"old\n"),
+            ("folder fsync EINVAL, ignored", "folder", errno.EINVAL, True, None, b"new\n"),
+            ("folder fsync ENOTSUP, ignored", "folder", errno.ENOTSUP, True, None, b"new\n"),
+            ("durable file: no folder sync", "folder", errno.EIO, "file", None, b"new\n"),
+            ("durable False: no sync", "folder", errno.EIO, False, None, b"new\n"),
+        )
+        for name, kind, code, durable, raised, content in cases:
+            with self.subTest(name):
+                with open(self.dest, "wb") as fh:
+                    fh.write(b"old\n")
+                with self._failing_fsync(kind, code):
+                    if raised is None:
+                        core_files.write_atomic(self.dest, "new\n", mode=0o644, durable=durable, relabel=False)
+                    else:
+                        with self.assertRaises(raised) as caught:
+                            core_files.write_atomic(self.dest, "new\n", mode=0o644, durable=durable, relabel=False)
+                        err = caught.exception
+                        self.assertEqual(err.errno, code)
+                        self.assertEqual(isinstance(err, ReplacedNotSynced), raised is ReplacedNotSynced)
+                        if isinstance(err, ReplacedNotSynced):
+                            self.assertEqual(err.dest, self.dest)
+                            self.assertEqual(str(err), str(OSError(code, os.strerror(code))))
+                self.assertEqual(self._content(), content)
+                self.assertEqual(os.listdir(self.tmp), ["fstab"])
+
+    def test_a_folder_that_cannot_be_opened_after_the_rename_is_the_signal_too(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root opens a folder whatever its mode")
+        os.chmod(self.tmp, 0o300)  # a file can still be made and renamed in it, the folder not opened to read
+        try:
+            with self.assertRaises(ReplacedNotSynced) as caught:
+                core_files.write_atomic(self.dest, "new\n", mode=0o644, relabel=False)
+        finally:
+            os.chmod(self.tmp, 0o755)
+        err = caught.exception
+        self.assertEqual((err.errno, err.filename), (errno.EACCES, self.tmp))
+        self.assertEqual(self._content(), b"new\n")
 
 
 class ValueObjectsTest(unittest.TestCase):

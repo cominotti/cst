@@ -30,6 +30,7 @@ from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, own
 from cst_core.domain.install import Owner, link_read_through
 from cst_core.domain.text import count_text, first_line
 from cst_core.domain.units import MASK_TARGET
+from cst_core.ports import ReplacedNotSynced
 
 
 @overload
@@ -444,6 +445,12 @@ def write_atomic(
       label it gets from its folder, and no program is started.
     - str data is written as UTF-8 (surrogateescape: bytes read with it come
       back as they were).
+
+    A failure before the rename raises its OSError and leaves the old file in
+    place. With durable True, a failure of the folder's sync after the rename
+    (its open or its fsync) raises ReplacedNotSynced (cst_core.ports), an
+    OSError with that error's errno, strerror and filename: the new file is in
+    place, not yet synced.
     """
     abs_path = os.path.abspath(path)
     parent = os.path.dirname(abs_path)
@@ -472,7 +479,10 @@ def write_atomic(
             os.unlink(tmp)
         raise
     if durable is True:
-        _fsync_dir(parent)
+        try:
+            _fsync_dir(parent)
+        except OSError as e:
+            raise ReplacedNotSynced(e.errno, e.strerror, e.filename, abs_path) from e
     if relabel and os.geteuid() == 0:
         _relabel(abs_path)
 
