@@ -2316,6 +2316,69 @@ class MachineSliceMemoryLowDoctorTest(Scratch):
         self.assertEqual(self.lines(self.run_tool().stdout), [])
 
 
+class ReadsNeverWaitTest(Scratch):
+    """doctor's shared reads (fstab, the machine.slice drop-ins, zswap.conf): a FIFO is a file they cannot
+    read, at once. Before, the open waited for a writer for ever (bounded here: CallBlocked)."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    OTHER = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+
+    def _fifo(self, host_path: str) -> str:
+        p = os.path.join(self.root, host_path.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.mkfifo(p)
+        return p
+
+    def _show(self, *dropins: str) -> None:
+        d = os.path.join(self.tmp, "show", "sys")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "machine.slice"), "w") as f:
+            f.write(f"LoadState=loaded\nMemoryLow={48 * 2**30}\nDropInPaths={' '.join(dropins)}\n")
+
+    def _install_cst_dropin(self) -> None:
+        p = os.path.join(self.root, self.CST.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "swap", "units", "machine.slice.d-10-swap-memory-low.conf"), p)
+
+    def test_the_shared_read_of_a_fifo_gives_nothing_and_a_regular_empty_file_still_reads(self) -> None:
+        host = doc_adapters.Host(dict(self.env))
+        for name in ("/etc/fstab", self.OTHER, self.CST):
+            with self.subTest(path=name), time_bound(5):
+                fifo = self._fifo(name)
+                try:
+                    got = doc_shared.read_text(host, host.path(doc_domain.HostPath(name)), 65536)
+                finally:
+                    os.remove(fifo)
+                self.assertEqual(got, "")
+        empty = os.path.join(self.root, "proc", "cmdline")
+        os.makedirs(os.path.dirname(empty))
+        with open(empty, "w") as f:
+            f.write("  root=UUID=x rw  \n")
+        self.assertEqual(doc_shared.read_text(host, doc_domain.ViewPath(empty)), "root=UUID=x rw")
+
+    def test_a_fifo_at_zswap_conf_is_one_it_cannot_read(self) -> None:
+        self.addCleanup(os.remove, self._fifo("/etc/tmpfiles.d/zswap.conf"))
+        with time_bound(5):
+            rows = list(doc_swap.check_zswap_params(doc_adapters.Host(dict(self.env))))
+        self.assertEqual(rows, [Result("info", "zswap: cannot read /etc/tmpfiles.d/zswap.conf")])
+
+    def test_a_fifo_among_machine_slice_s_drop_ins_is_skipped(self) -> None:
+        # CST's drop-in is a FIFO: nothing (as for one not installed). Another drop-in is a FIFO: it sets
+        # nothing doctor can read, so CST's value is the one systemd shows.
+        cases = (("cst", self.CST, []), ("other", self.OTHER, [f"machine.slice MemoryLow 48.0 GiB, from {self.CST}"]))
+        for kind, fifo, want in cases:
+            with self.subTest(kind=kind), time_bound(5):
+                if kind == "other":
+                    self._install_cst_dropin()
+                path = self._fifo(fifo)
+                self._show(self.CST, self.OTHER)
+                try:
+                    rows = list(doc_swap.check_machine_slice_memory_low(doc_adapters.Host(dict(self.env))))
+                finally:
+                    os.remove(path)
+                self.assertEqual([r.message for r in rows], want)
+
+
 class DockerNocowPostponedTest(Scratch):
     """check_docker_nocow_postponed: the record btrfs/docker-volumes-nocow
     keeps of the boots at which its migration had to wait."""

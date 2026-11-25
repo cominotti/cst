@@ -14969,3 +14969,41 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.DOCTOR, E2ETag.SWAP)
+    def test_273_doctor_names_a_fifo_at_zswap_conf_and_does_not_wait_on_it(self) -> None:
+        """cst doctor as tester with a FIFO that nothing ever writes to at /etc/tmpfiles.d/zswap.conf (a path
+        no daemon-reload or generator reads; the container's own file, if any, is put back after). The run is
+        bounded by timeout(1) at 120 s and must end within 60 s with the row "zswap: cannot read ...". Before
+        this change doctor opened the FIFO and waited for a writer for ever (exit 124 here). The FIFO at
+        /etc/fstab and in machine.slice.d is covered by the unit tests only: a daemon-reload or the fstab
+        generator would wait on it too. The trap lets a reader that waits go (a writer's open) before it removes
+        the FIFO."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+set -u
+Z=/etc/tmpfiles.d/zswap.conf
+W="$(mktemp -d)"
+if [[ -e "$Z" || -L "$Z" ]]; then mv "$Z" "$W/saved"; fi
+release() { if [[ -p "$Z" ]]; then timeout 2 sh -c 'exec 3>"$1"' sh "$Z" || true; rm -f "$Z"; fi; }
+restore() { release; if [[ -e "$W/saved" || -L "$W/saved" ]]; then mv "$W/saved" "$Z"; fi; rm -rf "$W"; }
+trap restore EXIT
+fail() { echo "FAILED: $1"; echo "--- output"; cat "$W/out"; exit 1; }
+mkdir -p /etc/tmpfiles.d
+mkfifo -m 0644 "$Z"
+rc=0
+start=$SECONDS
+timeout 120 runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I \
+    /opt/cst-rw/doctor/cst-doctor >"$W/out" 2>&1 </dev/null || rc=$?
+took=$((SECONDS - start))
+[[ $rc != 124 ]] || fail "doctor blocked on the FIFO"
+(( took <= 60 )) || fail "doctor took $took s"
+grep -qF "info   zswap: cannot read /etc/tmpfiles.d/zswap.conf" "$W/out" || fail "no zswap row"
+[[ -p "$Z" ]] || fail "the FIFO is gone"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

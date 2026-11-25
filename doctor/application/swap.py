@@ -52,7 +52,7 @@ def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
     (a new kernel can rename or drop one). Nothing when that file is not
     installed."""
     try:
-        with host.open_text(host.path(ZSWAP_CONF)) as f:
+        with host.open_regular_text(host.path(ZSWAP_CONF)) as f:
             wanted = [name for name, _ in parse_tmpfiles_params(f.read(65536))]
     except FileNotFoundError:
         return
