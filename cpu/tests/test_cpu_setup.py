@@ -20,7 +20,7 @@ import unittest.mock
 
 from cpu import domain as cpu_domain
 from cpu.setup import cli as setup_cli, wiring as setup_wiring
-from cpu.setup.adapters import CpuSetup, target_user
+from cpu.setup.adapters.setup import CpuSetup, target_user
 from cpu.power.domain import CpuTopology
 from cpu.setup.domain import (
     default_settings,

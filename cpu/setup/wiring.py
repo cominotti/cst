@@ -15,7 +15,7 @@ from cst_core.adapters.runner import SubprocessCommandRunner, on_host_argv
 from cst_core.adapters.runtime import undo_python_start
 from cst_core.ports import ModuleRoutePort
 from cpu.game.adapters.host import collate_as_bash
-from cpu.setup.adapters import CpuSetup, target_user
+from cpu.setup.adapters.setup import CpuSetup, target_user
 from cpu.setup.domain import QUIET_ENV, CpuRootCommand, SetupPaths
 
 
