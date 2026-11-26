@@ -602,6 +602,7 @@ def _provision_plan_steps(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_
         steps.append(f"cryptsetup open {spec.device_path} -> {spec.mapper_name}")
     if not luks.mapper_fstype and do_format:
         steps.append(f"mkfs.btrfs -L {BTRFS_CACHE_LABEL} -m dup -d single {spec.mapper_path}")
+        steps.append(f"run initial btrfs scrub on {CACHE_BASE}")
     missing_subvols = [s for s in SUBVOL_FOR_KIND.values() if s not in luks.subvols_present]
     if missing_subvols:
         steps.append(f"create btrfs subvolume(s): {', '.join(missing_subvols)}")

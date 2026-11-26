@@ -3392,6 +3392,11 @@ assert d["samples"] >= 1, d["samples"]
             if [[ -f {w}/created-part ]]; then rm -f "$(cat {w}/created-part)" 2>/dev/null || true; fi
             btrfs subvolume delete /home/e2e25/.cache /home/e2e25/.cache.pre-cst-cache 2>/dev/null || true
             userdel -rf e2e25 2>/dev/null
+            rm -rf /run/systemd/system/btrfs-scrub-weekly.service.d
+            if [[ -e {w}/scrub-svc.bak ]]; then mv {w}/scrub-svc.bak /etc/systemd/system/btrfs-scrub-weekly.service; elif [[ -e {w}/no-scrub-svc ]]; then rm -f /etc/systemd/system/btrfs-scrub-weekly.service; fi
+            if [[ -e {w}/scrub-dropin.bak ]]; then mkdir -p /etc/systemd/system/btrfs-scrub-weekly.service.d && mv {w}/scrub-dropin.bak /etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf; else rm -f /etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf; fi
+            rmdir /etc/systemd/system/btrfs-scrub-weekly.service.d 2>/dev/null || true
+            if [[ -e {w}/snaps-conf.bak ]]; then mv {w}/snaps-conf.bak /etc/btrfs-setup/snapshots.conf; elif [[ -e {w}/no-snaps-conf ]]; then rm -f /etc/btrfs-setup/snapshots.conf; fi
             rmdir /var/mnt/scratchpad /var/mnt/cache 2>/dev/null || true
             rm -f /etc/cst/btrfs-cache.conf /etc/cryptsetup-keys.d/cache25.key
             if [[ -e {w}/fstab.bak ]]; then mv {w}/fstab.bak /etc/fstab; elif [[ -e {w}/no-fstab ]]; then rm -f /etc/fstab; fi
@@ -3409,6 +3414,9 @@ assert d["samples"] >= 1, d["samples"]
             mkdir -p {w}
             if [[ -e /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else : >{w}/no-fstab; fi
             if [[ -e /etc/crypttab ]]; then cp -a /etc/crypttab {w}/crypttab.bak; else : >{w}/no-crypttab; fi
+            if [[ -e /etc/systemd/system/btrfs-scrub-weekly.service ]]; then cp -a /etc/systemd/system/btrfs-scrub-weekly.service {w}/scrub-svc.bak; else : >{w}/no-scrub-svc; fi
+            if [[ -e /etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf ]]; then cp -a /etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf {w}/scrub-dropin.bak; fi
+            if [[ -e /etc/btrfs-setup/snapshots.conf ]]; then cp -a /etc/btrfs-setup/snapshots.conf {w}/snaps-conf.bak; else : >{w}/no-snaps-conf; fi
 
             # 1. Create sparse image with GPT partition and loopback device.
             quiet() {{
@@ -3467,6 +3475,24 @@ assert d["samples"] >= 1, d["samples"]
             grep -qF "nofail" /etc/crypttab
             grep -qF "/dev/mapper/cache25 /var/mnt/cache btrfs" /etc/fstab
             grep -qF "nothing to do" <<<"$(/opt/cst-rw/cst btrfs cache provision apply)"
+            btrfs scrub status /var/mnt/cache | grep -qE "Status:[[:space:]]+finished"
+
+            # 3b. Weekly scrub unit + 10-cst-limit.conf also limit, scrub, and reset /var/mnt/cache when mounted.
+            cache_uuid="$(findmnt -rn -o UUID --target /var/mnt/cache)"
+            cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.service
+            quiet /opt/cst-rw/cst btrfs scrub-limit set 8M
+            mkdir -p /run/systemd/system/btrfs-scrub-weekly.service.d
+            printf '[Service]\\nExecStartPre=/bin/sh -c "cat /sys/fs/btrfs/%s/devinfo/*/scrub_speed_max >%s/cache-limit-during"\\n' \
+                "$cache_uuid" {w} >/run/systemd/system/btrfs-scrub-weekly.service.d/20-e2e-cache-probe.conf
+            systemctl daemon-reload
+            systemctl start btrfs-scrub-weekly.service
+            [[ "$(systemctl show -P Result btrfs-scrub-weekly.service)" == "success" ]]
+            [[ "$(cat {w}/cache-limit-during)" == "8388608" ]]
+            [[ "$(cat "/sys/fs/btrfs/$cache_uuid/devinfo/1/scrub_speed_max")" == "0" ]]
+            rm -rf /run/systemd/system/btrfs-scrub-weekly.service.d
+            quiet /opt/cst-rw/cst btrfs scrub-limit off
+            rm -f /etc/systemd/system/btrfs-scrub-weekly.service
+            systemctl daemon-reload
 
             # 4. Create test user with a real btrfs subvolume ~/.cache (if /home supports btrfs) and migrate it.
             useradd -m e2e25

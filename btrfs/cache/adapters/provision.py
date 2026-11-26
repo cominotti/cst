@@ -482,6 +482,16 @@ class CacheProvisionAdapter:
         )
         return None if res.returncode == 0 else res.failure(f"umount {target}")
 
+    def scrub_base(self, target: str) -> str | None:
+        mapped_target = map_path(target, self._rt, read_only=False)
+        res = self._rt.runner.run(
+            ["btrfs", "scrub", "start", "-B", mapped_target],
+            timeout=_MKFS_TIMEOUT_S,
+            locale_c=True,
+            output=OutputMode.CAPTURE,
+        )
+        return None if res.returncode == 0 else res.failure(f"btrfs scrub start -B {target}")
+
     def confirm_format(self, prompt: str, *, assume_yes: bool) -> tuple[bool, str | None]:
         if assume_yes:
             return True, None

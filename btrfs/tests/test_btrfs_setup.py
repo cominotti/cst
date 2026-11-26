@@ -1423,8 +1423,16 @@ class ScrubLimitTest(unittest.TestCase):
             [
                 "[Service]",
                 "ExecStartPre=/usr/sbin/btrfs scrub limit -a -l 1G /var",
+                (
+                    "ExecStartPre=/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/dev/null 2>&1; "
+                    "then exec /usr/sbin/btrfs scrub limit -a -l 1G /var/mnt/cache; fi'"
+                ),
                 # "-": a reset that fails does not turn a good scrub into a failed unit.
                 "ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var",
+                (
+                    "ExecStopPost=-/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/dev/null 2>&1; "
+                    "then exec /usr/sbin/btrfs scrub limit -a -l 0 /var/mnt/cache; fi'"
+                ),
             ],
         )
         self.assertEqual(os.stat(self.dropin).st_mode & 0o777, 0o644)
