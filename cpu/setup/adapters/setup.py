@@ -22,9 +22,8 @@ from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.adapters.terminal import stderr, stdout
-from cst_core.application.user_units import RecordedUnitCopies
 from cst_core.domain.errors import shell_exit_status
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, Component, select_entries
+from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
 from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.units import UNIT_PATH_PROP, show_manager_value_argv, user_manager_head, user_unit_dir
@@ -38,6 +37,7 @@ from cpu.game.adapters.host import holds, read_stripped
 from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
 from cpu.power.adapters import read_cpu_topology
 from cpu.setup.adapters.experiments import ExperimentEnv, run_experiment
+from cpu.setup.adapters.user_dropins import OlderDropins, classify_older_dropins
 from cpu.setup.domain import (
     CORE_COMPONENT,
     CPU_POWER_SERVICE,
@@ -241,6 +241,12 @@ class CpuSetup:
         if home:
             self.installer("remove-text", "--home", home, *dests, as_user=self.user)
 
+    def forget_user_text(self, *dests: str) -> None:
+        """Forget record lines under the target user's home without deleting the files."""
+        home = self._home_of(self.user)
+        if home and dests:
+            self.installer("forget-text", "--home", home, *dests, as_user=self.user)
+
     def required_home(self, user: str, who: str) -> str:
         """The user's home for a step in it (who: the helper that says so), or Halt(1)."""
         home = self._home_of(user)
@@ -294,14 +300,24 @@ class CpuSetup:
     def helper_dropin(self, name: str = DROPIN_NAME) -> str:
         return helper_dropin(self._user_unit_dir(), name)
 
-    def _older_dropin_copies(self, current: str, rel_subpath: str) -> tuple[str, ...]:
-        """Recorded older copies of one cpu:toolbox drop-in elsewhere than current; none when kept."""
+    def _older_dropins(self, tb_path: str, helper_path: str) -> OlderDropins:
+        """Recorded older copies of the cpu:toolbox drop-ins split into remove vs forget-only."""
         home = self._home_of(self.user)
         if not home:
-            return ()
-        return RecordedUnitCopies(self._records, home, Component.CPU_TOOLBOX, rel_subpath).older(
-            current, self._user_unit_path()
+            return OlderDropins((), ())
+        pairs = (
+            (tb_path, f"user.slice.d/{DROPIN_NAME}"),
+            (helper_path, f"flatpak-session-helper.service.d/{DROPIN_NAME}"),
         )
+        return classify_older_dropins(self._records, home, self._user_unit_path(), pairs)
+
+    def _clean_older_dropins(self, tb_path: str, helper_path: str) -> None:
+        """Remove CST's older copies elsewhere than current; forget aliased or foreign ones."""
+        older = self._older_dropins(tb_path, helper_path)
+        self.forget_user_text(*older.forget)
+        if older.remove:
+            self.remove_user_text(*older.remove)
+            self.rmdir(*(dict.fromkeys(os.path.dirname(p) for p in older.remove)))
 
     def remove_old_dropins(self) -> None:
         """The baseline drop-ins under their old name, from before the rename to 10-: they would still
@@ -372,13 +388,7 @@ class CpuSetup:
         self._install_ntsync()
         ecores = self.e_cores()
         tb_path, helper_path = self.toolbox_dropin(), self.helper_dropin()
-        older = (
-            *self._older_dropin_copies(tb_path, f"user.slice.d/{DROPIN_NAME}"),
-            *self._older_dropin_copies(helper_path, f"flatpak-session-helper.service.d/{DROPIN_NAME}"),
-        )
-        if older:
-            self.remove_user_text(*older)
-            self.rmdir(*(dict.fromkeys(os.path.dirname(p) for p in older)))
+        self._clean_older_dropins(tb_path, helper_path)
         if ecores:
             self.install_text(tb_path, toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
             self.install_text(helper_path, helper_dropin_text(ecores), user, TOOLBOX_COMPONENT)
@@ -501,12 +511,10 @@ class CpuSetup:
         self.rmdir(os.path.dirname(p.machine_dropin), os.path.dirname(p.delegate_dropin))
         if self.user:
             dropins = (self.toolbox_dropin(), self.helper_dropin())
-            older = (
-                *self._older_dropin_copies(dropins[0], f"user.slice.d/{DROPIN_NAME}"),
-                *self._older_dropin_copies(dropins[1], f"flatpak-session-helper.service.d/{DROPIN_NAME}"),
-            )
-            all_dropins = (*dropins, *older)
+            older = self._older_dropins(*dropins)
+            all_dropins = (*dropins, *older.remove)
             try:
+                self.forget_user_text(*older.forget)
                 self.remove_user_text(*all_dropins)
             except Halt:
                 # The installer failed (a record of a newer CST, a folder the user cannot write): the record

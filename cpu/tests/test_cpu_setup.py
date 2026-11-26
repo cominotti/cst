@@ -25,6 +25,7 @@ from cpu.power.domain import CpuTopology
 from cpu.setup.domain import (
     default_settings,
     DROPIN_NAME,
+    MANAGED_MARK,
     OLD_DROPIN_NAME,
     QUIET_ENV,
     SetupPaths,
@@ -1324,7 +1325,7 @@ class UserDropinUnitPathTest(CpuSetupCase):
         new_tb = toolbox_dropin(xdg_unit_dir)
         new_helper = helper_dropin(xdg_unit_dir)
         for p in (old_tb, old_helper):
-            self.write(p, "old\n")
+            self.write(p, f"# {MANAGED_MARK}\nold\n")
         self._record_old_dropins(old_tb, old_helper)
         self.runner.on_call = remove_text_files
         self.runner.answers = [
@@ -1353,7 +1354,7 @@ class UserDropinUnitPathTest(CpuSetupCase):
         # Uninstall removes both the current XDG drop-ins and any recorded copies elsewhere.
         self.write(new_tb, self.PINNED_TOOLBOX_TEXT)
         self.write(new_helper, self.PINNED_HELPER_TEXT)
-        self.write(old_tb, "stale\n")
+        self.write(old_tb, f"# {MANAGED_MARK}\nstale\n")
         self.runner.calls.clear()
         rc, _, err = self.command("uninstall")
         self.assertEqual((rc, err), (0, ""))
@@ -1361,6 +1362,59 @@ class UserDropinUnitPathTest(CpuSetupCase):
         self.assertIn(uninstall_rm, self.runner.joined())
         self.assertFalse(os.path.exists(os.path.dirname(new_tb)))
         self.assertFalse(os.path.exists(os.path.dirname(old_tb)))
+
+    def test_silverblue_symlink_alias_forgets_old_record_without_deleting_live_dropin(self) -> None:
+        real_dir = f"{self.home}/.config/systemd/user"
+        link_dir = f"{self.tmp}/silverblue-xdg/systemd/user"
+        os.makedirs(real_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(link_dir), exist_ok=True)
+        os.symlink(real_dir, link_dir)
+        old_tb = toolbox_dropin(real_dir)
+        old_helper = helper_dropin(real_dir)
+        live_tb = toolbox_dropin(link_dir)
+        live_helper = helper_dropin(link_dir)
+        self.write(old_tb, self.PINNED_TOOLBOX_TEXT)
+        self.write(old_helper, self.PINNED_HELPER_TEXT)
+        self._record_old_dropins(old_tb, old_helper)
+        self.runner.answers = [
+            (
+                "systemctl --user -M tester@ show -p UnitPath --value",
+                CommandResult(0, f"{link_dir} /etc/systemd/user /usr/lib/systemd/user\n", ""),
+            ),
+            ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+        ]
+        rc, _, err = self.command("install")
+        self.assertEqual((rc, err), (0, ""))
+        runuser = f"runuser -u tester -- {' '.join(INSTALLER)}"
+        calls = self.runner.joined()
+        self.assertIn(f"{runuser} forget-text --home {self.home} {old_tb} {old_helper}", calls)
+        self.assertFalse([c for c in calls if "remove-text" in c], calls)
+        self.assertTrue(os.path.isfile(live_tb))
+        self.assertTrue(os.path.isfile(live_helper))
+
+    def test_foreign_recorded_older_dropin_is_kept_and_forgotten(self) -> None:
+        xdg_unit_dir = f"{self.home}/xdg/systemd/user"
+        old_tb = f"{self.home}/.config/systemd/user/user.slice.d/{DROPIN_NAME}"
+        old_helper = f"{self.home}/.config/systemd/user/flatpak-session-helper.service.d/{DROPIN_NAME}"
+        self.write(old_tb, "# hand-edited by user\n")
+        self.write(old_helper, f"# {MANAGED_MARK}\nold\n")
+        self._record_old_dropins(old_tb, old_helper)
+        self.runner.on_call = remove_text_files
+        self.runner.answers = [
+            (
+                "systemctl --user -M tester@ show -p UnitPath --value",
+                CommandResult(0, f"{xdg_unit_dir} /etc/systemd/user /usr/lib/systemd/user\n", ""),
+            ),
+            ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+        ]
+        rc, _, err = self.command("install")
+        self.assertEqual((rc, err), (0, ""))
+        runuser = f"runuser -u tester -- {' '.join(INSTALLER)}"
+        calls = self.runner.joined()
+        self.assertIn(f"{runuser} forget-text --home {self.home} {old_tb}", calls)
+        self.assertIn(f"{runuser} remove-text --home {self.home} {old_helper}", calls)
+        self.assertTrue(os.path.isfile(old_tb))
+        self.assertFalse(os.path.exists(old_helper))
 
     def test_no_named_user_dir_keeps_recorded_copies_elsewhere(self) -> None:
         old_tb = f"{self.home}/other/systemd/user/user.slice.d/{DROPIN_NAME}"
