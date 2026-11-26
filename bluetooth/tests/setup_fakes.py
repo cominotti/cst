@@ -689,9 +689,7 @@ class SetupModel:
             case "show":
                 return self.show(scope, args)
             case "show-environment":
-                if self.has("no-session"):
-                    return 1, "", ""
-                return 0, self.cat("user-env")[1], ""
+                return (1, "", "") if self.has("no-session") else (0, self.cat("user-env")[1], "")
             case "daemon-reload":
                 return 0, "", ""
             case "restart" | "start":
