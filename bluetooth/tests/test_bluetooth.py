@@ -190,6 +190,41 @@ class MainConfTest(unittest.TestCase):
         self.assertNotIn("KernelExperimental = true", new)
         self.assertEqual(self.m.current_values(new), {"Experimental": "true", "KernelExperimental": ISO})
 
+    def test_main_conf_is_read_with_ascii_blanks_only_as_bluetoothd_reads_it(self) -> None:
+        # GLib's key file parser trims ASCII blanks only: a no-break space ends no value, starts no key
+        # and ends no header. Before, CST took every Unicode blank (str.strip, \s), so each of these
+        # read as set although bluetoothd did not read it so (R28's scenarios a, b, c, and a header).
+        nbsp = "\N{NO-BREAK SPACE}"
+        good = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
+        for text, want, values in (
+            (
+                f"[General]\nExperimental = true{nbsp}\nKernelExperimental = {ISO}\n",
+                good,
+                {"Experimental": f"true{nbsp}", "KernelExperimental": ISO},
+            ),
+            (
+                f"[General]\nExperimental = true\nKernelExperimental = {ISO}{nbsp}\n",
+                good,
+                {"Experimental": "true", "KernelExperimental": f"{ISO}{nbsp}"},
+            ),
+            (
+                f"[General]\n{nbsp}Experimental = true\nKernelExperimental = {ISO}\n",
+                f"[General]\nExperimental = true\n{nbsp}Experimental = true\nKernelExperimental = {ISO}\n",
+                {"Experimental": None, "KernelExperimental": ISO},
+            ),
+            (
+                f"[General]{nbsp}\nExperimental = true\nKernelExperimental = {ISO}\n",
+                f"{good}\n[General]{nbsp}\nExperimental = true\nKernelExperimental = {ISO}\n",
+                {"Experimental": None, "KernelExperimental": None},
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.m.current_values(text), values)
+                self.assertEqual(self.m.edit_general(text), (want, True))
+        # ASCII blanks around a header, a key and a value are no change.
+        ascii_blanks = f"[General] \t\n  Experimental = true \t\nKernelExperimental =\t{ISO}\t\n"
+        self.assertEqual(self.m.edit_general(ascii_blanks), (ascii_blanks, False))
+
     def test_uuid_list_with_iso_is_kept(self) -> None:
         other = "d4992530-b9ec-469f-ab01-6c481c47da1c"
         text = VENDOR.replace("#Experimental = false", "Experimental = true").replace(

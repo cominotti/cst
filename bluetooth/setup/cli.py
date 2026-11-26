@@ -30,7 +30,7 @@ def main(entry: str, argv: Sequence[str]) -> int:
     if isinstance(timeout, Exit):
         return wiring.emit(timeout)
     where = wiring.paths(env, entry, container=container)
-    found = read_bluetooth_settings(wiring.bt_host(), where)
+    found = read_bluetooth_settings(wiring.bt_host(), where, opts, prog)
     if isinstance(found, Exit):
         return wiring.emit(found)
     settings, user_keys, warnings = found

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Final
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState
 from cst_core.domain.units import masked_refusal
-from toolchains.domain.auto import AUTO_UNITS, TIMER_RUNNING_STATES, label
+from toolchains.domain.auto import AUTO_UNITS, TIMER_RUNNING_STATES, OlderUnitAction, label
 from toolchains.domain.common import (
     CONF_REL,
     LIB_REL,
@@ -24,8 +24,6 @@ from toolchains.domain.common import (
     OLD_TIMER,
     SERVICE,
     TIMER,
-    UNIT_DIR_REL,
-    WANTS_REL,
     tilde,
     timer_stamp_rel,
 )
@@ -64,8 +62,9 @@ class AutoTimer:
         timer's stamp could not be removed (reported). Refused (nothing removed)
         when its timer could not be stopped."""
         home = self.home
+        unit_dir = self.files.unit_dir()
         found = self.files.stale_files()
-        timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
+        timer = os.path.join(unit_dir, OLD_TIMER)
         stamp_ok = True
         if (timer, True) in found:
             self.units.disable_timer(OLD_TIMER)
@@ -89,8 +88,26 @@ class AutoTimer:
                 continue
             self.files.remove(path)
             self.out.say(f"removed:   {tilde(path, home)} (left by the earlier `cst btrfs cargo-gc`)")
-            reload = reload or path.startswith(os.path.join(home, UNIT_DIR_REL) + "/")
+            reload = reload or path.startswith(unit_dir + "/")
         return not (reload and self.units.reload_failed()) and stamp_ok
+
+    def _remove_older_units(self) -> tuple[bool, list[str]]:
+        """Remove recorded unit copies elsewhere than unit_dir (and their wants link);
+        returns (any_unit_file_removed, paths_to_forget_from_record)."""
+        home = self.home
+        reloaded = False
+        forgotten: list[str] = []
+        for path, action, link in self.files.older_auto_units():
+            if action == OlderUnitAction.REMOVE:
+                if link is not None and self.files.remove_if_present(link):
+                    self.out.say(f"removed:   {tilde(link, home)} (enable link of an older CST copy)")
+                if self.files.remove_if_present(path):
+                    self.out.say(f"removed:   {tilde(path, home)} (an older CST copy)")
+                    reloaded = True
+            elif action == OlderUnitAction.FOREIGN:
+                self.out.say(f"left alone: {tilde(path, home)} (not written by CST)", 4, err=True)
+            forgotten.append(path)
+        return reloaded, forgotten
 
     def on(self, *, unless_off: bool = False) -> int:
         rc = 0 if self.remove_stale() else 1
@@ -106,14 +123,19 @@ class AutoTimer:
             raise Refused(f"no target is enabled in the settings ({settings.source}): the timer would do nothing")
         mpath, refused = self._check_targets(settings, enabled)
         self._note_refused(refused, mpath)
+        unit_dir = self.files.unit_dir()
         st = self.files.auto_states()
-        masked = [os.path.join(self.home, UNIT_DIR_REL, k) for k in AUTO_UNITS if st[k] == OwnedState.MASKED]
+        masked = [os.path.join(unit_dir, k) for k in AUTO_UNITS if st[k] == OwnedState.MASKED]
         if (why := masked_refusal(masked, user=True)) is not None:
             raise Refused(why + "; nothing was written")
         conflicts = [k for k, v in st.items() if v == OwnedState.CONFLICT]
         if conflicts:
-            raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
-        if self._write_auto_files():
+            raise Refused(
+                "not written by CST, left alone: " + ", ".join(label(k, unit_dir, self.home) for k in conflicts)
+            )
+        older_removed, older_paths = self._remove_older_units()
+        self.files.forget_unit_paths(older_paths)
+        if self._write_auto_files(unit_dir) or older_removed:
             self.units.reload()
         self.units.enable_now(TIMER)
         self.out.say(f"enabled:   {TIMER} (hourly; logs: journalctl --user -u {SERVICE})")
@@ -124,7 +146,7 @@ class AutoTimer:
         self.old_conf_note()
         return rc
 
-    def _write_auto_files(self) -> bool:
+    def _write_auto_files(self, unit_dir: str) -> bool:
         """Write the copies and the units of auto on (each said written or unchanged);
         True when a unit was written."""
         changed = False
@@ -132,7 +154,7 @@ class AutoTimer:
             self.out.say(f"{'written:  ' if self.files.put_auto_copy(rel, data) else 'unchanged:'} ~/{rel}")
         for name, render in AUTO_UNITS.items():
             put = self.files.put_auto_unit(name, render())
-            self.out.say(f"{'written:  ' if put else 'unchanged:'} {label(name)}")
+            self.out.say(f"{'written:  ' if put else 'unchanged:'} {label(name, unit_dir, self.home)}")
             changed = changed or put
         return changed
 
@@ -216,6 +238,7 @@ class AutoTimer:
 
     def off(self) -> int:
         home = self.home
+        unit_dir = self.files.unit_dir()
         st = self.files.auto_states()
         # Both timers are stopped, checked, before anything is removed (see
         # UserUnitsPort): remove_stale stops the earlier one before it removes
@@ -229,20 +252,23 @@ class AutoTimer:
         rc = 0 if stale_ok and stamp_ok else 1
         removed = False
         for name in AUTO_UNITS:
+            shown = label(name, unit_dir, home)
             if st[name] in (OwnedState.OK, OwnedState.CHANGE):
-                self.files.remove(os.path.join(home, UNIT_DIR_REL, name))
-                self.out.say(f"removed:   {label(name)}")
+                self.files.remove(os.path.join(unit_dir, name))
+                self.out.say(f"removed:   {shown}")
                 removed = True
             elif st[name] in (OwnedState.CONFLICT, OwnedState.MASKED):
                 why = "masked with systemctl --user mask" if st[name] == OwnedState.MASKED else "not written by CST"
-                self.out.say(f"left alone: {label(name)} ({why})", 4, err=True)
+                self.out.say(f"left alone: {shown} ({why})", 4, err=True)
         # `disable` removes the link that enables the timer. One left pointing
         # at nothing (also left by the earlier unchecked `auto off`) goes too.
-        wants = os.path.join(home, WANTS_REL)
+        wants = self.files.wants_link()
         if self.files.dangling_link(wants):
             self.files.remove(wants)
-            self.out.say(f"removed:   ~/{WANTS_REL} (it pointed at the removed timer file)")
+            self.out.say(f"removed:   {tilde(wants, home)} (it pointed at the removed timer file)")
             removed = True
+        older_removed, older_paths = self._remove_older_units()
+        removed = removed or older_removed
         if removed and self.units.reload_failed():
             rc = 1
         for rel in self.files.auto_copies():
@@ -251,7 +277,7 @@ class AutoTimer:
                 self.out.say(f"removed:   ~/{rel}")
             elif st[rel] == OwnedState.CONFLICT:
                 self.out.say(f"left alone: ~/{rel} (not written by CST)", 4, err=True)
-        self.files.forget_auto_files()
+        self.files.forget_auto_files(older_paths)
         self.files.remove_if_empty(os.path.join(home, LIB_REL))  # bluetooth keeps its watcher there
         for tid in SPECS:
             self.state.forget(tid)

@@ -382,6 +382,57 @@ class HeadsetTest(SetupCase):
         self.assertTrue(os.path.exists(rule), "revert removed the rule of a headset that is not set")
         self.assertEqual(self.text(m.settings), "DEVICE=\n")
 
+    def test_a_device_or_le_audio_line_that_sets_nothing_stops_the_run(self) -> None:
+        # Owner choice r27.7. A DEVICE or LE_AUDIO line that sets nothing (a no-break space at the
+        # value's end) stops the run (exit 2) with the words a bad value has, and nothing is written:
+        # apply used to warn, take the headset of CST's LDAC rule and save it over the user's DEVICE
+        # line. Another key's problem line, a later DEVICE line that counts, or the option that
+        # sets the value still only warn.
+        nbsp = "\N{NO-BREAK SPACE}"
+        device = (
+            f"the device must be a MAC address like AA:BB:CC:DD:EE:FF (got 'AA:BB:CC:DD:EE:FF{nbsp}'; "
+            "set DEVICE in {} or use --device)"
+        )
+        le = f"LE Audio must be on or off (got 'off{nbsp}'; LE_AUDIO in the settings or --le-audio)"
+        for settings, cmd, said in (
+            (f"LE_AUDIO=off\nDEVICE='AA:BB:CC:DD:EE:FF{nbsp}'\n", ("apply", "--yes", "--no-restart"), device),
+            (f"LE_AUDIO=off\nDEVICE=AA:BB:CC:DD:EE:FF{nbsp}\n", ("apply", "--yes", "--no-restart"), device),
+            (f"DEVICE=AA:BB:CC:DD:EE:FF{nbsp}\n", ("plan",), device),
+            (f"LE_AUDIO=off{nbsp}\n", ("apply", "--yes", "--no-restart"), le),
+        ):
+            with self.subTest(settings=settings, cmd=cmd[0]):
+                m = self.machine(DONE, settings, headset=False)
+                rule = self.old_rule(m)
+                with open(rule, encoding="utf-8") as f:
+                    rule_text = f.read()
+                r = m.run(*cmd, env={"CST_PROG": "cst-t"})
+                self.assertEqual(r.returncode, 2, r.text)
+                self.assertTrue(r.stderr.endswith(f"cst-t {cmd[0]}: {said.format(m.settings)}\n"), r.stderr)
+                self.assertNotIn("written:", r.stdout)
+                self.assertEqual(self.text(m.settings), settings, "the run rewrote the settings")
+                self.assertEqual(self.text(rule), rule_text)
+        for settings, args in (
+            (f"LE_AUDIO=off\nNOT_A_KEY=x{nbsp}\n", ()),
+            (f"LE_AUDIO=off\nBEARER=bredr{nbsp}\n", ()),
+            (f"DEVICE=AA:BB:CC:DD:EE:FF{nbsp}\nDEVICE={MAC}\n", ()),
+            (f"DEVICE=AA:BB:CC:DD:EE:FF{nbsp}\n", ("--device", MAC)),
+            (f"LE_AUDIO=off{nbsp}\n", ("--le-audio", "on")),
+        ):
+            with self.subTest(settings=settings, args=args):
+                m = self.machine(DONE, settings, headset=False)
+                self.old_rule(m)
+                r = m.run("plan", *args, env={"CST_PROG": "cst-t"})
+                self.assertIn(r.returncode, (0, 10), r.text)
+                self.assertIn(f"Headset {MAC} (", r.stdout)
+                self.assertEqual(self.text(m.settings), settings)
+                problems = r.stderr.count("(the line is ignored)\n")
+                self.assertEqual(problems, 1, r.stderr)
+        m = self.machine(DONE, f"LE_AUDIO=off\nNOT_A_KEY=x{nbsp}\n", headset=False)
+        self.old_rule(m)
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertIn(f"written:   ~/.config/cst/bluetooth.conf: DEVICE={MAC}\n", r.stdout, r.text)
+        self.assertEqual(self.text(m.settings), f"LE_AUDIO=off\nNOT_A_KEY=x{nbsp}\nDEVICE={MAC}\n")
+
     def test_your_device_wins_over_a_rule_and_is_not_rewritten(self) -> None:
         m = self.machine(DONE, "DEVICE=AA:BB:CC:DD:EE:FF\n", headset=False)
         rule = self.old_rule(m)
@@ -2450,6 +2501,146 @@ class ClosedOutputTest(SetupCase):
         r = m.run("le-audio", "on", closed_stdout=True, env=env)
         self.assertEqual((r.returncode, r.stderr), (1, "cst-t: stopped: its output was closed.\n"))
         self.assertEqual(os.listdir(scratch), [])
+
+
+class WirePlumberConfigDirTest(SetupCase):
+    """r30.1: WirePlumber files go to the user manager's XDG_CONFIG_HOME (or ~/.config when unset),
+    not the shell's XDG_CONFIG_HOME (which still selects cst/bluetooth.conf); marked older CST
+    copies under the shell's XDG_CONFIG_HOME are cleaned up by apply and revert."""
+
+    def test_shell_xdg_does_not_move_wireplumber_and_cleans_marked_stale(self) -> None:
+        m = self.machine(DONE)
+        m.services()
+        shell_xdg = os.path.join(m.home, "shell-xdg")
+        os.makedirs(os.path.join(shell_xdg, "cst"))
+        with open(os.path.join(shell_xdg, "cst", "bluetooth.conf"), "w", encoding="utf-8") as f:
+            f.write(f"DEVICE={MAC}\n")
+        stale_dir = os.path.join(shell_xdg, "wireplumber", "wireplumber.conf.d")
+        os.makedirs(stale_dir)
+        stale_wp = os.path.join(stale_dir, f"50-bluez-{DEV}.conf")
+        stale_le = os.path.join(stale_dir, "90-cst-le-audio-off.conf")
+        stale_unmarked = os.path.join(stale_dir, "50-jbl-live-beam-4.conf")
+        with open(stale_wp, "w", encoding="utf-8") as f:
+            f.write("# Gerado por apply-le-audio.sh\n")
+        with open(stale_le, "w", encoding="utf-8") as f:
+            f.write("# managed-by: bluetooth-setup.sh (CST)\n")
+        with open(stale_unmarked, "w", encoding="utf-8") as f:
+            f.write("# hand-edited rule\n")
+        env = {"XDG_CONFIG_HOME": shell_xdg}
+
+        plan = m.run("plan", env=env)
+        self.assertEqual(plan.returncode, 10, plan.text)
+        self.assertIn(
+            row(
+                "remove",
+                f"~/shell-xdg/wireplumber/wireplumber.conf.d/50-bluez-{DEV}.conf",
+                "an older CST's copy under the shell's XDG_CONFIG_HOME",
+            ),
+            plan.stdout,
+        )
+        self.assertIn(
+            row(
+                "remove",
+                "~/shell-xdg/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf",
+                "an older CST's copy under the shell's XDG_CONFIG_HOME",
+            ),
+            plan.stdout,
+        )
+        self.assertIn(
+            row(
+                "warn",
+                "~/shell-xdg/wireplumber/wireplumber.conf.d/50-jbl-live-beam-4.conf",
+                "not written by CST: left alone",
+            ),
+            plan.stdout,
+        )
+
+        r = m.run("apply", "--yes", env=env)
+        self.assertTrue(os.path.isfile(m.wp_conf) and os.path.isfile(m.le_conf), r.text)
+        self.assertFalse(os.path.exists(stale_wp))
+        self.assertFalse(os.path.exists(stale_le))
+        self.assertTrue(os.path.isfile(stale_unmarked))
+        self.assertIn(f"removed:   {stale_wp} (an older CST's copy)\n", r.stdout)
+        self.assertIn(f"removed:   {stale_le} (an older CST's copy)\n", r.stdout)
+        self.assertIn(f"WARNING: {stale_unmarked} was not written by CST: left alone\n", r.stderr)
+
+        again = m.run("plan", env=env)
+        self.assertEqual(again.returncode, 0, again.text)
+
+        # Marked older copy under the shell's XDG_CONFIG_HOME is also removed by revert (not --check).
+        with open(stale_le, "w", encoding="utf-8") as f:
+            f.write("# managed-by: bluetooth-setup.sh (CST)\n")
+        chk = m.run("revert", "--check", env=env)
+        self.assertEqual(chk.returncode, 10, chk.text)
+        self.assertIn(f"would remove {stale_le}\n", chk.stdout)
+        self.assertTrue(os.path.isfile(stale_le))
+        rev = m.run("revert", "--yes", "--no-restart", env=env)
+        self.assertEqual(rev.returncode, 0, rev.text)
+        self.assertFalse(os.path.exists(stale_le))
+        self.assertIn(f"removed:   {stale_le} (an older CST's copy)\n", rev.stdout)
+
+    def test_user_manager_xdg_places_wireplumber_and_wp_roles_there(self) -> None:
+        m = self.machine(DONE)
+        m.services()
+        m.flag("iso-socket")
+        m.put("wp-roles", CLASSIC)
+        m.put("pw-dump.json", json.dumps(pw_dump(rate=48000)))
+        mgr_xdg = os.path.join(m.home, "mgr-xdg")
+        m.put("user-env", f"HOME={m.home}\nXDG_CONFIG_HOME={mgr_xdg}\n")
+        r = m.run("apply", "--yes")
+        mgr_wp_dir = os.path.join(mgr_xdg, "wireplumber", "wireplumber.conf.d")
+        self.assertTrue(os.path.isfile(os.path.join(mgr_wp_dir, f"50-bluez-{DEV}.conf")), r.text)
+        self.assertTrue(os.path.isfile(os.path.join(mgr_wp_dir, "90-cst-le-audio-off.conf")), r.text)
+        self.assertFalse(os.path.exists(m.wp_conf) or os.path.exists(m.le_conf))
+        self.assertIn(f"  XDG_CONFIG_HOME={mgr_xdg}", r.calls)
+        self.assertEqual(m.run("plan").returncode, 0)
+        m.adapter()
+        st = m.run("status", container=True)
+        self.assertEqual(st.returncode, 0, st.text)
+        self.assertIn(f"  XDG_CONFIG_HOME={mgr_xdg}", st.calls)
+
+        # When user manager has no XDG_CONFIG_HOME, falls back cleanly to ~/.config even with shell env set.
+        m2 = self.machine(DONE)
+        m2.services()
+        m2.flag("iso-socket")
+        m2.put("wp-roles", CLASSIC)
+        m2.put("pw-dump.json", json.dumps(pw_dump(rate=48000)))
+        shell_xdg2 = os.path.join(m2.home, "shell-xdg")
+        os.makedirs(os.path.join(shell_xdg2, "cst"))
+        with open(os.path.join(shell_xdg2, "cst", "bluetooth.conf"), "w", encoding="utf-8") as f:
+            f.write(f"DEVICE={MAC}\n")
+        r2 = m2.run("apply", "--yes", "--no-restart", env={"XDG_CONFIG_HOME": shell_xdg2})
+        self.assertTrue(os.path.isfile(m2.wp_conf) and os.path.isfile(m2.le_conf), r2.text)
+        self.assertIn(f"  XDG_CONFIG_HOME={m2.home}/.config", r2.calls)
+        m2.adapter()
+        st2 = m2.run("status", container=True, env={"XDG_CONFIG_HOME": shell_xdg2})
+        self.assertEqual(st2.returncode, 0, st2.text)
+        self.assertIn(f"  XDG_CONFIG_HOME={m2.home}/.config", st2.calls)
+
+    def test_shell_xdg_stale_only_differs_in_status_and_revert_check(self) -> None:
+        m = self.machine(DONE)
+        m.services()
+        shell_xdg = os.path.join(m.home, "shell-xdg")
+        stale_dir = os.path.join(shell_xdg, "wireplumber", "wireplumber.conf.d")
+        os.makedirs(os.path.join(shell_xdg, "cst"))
+        os.makedirs(stale_dir)
+        with open(os.path.join(shell_xdg, "cst", "bluetooth.conf"), "w", encoding="utf-8") as f:
+            f.write("LE_AUDIO=on\n")
+        stale_le = os.path.join(stale_dir, "90-cst-le-audio-off.conf")
+        with open(stale_le, "w", encoding="utf-8") as f:
+            f.write("# managed-by: bluetooth-setup.sh (CST)\n")
+        env = {"XDG_CONFIG_HOME": shell_xdg}
+
+        chk = m.run("revert", "--check", env=env)
+        self.assertEqual(chk.returncode, 10, chk.text)
+        self.assertIn(f"would remove {stale_le}\n", chk.stdout)
+        self.assertTrue(os.path.isfile(stale_le))
+
+        m.adapter()
+        m.flag("iso-socket")
+        st = m.run("status", container=True, env=env)
+        self.assertEqual(st.returncode, 0, st.text)
+        self.assertIn("Some files or services differ from what apply sets up:", st.stdout)
 
 
 if __name__ == "__main__":

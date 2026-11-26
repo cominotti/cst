@@ -30,6 +30,7 @@ from btrfs.compress.domain import (
     pick_root_mounts,
 )
 from btrfs.cache.domain import parse_all_mounts, parse_managed_fstab_entries
+from btrfs.snapshot_runtime.domain import DEFAULTS as SNAPSHOT_DEFAULTS, GUARD_KEYS, guard_number, nas_unreadable
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread
 from cst_core.domain.units import parse_show_units, show_units_argv
@@ -544,6 +545,37 @@ def check_snapshot_settings(host: DoctorHostPort) -> Iterator[Result]:
 
 
 @check(CHECKS, "btrfs")
+def check_snapshot_numbers(host: DoctorHostPort) -> Iterator[Result]:
+    """The numbers of snapshots.conf the hourly run cannot use, judged by the runtime's own parsers on
+    the settings as the runtime merges them (its DEFAULTS, then each line whose key is one of them): a
+    space guard limit it cannot hold at (guard_limits: no snapshot until it is fixed), and, with the NAS
+    backup on, a NAS number it cannot compute (nas_unreadable: its step is skipped and the run fails). A
+    problem line sets nothing (check_snapshot_settings warns about it). Nothing when the file cannot be
+    read (that check says so) or snapshots are not set up."""
+    parsed = settings_of(host, SNAP_CONF)
+    if parsed is None:
+        return
+    settings = dict(SNAPSHOT_DEFAULTS)
+    for entry in parsed.entries:
+        if entry.key in SNAPSHOT_DEFAULTS:
+            settings[entry.key] = entry.value
+    for key in GUARD_KEYS:
+        if not isinstance(guard_number(settings[key], exact=True), int):
+            yield Result(
+                WARN,
+                f"snapshots: {key}={settings[key]!r} in {SNAP_CONF}: not a number of GiB the space guard can hold"
+                " at: the hourly run takes no snapshot until it is fixed",
+            )
+    if settings["NAS_ENABLED"] == "1":
+        for key in nas_unreadable(settings):
+            yield Result(
+                WARN,
+                f"snapshots: {key}={settings[key]!r} in {SNAP_CONF}: the NAS run cannot compute it: the step it"
+                " governs is skipped and the run fails",
+            )
+
+
+@check(CHECKS, "btrfs")
 def check_snapshots_writable(host: DoctorHostPort) -> Iterator[Result]:
     if not host.isdir(host.path(SNAP_STATE)):
         return  # snapshots never set up
@@ -724,7 +756,7 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     crypttab_path = host.path(HostPath("/etc/crypttab"))
     crypttab_raw, crypttab_unreadable = "", False
     try:
-        with host.open_text(crypttab_path) as fh:
+        with host.open_regular_text(crypttab_path) as fh:
             crypttab_raw = fh.read(65536)
     except PermissionError:
         crypttab_unreadable = True

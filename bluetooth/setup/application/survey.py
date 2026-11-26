@@ -8,7 +8,7 @@ runs, their arguments and where their output goes are bluetooth-setup.sh's.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 import re
 from typing import Final, Literal
@@ -63,8 +63,9 @@ from bluetooth.setup.domain import (
     wp_word,
 )
 from bluetooth.setup.application import watcher_unit
-from bluetooth.setup.application.inputs import rule_headsets
+from bluetooth.setup.application.inputs import resolve_headset, shell_wp_stale
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
+from cst_core.application.user_units import manager_unit_path
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
 from cst_core.domain.units import ActiveState, EnablementState
@@ -77,6 +78,8 @@ from cst_core.ports import (
     SystemdPort,
     UnitName,
 )
+
+_FOREIGN_NOTE: Final = "not written by CST: left alone"
 
 
 # The states of the watcher's program that are CST's (revert and apply with the watcher off remove it).
@@ -118,25 +121,8 @@ class Survey:
         self.o = opts
         self.p = paths
         self.m = m
-        # The headset: --device, DEVICE in the settings, else (the user's file has no DEVICE line) the
-        # one LDAC rule CST wrote. CST set a default headset until 2026-11, so a machine set up with it
-        # has that rule and no DEVICE line: its headset is used, and apply (or revert) saves it.
-        self.device_save = False
-        self.device_rules: tuple[str, ...] = ()
-        if not cfg.device and "DEVICE" not in cfg.user_keys:
-            rules = rule_headsets(m.files, paths.wp_dir)
-            if len(rules) == 1:
-                cfg = replace(
-                    cfg,
-                    device=rules[0],
-                    device_from=f"from CST's LDAC rule; apply saves it as DEVICE in {self.tilde(paths.user_settings)}",
-                )
-                self.device_save = True
-            elif len(rules) > 1:
-                self.device_rules = tuple(rules)
-        self.c = cfg
-        self.headset = bool(cfg.device)  # none: its parts are skipped and say how to set one
-        self.wp_conf = paths.wp_conf(cfg.device_id) if self.headset else ""
+        self._base_cfg = cfg
+        self._apply_headset()
         self.le_on_hint = f"{cfg.prog} le-audio on"
         self.le_off_hint = f"{cfg.prog} le-audio off"
         self.tmp = ""  # main.conf as apply would write it (a mktemp file)
@@ -146,6 +132,7 @@ class Survey:
         self.mc_changed = False
         self.wp_state: WpState | Literal[""] = ""  # "": not read yet
         self.legacy = False
+        self.wp_stale: list[tuple[str, bool]] = []
         self.le_state: LeState | Literal[""] = ""
         self.le_change = False
         self.bearer_state = BearerState.NONE
@@ -165,6 +152,7 @@ class Survey:
         self.wp_restart = False
         self.owing: set[str] = set()  # the units whose restart this run's writes need so far (Change.owe)
         self.owed_warned = False  # the run said it could not record the restarts still owed
+        self.restart_error = ""  # why restart_state last failed, for save_owed's warning
         # (user, unit) -> (ActiveState, InvocationID), see unit_show: a system unit and a user unit
         # of the same name are two units.
         self.unit_states: dict[tuple[bool, str], tuple[str, str]] = {}
@@ -260,6 +248,11 @@ class Survey:
     def no_headset(self) -> str:
         return no_headset_note(self.device_rules, self.tilde(self.p.user_settings))
 
+    def _apply_headset(self) -> None:
+        self.c, self.device_save, self.device_rules = resolve_headset(self.m.files, self.p, self._base_cfg, self.tilde)
+        self.headset = bool(self.c.device)  # none: its parts are skipped and say how to set one
+        self.wp_conf = self.p.wp_conf(self.c.device_id) if self.headset else ""
+
     def wp_title(self) -> str:
         """The rule as the WirePlumber section of apply and revert names it."""
         return self.wp_conf or "no LDAC rule (no headset)"
@@ -296,6 +289,7 @@ class Survey:
             return self.m.host.restart_pending(self.p.pending, ids, units, save=mode == "save")
         except (OSError, ValueError) as e:
             self.err(f"bt-helper: {e}\n")
+            self.restart_error = str(e)
             return None
 
     # ---- facts -----------------------------------------------------------------------------
@@ -415,6 +409,7 @@ class Survey:
         )
         # The rule's oldest name is renamed to the headset's rule; with no headset it is left alone.
         self.legacy = self.headset and f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
+        self.wp_stale = shell_wp_stale(f, self.p, self.wp_conf, has_headset=self.headset)
         self.le_plan()
         self.bearer_state = self._bearer_state()
         self.lw_plan()
@@ -488,8 +483,8 @@ class Survey:
 
     @cached_property
     def lw_unit_path(self) -> str | None:
-        """The user manager's UnitPath (watcher_unit): asked once, on first use."""
-        return watcher_unit.unit_path(self.m.user_systemd_host)
+        """The user manager's UnitPath (manager_unit_path): asked once, on first use."""
+        return manager_unit_path(self.m.user_systemd_host)
 
     @cached_property
     def lw_unit_file(self) -> str:
@@ -560,6 +555,7 @@ class Survey:
             self.item("skip", "the headset's LDAC rule", self.no_headset())
         if self.legacy:
             self.item("remove", wp_label(self.p.legacy_wp_conf), "older name of the same rule (apply-le-audio.sh)")
+        self._wp_stale_report()
         self.le_report()
         self.le_others_report()
         b, dev = self.c.bearer, self.c.device
@@ -678,12 +674,20 @@ class Survey:
         else:
             self.item("ok", LDAC_WATCHER_LABEL, "off (LDAC_RATE empty; 48000 turns it on)")
         if self.lw_unit_st == OwnedState.CONFLICT:
-            self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
+            self.item("CONFLICT", self.lw_unit_label(), _FOREIGN_NOTE)
         if self.lw_prog_st == OwnedState.CONFLICT:
-            self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
+            self.item("CONFLICT", self.lw_prog_label(), _FOREIGN_NOTE)
         if self.lw_keeps_prog():
             self.item("note", self.lw_prog_label(), LW_KEPT_NOTE)
         self._lw_stale_report()
+
+    def _wp_stale_report(self) -> None:
+        """The rows of WirePlumber files under the shell's XDG_CONFIG_HOME when it differs."""
+        for path, ours in self.wp_stale:
+            if ours:
+                self.item("remove", self.tilde(path), "an older CST's copy under the shell's XDG_CONFIG_HOME")
+            else:
+                self.item("warn", self.tilde(path), _FOREIGN_NOTE)
 
     def _lw_stale_report(self) -> None:
         """The rows of an older CST's copies of the watcher's unit (watcher_unit.stale_rows)."""
@@ -778,6 +782,7 @@ class Survey:
             or self.legacy
             or self.lw_change
             or self.le_change
+            or any(ours for _, ours in self.wp_stale)
             or self.device_save
             or self.wp_state not in (WpState.OK, WpState.NONE)
             or self.bearer_state == BearerState.SET

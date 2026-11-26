@@ -30,7 +30,9 @@ from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import beside_program, lc_ctype_handover, restore_lc_ctype, undo_python_start
 from cst_core import wiring as core_wiring
 from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format, version_of
-from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.application.user_units import RecordedUnitCopies, manager_unit_path
+from cst_core.domain.install import INSTALL_MANIFEST, Component, Owner
+from cst_core.domain.record import InstallRecord, RecordedFile, RecordFormatError
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
 from cst_core.domain.dispatch import (
@@ -553,6 +555,119 @@ class UserUnitDirTest(unittest.TestCase):
         ):
             with self.subTest(answer=answer):
                 self.assertIsNone(named_user_unit_dir(answer))
+
+
+class _Records:
+    """An InstallRecordPort that serves one record for the user's record path (or raises)."""
+
+    def __init__(self, record: InstallRecord | None, error: Exception | None = None) -> None:
+        self.record = record
+        self.error = error
+        self.paths: list[str] = []
+
+    def read(self, path: str) -> InstallRecord | None:
+        self.paths.append(path)
+        if self.error is not None:
+            raise self.error
+        return self.record
+
+    def update(self, path: str, change: Callable[[InstallRecord], InstallRecord]) -> bool:
+        raise AssertionError(f"no update expected: {path} {change}")
+
+    def sha256(self, data: bytes) -> str:
+        raise AssertionError(f"no sha256 expected: {len(data)} bytes")
+
+
+class UserUnitCopiesTest(unittest.TestCase):
+    """cst_core.application.user_units: the user manager's UnitPath and the recorded copies elsewhere."""
+
+    HOME: Final = "/home/u"
+    NAME: Final = "x.service"
+    CURRENT: Final = "/home/u/xdg/systemd/user/x.service"
+    OLD: Final = "/home/u/.config/systemd/user/x.service"
+    NAMED: Final = "/home/u/xdg/systemd/user /etc/systemd/user /usr/lib/systemd/user"
+
+    def _record(self, *dests: tuple[str, Component]) -> InstallRecord:
+        def recorded(component: Component) -> RecordedFile:
+            return RecordedFile(None, component, "text", "0" * 64, 0o644, Owner.USER)
+
+        return InstallRecord({dest: recorded(component) for dest, component in dests}, {})
+
+    def test_manager_unit_path_is_the_answer_or_none(self) -> None:
+        class Answer:
+            def __init__(self, result: CommandResult) -> None:
+                self.result = result
+
+            def run(self, argv: Sequence[str], *, check: bool = False, **options: object) -> CommandResult:
+                return self.result
+
+        named = SystemctlAdapter(Answer(CommandResult(0, self.NAMED, "")))
+        self.assertEqual(manager_unit_path(named), self.NAMED)
+        failing = SystemctlAdapter(Answer(CommandResult(1, "", "Failed to connect to bus")))
+        self.assertIsNone(manager_unit_path(failing))
+
+    def test_older_copies_are_the_recorded_ones_elsewhere_when_the_manager_names_its_folder(self) -> None:
+        rec = self._record(
+            (self.OLD, Component.CPU_TOOLBOX),
+            (self.CURRENT, Component.CPU_TOOLBOX),
+            ("/home/u/.config/systemd/user/y.service", Component.CPU_TOOLBOX),  # another name
+            ("/home/u/old/x.service", Component.TOOLCHAINS_AUTO),  # another component
+        )
+        records = _Records(rec)
+        found = RecordedUnitCopies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME).older(self.CURRENT, self.NAMED)
+        self.assertEqual(found, (self.OLD,))
+        # A relative subpath (e.g. a drop-in under <unit>.d/) matches only that unit's drop-ins, not another
+        # unit's drop-in with the same filename.
+        dropin_rec = self._record(
+            ("/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf", Component.CPU_TOOLBOX),
+            ("/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf", Component.CPU_TOOLBOX),
+            ("/home/u/xdg/systemd/user/user.slice.d/10-cpu-setup.conf", Component.CPU_TOOLBOX),
+        )
+        dropin_found = RecordedUnitCopies(
+            _Records(dropin_rec), self.HOME, Component.CPU_TOOLBOX, "user.slice.d/10-cpu-setup.conf"
+        ).older("/home/u/xdg/systemd/user/user.slice.d/10-cpu-setup.conf", self.NAMED)
+        self.assertEqual(dropin_found, ("/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf",))
+        self.assertEqual(records.paths, ["/home/u/.local/state/cst/installed.json"])
+        # No answer, or an answer that names no folder of the user's own: every recorded copy is kept.
+        for answer in (None, "/etc/systemd/user /usr/lib/systemd/user"):
+            with self.subTest(answer=answer):
+                self.assertEqual(
+                    RecordedUnitCopies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME).older(
+                        self.CURRENT, answer
+                    ),
+                    (),
+                )
+
+    def test_a_record_that_cannot_be_read_lists_no_copy(self) -> None:
+        for records in (
+            _Records(None),
+            _Records(None, OSError(5, "Input/output error")),
+            _Records(None, RecordFormatError("not a record")),
+            _Records(None, ValueError("bad")),
+        ):
+            with self.subTest(error=records.error):
+                self.assertEqual(
+                    RecordedUnitCopies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME).older(
+                        self.CURRENT, self.NAMED
+                    ),
+                    (),
+                )
+
+    def test_kept_copies_are_those_on_disk_and_not_current_when_the_manager_names_no_folder(self) -> None:
+        other = "/home/u/other/x.service"
+        link = "/home/u/link/x.service"
+        rec = self._record(
+            (self.OLD, Component.CPU_TOOLBOX), (other, Component.CPU_TOOLBOX), (link, Component.CPU_TOOLBOX)
+        )
+        on_disk = {self.OLD, link}
+        real = {link: self.CURRENT}
+
+        def kept(answer: str | None) -> tuple[str, ...]:
+            copies = RecordedUnitCopies(_Records(rec), self.HOME, Component.CPU_TOOLBOX, self.NAME)
+            return copies.kept(self.CURRENT, answer, on_disk.__contains__, lambda p: real.get(p, p))
+
+        self.assertEqual(kept(None), (self.OLD,))
+        self.assertEqual(kept(self.NAMED), ())
 
 
 class ManagedFilesTest(unittest.TestCase):

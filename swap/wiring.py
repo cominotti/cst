@@ -26,7 +26,7 @@ from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort, SystemctlHost
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.application.apply import SwapApplicationService
-from swap.application.reports import SwapEnvironment
+from swap.application.environment import SwapEnvironment
 
 # The test seam's variables (kernel_dirs).
 SEAM_PROC: Final = "CST_SWAP_PROC"
@@ -131,4 +131,10 @@ def desired_paths(
         install_record=os.path.join(os.path.dirname(etc.rstrip("/")), ROOT_RECORD.lstrip("/")),
         as_root=ctx.is_root(),
         in_container=ctx.is_container(),
+        unit_dirs=(
+            ctx.host_run_dir("systemd/system"),
+            ctx.host_run_dir("systemd/system.control"),
+            ctx.host_run_dir("systemd/transient"),
+            "/usr/lib/systemd/system",
+        ),
     )

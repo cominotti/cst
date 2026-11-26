@@ -18,17 +18,10 @@ from bluetooth.setup.domain import (
     OlderCopy,
 )
 from bluetooth.setup.ports import SetupFilesPort
-from cst_core.application.install import record_file
-from cst_core.domain.install import Component, Owner
-from cst_core.domain.record import RecordFormatError, component_dests
-from cst_core.domain.units import UNIT_PATH_PROP, named_user_unit_dir, user_unit_dir
-from cst_core.ports import InstallRecordPort, SystemdPort
-
-
-def unit_path(user_manager: SystemdPort) -> str | None:
-    """The user manager's UnitPath (show -p UnitPath --value); None when it does not answer."""
-    r = user_manager.show_value(None, UNIT_PATH_PROP)
-    return r.stdout if r.returncode == 0 else None
+from cst_core.application.user_units import RecordedUnitCopies
+from cst_core.domain.install import Component
+from cst_core.domain.units import user_unit_dir
+from cst_core.ports import InstallRecordPort
 
 
 def unit_file(answer: str | None, home: str) -> str:
@@ -44,9 +37,7 @@ def older_copies(records: InstallRecordPort, home: str, current: str, answer: st
     either when the user manager's UnitPath (answer) names no folder of the user's own units
     (named_user_unit_dir): current is then only systemd's default, and a recorded copy elsewhere may be
     the one the manager loads, so every recorded copy is kept (kept_copies)."""
-    if named_user_unit_dir(answer) is None:
-        return ()
-    return _recorded_elsewhere(records, home, current)
+    return RecordedUnitCopies(records, home, Component.BLUETOOTH_LDAC, LDAC_UNIT).older(current, answer)
 
 
 def kept_copies(
@@ -55,23 +46,8 @@ def kept_copies(
     """The recorded copies older_copies keeps because the user manager's UnitPath (answer) names no
     folder: those on disk that are not current by another path. One of them may be the unit the manager
     runs, so revert keeps the watcher's program with them. None when the manager names its folder."""
-    if named_user_unit_dir(answer) is not None:
-        return ()
-    cur = files.realpath(current)
-    return tuple(p for p in _recorded_elsewhere(records, home, current) if files.exists(p) and files.realpath(p) != cur)
-
-
-def _recorded_elsewhere(records: InstallRecordPort, home: str, current: str) -> tuple[str, ...]:
-    """The watcher's unit files the user's install record lists elsewhere than current; none when the
-    record cannot be read."""
-    try:
-        rec = records.read(record_file(Owner.USER, home))
-    except OSError, RecordFormatError, ValueError:
-        return ()
-    if rec is None:
-        return ()
-    dests = component_dests(rec, Component.BLUETOOTH_LDAC)
-    return tuple(d for d in dests if posixpath.basename(d) == LDAC_UNIT and d != current)
+    copies = RecordedUnitCopies(records, home, Component.BLUETOOTH_LDAC, LDAC_UNIT)
+    return copies.kept(current, answer, files.exists, files.realpath)
 
 
 def copy_kind(files: SetupFilesPort, path: str, current: str) -> OlderCopy:

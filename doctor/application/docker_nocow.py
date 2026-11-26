@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: MPL-2.0
 """The Docker volumes NOCOW checks of the btrfs area of `cst doctor`: what docker-volumes-nocow leaves on
-disk (cst doctor never opens Docker's own folders, which are root's only). btrfs.py puts them in its
+disk. As a user cst doctor never opens Docker's own folders, which are root's only; as root on the host it
+reads the volumes folder's +C and its volumes with the helper's own adapters, for the one case nothing on
+disk names. btrfs.py puts them in its
 list (@check), in their place among its checks: one module registers each area's checks."""
 
 from collections.abc import Iterator
 import time
+from typing import Final
 
 from btrfs.docker_volumes_nocow.domain import (
     DAEMON_JSON,
@@ -86,6 +89,9 @@ def _nocow_outcome(host: DoctorHostPort) -> OutcomeRead:
     return parse_outcome(text, NOCOW_OUTCOME)
 
 
+_BTRFS_INSTALL_CMD: Final = "cst btrfs install"
+
+
 def _nocow_count(host: DoctorHostPort) -> int:
     """The helper's count of boots, as CounterFile.count reads it (0: none, or no number)."""
     try:
@@ -117,7 +123,7 @@ def check_docker_nocow_outcome(host: DoctorHostPort) -> Iterator[Result]:
             f"Docker volumes NOCOW: {read.record['volumes']} keeps copy-on-write data and no boot will migrate it "
             f"(the folder has +C already, and a boot asks only for one without it), and the install at {when} "
             f"failed: {read.record['reason']}; fix that, then run the install",
-            "cst btrfs install",
+            _BTRFS_INSTALL_CMD,
         )
         return
     count = _nocow_count(host)
@@ -127,5 +133,18 @@ def check_docker_nocow_outcome(host: DoctorHostPort) -> Iterator[Result]:
             f"Docker volumes NOCOW: a count of {count} boot(s) is left with no migration scheduled: an install or "
             "a boot could not reset it, so a migration may not be asked for (journalctl -u docker-volumes-nocow "
             "says why); fix that, then run the install",
-            "cst btrfs install",
+            _BTRFS_INSTALL_CMD,
         )
+    elif read.record is None and host.uid == 0 and not host.container:
+        # As cst btrfs status says "no boot asks for it": +C, no flag, no outcome known. Docker's folders
+        # are root's only, so only root's doctor on the host can look.
+        found = host.nocow_unscheduled()
+        if found is not None:
+            volumes, first = found
+            yield Result(
+                WARN,
+                f"Docker volumes NOCOW: {volumes} has +C and its volumes keep copy-on-write data ({first} first), but "
+                "no migration is scheduled and no outcome is recorded (an older install stopped between its +C and "
+                "its flag): no boot asks for it",
+                _BTRFS_INSTALL_CMD,
+            )

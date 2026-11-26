@@ -151,6 +151,24 @@ class CpuPowerLifecycleTest(unittest.TestCase):
         self._write(os.path.join(sdir, "latency"), f"{latency}\n")
         self._write(os.path.join(sdir, "disable"), disable + "\n")
 
+    def test_a_drm_folder_gone_after_it_was_seen_lists_nothing(self) -> None:
+        # A card unbound (or the drm class gone) between the check and the listing: os.listdir raises
+        # FileNotFoundError. Before, that ended the snapshot with a traceback; now the folder lists nothing.
+        real_listdir = os.listdir
+        for gone, want in (
+            (self.paths.sys_drm, ()),
+            (os.path.join(self.paths.sys_drm, "card3"), (("card1", ()), ("card3", ()))),
+        ):
+
+            def listdir(path: str, gone: str = gone) -> list[str]:
+                if path == gone:
+                    raise FileNotFoundError(2, "No such file or directory", path)
+                return real_listdir(path)
+
+            with self.subTest(gone=os.path.basename(gone)), mock.patch("cpu.power.adapters.os.listdir", listdir):
+                cards = collect_power_snapshot(self.paths).gpu_cards
+                self.assertEqual(tuple((c.card, c.connected_outputs) for c in cards), want)
+
     def test_a_cpuidle_latency_that_does_not_read_skips_the_state(self) -> None:
         # More digits than int() reads (main: ValueError) or no number: the state is not listed.
         for lat in ("1" * 5000, "abc", "\N{ARABIC-INDIC DIGIT THREE}"):

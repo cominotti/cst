@@ -11,7 +11,7 @@ from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import CommandFailed, WriteFailed
 from perf.presenter import render_perf_findings_block
 from swap.application.apply import SwapApplicationService
-from swap.application.reports import MissingDesiredFileError
+from swap.application.environment import MissingDesiredFileError
 from swap.domain import (
     PAGE,
     ApplyEvent,

@@ -14,6 +14,8 @@ EXIT_PERF_FINDINGS: Final = 1
 EXIT_PERF_USAGE: Final = 2
 
 MIN_UPTIME_FOR_RATE_SECONDS: Final = 600.0
+# The row label of a settings file's problem line in an axis of the report.
+SETTINGS_PROBLEM_LABEL: Final = "settings line"
 LARGE_RAM_THRESHOLD_BYTES: Final = 32 * GIB
 MEM_MIN_FREE_LARGE_RAM_BYTES: Final = 192 * MIB
 MEM_MIN_FREE_SMALL_RAM_BYTES: Final = 32 * MIB
@@ -348,6 +350,8 @@ class CpuProbeExtra:
     irqbalance_banned_cpus: CpuSet | None = None
     # The lines of /proc/interrupts as the probe read them (effective affinity included).
     irq_lines: tuple[IrqLineSample, ...] = ()
+    # The problem lines of the settings files the CPU axis reads (settings_problem_lines).
+    settings_problems: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +374,7 @@ class CpuProbeSnapshot:
     irqbalance_banned_cpus: CpuSet | None = None
     irq_lines: tuple[IrqLineSample, ...] = ()
     default_smp_affinity_hex: str | None = None
+    settings_problems: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +416,7 @@ class IoProbeSnapshot:
     btrfs_commits: tuple[BtrfsCommitSample, ...] = ()
     btrfs_scrub_limit: str | None = None
     btrfs_conf_present: bool = False
+    settings_problems: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,6 +441,7 @@ class GpuProbeSnapshot:
     game_profile_active: bool | None = None
     gpu_pm_mode: str | None = None
     game_profile_manual: bool = False
+    settings_problems: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

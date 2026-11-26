@@ -63,6 +63,7 @@ from doctor.application import (
     alerts as doc_alerts,
     btrfs as doc_btrfs,
     cpu as doc_cpu,
+    docker_nocow as doc_nocow,
     install as doc_install,
     registry as doc_registry,
     services as doc_services,
@@ -70,7 +71,9 @@ from doctor.application import (
     swap as doc_swap,
     vm as doc_vm,
 )
+from btrfs.docker_volumes_nocow import adapters as nocow_adapters, domain as nocow_domain
 from btrfs.health_check import domain as hc_domain
+from btrfs.snapshot_runtime import domain as snap_domain
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.zipapp import entry_payload
@@ -2232,7 +2235,14 @@ class SwapSettingsDoctorTest(Scratch):
             " refuses (swap/README.md, section 2.3)",
         )
         zswap = os.path.join(self.root, "etc", "tmpfiles.d", "zswap.conf")
-        for name, set_up, want in (("crypttab", True, [not_configured]), ("fstab", False, [])):
+        # crypttab is not a regular file: its lines cannot be read, so not "not configured" (since 2026-11).
+        not_regular = Result(
+            "WARN",
+            "swap partition: /etc/cst/swap.conf not written yet, and /etc/crypttab is not a regular file (a FIFO,"
+            " a device, a folder, or a link to one): cst swap apply refuses until it is fixed",
+        )
+        del not_configured
+        for name, set_up, want in (("crypttab", True, [not_regular]), ("fstab", False, [])):
             path = os.path.join(self.root, "etc", name)
             with self.subTest(name=name), time_bound(5):
                 if set_up:
@@ -2314,6 +2324,156 @@ class MachineSliceMemoryLowDoctorTest(Scratch):
         self.install()
         os.remove(os.path.join(self.tmp, "show", "sys", "machine.slice"))
         self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+
+class ReadsNeverWaitTest(Scratch):
+    """doctor's shared reads (fstab, the machine.slice drop-ins, zswap.conf): a FIFO is a file they cannot
+    read, at once. Before, the open waited for a writer for ever (bounded here: CallBlocked)."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    OTHER = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+
+    def _fifo(self, host_path: str) -> str:
+        p = os.path.join(self.root, host_path.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.mkfifo(p)
+        return p
+
+    def _show(self, *dropins: str) -> None:
+        d = os.path.join(self.tmp, "show", "sys")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "machine.slice"), "w") as f:
+            f.write(f"LoadState=loaded\nMemoryLow={48 * 2**30}\nDropInPaths={' '.join(dropins)}\n")
+
+    def _install_cst_dropin(self) -> None:
+        p = os.path.join(self.root, self.CST.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "swap", "units", "machine.slice.d-10-swap-memory-low.conf"), p)
+
+    def test_the_shared_read_of_a_fifo_gives_nothing_and_a_regular_empty_file_still_reads(self) -> None:
+        host = doc_adapters.Host(dict(self.env))
+        for name in ("/etc/fstab", self.OTHER, self.CST):
+            with self.subTest(path=name), time_bound(5):
+                fifo = self._fifo(name)
+                try:
+                    got = doc_shared.read_text(host, host.path(doc_domain.HostPath(name)), 65536)
+                finally:
+                    os.remove(fifo)
+                self.assertEqual(got, "")
+        empty = os.path.join(self.root, "proc", "cmdline")
+        os.makedirs(os.path.dirname(empty))
+        with open(empty, "w") as f:
+            f.write("  root=UUID=x rw  \n")
+        self.assertEqual(doc_shared.read_text(host, doc_domain.ViewPath(empty)), "root=UUID=x rw")
+
+    def test_a_fifo_at_zswap_conf_is_one_it_cannot_read(self) -> None:
+        self.addCleanup(os.remove, self._fifo("/etc/tmpfiles.d/zswap.conf"))
+        with time_bound(5):
+            rows = list(doc_swap.check_zswap_params(doc_adapters.Host(dict(self.env))))
+        self.assertEqual(rows, [Result("info", "zswap: cannot read /etc/tmpfiles.d/zswap.conf")])
+
+    def test_a_fifo_among_machine_slice_s_drop_ins_is_skipped(self) -> None:
+        # CST's drop-in is a FIFO: nothing (as for one not installed). Another drop-in is a FIFO: it sets
+        # nothing doctor can read, so CST's value is the one systemd shows.
+        cases = (("cst", self.CST, []), ("other", self.OTHER, [f"machine.slice MemoryLow 48.0 GiB, from {self.CST}"]))
+        for kind, fifo, want in cases:
+            with self.subTest(kind=kind), time_bound(5):
+                if kind == "other":
+                    self._install_cst_dropin()
+                path = self._fifo(fifo)
+                self._show(self.CST, self.OTHER)
+                try:
+                    rows = list(doc_swap.check_machine_slice_memory_low(doc_adapters.Host(dict(self.env))))
+                finally:
+                    os.remove(path)
+                self.assertEqual([r.message for r in rows], want)
+
+    def test_installed_files_sha256_and_check_install_do_not_wait_on_fifo(self) -> None:
+        fifo = self._fifo("/etc/tmpfiles.d/zswap.conf")
+        self.addCleanup(os.remove, fifo)
+        installed = doc_adapters.InstalledFiles(REPO)
+        with time_bound(5):
+            with self.assertRaises(OSError) as cm:
+                installed.file_sha256(doc_domain.ViewPath(fifo))
+            self.assertEqual(cm.exception.errno, errno.EINVAL)
+            list(doc_install.check_install(doc_adapters.Host(dict(self.env)), installed=installed))
+
+    def test_btrfs_cache_check_does_not_wait_on_fifo_crypttab(self) -> None:
+        os.makedirs(
+            os.path.join(self.root, "sys", "fs", "btrfs", "11111111-2222-3333-4444-555555555555", "allocation"),
+            exist_ok=True,
+        )
+        fifo = self._fifo("/etc/crypttab")
+        self.addCleanup(os.remove, fifo)
+        with time_bound(5):
+            rows = list(doc_btrfs.check_btrfs_cache(doc_adapters.Host(dict(self.env))))
+        self.assertEqual(rows, [])
+
+
+class SnapshotNumbersDoctorTest(Scratch):
+    """check_snapshot_numbers: a number of snapshots.conf the hourly run cannot use, judged by the runtime's
+    own parsers (guard_number of each GUARD_KEYS value, nas_unreadable), on the settings merged as the
+    runtime merges them. Before, doctor said nothing: only the run's journal named them."""
+
+    def _rows(self, text: str | None) -> list[str]:
+        conf = os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf")
+        if text is not None:
+            os.makedirs(os.path.dirname(conf), exist_ok=True)
+            with open(conf, "w") as f:
+                f.write(text)
+        try:
+            return [r.message for r in doc_btrfs.check_snapshot_numbers(doc_adapters.Host(dict(self.env)))]
+        finally:
+            if os.path.exists(conf):
+                os.remove(conf)
+
+    def test_each_value_the_guard_cannot_hold_at_is_named(self) -> None:
+        guard = (
+            "snapshots: SKIP_AT_OR_BELOW_GIB={!r} in /etc/btrfs-setup/snapshots.conf: not a number of GiB the space"
+            " guard can hold at: the hourly run takes no snapshot until it is fixed"
+        )
+        cases: tuple[tuple[str, bool], ...] = (
+            ("250GiB", True),
+            ("abc", True),
+            ("1 x", True),
+            ("1\N{NO-BREAK SPACE}", True),
+            ("08", True),
+            (str(2**63), True),
+            ("200", False),
+            ("", False),
+            ("100 + 20", False),
+        )
+        for value, warned in cases:
+            with self.subTest(value=value):
+                # The oracle: the runtime's own reading of the value.
+                self.assertEqual(not isinstance(snap_domain.guard_number(value, exact=True), int), warned)
+                want = [guard.format(value)] if warned else []
+                self.assertEqual(self._rows(f"SKIP_AT_OR_BELOW_GIB='{value}'\n"), want)
+
+    def test_a_nas_number_is_named_only_with_the_nas_backup_on(self) -> None:
+        nas = (
+            "snapshots: NAS_STALE_DAYS='abc' in /etc/btrfs-setup/snapshots.conf: the NAS run cannot compute it: the"
+            " step it governs is skipped and the run fails"
+        )
+        cases: tuple[tuple[str, str, list[str]], ...] = (
+            ("on", "NAS_ENABLED=1\nNAS_STALE_DAYS=abc\n", [nas]),
+            ("off", "NAS_ENABLED=0\nNAS_STALE_DAYS=abc\n", []),
+            ("on, a good number", "NAS_ENABLED=1\nNAS_STALE_DAYS=3\nNAS_PRUNE_EVERY_DAYS=7\n", []),
+        )
+        for label, text, want in cases:
+            with self.subTest(label):
+                self.assertEqual(self._rows(text), want)
+
+    def test_nothing_for_defaults_a_problem_line_an_unknown_key_or_no_file(self) -> None:
+        cases: tuple[tuple[str, str | None], ...] = (
+            ("defaults only", "TOP=/var/mnt/btrfs-top\n"),
+            ("a problem line sets nothing", "SKIP_AT_OR_BELOW_GIB = abc\n"),
+            ("a key the runtime does not read", "OTHER_GIB=abc\n"),
+            ("no file", None),
+        )
+        for label, text in cases:
+            with self.subTest(label):
+                self.assertEqual(self._rows(text), [])
 
 
 class DockerNocowPostponedTest(Scratch):
@@ -2526,6 +2686,98 @@ class DockerNocowOutcomeTest(Scratch):
         )
         self.assertIn("fix: cst btrfs install", r.stdout)
         self.assert_read_only()
+
+    def _root_rows(
+        self, *, uid: int = 0, container: bool = False, answer: tuple[str, str] | None
+    ) -> tuple[list[Result], int]:
+        host = doc_adapters.Host(dict(self.env))
+        host.uid = uid
+        host.container = container
+        with mock.patch.object(doc_adapters.Host, "nocow_unscheduled", return_value=answer) as asked:
+            rows = list(doc_nocow.check_docker_nocow_outcome(host))
+        return rows, asked.call_count
+
+    def test_as_root_on_the_host_a_folder_with_c_and_no_flag_or_record_warns(self) -> None:
+        # As cst btrfs status's "no boot asks for it". Before, nothing: doctor never looked at the folder.
+        rows, asked = self._root_rows(answer=("/var/lib/docker/volumes", "db"))
+        self.assertEqual(asked, 1)
+        self.assertEqual(
+            rows,
+            [
+                Result(
+                    "WARN",
+                    "Docker volumes NOCOW: /var/lib/docker/volumes has +C and its volumes keep copy-on-write data (db "
+                    "first), but no migration is scheduled and no outcome is recorded (an older install stopped "
+                    "between its +C and its flag): no boot asks for it",
+                    "cst btrfs install",
+                )
+            ],
+        )
+
+    def test_the_host_reads_the_folder_with_the_helper_s_tree_adapter(self) -> None:
+        volumes = os.path.join(self.tmp, "docker", "volumes")
+        for name in ("a", "b"):
+            os.makedirs(os.path.join(volumes, name, "_data"))
+        cow = {os.path.join(volumes, "a", "_data"): 0, os.path.join(volumes, "b", "_data"): 2}
+
+        def scan(_tree: object, top: str, *, fix: bool = False) -> nocow_domain.TreeScan:
+            del fix
+            return nocow_domain.TreeScan(cow[top], cow[top] * 4096, 1, 4096)
+
+        cases: tuple[tuple[str, str, bool | OSError, tuple[str, str] | None], ...] = (
+            ("+C and a volume with copy-on-write data: the first one", volumes, True, (volumes, "b")),
+            ("no +C", volumes, False, None),
+            ("absent", os.path.join(self.tmp, "none"), True, None),
+            ("+C cannot be read", volumes, OSError(errno.EIO, "I/O error"), None),
+        )
+        for label, folder, nocow, want in cases:
+            with (
+                self.subTest(label),
+                mock.patch.object(doc_adapters, "nocow_docker_root", return_value=(folder, "")),
+                mock.patch.object(nocow_adapters.LocalVolumeTree, "is_nocow", side_effect=[nocow]),
+                mock.patch.object(nocow_adapters.LocalVolumeTree, "scan", scan),
+            ):
+                self.assertEqual(doc_adapters.Host(dict(self.env)).nocow_unscheduled(), want)
+
+    def test_the_folder_is_looked_at_only_when_nothing_else_answers(self) -> None:
+        cases: tuple[tuple[str, int, bool, str, bool], ...] = (
+            # (label, uid, container, what is on disk, whether the folder is asked)
+            ("as a user", 1000, False, "", False),
+            ("as root in a toolbox", 0, True, "", False),
+            ("a flag", 0, False, "flag", False),
+            ("a give-up's record", 0, False, "gave-up", False),
+            ("a count left", 0, False, "count", False),
+            ("no helper installed", 0, False, "no helper", False),
+            ("nothing else: the folder is asked, and answers none", 0, False, "", True),
+        )
+        for label, uid, container, on_disk, want_asked in cases:
+            with self.subTest(label):
+                match on_disk:
+                    case "flag":
+                        open(self.flag, "w").close()
+                    case "gave-up":
+                        self.record("gave-up")
+                    case "count":
+                        self.count("1")
+                    case "no helper":
+                        os.remove(self.helper)
+                    case _:
+                        pass
+                try:
+                    rows, asked = self._root_rows(uid=uid, container=container, answer=None)
+                finally:
+                    for p in (
+                        self.flag,
+                        os.path.join(self.state_dir, "outcome"),
+                        os.path.join(self.state_dir, "attempts"),
+                    ):
+                        if os.path.exists(p):
+                            os.remove(p)
+                    if not os.path.exists(self.helper):
+                        with open(self.helper, "w") as f:
+                            f.write("#!/bin/sh\n")
+                self.assertEqual(asked, int(want_asked))
+                self.assertFalse(any("has +C" in r.message for r in rows), rows)
 
     def test_nothing_beside_the_flag(self) -> None:
         self.record("not-scheduled")

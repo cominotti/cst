@@ -288,6 +288,11 @@ again and must equal the old one plus this one key; otherwise (for example
 `build.jobs = 4` written as a dotted key) `config` prints the line to add by
 hand. If `rustc-wrapper` is already set to something else, it is yours:
 `config` says so and changes nothing (not even with `--no-sccache`).
+Adding or removing the line rewrites the file (a new file renamed into
+place, then its folder synced). If that fails, `config apply` exits 1 with
+`cannot write ...: left as it is` when the file is as it was, or with
+`...: written, but its folder could not be synced (...): the change may not
+survive a power loss` when only the sync failed and the new text is there.
 
 What the wrapper does for each compiler call (`rustc-wrapper <compiler>
 <arguments>`, as cargo runs it):
@@ -834,7 +839,12 @@ runs. A manual `prune apply` has the same budget.
   program), so that the timer does not depend on this working copy. `auto on`
   again updates them after a change in CST, also a plain-script copy an older
   CST version wrote;
-- `~/.config/systemd/user/cst-toolchains-prune.service` and `.timer`.
+- `~/.config/systemd/user/cst-toolchains-prune.service` and `.timer` (written
+  under the folder `systemctl --user show -p UnitPath --value` names first, or
+  `~/.config/systemd/user` when unset or when the user manager does not answer;
+  `auto on` removes and forgets recorded older copies elsewhere and their
+  `timers.target.wants` enable links before writing the new units, and `auto off`
+  removes current and recorded older copies).
 
 All of them start with (or contain) `# managed-by: toolchains-setup.sh (CST)`;
 files without that line are never overwritten or removed. A unit you masked

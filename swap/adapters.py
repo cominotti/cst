@@ -19,9 +19,10 @@ class LinuxSwapSystemAdapter:
         """The size `blockdev --getsize64` prints; CommandFailed when it fails (apply stops, as under set -e)."""
         return self._runner.run(["blockdev", "--getsize64", dev_path], check=True).stdout.strip()
 
-    def blkid_type(self, dev_path: str) -> str:
-        """Return `blkid -o value -s TYPE` for dev_path, or '' when absent."""
-        res = self._runner.run(["blkid", "-o", "value", "-s", "TYPE", dev_path], check=False)
+    def blkid_type(self, dev_path: str, *, cache: bool = True) -> str:
+        """Return `blkid -o value -s TYPE` for dev_path, or '' when absent (cache False: `-c /dev/null`)."""
+        no_cache = [] if cache else ["-c", "/dev/null"]
+        res = self._runner.run(["blkid", *no_cache, "-o", "value", "-s", "TYPE", dev_path], check=False)
         if res.returncode != 0:
             return ""
         return res.stdout.strip()

@@ -2,20 +2,19 @@
 """The read-only use cases of swap: what plan and status show (no direct OS I/O or terminal formatting)."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
 import posixpath
 import re
 from typing import Final
 
-from cst_core.application.install import InstallService
+from cst_core.application.install import InstallRefused, InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState, inspect_managed_file
-from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import format_bytes_human as human, parse_whole_number
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from perf.application import collect_memory_from_reader
 from perf.domain.evaluate import evaluate_perf_memory
 from perf.domain.models import PerfRootKind, PerfVerdict
+from swap.application.environment import DROPIN_ENTRY, MissingDesiredFileError, SwapEnvironment
 from swap.application.in_the_way import folder_in_place, non_folder_above
 from swap.application.memory_tuning import (
     MM_TMPFILES_ENTRY,
@@ -23,11 +22,13 @@ from swap.application.memory_tuning import (
     URESOURCED_BAK_SUFFIX,
     URESOURCED_ENTRY,
     SwapPerfReader,
-    UresourcedView,
     mm_settings_rows,
     uresourced_settings_row,
 )
 from swap.domain import (
+    NOT_REGULAR_NOTE,
+    crypto_has_algorithm,
+    is_safe_partition_type,
     MACHINE_SLICE,
     WSF_EXPERIMENT,
     CgroupSwapRow,
@@ -48,7 +49,6 @@ from swap.domain import (
     describe_state,
     find_swap_used_kib,
     DEFAULT_SWAP_NAME,
-    SETTINGS_REL,
     SpecResolution,
     human_size,
     is_cst_dropin,
@@ -70,142 +70,8 @@ from swap.domain import (
 from swap.ports import SwapSystemPort
 
 
-# The files swap installs: where they go and with which mode comes from the
-# install manifest (cst_core/domain/install.py), the one list of installed files.
-_MANIFEST = manifest_by_src()
-TMPFILES_ENTRY: InstallEntry = _MANIFEST["swap/tmpfiles/zswap.conf"]
-SYSCTL_ENTRY: InstallEntry = _MANIFEST["swap/sysctl/99-swap-tuning.conf"]
-DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-10-swap-memory-low.conf"]
-# The drop-in's name until 2026-11: it sorted after the 50-MemoryLow.conf of `systemctl set-property`
-# ('M' < 'm'), so after a daemon-reload its 48G beat a runtime value. plan shows it, apply removes it.
-OLD_DROPIN_ENTRY: InstallEntry = replace(
-    DROPIN_ENTRY,
-    src="swap/units/machine.slice.d-50-memory-low.conf",
-    dest="/etc/systemd/system/machine.slice.d/50-memory-low.conf",
-)
 # The row of machine.slice's live floor in status.
 _MEMORY_LOW_ROW: Final = f"{MACHINE_SLICE} memory.low"
-# Where the manifest's paths start: a dest under /etc, a src in the swap module's folder.
-_ETC_PREFIX: Final = "/etc/"
-_SWAP_SRC_PREFIX: Final = "swap/"
-
-
-def _under(base: str, manifest_path: str, prefix: str) -> str:
-    """manifest_path (which starts with prefix) moved under base."""
-    return posixpath.join(base, manifest_path[len(prefix) :])
-
-
-class MissingDesiredFileError(RuntimeError):
-    """Raised when a desired config file inside CST's swap/ directory is missing."""
-
-
-@dataclass(frozen=True, slots=True)
-class SwapEnvironment:
-    """Path and identity configuration injected into SwapApplicationService."""
-
-    src_dir: str
-    etc_dir: str
-    proc_dir: str = "/proc"
-    sys_dir: str = "/sys"
-    cgroup_dir: str = "/sys/fs/cgroup"
-    zswap_params_dir: str = "/sys/module/zswap/parameters"
-    zswap_debug_dir: str = "/sys/kernel/debug/zswap"
-    cpu_run_dir: str = "/run/cpu-setup"
-    # logind's seat files: whether a session is in the foreground (uresourced's floor).
-    seats_dir: str = "/run/systemd/seats"
-    prog: str = "cst swap"
-    # The install record that lists swap's three files ("": not recorded) and whether apply runs as
-    # root (a root file owned by another account is then rewritten, as by the installer).
-    install_record: str = ""
-    as_root: bool = False
-    # Whether this runs in a toolbox or a container: its root is root of that user namespace only, so a
-    # file it cannot read may be one the host's root reads (on the host, --root).
-    in_container: bool = False
-    # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
-    test_seam: tuple[tuple[str, str, str], ...] = ()
-
-    @property
-    def host_root(self) -> bool:
-        """Root of the host, whom --root cannot help with a file it cannot read (cst doctor's rule too)."""
-        return self.as_root and not self.in_container
-
-    @property
-    def managed_files(self) -> tuple[tuple[str, str], ...]:
-        """The files apply writes whole, as (source in swap/, where it goes), in the order plan lists them."""
-        return (
-            (self.src_tmpfiles, self.tmpfiles_conf),
-            (self.src_path(MM_TMPFILES_ENTRY), self.etc_path(MM_TMPFILES_ENTRY)),
-            (self.src_sysctl, self.sysctl_conf),
-            (self.src_path(URESOURCED_ENTRY), self.etc_path(URESOURCED_ENTRY)),
-            (self.src_dropin, self.slice_dropin),
-        )
-
-    @property
-    def uresourced_view(self) -> UresourcedView:
-        """Where uresourced's floor is read (the cgroup tree, /proc, the seat files)."""
-        return UresourcedView(self.cgroup_dir, self.proc_dir, self.seats_dir)
-
-    def host_view(self, host_path: str) -> str:
-        """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
-        root = self.etc_dir.rstrip("/").removesuffix("/etc")
-        return root + host_path
-
-    def etc_path(self, entry: InstallEntry) -> str:
-        """Where `entry` is installed under this environment's `etc_dir`."""
-        return _under(self.etc_dir, entry.dest, _ETC_PREFIX)
-
-    def src_path(self, entry: InstallEntry) -> str:
-        """Where `entry`'s source template lives under `src_dir`."""
-        return _under(self.src_dir, entry.src, _SWAP_SRC_PREFIX)
-
-    @property
-    def settings_path(self) -> str:
-        """/etc/cst/swap.conf: the partition swap manages."""
-        return posixpath.join(self.etc_dir, SETTINGS_REL)
-
-    @property
-    def crypttab(self) -> str:
-        return posixpath.join(self.etc_dir, "crypttab")
-
-    @property
-    def fstab(self) -> str:
-        return posixpath.join(self.etc_dir, "fstab")
-
-    @property
-    def tmpfiles_conf(self) -> str:
-        return _under(self.etc_dir, TMPFILES_ENTRY.dest, _ETC_PREFIX)
-
-    @property
-    def sysctl_conf(self) -> str:
-        return _under(self.etc_dir, SYSCTL_ENTRY.dest, _ETC_PREFIX)
-
-    @property
-    def old_sysctl_conf(self) -> str:
-        return posixpath.join(self.etc_dir, "sysctl.d", "99-zram-tuning.conf")
-
-    @property
-    def slice_dropin(self) -> str:
-        return _under(self.etc_dir, DROPIN_ENTRY.dest, _ETC_PREFIX)
-
-    @property
-    def old_slice_dropin(self) -> str:
-        return _under(self.etc_dir, OLD_DROPIN_ENTRY.dest, _ETC_PREFIX)
-
-    @property
-    def zram_conf(self) -> str:
-        return posixpath.join(self.etc_dir, "systemd", "zram-generator.conf")
-
-    @property
-    def src_tmpfiles(self) -> str:
-        return _under(self.src_dir, TMPFILES_ENTRY.src, _SWAP_SRC_PREFIX)
-
-    @property
-    def src_sysctl(self) -> str:
-        return _under(self.src_dir, SYSCTL_ENTRY.src, _SWAP_SRC_PREFIX)
-
-    @property
-    def src_dropin(self) -> str:
-        return _under(self.src_dir, DROPIN_ENTRY.src, _SWAP_SRC_PREFIX)
 
 
 # A crypttab or fstab, or a file apply writes whole (the tmpfiles, sysctl and uresourced files, the slice
@@ -216,6 +82,23 @@ _ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before i
 # row, whoever runs plan (after the name, for a name above a file apply writes whole that is not a folder).
 _FOLDER_IN_PLACE_NOTE: Final = "a folder is in its place: apply refuses before it writes anything"
 _NOT_A_FOLDER_NOTE: Final = "is not a folder: apply refuses before it writes anything"
+# The drop-in folders of machine.slice that systemd reads at a daemon-reload (its own and every slice's).
+_SLICE_DROPIN_FOLDERS: Final = ("machine.slice.d", "slice.d")
+# What plan and apply say of a drop-in there that is not a regular file.
+SLICE_DROPIN_NOT_REGULAR: Final = "not a regular file: systemd's daemon-reload would wait on it"
+# The install record's row (check_record's refusal), and what that refusal says apply does.
+_RECORD_ROW: Final = "install record"
+_RECORD_REFUSAL_OUTCOME: Final = "apply stops before it writes anything"
+
+
+def tmpfiles_compressor(text: str) -> str:
+    """The compressor zswap.conf sets (its first compressor line); "" when it sets none."""
+    return next((val for name, val in parse_tmpfiles_params(text) if name == "compressor"), "")
+
+
+def _not_regular(fs: FileSystemPort, path: str) -> bool:
+    """Whether path is there (a link that leads nowhere too) and is not a regular file after links."""
+    return fs.lexists(path) and not fs.is_file(path)
 
 
 def _root_note(env: SwapEnvironment, state: ManagedState, swap_name: str, verb: str, *, cannot_read: str) -> str:
@@ -274,6 +157,9 @@ class _FileSettingsFacts:
     def crypttab_closed(self) -> bool:
         return self._fs.exists(self._env.crypttab) and not self._fs.is_readable(self._env.crypttab)
 
+    def crypttab_not_regular(self) -> bool:
+        return _not_regular(self._fs, self._env.crypttab)
+
     def crypttab_text(self) -> str:
         return self._fs.read_text(self._env.crypttab, "", regular_only=True) or ""
 
@@ -330,6 +216,12 @@ class SwapReports:
     def _read_first(self, path: str, default: str) -> str:
         text = self._fs.read_first_line(path)
         return default if text is None else text
+
+    def _in_proc_crypto(self, algorithm: str) -> bool:
+        """Whether /proc/crypto lists algorithm now (none listed when it cannot be read)."""
+        return crypto_has_algorithm(
+            self._fs.read_text(posixpath.join(self._env.proc_dir, "crypto"), "") or "", algorithm
+        )
 
     def _inspect_marked(self, path: str, spec: MarkedLineSpec) -> ManagedState:
         exists = self._fs.exists(path)
@@ -458,13 +350,51 @@ class SwapReports:
         file_items: list[PlanItem] = []
         c_state = self._inspect_marked(env.crypttab, spec.crypttab_spec())
         f_state = self._inspect_marked(env.fstab, spec.fstab_spec())
-        for state, row in ((c_state, f"crypttab: {spec.name} line"), (f_state, f"fstab: {spec.mapper_path} line")):
-            note = _root_note(env, state, spec.name, verb, cannot_read=_ROOT_CANNOT_READ)
+        rows = (
+            (c_state, env.crypttab, f"crypttab: {spec.name} line"),
+            (f_state, env.fstab, f"fstab: {spec.mapper_path} line"),
+        )
+        for state, path, row in rows:
+            if state == OwnedState.UNREADABLE and _not_regular(self._fs, path):
+                # Root cannot help: no --root advice.
+                note = f"{NOT_REGULAR_NOTE}: apply refuses; put a regular file there"
+            else:
+                note = _root_note(env, state, spec.name, verb, cannot_read=_ROOT_CANNOT_READ)
             file_items.append(PlanItem(describe_state(state), row, note))
         tier_change = any(st in (OwnedState.MISSING, OwnedState.CHANGE) for st in (c_state, f_state))
         return file_items, tier_change
 
-    def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:
+    def _signature_item(self, spec: SwapHardwareSpec, verb: str) -> PlanItem | None:
+        """apply's signature check, where apply makes it (the partition found with its size, swap0 not open):
+        as the host's root, blkid with no cache file (plan writes nothing; /run/blkid is blkid's cache), and
+        REFUSE for a signature apply would not overwrite; anyone else gets "?" (blkid needs root)."""
+        if self._fs.is_block_device(spec.mapper_path):
+            return None
+        target = f"partition {spec.partuuid[:8]}..."
+        if not self._env.host_root:
+            return PlanItem(
+                "?", target, f"its signature needs root (blkid): on the host, {self._env.prog} {verb} --root"
+            )
+        part_type = self._system.blkid_type(spec.device_path, cache=False)
+        if is_safe_partition_type(part_type):
+            return None
+        return PlanItem("REFUSE", target, f"has a '{part_type}' signature: apply refuses to overwrite it")
+
+    def _compressor_item(self) -> PlanItem | None:
+        """apply's compressor check without its modprobe (plan loads nothing): "?" when the compressor of
+        swap/tmpfiles is not in /proc/crypto now."""
+        comp = tmpfiles_compressor(self._desired_text(self._env.src_tmpfiles))
+        if not comp or self._in_proc_crypto(comp):
+            return None
+        return PlanItem(
+            "?",
+            f"compressor {comp}",
+            "not in /proc/crypto now: apply loads its module (modprobe) and stops if it is still missing",
+        )
+
+    def _partition_items(
+        self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool, verb: str
+    ) -> list[PlanItem]:
         """The rows of the partition and of swap0 (swaps_text: /proc/swaps)."""
         runtime_items: list[PlanItem] = []
         part = self._partition_size_sysfs(spec.device_path)
@@ -474,6 +404,9 @@ class SwapReports:
                 runtime_items.append(
                     PlanItem("ok", f"partition {spec.partuuid[:8]}...", f"{dev}, {size} bytes as expected")
                 )
+                signature = self._signature_item(spec, verb)
+                if signature is not None:
+                    runtime_items.append(signature)
             else:
                 runtime_items.append(
                     PlanItem(
@@ -487,29 +420,22 @@ class SwapReports:
                 PlanItem("REFUSE", f"partition {spec.partuuid[:8]}...", f"{spec.device_path} not found: apply stops")
             )
 
+        runtime_items.append(self._swap0_item(spec, swaps_text, tier_change=tier_change))
+        return runtime_items
+
+    def _swap0_item(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> PlanItem:
+        """The plan/status row for the live swap0 device."""
         real_swap0 = self._swap0_device(spec)
         swap0_used = find_swap_used_kib(swaps_text, real_swap0)
-        if swap0_used is not None:
-            if tier_change:
-                if swap0_used == 0:
-                    runtime_items.append(
-                        PlanItem("restart", spec.name, "active and empty: apply re-activates it with the new options")
-                    )
-                else:
-                    runtime_items.append(
-                        PlanItem(
-                            "later",
-                            spec.name,
-                            f"active with {swap0_used // 1024} MiB in use: new options only after a reboot",
-                        )
-                    )
-            else:
-                runtime_items.append(PlanItem("ok", spec.name, f"active as swap ({real_swap0})"))
-        else:
-            runtime_items.append(
-                PlanItem("start", spec.name, "not active: apply opens it (dm-crypt + mkswap) and swaps on")
-            )
-        return runtime_items
+        if swap0_used is None:
+            return PlanItem("start", spec.name, "not active: apply opens it (dm-crypt + mkswap) and swaps on")
+        if not tier_change:
+            return PlanItem("ok", spec.name, f"active as swap ({real_swap0})")
+        if swap0_used == 0:
+            return PlanItem("restart", spec.name, "active and empty: apply re-activates it with the new options")
+        return PlanItem(
+            "later", spec.name, f"active with {swap0_used // 1024} MiB in use: new options only after a reboot"
+        )
 
     def build_config_report(self, verb: str) -> ConfigSectionReport:
         """Inspect managed config files and runtime swap/zram states."""
@@ -555,9 +481,22 @@ class SwapReports:
             )
 
         file_items.append(self._zram_conf_item())
+        record = self._record_item(verb)
+        if record is not None:
+            file_items.append(record)
+        dropin = self.slice_dropin_in_the_way()
+        if dropin is not None:
+            file_items.append(
+                PlanItem("REFUSE", _short_etc_path(env.etc_dir, dropin), f"{SLICE_DROPIN_NOT_REGULAR}; apply stops")
+            )
 
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
-        runtime_items = [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change)
+        runtime_items = (
+            [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change, verb=verb)
+        )
+        compressor = self._compressor_item()
+        if compressor is not None:
+            runtime_items.append(compressor)
         runtime_items.append(self._zram_runtime_item(swaps_text))
 
         return ConfigSectionReport(
@@ -568,6 +507,44 @@ class SwapReports:
             file_items=tuple(file_items),
             runtime_items=tuple(runtime_items),
         )
+
+    def slice_dropin_in_the_way(self) -> str | None:
+        """The first NAME.conf in machine.slice.d/ or slice.d/ of the system manager's unit folders that is
+        there and is not a regular file after links (a FIFO, a device, a folder): every daemon-reload of apply
+        makes systemd open it, and a FIFO's open waits for ever (PID 1 stops answering). A link that leads
+        nowhere is no obstacle (systemd skips it). Only stat, never an open. None: none."""
+        for base in self._env.slice_dropin_dirs:
+            for sub in _SLICE_DROPIN_FOLDERS:
+                folder = posixpath.join(base, sub)
+                for name in self._sorted_names(folder):
+                    path = posixpath.join(folder, name)
+                    if path == self._env.slice_dropin:
+                        continue  # CST's own: refused as a file apply writes whole ("cannot be read")
+                    if name.endswith(".conf") and self._fs.exists(path) and not self._fs.is_file(path):
+                        return path
+        return None
+
+    def _sorted_names(self, folder: str) -> list[str]:
+        """The names in folder, sorted; none when it is no folder or this user may not list it (plan
+        cannot tell, apply (root) can)."""
+        try:
+            return sorted(self._fs.list_dir(folder)) if self._fs.is_dir(folder) else []
+        except OSError:
+            return []
+
+    def _record_item(self, verb: str) -> PlanItem | None:
+        """The install record's row when apply would refuse it before its first write (check_record: one of a
+        newer CST, or one that is there and cannot be read); None when apply would take it. A reader that may
+        not read it and is not the host's root gets "?": the host's root may."""
+        try:
+            self._installer.check_record(self._env.install_record, _RECORD_REFUSAL_OUTCOME)
+        except InstallRefused as e:
+            if isinstance(e.__cause__, PermissionError) and not self._env.host_root:
+                return PlanItem(
+                    "?", _RECORD_ROW, f"cannot be read as this user: on the host, {self._env.prog} {verb} --root"
+                )
+            return PlanItem("REFUSE", _RECORD_ROW, str(e))
+        return None
 
     def _zram_conf_item(self) -> PlanItem:
         """The row of zram-generator.conf: masked, apply masks it, or a folder in its place that apply refuses."""

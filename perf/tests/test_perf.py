@@ -955,6 +955,40 @@ class PerfScratchIntegrationTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         CpuSet.parse(build)  # as cpu irq and vm-pin read it
 
+    def test_a_settings_file_s_problem_line_is_shown_in_the_section_that_reads_it(self) -> None:
+        # A line that is no KEY=VALUE assignment sets nothing. Before, perf dropped it silently and showed
+        # only what it then lacked (no BUILD_CPUS, no ban list, no scrub limit).
+        dropin = "etc/systemd/system/irqbalance.service.d/10-cst-ban.conf"
+        for rel, text, axes, with_dropin in (
+            ("etc/cpu-setup/cpu-setup.conf", "BUILD_CPUS = 12-23\n", ("cpu", "gpu"), False),
+            ("etc/cpu-setup/irqbalance.env", "IRQBALANCE_BANNED_CPULIST = 12-23\n", ("cpu",), True),
+            ("etc/sysconfig/irqbalance", "IRQBALANCE_BANNED_CPULIST = 12-23\n", ("cpu",), False),
+            ("etc/btrfs-setup/snapshots.conf", "SCRUB_LIMIT = 100M\n", ("io",), False),
+        ):
+            with self.subTest(rel=rel):
+                self.tmp = tempfile.mkdtemp(prefix="cst-perf-test-")
+                self.addCleanup(shutil.rmtree, self.tmp)
+                self._populate_healthy_tree()
+                self._write(rel, text)
+                if with_dropin:
+                    self._write(dropin, "[Service]\nEnvironmentFile=-/etc/cpu-setup/irqbalance.env\n")
+                with mock.patch.dict(os.environ, {"CST_PERF_ROOT": self.tmp}, clear=True):
+                    rep = build_perf_report(
+                        LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.CPU, PerfAxis.IO, PerfAxis.GPU)
+                    )
+                out = io.StringIO()
+                render_perf_report(rep, out=out)
+                sections = {s.split(" ", 1)[0]: s for s in out.getvalue().split("\n== ")[1:]}
+                row = f"/{rel} line 1: {text.strip()}: "
+                for axis in ("cpu", "io", "gpu"):
+                    rows = [line for line in sections[axis].splitlines() if row in line]
+                    if axis in axes:
+                        self.assertEqual(len(rows), 1, sections[axis])
+                        self.assertTrue(rows[0].startswith("  settings line "), rows[0])
+                        self.assertTrue(rows[0].endswith(" (ignored)"), rows[0])
+                    else:
+                        self.assertEqual(rows, [], sections[axis])
+
     def test_irqbalance_env_precedence_effective_affinity_and_iocost_enable_zero(self) -> None:
         self._populate_healthy_tree()
         self._write("etc/cpu-setup/cpu-setup.conf", "BUILD_CPUS='12-23'\nGPU_PM_MODE='game'\n")

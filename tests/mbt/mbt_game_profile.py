@@ -89,6 +89,8 @@ from hypothesis import settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
+from cpu.game.adapters.files import GameStateFiles
+from cpu.game.adapters.output import GameStreamOutput
 from cpu.game.adapters.profile import machine_ports
 from cpu.game.application.profile import GameProfileSteps
 from cpu.game.domain import (
@@ -555,12 +557,36 @@ class GameProfileMachine(RuleBasedStateMachine):
             assert has_prop_record(text, manager, unit, prop), f"tick: {unit} {prop} has no record: {text}"
             now = self.systemd.now(mgr, unit, prop)
             assert now == want, f"tick: {unit} {prop} is {now}, not {want}"
-        intended = ""  # none when 'on' died before it wrote it
-        if os.path.exists(self.paths.intended):
-            with open(self.paths.intended, encoding="utf-8", errors="replace") as fh:
-                intended = fh.read()
+        intended = read_text(self.paths.intended, "")
         drifts = self.profile(self.systemd).drift(intended)
         assert unheld(drifts, records(text)) == drifts, f"tick left a drift game.state holds: {drifts}"
+
+    def run_state(self) -> tuple[int, list[str]]:
+        """Run 'state' against the current machine files and return (rc, lines)."""
+        buf = io.StringIO()
+        real = machine_ports(
+            self.paths,
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "",
+            name_of=lambda uid: USER if uid == UID else "",
+            out=buf,
+        )
+        rc = GameProfileSteps(
+            self.paths, SETTINGS, dataclasses.replace(real, state=GameStateFiles(), out=GameStreamOutput(buf))
+        ).state()
+        return rc, buf.getvalue().splitlines()
+
+    @invariant()
+    def state_report_matches_files(self) -> None:
+        rc, lines = self.run_state()
+        assert rc == 0 and lines
+        has_state = os.path.exists(self.paths.state)
+        assert lines[0].startswith("game profile: ON" if has_state else "game profile: off"), lines
+        if has_state:
+            if self.state_text() == "":
+                assert not any(ln.lstrip().startswith("unreadable:") for ln in lines), lines
+            if not os.path.exists(self.paths.intended):
+                assert any("switched on by an older version" in ln for ln in lines), lines
 
     @invariant()
     def no_odd_box_is_named(self) -> None:
@@ -774,6 +800,32 @@ class GameProfileMachineTest(profiles.MbtTestCase):
             self.faulted("@ daemon-reload", at),
             lambda m: m.off(ProfileFault.NONE, 1),
         )
+
+    def test_state_and_drift_after_a_failed_create_of_state_files(self) -> None:
+        # r36.2: failed create(game.state) leaves an empty file that 'state' reads as ON with no unreadable lines.
+        m1 = GameProfileMachine()
+        self.addCleanup(m1.teardown)
+        m1.start(prior=False, cpuset=False, builds=False)
+        m1.call("on", ProfileFault.FAIL, 1)
+        rc, lines = m1.run_state()
+        self.assertEqual((rc, m1.state_text(), lines[0]), (0, "", "game profile: ON"))
+        self.assertTrue(any("switched on by an older version" in ln for ln in lines), lines)
+        m1.game(running=False)
+        m1.tick(ProfileFault.NONE, 1)
+        m1.run_follow_up()
+        self.assertFalse(os.path.exists(m1.paths.state))
+        # Failed create(game.intended) empties it; append_intended writes with no format line (version 0),
+        # so tick still repairs drift and 'state' compares it normally.
+        at = self.point("on", "game.intended")
+        m2 = GameProfileMachine()
+        self.addCleanup(m2.teardown)
+        m2.start(prior=False, cpuset=False, builds=False)
+        m2.game(running=True)
+        m2.call("on", ProfileFault.FAIL, at)
+        m2.systemd.set_now("sys", "machine.slice", CPUWeight="1")
+        m2.tick(ProfileFault.NONE, 1)
+        self.assertEqual(m2.systemd.now("sys", "machine.slice", "CPUWeight"), SETTINGS.vm_weight)
+        self.assertTrue(any("drift: none" in ln for ln in m2.run_state()[1]))
 
 
 if __name__ == "__main__":

@@ -19,13 +19,8 @@ from swap.application.memory_tuning import (
     uresourced_settings_row,
     wait_for_uresourced_floor,
 )
-from swap.application.reports import (
-    DROPIN_ENTRY,
-    OLD_DROPIN_ENTRY,
-    SYSCTL_ENTRY,
-    TMPFILES_ENTRY,
-    SwapReports,
-)
+from swap.application.environment import DROPIN_ENTRY, OLD_DROPIN_ENTRY, SYSCTL_ENTRY, TMPFILES_ENTRY
+from swap.application.reports import SLICE_DROPIN_NOT_REGULAR, SwapReports, tmpfiles_compressor
 from swap.domain import (
     SETTING_STATE_WIDTH,
     WSF_EXPERIMENT,
@@ -35,7 +30,6 @@ from swap.domain import (
     SwapApplyResult,
     SwapHardwareSpec,
     SwapSpecState,
-    crypto_has_algorithm,
     find_swap_used_kib,
     is_safe_partition_type,
     killed_text,
@@ -103,13 +97,12 @@ class SwapApplicationService(SwapReports):
             fail(f"zswap is not built into this kernel (no {env.zswap_params_dir}).")
             return None
         tmpfiles_text = self._desired_text(env.src_tmpfiles)
-        comp = next((val for name, val in parse_tmpfiles_params(tmpfiles_text) if name == "compressor"), "")
+        comp = tmpfiles_compressor(tmpfiles_text)
         if not comp:
             fail(f"no compressor line in {env.src_tmpfiles}.")
             return None
         self._system.modprobe(comp)
-        crypto_text = self._fs.read_text(posixpath.join(env.proc_dir, "crypto"), "") or ""
-        if not crypto_has_algorithm(crypto_text, comp):
+        if not self._in_proc_crypto(comp):
             fail(f"Compressor '{comp}' is not available in /proc/crypto.")
             return None
         if not self._fs.is_block_device(spec.device_path):
@@ -151,8 +144,19 @@ class SwapApplicationService(SwapReports):
 
         if not self._fs.exists(path):
             self._fs.write_atomic(path, "", mode)
+        # Read before the backup and the write: the file is there now, so None is one that cannot be read
+        # now (replaced by a FIFO, an I/O error). It is never replaced by the marked line alone.
+        existing = self._fs.read_text(path, regular_only=True)
+        if existing is None:
+            events.append(
+                ApplyEvent(
+                    "err",
+                    ApplyEventKind.ERROR,
+                    f"{self._env.prog}: ERROR: {path}: cannot be read: its {name} entry was not written",
+                )
+            )
+            return False, False, False
         self._fs.copy_if_absent(path, f"{path}.pre-swap-config.bak")
-        existing = self._fs.read_text(path, "", regular_only=True) or ""
         self._fs.write_atomic(path, line_spec.render_updated(existing), mode)
 
         if st == OwnedState.ADOPT:
@@ -308,6 +312,9 @@ class SwapApplicationService(SwapReports):
                 events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {dest}: {_FILE_CANNOT_BE_READ}"))
                 return None
         in_the_way = self._path_in_the_way()
+        if in_the_way is None and (dropin := self.slice_dropin_in_the_way()) is not None:
+            # Before the first write: each of apply's daemon-reloads would make PID 1 wait on it.
+            in_the_way = f"{dropin}: {SLICE_DROPIN_NOT_REGULAR}; nothing was changed"
         if in_the_way is not None:
             events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {in_the_way}"))
             return None

@@ -17,6 +17,7 @@ from perf.domain.axis import (
     worst_perf_verdict,
 )
 from perf.domain.models import (
+    SETTINGS_PROBLEM_LABEL,
     ALL_PERF_AXES,
     ALLOCSTALL_ATTENTION_PER_HOUR,
     ALLOCSTALL_BOTTLENECK_PER_HOUR,
@@ -481,6 +482,12 @@ def _eval_cpu_irqbalance(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
         )
 
 
+def _settings_problem_rows(col: AxisCollector, lines: Sequence[str]) -> None:
+    """A row for each problem line of a settings file the axis reads (it set nothing it should)."""
+    for line in lines:
+        col.metric(SETTINGS_PROBLEM_LABEL, line)
+
+
 def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
     """Evaluate cpuidle wakeup latency, preemption mode, ntsync, and IRQ placement."""
     col = AxisCollector(PerfAxis.CPU)
@@ -488,6 +495,7 @@ def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
     _eval_cpu_kernel(col, cpu)
     _eval_cpu_irqbalance(col, cpu)
     _eval_irq_build_overlap(col, cpu)
+    _settings_problem_rows(col, cpu.settings_problems)
     return col.report()
 
 
@@ -643,6 +651,7 @@ def evaluate_perf_io(io: IoProbeSnapshot) -> PerfAxisReport:
     _eval_io_dirty(col, io)
     _eval_io_root_commit(col, io)
     _eval_io_btrfs(col, io)
+    _settings_problem_rows(col, io.settings_problems)
     return col.report()
 
 
@@ -702,6 +711,7 @@ def evaluate_perf_gpu(gpu: GpuProbeSnapshot) -> PerfAxisReport:
     for dev in gpu.gpus:
         _eval_gpu_runtime_pm(col, gpu, dev)
         _eval_gpu_game_profile(col, gpu, dev)
+    _settings_problem_rows(col, gpu.settings_problems)
     return col.report()
 
 

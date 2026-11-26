@@ -23,7 +23,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from typing import Literal, TextIO, overload
+from typing import BinaryIO, Literal, TextIO, overload
 
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, owned_file_state
@@ -192,16 +192,36 @@ def unit_file_state_at(
     return owned_file_state_at(path, wanted, is_ours, owner=owner)
 
 
+def _open_regular_fd(path: str) -> int:
+    """Open path read-only without waiting and require a regular file; raise OSError(EINVAL) otherwise."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def open_regular_text(path: str, *, errors: str = "surrogateescape", newline: str | None = "") -> TextIO:
     """path opened for reading as UTF-8 text if it is a regular file (after links), else OSError(EINVAL);
     the open never waits (LocalFileSystemAdapter.read_existing_text's regular_only). errors and newline
     are open()'s: by default byte-transparent, line ends kept; cst doctor asks for errors="replace" and
     newline=None, as its plain open of a settings file reads."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    fd = _open_regular_fd(path)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EINVAL, "not a regular file", path)
         return os.fdopen(fd, encoding="utf-8", errors=errors, newline=newline)
+    except BaseException:
+        os.close(fd)  # fdopen did not take it
+        raise
+
+
+def open_regular_bytes(path: str) -> BinaryIO:
+    """path opened for reading raw bytes if it is a regular file (after links), else OSError(EINVAL); never waits."""
+    fd = _open_regular_fd(path)
+    try:
+        return os.fdopen(fd, "rb")
     except BaseException:
         os.close(fd)  # fdopen did not take it
         raise

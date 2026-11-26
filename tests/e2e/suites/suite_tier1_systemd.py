@@ -1012,6 +1012,45 @@ echo E2E-OK
 """
 )
 
+BT_PROBLEM_LINE_SCRIPT = (
+    BT_STEPS
+    + r"""
+set -E
+TEST=test_280
+trap 'echo "test_280 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+H=/home/tester
+wp="$H/.config/wireplumber/wireplumber.conf.d"
+rule="$wp/50-bluez-0A_1B_2C_3D_4E_5F.conf"
+conf="$H/.config/cst/bluetooth.conf"
+mkdir -p "$wp" "$(dirname "$conf")"
+cp /opt/cst-rw/tests/fixtures/legacy/50-bluez-0A_1B_2C_3D_4E_5F.conf@535aea1 "$rule"
+r0="$(sha256sum <"$rule")"
+# refused LABEL WORDS...: apply exits 2 with the words, writes nothing, and the settings and the rule
+# keep their bytes.
+refused() {
+    local c0 rc=0
+    c0="$(sha256sum <"$conf")"
+    out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+    show "$1" "$out"
+    [[ "$rc" == 2 ]]
+    for words in "${@:2}"; do grep -qF "$words" <<<"$out"; done
+    no_writes "$1" "$out"
+    [[ "$(sha256sum <"$conf")" == "$c0" && "$(sha256sum <"$rule")" == "$r0" ]]
+}
+
+# 1. A DEVICE line with a no-break space at its end, next to CST's LDAC rule for another headset.
+printf 'LE_AUDIO=off\nDEVICE=AA:BB:CC:DD:EE:FF\xc2\xa0\n' >"$conf"
+refused device "the device must be a MAC address like AA:BB:CC:DD:EE:FF (got 'AA:BB:CC:DD:EE:FF" \
+    "'; set DEVICE in $conf or use --device)"
+
+# 2. The same for LE_AUDIO.
+printf 'LE_AUDIO=off\xc2\xa0\n' >"$conf"
+refused le-audio "LE Audio must be on or off (got 'off" "'; LE_AUDIO in the settings or --le-audio)"
+echo E2E-OK
+"""
+)
+
 
 # test_151, test_200: helpers for their bash steps, and cst vm's torn-snapshot steps (vm/application/nas_torn.py)
 # over the real restic; argv[1] the step. "summary" and "ids" read restic's JSON on stdin; "record",
@@ -5385,6 +5424,24 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf",
         )
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_HEADSET_SCRIPT).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_280_bluetooth_apply_refuses_a_device_or_le_audio_line_that_sets_nothing(self) -> None:
+        """Owner choice r27.7. As tester with the real user manager and WirePlumber, CST's LDAC rule
+        of main's install (tests/fixtures/legacy) and a settings file whose DEVICE line, then whose
+        LE_AUDIO line, ends with a no-break space (a line that sets nothing): `cst bluetooth apply`
+        exits 2 with the words of a bad value, writes nothing, and the settings file and the rule
+        keep their sha256. Before, apply warned that the line is ignored and saved the rule's
+        headset over the DEVICE line: run against the old code, this test fails at that write."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "rm -f /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.config/wireplumber/wireplumber.conf.d/50-bluez-0A_1B_2C_3D_4E_5F.conf",
+            check=False,
+        )
+        out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_PROBLEM_LINE_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BLUETOOTH)
@@ -14692,7 +14749,8 @@ echo E2E-OK
         /etc/fstab was (the real one moved aside). The test's own trap puts each back before swap_cleanup
         runs. Each time plan exits 0 and its row of that path is "?" with apply's reason ("a folder is in
         its place: apply refuses before it writes anything", "<folder> is not a folder: ...", "cannot be
-        read, even as root: ..."), and apply then exits 1 with the matching "...: nothing was changed"
+        read, even as root: ...", or for /etc/fstab "not a regular file ...: apply refuses; put a regular file
+        there"), and apply then exits 1 with the matching "...: nothing was changed"
         line, every file, link, mode and owner under /etc and the scratch tree, and the install record,
         as before (no .pre-swap-config.bak, no sysctl run). The pair (plan's row, apply's refusal) per
         case is the point: before 02409d4d plan said "mask", "remove" and "write" for the first three.
@@ -14774,7 +14832,8 @@ put_back
 if [[ -e /etc/fstab ]]; then mv /etc/fstab "$W/fstab.real"; fi
 mkdir /etc/fstab
 made=fstab
-pair "a folder in place of /etc/fstab" "fstab: /dev/mapper/swap0 line" "cannot be read, even as root: $REFUSES" \
+pair "a folder in place of /etc/fstab" "fstab: /dev/mapper/swap0 line" \
+    "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there" \
     "/etc/fstab: cannot be read: nothing was changed"
 put_back
 
@@ -14874,8 +14933,9 @@ echo E2E-OK
         that nothing ever writes to at /etc/systemd/system/machine.slice.d/50-memory-low.conf, the name an
         older CST gave its drop-in (plan reads it to decide whether apply removes it). Each run is bounded
         by timeout(1) at 30 s: before this change plan opened the FIFO and waited for a writer for ever
-        (exit 124 here). Now the FIFO is not CST's file: plan and status exit 0 at once with no row for it,
-        and change nothing. machine.slice is started before the FIFO is made, so systemd has loaded it and
+        (exit 124 here). Now the FIFO is not CST's file: plan and status exit 0 at once, with no "remove" row
+        for it but a REFUSE row (since 2026-11: apply refuses a drop-in there that is not a regular file,
+        test_274), and change nothing. machine.slice is started before the FIFO is made, so systemd has loaded it and
         its drop-ins already: systemd itself opens a FIFO drop-in when it loads the slice (and at a
         daemon-reload) and waits for a writer, and PID 1 then stops answering (seen in a first version of
         this test). So apply, whose daemon-reload reloads the slice, is not run here; the unit tests show
@@ -14911,10 +14971,12 @@ s0="$(snap)"
 bounded plan
 [[ $rc == 0 ]] || fail "plan with a FIFO at $OLD exited $rc"
 grep -qE '^  write +crypttab: swap0 line' <<<"$out" || fail "plan's crypttab row"
-if grep -qF '50-memory-low.conf' <<<"$out"; then fail "plan has a row for the FIFO"; fi
+# Not CST's file (no "remove" row), and one a daemon-reload would wait on: apply refuses it (REFUSE).
+grep -qE '^ *REFUSE +machine.slice.d/50-memory-low.conf +not a regular file: systemd' <<<"$out" || fail "plan's REFUSE row"
+if grep -qE '^ *remove +machine.slice.d/50-memory-low.conf' <<<"$out"; then fail "plan would remove the FIFO"; fi
 bounded status
 [[ $rc == 0 || $rc == 1 ]] || fail "status with a FIFO at $OLD exited $rc"
-if grep -qF '50-memory-low.conf' <<<"$out"; then fail "status has a row for the FIFO"; fi
+grep -qE '^ *REFUSE +machine.slice.d/50-memory-low.conf +not a regular file: systemd' <<<"$out" || fail "status's REFUSE row"
 [[ -p "$OLD" ]] || fail "the FIFO is gone"
 [[ "$(snap)" == "$s0" ]] || fail "plan or status changed /etc or the scratch tree"
 echo E2E-OK
@@ -14969,3 +15031,451 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.DOCTOR, E2ETag.SWAP)
+    def test_273_doctor_names_a_fifo_at_zswap_conf_and_does_not_wait_on_it(self) -> None:
+        """cst doctor as tester with a FIFO that nothing ever writes to at /etc/tmpfiles.d/zswap.conf (a path
+        no daemon-reload or generator reads; the container's own file, if any, is put back after). The run is
+        bounded by timeout(1) at 120 s and must end within 60 s with the row "zswap: cannot read ...". Before
+        this change doctor opened the FIFO and waited for a writer for ever (exit 124 here). The FIFO at
+        /etc/fstab and in machine.slice.d is covered by the unit tests only: a daemon-reload or the fstab
+        generator would wait on it too. The trap lets a reader that waits go (a writer's open) before it removes
+        the FIFO."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+set -u
+Z=/etc/tmpfiles.d/zswap.conf
+W="$(mktemp -d)"
+if [[ -e "$Z" || -L "$Z" ]]; then mv "$Z" "$W/saved"; fi
+release() { if [[ -p "$Z" ]]; then timeout 2 sh -c 'exec 3>"$1"' sh "$Z" || true; rm -f "$Z"; fi; }
+restore() { release; if [[ -e "$W/saved" || -L "$W/saved" ]]; then mv "$W/saved" "$Z"; fi; rm -rf "$W"; }
+trap restore EXIT
+fail() { echo "FAILED: $1"; echo "--- output"; cat "$W/out"; exit 1; }
+mkdir -p /etc/tmpfiles.d
+mkfifo -m 0644 "$Z"
+rc=0
+start=$SECONDS
+timeout 120 runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I \
+    /opt/cst-rw/doctor/cst-doctor >"$W/out" 2>&1 </dev/null || rc=$?
+took=$((SECONDS - start))
+[[ $rc != 124 ]] || fail "doctor blocked on the FIFO"
+(( took <= 60 )) || fail "doctor took $took s"
+grep -qF "info   zswap: cannot read /etc/tmpfiles.d/zswap.conf" "$W/out" || fail "no zswap row"
+[[ -p "$Z" ]] || fail "the FIFO is gone"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP, E2ETag.INSTALL)
+    def test_275_swap_apply_and_the_installer_refuse_an_install_record_that_cannot_be_read(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap set
+        before swap_setup, which saves root's install record and puts it back) with /etc/cst/swap.conf in
+        place and a folder where root's install record goes. apply exits 1 with "REC: cannot be read (Is a
+        directory): nothing was changed" on stderr, and every file, link, mode and owner under /etc and the
+        scratch tree is as before (no crypttab line, no .pre-swap-config.bak); plan --root shows the same
+        refusal as a REFUSE row of the install record ("apply stops before it writes anything"). The
+        installer's text command (as cpu-setup calls it) refuses the same record and does not write its
+        destination. Then a record of a newer CST (format 99): plan --root shows its REFUSE row too. Before,
+        apply wrote crypttab and fstab and started swap0 first and failed at the record, the text command
+        wrote its file and then failed, and plan showed apply's writes. The test's trap removes the folder before swap_cleanup puts the
+        saved record back."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+unplant() { if [[ -d "$REC" && ! -L "$REC" ]]; then rmdir "$REC"; fi; rm -f /etc/e2e275.conf; }
+trap 'unplant; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+
+mkdir -p /etc/cst "$(dirname "$REC")"
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+rm -f "$REC"
+mkdir "$REC"
+s0="$(snap)"
+swap_run plan --root
+[[ $rc == 0 ]] || fail "plan with a folder at the record exited $rc"
+grep -qE "^ *REFUSE +install record +$REC: cannot be read \(Is a directory\): apply stops before it writes anything$" \
+    <<<"$out" || fail "plan's row of the folder at the record"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a folder at the record exited $rc"
+grep -qF "ERROR: $REC: cannot be read (Is a directory): nothing was changed" <<<"$err" || fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
+[[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+
+rc=0
+out="$(printf 'x\n' | /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py text /etc/e2e275.conf 0644 \
+    --component btrfs:core 2>&1)" || rc=$?
+err="$out"
+[[ $rc == 1 ]] || fail "the installer's text command exited $rc"
+grep -qF "$REC: cannot be read (Is a directory): /etc/e2e275.conf was not written" <<<"$out" || fail "text's message"
+[[ ! -e /etc/e2e275.conf ]] || fail "the text command wrote its file"
+
+rmdir "$REC"
+printf '{"format": 99, "files": {}}' >"$REC"
+swap_run plan --root
+[[ $rc == 0 ]] || fail "plan with a newer record exited $rc"
+grep -qE "^ *REFUSE +install record +$REC: format 99, written by a newer CST .*: apply stops before it writes anything$" \
+    <<<"$out" || fail "plan's row of a newer record"
+[[ "$(snap)" == "$s0" ]] || fail "plan changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP, E2ETag.DOCTOR)
+    def test_276_swap_plan_and_doctor_name_a_crypttab_that_is_not_a_regular_file_and_a_missing_compressor(self) -> None:
+        """cst swap plan --root and cst doctor as root on the container's /etc (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup), nothing applied yet. (1) No /etc/cst/swap.conf, as on a machine an older CST
+        set up, and a FIFO that nothing writes to at /etc/crypttab: plan's row of cst/swap.conf is "REFUSE ...
+        not written yet, and /etc/crypttab is not a regular file ...: apply stops", and doctor's line says the
+        same, both at once (timeout 60). Before, both said "no swap partition configured" / "not configured".
+        (2) swap.conf in place, crypttab back, and the scratch /proc/crypto (CST_SWAP_PROC) without zstd:
+        plan's row "? compressor zstd not in /proc/crypto now: apply loads its module ...". Before, plan had no
+        row and only apply found it. The trap lets a reader that waits go and removes the FIFO before
+        swap_cleanup copies crypttab back."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+release() {
+    if [[ -p /etc/crypttab ]]; then timeout 2 sh -c 'exec 3>"$1"' sh /etc/crypttab || true; rm -f /etc/crypttab; fi
+}
+trap 'release; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+bounded() {
+    rc=0
+    timeout 60 "$@" >"$W/out" 2>"$W/err" </dev/null || rc=$?
+    out="$(cat "$W/out")"
+    err="$(cat "$W/err")"
+    [[ $rc != 124 ]] || fail "$* blocked at /etc/crypttab"
+}
+
+rm -f /etc/cst/swap.conf
+mv /etc/crypttab "$W/crypttab.e2e276" 2>/dev/null || true
+mkfifo -m 0600 /etc/crypttab
+bounded "$CST" swap plan --root
+grep -qE "^ *REFUSE +cst/swap.conf +not written yet, and /etc/crypttab is not a regular file \(a FIFO, a device, a folder, or a link to one\): apply stops$" \
+    <<<"$out" || fail "plan's settings row"
+bounded env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor
+grep -qF "WARN   swap partition: /etc/cst/swap.conf not written yet, and /etc/crypttab is not a regular file" <<<"$out" ||
+    fail "doctor's line"
+[[ "$out" != *"swap partition: not configured"* ]] || fail "doctor took the FIFO for no settings"
+release
+if [[ -e "$W/crypttab.e2e276" ]]; then mv "$W/crypttab.e2e276" /etc/crypttab; fi
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+cp "$W/proc/crypto" "$W/crypto.e2e276"
+printf 'name         : deflate\ndriver       : deflate-generic\n' >"$W/proc/crypto"
+swap_run plan --root
+cp "$W/crypto.e2e276" "$W/proc/crypto"
+[[ $rc == 0 ]] || fail "plan exited $rc"
+grep -qE "^ *\? +compressor zstd +not in /proc/crypto now: apply loads its module \(modprobe\) and stops if it is still missing$" \
+    <<<"$out" || fail "plan's compressor row"
+if grep -qs '^modprobe ' "$W/calls"; then fail "plan ran modprobe"; fi
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_274_swap_apply_refuses_a_fifo_among_machine_slice_s_drop_ins_before_its_daemon_reload(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap set
+        before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and a FIFO that nothing
+        writes to at /etc/systemd/system/machine.slice.d/60-e2e274.conf. machine.slice is started before
+        the FIFO is made, so systemd has loaded the slice and does not open the FIFO unless something
+        reloads it (as test_213; this test, too, relies on nothing else reloading systemd while the FIFO is
+        there: each tier 1 job has a container of its own). apply, bounded by timeout(1) at 60 s, exits 1
+        with "...: not a regular file: systemd's daemon-reload would wait on it; nothing was changed",
+        changes nothing, and systemd still answers within 10 s. On the old code apply's daemon-reload would
+        make PID 1 wait in the FIFO's open; the unit tests prove that (a fake records the reload), and this
+        test is not run against the old code. The trap lets a reader that waits go (a writer's open) and
+        removes the FIFO before swap_cleanup's daemon-reload."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+FIFO="$DROPIN_DIR/60-e2e274.conf"
+release() { if [[ -p "$FIFO" ]]; then timeout 2 sh -c 'exec 3>"$1"' sh "$FIFO" || true; rm -f "$FIFO"; fi; }
+trap 'release; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+systemctl start machine.slice
+mkdir -p "$DROPIN_DIR"
+mkfifo -m 0644 "$FIFO"
+s0="$(snap)"
+rc=0
+timeout 60 "$CST" swap apply >"$W/out" 2>"$W/err" </dev/null || rc=$?
+out="$(cat "$W/out")"
+err="$(cat "$W/err")"
+[[ $rc != 124 ]] || fail "apply blocked"
+[[ $rc == 1 ]] || fail "apply with a FIFO among the drop-ins exited $rc"
+grep -qF "ERROR: $FIFO: not a regular file: systemd's daemon-reload would wait on it; nothing was changed" <<<"$err" ||
+    fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+timeout 10 systemctl is-system-running >/dev/null || [[ $? != 124 ]] || fail "systemd does not answer"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_277_cpu_setup_dropins_follow_user_unit_path(self) -> None:
+        """cst cpu install writes user.slice.d drop-ins under the user manager's UnitPath (e2e277 with
+        XDG_CONFIG_HOME for user@1277.service), upgrades a recorded copy under ~/.config, is idempotent on
+        a second run, keeps tester's usual path and sha256 unchanged, and uninstall removes them."""
+        c = self.SYSTEMD_CONTAINER
+        if exec_bash(c, "getent passwd e2e277 || getent passwd 1277 || true").stdout.strip():
+            self.skipTest("the account e2e277 or the uid 1277 is taken")
+        if exec_bash(
+            c, "for f in /etc/systemd/system/user@1277.service.d; do [[ ! -e $f ]] || echo $f; done"
+        ).stdout.strip():
+            self.skipTest("user@1277.service.d already exists")
+        self.addCleanup(
+            exec_bash,
+            c,
+            """set +e
+            /opt/cst-rw/cst cpu uninstall >/dev/null 2>&1
+            systemctl stop user@1277.service user-runtime-dir@1277.service 2>/dev/null
+            rm -rf /etc/systemd/system/user@1277.service.d
+            systemctl daemon-reload
+            userdel -rf e2e277 2>/dev/null
+            if [[ -e /tmp/e2e-277-conf.bak ]]; then
+                mv /tmp/e2e-277-conf.bak /etc/cpu-setup/cpu-setup.conf
+            else
+                rm -f /etc/cpu-setup/cpu-setup.conf
+            fi""",
+            check=False,
+        )
+        r = exec_bash(
+            c,
+            r"""
+            set -Ee
+            trap 'echo "test_277 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            if [[ -e /etc/cpu-setup/cpu-setup.conf ]]; then cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-277-conf.bak; fi
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            useradd -m -u 1277 e2e277
+            H=/home/e2e277
+            mkdir -p /etc/systemd/system/user@1277.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s/xdg277\n' "$H" >/etc/systemd/system/user@1277.service.d/zz-e2e277.conf
+            systemctl daemon-reload
+            systemctl start user@1277.service
+            old="$H/.config/systemd/user/user.slice.d/10-cpu-setup.conf"
+            new="$H/xdg277/systemd/user/user.slice.d/10-cpu-setup.conf"
+            rec="$H/.local/state/cst/installed.json"
+            printf '# Managed by cpu-setup.sh (CST).\n[Slice]\nCPUWeight=30\n' |
+                runuser -u e2e277 -- python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old" 0644 --component cpu:toolbox >/dev/null
+            [[ -f "$old" ]]
+            grep -qF "\"$old\"" "$rec"
+            as_user() { local u="$1" id="$2"; shift 2; SUDO_USER="$u" SUDO_UID="$id" SUDO_GID="$id" "$@"; }
+            as_user e2e277 1277 /opt/cst-rw/cst cpu install >/tmp/e2e-277-1.out 2>&1
+            [[ -f "$new" ]]
+            [[ ! -e "$old" ]]
+            if grep -qF "\"$old\"" "$rec"; then echo "old copy still in installed.json" >&2; exit 1; fi
+            grep -qF "\"$new\"" "$rec"
+            drops="$(systemctl --user -M e2e277@ show user.slice -p DropInPaths --value)"
+            grep -qF "$new" <<<"$drops"
+            as_user e2e277 1277 /opt/cst-rw/cst cpu install >/tmp/e2e-277-2.out 2>&1
+            if grep -qE '^(written:|removed:)' /tmp/e2e-277-2.out; then cat /tmp/e2e-277-2.out >&2; exit 1; fi
+            as_user e2e277 1277 /opt/cst-rw/cst cpu uninstall >/dev/null
+            [[ ! -e "$new" ]]
+            # Usual set-up (tester): exact default path and content match origin/main.
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            as_user tester 1000 /opt/cst-rw/cst cpu install >/dev/null
+            t_drop="/home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf"
+            [[ -f "$t_drop" ]]
+            ec="$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)"
+            if [[ -n "$ec" ]]; then
+                want_sha="$(printf '# Managed by cpu-setup.sh (CST): toolbox containers (inner user.slice of the\n# user manager, sibling of app.slice) on the E-cores, weighing like background.slice.\n[Slice]\nCPUWeight=30\nAllowedCPUs=%s\n' "$ec" | sha256sum | awk '{print $1}')"
+            else
+                want_sha="$(printf '# Managed by cpu-setup.sh (CST).\n[Slice]\nCPUWeight=30\n' | sha256sum | awk '{print $1}')"
+            fi
+            got_sha="$(sha256sum "$t_drop" | awk '{print $1}')"
+            if [[ "$got_sha" != "$want_sha" ]]; then echo "sha mismatch: $got_sha != $want_sha" >&2; cat "$t_drop" >&2; exit 1; fi
+            as_user tester 1000 /opt/cst-rw/cst cpu uninstall >/dev/null
+            [[ ! -e "$t_drop" ]]
+            echo E2E-OK
+            """,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.TOOLCHAINS)
+    def test_278_toolchains_auto_units_follow_user_unit_path(self) -> None:
+        """cst toolchains auto on writes cst-toolchains-prune.{service,timer} under the user manager's
+        UnitPath (e2e278 with XDG_CONFIG_HOME for user@1278.service), loads/enables the timer there
+        (FragmentPath), removes a recorded older copy under ~/.config, is undone by auto off, and keeps
+        tester's usual paths unchanged."""
+        c = self.SYSTEMD_CONTAINER
+        if exec_bash(c, "getent passwd e2e278 || getent passwd 1278 || true").stdout.strip():
+            self.skipTest("the account e2e278 or the uid 1278 is taken")
+        if exec_bash(
+            c, "for f in /etc/systemd/system/user@1278.service.d; do [[ ! -e $f ]] || echo $f; done"
+        ).stdout.strip():
+            self.skipTest("user@1278.service.d already exists")
+        self.addCleanup(
+            exec_bash,
+            c,
+            """set +e
+            runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1
+            rm -f /home/tester/.config/cst/toolchains-auto.off
+            systemctl stop user@1278.service user-runtime-dir@1278.service 2>/dev/null
+            rm -rf /etc/systemd/system/user@1278.service.d
+            systemctl daemon-reload
+            userdel -rf e2e278 2>/dev/null""",
+            check=False,
+        )
+        r = exec_bash(
+            c,
+            r"""
+            set -Ee
+            trap 'echo "test_278 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            useradd -m -u 1278 e2e278
+            H=/home/e2e278
+            mkdir -p /etc/systemd/system/user@1278.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s/xdg278\n' "$H" >/etc/systemd/system/user@1278.service.d/zz-e2e278.conf
+            systemctl daemon-reload
+            systemctl start user@1278.service
+            as_278() {
+                runuser -u e2e278 -- env HOME="$H" USER=e2e278 LOGNAME=e2e278 \
+                    XDG_RUNTIME_DIR=/run/user/1278 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1278/bus "$@"
+            }
+            as_278 mkdir -p "$H/.cargo"
+            printf '[build]\nbuild-dir = "%s/.cache/cargo-build/{workspace-path-hash}"\n' "$H" |
+                as_278 tee "$H/.cargo/config.toml" >/dev/null
+            old_t="$H/.config/systemd/user/cst-toolchains-prune.timer"
+            old_s="$H/.config/systemd/user/cst-toolchains-prune.service"
+            new_t="$H/xdg278/systemd/user/cst-toolchains-prune.timer"
+            new_s="$H/xdg278/systemd/user/cst-toolchains-prune.service"
+            rec="$H/.local/state/cst/installed.json"
+            printf '# managed-by: toolchains-setup.sh (CST)\n[Timer]\nOnCalendar=hourly\n' |
+                as_278 python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old_t" 0644 --component toolchains:auto >/dev/null
+            printf '# managed-by: toolchains-setup.sh (CST)\n[Service]\nType=oneshot\n' |
+                as_278 python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old_s" 0644 --component toolchains:auto >/dev/null
+            [[ -f "$old_t" && -f "$old_s" ]]
+            out1="$(as_278 /opt/cst-rw/cst toolchains auto on 2>&1)"
+            [[ -f "$new_t" && -f "$new_s" ]]
+            [[ ! -e "$old_t" && ! -e "$old_s" ]]
+            if grep -qF "\"$old_t\"" "$rec"; then echo "old copy still in installed.json" >&2; cat "$rec" >&2; exit 1; fi
+            [[ "$(systemctl --user -M e2e278@ show -P FragmentPath cst-toolchains-prune.timer)" == "$new_t" ]]
+            systemctl --user -M e2e278@ is-enabled --quiet cst-toolchains-prune.timer
+            as_278 /opt/cst-rw/cst toolchains auto off >/dev/null
+            [[ ! -e "$new_t" && ! -e "$new_s" ]]
+            # Usual set-up (tester): units go to ~/.config/systemd/user.
+            as_tester() {
+                runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"
+            }
+            as_tester mkdir -p /home/tester/.cargo
+            if [[ ! -e /home/tester/.cargo/config.toml ]]; then
+                printf '[build]\nbuild-dir = "/home/tester/.cache/cargo-build/{workspace-path-hash}"\n' |
+                    as_tester tee /home/tester/.cargo/config.toml >/dev/null
+            fi
+            as_tester /opt/cst-rw/cst toolchains auto on >/dev/null
+            [[ -f /home/tester/.config/systemd/user/cst-toolchains-prune.timer ]]
+            as_tester /opt/cst-rw/cst toolchains auto off >/dev/null
+            [[ ! -e /home/tester/.config/systemd/user/cst-toolchains-prune.timer ]]
+            echo E2E-OK
+            """,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_279_bluetooth_wireplumber_follows_user_manager_env(self) -> None:
+        """r30.1: `cst bluetooth` writes WirePlumber files under the user manager's XDG_CONFIG_HOME
+        (~/.config for tester), ignores the shell's XDG_CONFIG_HOME for WirePlumber while keeping it
+        for cst/bluetooth.conf, removes marked stale WirePlumber files from the shell's folder, warns
+        and keeps unmarked ones, and checks wp-roles under the manager's folder."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "XDG_CONFIG_HOME=/home/tester/.e2e279-xdg /opt/cst-rw/cst bluetooth revert --yes --no-restart "
+            ">/dev/null 2>&1 || true\n"
+            "rm -rf /home/tester/.e2e279-xdg",
+            check=False,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            "mkdir -p /etc/bluetooth\nprintf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf",
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_279 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            H=/home/tester
+            S="$H/.e2e279-xdg"
+            rm -rf "$S"
+            mkdir -p "$S/cst" "$S/wireplumber/wireplumber.conf.d"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_QUALITY=auto\nLDAC_RATE=\nLE_AUDIO=off\n' >"$S/cst/bluetooth.conf"
+            printf '# managed-by: bluetooth-setup.sh (CST)\n' >"$S/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf"
+            printf '# hand-edited\n' >"$S/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf"
+
+            wp_pid="$(systemctl --user show -P MainPID wireplumber.service || echo 0)"
+            if [[ "$wp_pid" =~ ^[0-9]+$ ]] && [[ "$wp_pid" -gt 0 ]] && [[ -r "/proc/$wp_pid/environ" ]]; then
+                if tr '\0' '\n' <"/proc/$wp_pid/environ" | grep -q '^XDG_CONFIG_HOME='; then
+                    mgr_xdg="$(systemctl --user show-environment | sed -n 's/^XDG_CONFIG_HOME=//p' | head -n1)"
+                    proc_xdg="$(tr '\0' '\n' <"/proc/$wp_pid/environ" | sed -n 's/^XDG_CONFIG_HOME=//p' | head -n1)"
+                    [[ "$proc_xdg" == "$mgr_xdg" ]]
+                else
+                    if systemctl --user show-environment | grep -q '^XDG_CONFIG_HOME='; then exit 1; fi
+                fi
+            fi
+
+            export XDG_CONFIG_HOME="$S"
+            set +e
+            plan_out="$(/opt/cst-rw/cst bluetooth plan 2>&1)"
+            plan_rc=$?
+            set -e
+            [[ "$plan_rc" -eq 10 ]] || { echo "plan rc=$plan_rc out=$plan_out" >&2; exit 1; }
+            grep -qF "90-cst-le-audio-off.conf" <<<"$plan_out"
+            grep -qF "not written by CST: left alone" <<<"$plan_out"
+
+            apply_out="$(/opt/cst-rw/cst bluetooth apply --yes 2>&1 || true)"
+            [[ -f "$H/.config/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf" ]]
+            [[ -f "$H/.config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" ]]
+            [[ ! -e "$S/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" ]]
+            [[ -f "$S/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf" ]]
+            grep -qF "removed:   $S/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" <<<"$apply_out"
+            grep -qF "WARNING: $S/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf was not written by CST: left alone" <<<"$apply_out"
+            grep -qE 'WirePlumber bluez5\.roles.*\(no LE Audio roles\)' <<<"$apply_out" ||
+                { echo "unexpected wp-roles output: $apply_out" >&2; exit 1; }
+
+            plan2_rc=0
+            /opt/cst-rw/cst bluetooth plan >/dev/null || plan2_rc=$?
+            [[ "$plan2_rc" -eq 0 ]]
+            apply2_out="$(/opt/cst-rw/cst bluetooth apply --yes 2>&1 || true)"
+            if grep -qF "restarted: wireplumber" <<<"$apply2_out"; then exit 1; fi
+
+            /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null
+            [[ ! -e "$H/.config/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf" ]]
+            [[ ! -e "$H/.config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

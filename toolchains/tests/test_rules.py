@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
 import fcntl
 import hashlib
 import io
@@ -1030,6 +1031,50 @@ class SccacheConfigTest(RulesBase):
         _rc, out = self.run_main("config", "plan", "--sccache")
         self.assertIn("sccache: rustc-wrapper set (--sccache)", out)
         self.assertNotIn("Apply with", out)
+
+    def test_a_failed_rewrite_says_whether_the_new_text_is_in_place(self) -> None:
+        # write_atomic renames the new file into place and only then syncs its folder, and that sync can
+        # fail (EIO): the file then holds the new text. Before, apply said "left as it is" both times.
+        real_write = tc_home_files.write_atomic
+        eio = OSError(errno.EIO, os.strerror(errno.EIO))
+
+        def replaced_then_eio(path: str, data: str, *, mode: int) -> None:
+            real_write(path, data, mode=mode)
+            if os.path.basename(path) == "config.toml":
+                raise eio
+
+        def eio_before(path: str, data: str, *, mode: int) -> None:
+            if os.path.basename(path) == "config.toml":
+                raise eio
+            real_write(path, data, mode=mode)
+
+        for args in (("--sccache",), ("--no-sccache",)):
+            for fake, replaced in ((replaced_then_eio, True), (eio_before, False)):
+                with self.subTest(args=args, replaced=replaced):
+                    self.write_cargo_config("[net]\noffline = true\n")
+                    if args == ("--no-sccache",):
+                        rc, out = self.run_main("config", "apply", "--sccache")
+                        self.assertEqual(rc, 0, out)
+                    else:
+                        self.run_main("config", "apply")  # build-dir first: the rewrite is then the one write
+                    before = self.cfg()
+                    with mock.patch.object(tc_home_files, "write_atomic", fake):
+                        rc, out = self.run_main("config", "apply", *args)
+                    self.assertEqual(rc, 1, out)
+                    self.assertNotIn("Traceback", out)
+                    if replaced:
+                        self.assertIn(
+                            f"cst-toolchains: {self.cfg_path}: written, but its folder could not be synced"
+                            " (Input/output error): the change may not survive a power loss",
+                            out,
+                        )
+                        self.assertNotIn("left as it is", out)
+                        self.assertNotEqual(self.cfg(), before)
+                    else:
+                        self.assertIn(
+                            f"cst-toolchains: cannot write {self.cfg_path}: Input/output error: left as it is", out
+                        )
+                        self.assertEqual(self.cfg(), before)
 
     def test_header_with_a_comment_and_no_keys(self) -> None:
         self.write_cargo_config("[build] # empty for now\n\n[net]\noffline = true\n")

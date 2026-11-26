@@ -13,7 +13,10 @@ class SwapSystemPort(Protocol):
         """`blockdev --getsize64` as it printed it; raises CommandFailed when it fails."""
         ...
 
-    def blkid_type(self, dev_path: str) -> str: ...
+    def blkid_type(self, dev_path: str, *, cache: bool = True) -> str:
+        """`blkid -o value -s TYPE` of dev_path, '' when it has none; cache False: no cache file
+        (`-c /dev/null`), so a plan run as root writes nothing to /run/blkid."""
+        ...
 
     def modprobe(self, module: str) -> None: ...
 
@@ -60,6 +63,11 @@ class SwapSettingsFacts(Protocol):
 
     def crypttab_closed(self) -> bool:
         """/etc/crypttab is there and this user may not read it."""
+        ...
+
+    def crypttab_not_regular(self) -> bool:
+        """/etc/crypttab is there (a link that leads nowhere too) and is not a regular file after links (a FIFO,
+        a device, a folder): no reader can take its lines."""
         ...
 
     def crypttab_text(self) -> str:

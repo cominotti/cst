@@ -181,7 +181,7 @@ case "$me" in
                 esac
                 exit 1
                 ;;
-            show-environment) [[ ! -e "$S/no-session" ]]; exit ;;
+            show-environment) [[ ! -e "$S/no-session" ]] || exit 1; [[ ! -e "$S/user-env" ]] || cat "$S/user-env"; exit 0 ;;
             daemon-reload) exit 0 ;;
             restart|start)
                 u="$(unit "$scope" "$2")"
@@ -689,7 +689,7 @@ class SetupModel:
             case "show":
                 return self.show(scope, args)
             case "show-environment":
-                return (1 if self.has("no-session") else 0), "", ""
+                return (1, "", "") if self.has("no-session") else (0, self.cat("user-env")[1], "")
             case "daemon-reload":
                 return 0, "", ""
             case "restart" | "start":

@@ -113,8 +113,10 @@ def runs(host: DoctorHostPort, program: HostPath) -> bool:
 
 
 def read_text(host: DoctorHostPort, path: ViewPath, limit: int = 256) -> str:
+    """The first limit characters of a regular file (bad bytes replaced), stripped; "" when it cannot be
+    read. A FIFO, a device or a folder is one it cannot read: its open never waits for a writer."""
     try:
-        with host.open_text(path) as f:
+        with host.open_regular_text(path) as f:
             return f.read(limit).strip()
     except OSError:
         return ""

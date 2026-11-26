@@ -10,9 +10,11 @@ import time
 import zipfile
 from typing import BinaryIO, TextIO
 
+from btrfs.docker_volumes_nocow.adapters import LocalVolumeTree, docker_root as nocow_docker_root
+from btrfs.docker_volumes_nocow.domain import NocowPaths
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
-from cst_core.adapters.files import open_regular_text
+from cst_core.adapters.files import open_regular_bytes, open_regular_text
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template
@@ -133,6 +135,22 @@ class Host:
         """os.path.realpath."""
         return ViewPath(os.path.realpath(path))
 
+    def nocow_unscheduled(self) -> tuple[str, str] | None:
+        """docker-volumes-nocow's own readers (data-root from daemon.json, its tree adapter's +C test and
+        scan), on the host's own paths: the check asks only as root outside a toolbox. The scan stops at
+        the first volume with copy-on-write data."""
+        volumes, _ = nocow_docker_root()
+        tree = LocalVolumeTree(NocowPaths(volumes=volumes), self._commands)
+        try:
+            if not tree.is_dir(volumes) or not tree.is_nocow(volumes):
+                return None
+            for name, data in tree.volumes():
+                if tree.scan(data).cow_files:
+                    return volumes, name
+        except OSError:
+            return None
+        return None
+
     def user_name(self, uid: int) -> str:
         """pwd.getpwuid(uid).pw_name, or "" for an unknown uid."""
         try:
@@ -196,8 +214,8 @@ class InstalledFiles:
         return JsonInstallRecord().read(path)
 
     def file_sha256(self, path: ViewPath) -> str:
-        """sha256 of the file's bytes (OSError when it cannot be read)."""
-        with open(path, "rb") as f:
+        """sha256 of a regular file's bytes (OSError when not a regular file or unreadable)."""
+        with open_regular_bytes(path) as f:
             return hashlib.sha256(f.read()).hexdigest()
 
     def desired_sha256(self, src: str, values: Mapping[str, str] | None) -> str | None:

@@ -7,18 +7,18 @@ rules (main.conf, the WirePlumber files, the watcher's unit) are in
 bluetooth.domain.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import os.path
 import re
 from typing import Final, Literal
 
-from bluetooth.domain import LDAC_PROG, LE_CONF_NAME, OLD_MARKERS, QUALITIES
+from bluetooth.domain import LDAC_PROG, LE_CONF_NAME, OLD_MARKERS, QUALITIES, line_key
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.files import OwnedState
 from cst_core.domain.install import InstallReportWord
-from cst_core.domain.text import HELP_WORDS, enum_member, group
+from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments, strip_ascii_blanks
 from cst_core.domain.units import ActiveState
 from cst_core.domain.values import parse_whole_number
 
@@ -287,15 +287,29 @@ def home_tilde(path: str, home: str) -> str:
     return "~" + path[len(home) :] if home and path.startswith(home) else path
 
 
+def wp_config_dir(shown_env: str | None, home: str) -> str:
+    """WirePlumber's config folder from `systemctl --user show-environment` (XDG_CONFIG_HOME
+    given to user services), else HOME/.config."""
+    if shown_env is not None:
+        for line in shown_env.splitlines():
+            if line.startswith("XDG_CONFIG_HOME="):
+                val = line[len("XDG_CONFIG_HOME=") :]
+                if val.startswith("/"):
+                    return os.path.normpath(val)
+                break
+    return os.path.join(home, ".config") if home else ".config"
+
+
 @dataclass(frozen=True, slots=True)
 class Paths:
     """Where the program's files are, for one user and one host root."""
 
     home: str
-    config: str  # XDG_CONFIG_HOME or ~/.config
+    config: str  # shell's XDG_CONFIG_HOME or ~/.config (settings + older WirePlumber copies)
     etc: str
     usr_share: str
     checkout: str  # the CST folder
+    wp_config: str = ""  # user manager's XDG_CONFIG_HOME or ~/.config ("" uses config)
 
     @property
     def main_conf(self) -> str:
@@ -326,8 +340,20 @@ class Paths:
         return f"{self.checkout}/{SETUP_SCRIPT}"
 
     @property
+    def wp_root(self) -> str:
+        """The XDG config root WirePlumber uses (user manager's environment, else config)."""
+        return self.wp_config or self.config
+
+    @property
     def wp_dir(self) -> str:
-        return f"{self.config}/wireplumber/wireplumber.conf.d"
+        return f"{self.wp_root}/wireplumber/wireplumber.conf.d"
+
+    @property
+    def shell_wp_dir(self) -> str | None:
+        """WirePlumber's conf.d under the shell's XDG_CONFIG_HOME when it differs from wp_root."""
+        if os.path.normpath(self.config) == os.path.normpath(self.wp_root):
+            return None
+        return f"{os.path.normpath(self.config)}/wireplumber/wireplumber.conf.d"
 
     def wp_conf(self, device_id: str) -> str:
         return f"{self.wp_dir}/50-bluez-{device_id}.conf"
@@ -380,12 +406,16 @@ class Config:
         return self.device.replace(":", "_")
 
 
+_DEVICE_KEY: Final = "DEVICE"
+_LE_AUDIO_KEY: Final = "LE_AUDIO"
+
+
 def _le_audio(opts: Options, settings: dict[str, str], user_keys: Sequence[str], paths: Paths) -> tuple[str, str]:
     """(LE Audio on or off, where that came from): --le-audio, else the user's settings, else CST's;
     le-audio's on or off wins over all (its where stays the settings')."""
-    le = opts.le or settings.get("LE_AUDIO", "") or "off"
+    le = opts.le or settings.get(_LE_AUDIO_KEY, "") or "off"
     le_from = "the CST default"
-    if "LE_AUDIO" in user_keys:
+    if _LE_AUDIO_KEY in user_keys:
         le_from = home_tilde(paths.user_settings, paths.home)
     if opts.le:
         le_from = "--le-audio, this run only"
@@ -394,32 +424,87 @@ def _le_audio(opts: Options, settings: dict[str, str], user_keys: Sequence[str],
     return le, le_from
 
 
+def usage_error(opts: Options, prog: str, msg: str) -> Exit:
+    """A usage error that stops the run (exit 2) before it reads the machine."""
+    return Exit(2, err=f"{prog} {opts.cmd}: {msg}\n")
+
+
+def le_audio_words(got: str) -> str:
+    """What stops a run whose LE Audio setting (got) is neither on nor off."""
+    return f"LE Audio must be on or off (got '{got}'; LE_AUDIO in the settings or --le-audio)"
+
+
+def device_words(got: str, paths: Paths) -> str:
+    """What stops a run whose headset (got) is not a MAC address."""
+    return f"the device must be a MAC address like AA:BB:CC:DD:EE:FF (got '{got}'; set DEVICE in {paths.user_settings} or use --device)"
+
+
+# The settings whose problem line (one that sets nothing) stops the run with the words of a bad value,
+# as before problem lines were ignored, where the other settings only warn: apply would save the
+# headset of CST's LDAC rule as DEVICE over that line, and LE_AUDIO's default would turn LE Audio off.
+REFUSED_PROBLEM_KEYS: Final = (_DEVICE_KEY, _LE_AUDIO_KEY)
+
+
+def _written_value(line: str) -> str:
+    """The value of a KEY=... line as written: after =, without its ASCII blanks and one pair of quotes."""
+    value = strip_ascii_blanks(line.partition("=")[2])
+    if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    return value
+
+
+def problem_values(texts: Iterable[str]) -> dict[str, str]:
+    """{KEY: its value as written} of the REFUSED_PROBLEM_KEYS whose line that counts (the last
+    one of the key, over the settings TEXTS in priority order) is a problem line."""
+    out: dict[str, str] = {}
+    for text in texts:
+        found = parse_shell_assignments(text, bash_sourced=False)
+        lines: list[tuple[int, str | None, str | None]] = [(a.line, a.key, None) for a in found.entries]
+        lines += [(p.line, line_key(p.text), p.text) for p in found.problems]
+        for _, key, problem in sorted(lines, key=lambda entry: entry[0]):
+            if key not in REFUSED_PROBLEM_KEYS:
+                continue
+            if problem is None:
+                out.pop(key, None)
+            else:
+                out[key] = _written_value(problem)
+    return out
+
+
+def problem_refusal(opts: Options, problems: Mapping[str, str], paths: Paths) -> str | None:
+    """What stops the run for a DEVICE or LE_AUDIO problem line (problems: problem_values), unless
+    the option sets that value (--device; --le-audio or le-audio on|off); None when nothing does."""
+    if _LE_AUDIO_KEY in problems and not (opts.le or opts.le_set):
+        return le_audio_words(problems[_LE_AUDIO_KEY])
+    if _DEVICE_KEY in problems and not opts.device:
+        return device_words(problems[_DEVICE_KEY], paths)
+    return None
+
+
 def resolve(
     opts: Options, settings: dict[str, str], user_keys: Sequence[str], paths: Paths, prog: str
 ) -> Config | Exit:
     """The settings of the run, or the usage error that stops it (exit 2)."""
-    device = opts.device or settings.get("DEVICE", "")
+    device = opts.device or settings.get(_DEVICE_KEY, "")
     quality = opts.quality or settings.get("LDAC_QUALITY", "") or "auto"
     bearer = opts.bearer if opts.bearer_given else settings.get("BEARER", "")
     rate = settings.get("LDAC_RATE", "")
     le, le_from = _le_audio(opts, settings, user_keys, paths)
 
     def bad(msg: str) -> Exit:
-        return Exit(2, err=f"{prog} {opts.cmd}: {msg}\n")
+        return usage_error(opts, prog, msg)
 
     if bearer not in BEARERS:
         return bad(f"the bearer must be le, bredr or last-used (got '{bearer}')")
     if rate not in ("", "48000"):
         return bad(f"LDAC_RATE must be empty (watcher off) or 48000 (got '{rate}' in the settings)")
     if le not in ("on", "off"):
-        return bad(f"LE Audio must be on or off (got '{le}'; LE_AUDIO in the settings or --le-audio)")
+        return bad(le_audio_words(le))
     if quality not in QUALITIES:
         return bad(f"the LDAC quality must be auto, hq, sq or mq (got '{quality}')")
     # No headset at all is fine (CST ships none): the run skips its parts (see the Survey).
     if device and not MAC_RE.fullmatch(device):
-        return bad(
-            f"the device must be a MAC address like AA:BB:CC:DD:EE:FF (got '{device}'; set DEVICE in {paths.user_settings} or use --device)"
-        )
+        return bad(device_words(device, paths))
     if not device:
         device_from = "no DEVICE set"
     elif opts.device:

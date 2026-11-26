@@ -106,17 +106,23 @@ class FailureShapeTest(Case):
         )
 
     def test_a_create_that_fails_raises_and_leaves_an_empty_file_on_the_real_side(self) -> None:
-        # The known gap (out-of-scope note of R36): the real open "w" truncates before the write fails; the
-        # machine's FAIL keeps main's "no effect" model, for parity.
+        # The real open "w" truncates before the write fails, and the fake's FAIL does the same (before,
+        # it left the old text: R36's known gap); a file that was not there is there, empty.
         f = self.path("run", "game.intended")
-        self.put(f, b"before\n")
-        with no_file_may_grow(), self.assertRaises(OSError):
-            GameStateFiles().create(f, "cst-game-intended 1\n")
-        self.assertEqual(self.got(f), b"")
-        self.put(f, b"before\n")
-        with self.assertRaises(OSError):
-            FaultyStateFiles(self.failing()).create(f, "x")
-        self.assertEqual(self.got(f), b"before\n")
+        for side, create in (
+            ("real", lambda: GameStateFiles().create(f, "cst-game-intended 1\n")),
+            ("fake", lambda: FaultyStateFiles(self.failing()).create(f, "cst-game-intended 1\n")),
+        ):
+            for before in (b"before\n", None):
+                with self.subTest(side=side, before=before):
+                    if before is None:
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(f)
+                    else:
+                        self.put(f, before)
+                    with no_file_may_grow(), self.assertRaises(OSError):
+                        create()
+                    self.assertEqual(self.got(f), b"")
 
     def test_a_cgroup_or_sysfs_write_that_fails_answers_false(self) -> None:
         f = self.path("cg", "cpuset.cpus")

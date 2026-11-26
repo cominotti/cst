@@ -52,7 +52,7 @@ def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
     (a new kernel can rename or drop one). Nothing when that file is not
     installed."""
     try:
-        with host.open_text(host.path(ZSWAP_CONF)) as f:
+        with host.open_regular_text(host.path(ZSWAP_CONF)) as f:
             wanted = [name for name, _ in parse_tmpfiles_params(f.read(65536))]
     except FileNotFoundError:
         return
@@ -164,6 +164,14 @@ class _HostSettingsFacts:
 
     def crypttab_closed(self) -> bool:
         return isinstance(self._read(CRYPTTAB), PermissionError)
+
+    def crypttab_not_regular(self) -> bool:
+        view = self._host.path(CRYPTTAB)
+        try:
+            self._host.lstat(view)
+        except OSError:
+            return False
+        return not self._host.isfile(view)
 
     def crypttab_text(self) -> str:
         return self._text(CRYPTTAB)

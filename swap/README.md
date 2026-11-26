@@ -126,7 +126,11 @@ compressor later creates a second pool that lives until the old one drains).
   `apply` stops before it changes anything. A FIFO there is never opened in
   a way that waits: `plan` and `apply` answer at once. Root inside a
   toolbox counts as a user here: the host's root-only files may be closed
-  to it, and `--root` on the host reads them.
+  to it, and `--root` on the host reads them. On a machine an older CST set
+  up (no `/etc/cst/swap.conf`), a `/etc/crypttab` that is there and is not
+  a regular file (or a link that leads nowhere) is `REFUSE` "not written yet,
+  and /etc/crypttab is not a regular file ...", never "not configured": no
+  one can read the line `apply` would write the file from.
   On sophia it reads:
 
   ```
@@ -201,7 +205,14 @@ is anything there that is not a regular file (a FIFO, a device, or a link
 to one): `plan`, `status` and `apply` do not open it in a way that waits.
 systemd itself does: it opens a FIFO among `machine.slice`'s drop-ins when
 it loads the slice or at a `daemon-reload` (`apply` runs one) and waits for
-a writer, and stops answering. Remove such a FIFO by hand. While a game
+a writer, and stops answering. So `plan` and `status` show a `REFUSE` row
+for each `*.conf` in `machine.slice.d/` or `slice.d/` (under
+`/etc/systemd/system`, `/etc/systemd/system.control`, `/run/systemd/system`,
+`/run/systemd/system.control`, `/run/systemd/transient` and
+`/usr/lib/systemd/system`) that is not a regular file (a FIFO, a device, a
+folder, or a link to one; a link to a regular file and a link that leads
+nowhere are fine), and `apply` refuses before it writes anything (step 1).
+Remove such a file by hand. While a game
 runs, the `cpu` module's game profile gives the game's cgroups
 `MemoryLow=16G` (runtime only); it does not touch `machine.slice`'s memory
 settings. `cst swap status` shows both floors in its `low` column.
@@ -256,6 +267,15 @@ drop-in to a live `session.slice`. What the file asks is `[ActiveUser]
 MemoryMin` for each user with a session in a seat's foreground (logind's
 `/run/systemd/seats`, `ACTIVE_UID`; one user in front of two seats counts
 once), capped in total by `[Global] MaxMemoryMin`, as uresourced computes it.
+The file is read as uresourced reads it (GLib's GKeyFile, then its own
+reading of a memory value): only ASCII blanks are trimmed, around the key and
+before the value but not after it; only `#` starts a comment (a `;` line is a
+key of another name); the last of two keys counts. A value is a whole number
+(ASCII digits) and only the one character after it decides: `K`, `M`, `G`, `T`
+(powers of 1024), `%` (`MaxMemoryMin`'s share of RAM, at most 100) or none
+(bytes); any other character (a blank too, as in `4 G` or `4 ` with a
+trailing blank, or a no-break space) or no number at all makes uresourced read
+0, and so does CST.
 A greeter (the login screen, a uid below 1000) is no such user; an
 `ACTIVE_UID` of other than ASCII digits (0-9) is no uid, so it counts as a user,
 as a seat without one does. A cgroup value (`memory.min`, `memory.low`,
@@ -318,7 +338,7 @@ The words in the first column of `plan` and `status`:
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
-| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole, also when a folder, a FIFO or a device is in place of one): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. Also, for any user: a folder in place of `/etc/systemd/zram-generator.conf` or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, or a name above a file `apply` writes whole that is not a folder (step 1 below): the row says that `apply` refuses it before it writes anything. |
+| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole, also when a folder, a FIFO or a device is in place of one): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. Also, for any user: a folder in place of `/etc/systemd/zram-generator.conf` or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, or a name above a file `apply` writes whole that is not a folder (step 1 below): the row says that `apply` refuses it before it writes anything. `/etc/crypttab` or `/etc/fstab` that is not a regular file (a FIFO, a device, a folder, or a link to one) has a note of its own for any user, with no `--root` advice (root cannot help): "not a regular file ...: apply refuses; put a regular file there". Two runtime rows show what `apply` checks before it writes: `compressor NAME` when NAME (swap/tmpfiles' compressor) is not in `/proc/crypto` now (`apply` loads its module with `modprobe` and stops if it is still missing; `plan` loads nothing), and the partition's signature where `apply` checks it (found with its size, `/dev/mapper/swap0` not open): `?` for a user or root in a toolbox (`blkid` needs root), and as the host's root `plan` runs `blkid -c /dev/null` (no cache file written) and shows `REFUSE` for a signature `apply` would not overwrite. |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:
@@ -353,9 +373,16 @@ What `apply` does, in order:
    is in place of `/etc/systemd/zram-generator.conf`, where step 4 puts a
    link, or of the legacy `/etc/sysctl.d/99-zram-tuning.conf`, which step 5
    removes (refused with `<file>: a folder is in its place: nothing was
-   changed`), and that
+   changed`), that no `*.conf` among `machine.slice`'s drop-in folders
+   is something other than a regular file (refused with `<file>: not a
+   regular file: systemd's daemon-reload would wait on it; nothing was
+   changed`: its `daemon-reload` would make systemd wait in a FIFO's open),
+   and that
    root's install record (`/var/lib/cst/installed.json`) was not written by
-   a newer CST (a downgrade): a refusal stops it before it writes anything.
+   a newer CST (a downgrade) and, when it is there, can be read (a folder,
+   a FIFO, a read error): a refusal stops it before it writes anything.
+   `plan` and `status` show that refusal as a `REFUSE` row of the install
+   record (`?` with the `--root` advice for a user who may not read it).
    To get past a refusal of one of the files it writes whole, or of the
    paths of steps 4 and 5, move what is in the way aside (keep it if it
    holds settings of yours), or remove it, then run `apply` again: it
@@ -369,7 +396,12 @@ What `apply` does, in order:
    is removed; with none, the line is appended. The file is replaced
    atomically (temporary file in the same folder, then a rename), then
    `restorecon` fixes the SELinux label. A copy of the file before the first
-   change stays as `<file>.pre-swap-config.bak`. After any rewrite, even a
+   change stays as `<file>.pre-swap-config.bak`. The file is read again
+   right before its backup and its write; if it cannot be read then (it
+   became a FIFO, a read error), `apply` stops with
+   `<file>: cannot be read: its swap0 entry was not written` and leaves it,
+   and has no backup of it, as it is: it is never replaced by the marked line
+   alone. After any rewrite, even a
    renewed comment, `systemctl daemon-reload` runs: systemd builds the
    `swap0` units from these files and would otherwise show them as "changed
    on disk" until the next reboot. A reload restarts nothing. If an entry
@@ -628,7 +660,7 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | `units/machine.slice.d-10-swap-memory-low.conf` | `/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf` |
 | `domain.py` | pure swap domain model, the partition (`SwapHardwareSpec`, read from `/etc/cst/swap.conf`), parsing, and metrics |
 | `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
-| `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, memory reclaim and `uresourced` helpers in `application/memory_tuning.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens), the checks of a path in apply's way (a folder in place of a file, a file in place of a folder) in `application/in_the_way.py`, the command line's words and where it stops (help, a wrong argument) in `application/command_line.py`; the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
+| `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py` (the paths of a run, `SwapEnvironment`, and the files swap installs in `application/environment.py`), memory reclaim and `uresourced` helpers in `application/memory_tuning.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens), the checks of a path in apply's way (a folder in place of a file, a file in place of a folder) in `application/in_the_way.py`, the command line's words and where it stops (help, a wrong argument) in `application/command_line.py`; the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
 | `wiring.py` | the composition root: the environment, the sudo re-run of `cli.py` (with `CST_PROG` and the caller's `LC_CTYPE`), and the use cases built over the real adapters. `CST_SWAP_PROC` and `CST_SWAP_SYS` move where `/proc` and `/sys` are read and written (the cgroup tree stays `/sys/fs/cgroup`): for the tier 1 E2E test only, whose container has a read-only `/proc/sys` and `/sys` of the host's kernel. When either is set, `plan`, `status` and `apply` say so on their first line (`test seam (...)`), so a stale export in a root shell cannot pass for the kernel's state; the line also says that `/etc` is the real one and that `apply`'s `sysctl`, `modprobe` and `zramctl` are the ones on `PATH` (the tier 1 test puts stand-ins there) |
 | `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)) |
 

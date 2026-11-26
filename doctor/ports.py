@@ -100,6 +100,12 @@ class DoctorHostPort(Protocol):
         """The path with every link resolved."""
         ...
 
+    def nocow_unscheduled(self) -> tuple[str, str] | None:
+        """(Docker's volumes folder, the first volume in it that keeps copy-on-write data) when that folder
+        has +C and such a volume is there, read with docker-volumes-nocow's own adapters; None when the
+        folder is absent, has no +C, holds no such volume, or cannot be read. Only root can read it."""
+        ...
+
     def user_name(self, uid: int) -> str:
         """The login name of uid ("" when the account is unknown)."""
         ...

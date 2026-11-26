@@ -255,8 +255,8 @@ Rules:
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
 | `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` | Turns on intel_pstate's HWP dynamic boost at every boot (6.3). |
 | `/etc/modules-load.d/cst-ntsync.conf` | Autoloads `ntsync` at boot (and via `modprobe ntsync` during `install`) when built as a kernel module, exposing `/dev/ntsync` for Wine/Proton. |
-| `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. |
-| `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23`. |
+| `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. Written under the folder `systemctl --user show -p UnitPath --value` names first (`~/.config/systemd/user` when unset or when the user manager does not answer); older recorded copies elsewhere are removed by `install` and `uninstall`. |
+| `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23` (same `UnitPath` folder and cleanup). |
 | `~/.config/gamemode.ini` | GameMode config (only if you do not have your own). |
 | `/etc/group`, `/etc/gshadow` | `gamemode` group copied in, your user added (6.4). |
 
@@ -407,7 +407,7 @@ can be slow).
 |-----|---------|---------|
 | `TARGET_USER` | Your user. Needed for everything in your session. | `cst cpu` (`cpu/setup`), game profile |
 | `BUILD_CPUS` | Where the VM and Docker go during games; the VM always, after `vm-pin`. | game profile, `vm-pin` |
-| `P_CORES` | Cores that get EPP `performance` during games. A range whose end is no number (or has more digits than Python reads, 4300) gives no CPU, as `seq` did. | game profile |
+| `P_CORES` | Cores that get EPP `performance` during games. A range whose end is no number (or has more digits than Python reads, 4300) gives no CPU, as `seq` did, and so does one whose end is 8192 or more (no CPU has that index). Only spaces and tabs are blanks around a range's ends, and the list is split at ASCII blanks only (a no-break space is part of a word, which names no CPU). | game profile |
 | `VM_WEIGHT` | VM CPU (and I/O, when numeric `1..10000`) weight during games. A value of more digits than Python reads is no number: `IOWeight=10`. | game profile |
 | `GAME_MEMORY_LOW` | Memory protection for the game (Dota 2 uses about 10 GB, plus Steam). | game profile |
 | `GAME_ZSWAP_WRITEBACK` | `no`: during games, swapped pages of desktop apps stay in zswap, never on the swap disk (7.1). `yes`: leave it alone. Missing (files written before this key existed) means `no`. | game profile |

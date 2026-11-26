@@ -408,6 +408,7 @@ def assemble_cpu_probe(
         irqbalance_banned_cpus=meta.irqbalance_banned_cpus,
         irq_lines=meta.irq_lines,
         default_smp_affinity_hex=clean_opt_str(files.get(PerfPathKey.DEFAULT_SMP_AFFINITY)),
+        settings_problems=meta.settings_problems,
     )
 
 

@@ -28,7 +28,7 @@ from bluetooth.domain import (
 )
 from bluetooth.setup.application import watcher_unit
 from bluetooth.setup.application.checks import Checks
-from bluetooth.setup.application.inputs import is_cst_rule
+from bluetooth.setup.application.inputs import is_cst_rule, shell_wp_stale
 from bluetooth.setup.application.survey import StepFailed
 from bluetooth.setup.domain import (
     A2DP_SINK_UUID,
@@ -82,6 +82,7 @@ class Change(Checks):
             self.need_tmp()  # every command made it first (TMP="$(mktemp)"), before the ERR trap
         except StepFailed as e:
             return e.status
+        self.resolve_wp_env()
         try:
             return commands[self.o.cmd]()
         except BrokenPipeError:
@@ -283,14 +284,18 @@ class Change(Checks):
         return False
 
     def save_owed(self, *units: str) -> bool:
-        """The record saved, owing the units' restarts; False when it cannot be written (warned once a
-        run). The invocation IDs are read again first: a service that restarted by itself since they
-        were read may have read the old files."""
+        """The record saved, owing the units' restarts; False when saving it failed (warned once a run).
+        The warning does not say the record is unwritten: a write that fails at the sync of its folder
+        has already put the new record in place. The invocation IDs are read again first: a service
+        that restarted by itself since they were read may have read the old files."""
         self.forget_unit(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
         if self.restart_state("save", *units) is not None:
             return True
         if not self.owed_warned:
-            self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
+            self.err(
+                f"WARNING: could not save the restarts still owed in {self.p.pending} for sure"
+                f" ({self.restart_error}): if this run stops before its restarts, the next run may not make them\n"
+            )
             self.owed_warned = True
         return False
 
@@ -408,6 +413,7 @@ class Change(Checks):
             self.owe(WIREPLUMBER_UNIT)
             self.m.files.remove_file(p.legacy_wp_conf)
             self.out(f"removed:   {p.legacy_wp_conf} (older name of the same rule)\n")
+        self._clean_shell_wp_stale(check=False)
         match self.wp_state:
             case WpState.OK:
                 self.out(f"unchanged: {self.wp_conf}\n")
@@ -648,7 +654,7 @@ class Change(Checks):
         self.read_owed()  # before any change: what an earlier run (apply or revert) left owed
         changed_mc = self.revert_main_conf()
         self.save_headset()  # the rule goes next: it may be the only place that names the headset
-        wp, le = self.revert_files()
+        wp, le, wp_stale = self.revert_files()
         self.out(f"== LDAC rate watcher: {LDAC_UNIT}\n")
         self.lw_plan()
         lw = self.lw_removes() or bool(self.lw_stale)
@@ -661,7 +667,7 @@ class Change(Checks):
             elif restart:
                 self.out("would restart wireplumber\n")
             self.owed_report()
-            return 10 if restart or lw else 0
+            return 10 if restart or lw or wp_stale else 0
         self.out("== restarts\n")
         if not restart:
             self.out("none needed\n")
@@ -703,8 +709,8 @@ class Change(Checks):
             self.err(f"WARNING: no backup {mc}.bak-* found; main.conf not changed\n")
         return changed_mc
 
-    def revert_files(self) -> tuple[bool, bool]:
-        """The rule and the drop-in removed when they are CST's; whether each was."""
+    def revert_files(self) -> tuple[bool, bool, bool]:
+        """The rule and the drop-in removed when they are CST's; whether each (or stale WP) was."""
         p, f, check = self.p, self.m.files, self.o.check
         wp = le = False
         self.out(f"== WirePlumber: {self.wp_title()}\n")
@@ -737,7 +743,23 @@ class Change(Checks):
                 self.out(
                     f"removed:   {p.le_conf} (LE Audio on again; LE_AUDIO=off in the settings writes it again at the next apply)\n"
                 )
-        return wp, le
+        return wp, le, self._clean_shell_wp_stale(check=check)
+
+    def _clean_shell_wp_stale(self, *, check: bool) -> bool:
+        """Remove marked older CST WirePlumber copies under the shell's XDG_CONFIG_HOME (warn & keep
+        unmarked ones; check: only print what revert would remove). Return whether any CST copy was seen."""
+        had = False
+        for path, ours in shell_wp_stale(self.m.files, self.p, self.wp_conf, has_headset=self.headset):
+            if not ours:
+                self.err(f"WARNING: {path} was not written by CST: left alone\n")
+            else:
+                had = True
+                if check:
+                    self.out(f"would remove {path}\n")
+                else:
+                    self.m.files.remove_file(path)
+                    self.out(f"removed:   {path} (an older CST's copy)\n")
+        return had
 
     # ---- the user's settings ----------------------------------------------------------------
     def save_setting(self, key: str, value: str) -> None:

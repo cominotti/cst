@@ -18,6 +18,7 @@ from typing import override
 import unittest
 from unittest import mock
 
+from bluetooth import adapters as bt_adapters
 from bluetooth.adapters import LocalBluetoothHostAdapter
 from bluetooth.domain import parse_pending
 from bluetooth.setup import wiring
@@ -36,6 +37,7 @@ from bluetooth.setup.domain import (
     is_running,
     parse_command_line,
     resolve,
+    wp_config_dir,
 )
 from bluetooth.tests.setup_fakes import DEV, ISO, MAC, REPO, Machine, SetupModel
 from bluetooth.tests.test_ldac_watch import cards, pw_dump
@@ -900,7 +902,13 @@ class OwedBeforeTheWriteUnitTest(InProcessCase):
         host = SavingHost(fail=True)
         rc, out, err = self.run_with(m, host, "apply", "--yes")
         self.assertEqual(rc, 0, out + err)
-        self.assertEqual(err.count("WARNING: could not record the restarts still owed"), 1, err)
+        self.assertEqual(err.count("WARNING: could not save the restarts still owed"), 1, err)
+        self.assertIn(
+            f"WARNING: could not save the restarts still owed in {m.pending} for sure"
+            " ([Errno 30] Read-only file system): if this run stops before its restarts, the next run may not make"
+            " them\n",
+            err,
+        )
         self.assertIn(f"KernelExperimental = {ISO}", self.text(m.main_conf))
         calls = m.read("log").splitlines()
         self.assertIn("sudo systemctl restart bluetooth", calls)
@@ -909,6 +917,34 @@ class OwedBeforeTheWriteUnitTest(InProcessCase):
         # the restarts', then the clearing one.
         bt, wp = "bluetooth.service", "wireplumber.service"
         self.assertEqual(host.saves, [(bt, wp), (bt, wp), (bt, wp), (wp, bt), ()])
+
+    def test_a_save_that_fails_after_or_before_its_replace_never_says_the_record_is_unwritten(self) -> None:
+        # write_atomic renames the new record into place, then syncs its folder: an error there (EIO)
+        # comes after the record is written. Before, the warning said "could not record the restarts
+        # still owed", false then. The new words are true both ways.
+        real_write = bt_adapters.write_atomic
+
+        def replaced_then_eio(path: str, data: str, *, mode: int, relabel: bool) -> None:
+            real_write(path, data, mode=mode, relabel=relabel)
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        def eio_before(path: str, data: str, *, mode: int, relabel: bool) -> None:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        for fake, written in ((replaced_then_eio, True), (eio_before, False)):
+            with self.subTest(written=written):
+                m = self.machine()
+                with mock.patch.object(bt_adapters, "write_atomic", fake):
+                    rc, out, err = self.run_with(m, SavingHost(), "apply", "--yes")
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("could not record", err)
+                self.assertEqual(err.count("WARNING: could not save the restarts still owed"), 1, err)
+                self.assertIn(
+                    f"WARNING: could not save the restarts still owed in {m.pending} for sure"
+                    " ([Errno 5] Input/output error): if this run stops before its restarts, the next run may"
+                    " not make them\n",
+                    err,
+                )
 
     def stopped_apply(self, m: Machine, host: SavingHost) -> None:
         """apply --yes, stopped by host (Stopped) at a save of the record."""
@@ -1025,7 +1061,10 @@ class SetupModelParityTest(unittest.TestCase):
             m.flag("race-backup")
             os.utime(m.main_conf, (1_000_000, 1_000_000))  # its backup is the oldest, whatever the clock
         self.assertEqual(self.runs(model, model=True), self.runs(fake, model=False))
-        self.assertEqual(self.files(model), self.files(fake))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
         self.assertIn("another run's backup\n", self.files(model).values())
 
     def test_a_raced_backup_name_in_another_language_as_fake_does(self) -> None:
@@ -1037,7 +1076,10 @@ class SetupModelParityTest(unittest.TestCase):
             os.utime(m.main_conf, (1_000_000, 1_000_000))
         on_model = self.runs(model, model=True, lang="pt_BR.UTF-8")
         self.assertEqual(on_model, self.runs(fake, model=False, lang="pt_BR.UTF-8"))
-        self.assertEqual(self.files(model), self.files(fake))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
         self.assertEqual(on_model[0][0], 0, on_model[0])
 
     def test_apply_then_revert_as_fake_does(self) -> None:
@@ -1047,9 +1089,33 @@ class SetupModelParityTest(unittest.TestCase):
         for (rc_f, out_f, err_f, calls_f), (rc_m, out_m, err_m, calls_m) in zip(on_fake, on_model, strict=True):
             self.assertEqual(calls_m, calls_f)
             self.assertEqual((rc_m, out_m, err_m), (rc_f, out_f, err_f))
-        self.assertEqual(self.files(model), self.files(fake))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
         self.assertIn("restart:   bluetooth.service", on_model[0][1])
         self.assertIn("restart:   bluetooth.service", on_model[1][1])
+
+    def test_wireplumber_follows_user_manager_env_as_fake_does(self) -> None:
+        fake, model = self.machine(), self.machine()
+        for m in (fake, model):
+            m.put("user-env", f"HOME={m.home}\nXDG_CONFIG_HOME={m.home}/mgr-xdg\n")
+        on_fake = self.runs(fake, model=False)
+        on_model = self.runs(model, model=True)
+        for (rc_f, out_f, err_f, calls_f), (rc_m, out_m, err_m, calls_m) in zip(on_fake, on_model, strict=True):
+            self.assertEqual(calls_m, calls_f)
+            self.assertEqual((rc_m, out_m, err_m), (rc_f, out_f, err_f))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
+        self.assertIn("mgr-xdg/wireplumber/wireplumber.conf.d/50-bluez-", on_model[0][1])
+
+    def test_wp_config_dir_resolution(self) -> None:
+        self.assertEqual(wp_config_dir(None, "/home/u"), "/home/u/.config")
+        self.assertEqual(wp_config_dir("HOME=/home/u\n", "/home/u"), "/home/u/.config")
+        self.assertEqual(wp_config_dir("XDG_CONFIG_HOME=relative\n", "/home/u"), "/home/u/.config")
+        self.assertEqual(wp_config_dir("XDG_CONFIG_HOME=/home/u/cfg/\n", "/home/u"), "/home/u/cfg")
 
 
 if __name__ == "__main__":

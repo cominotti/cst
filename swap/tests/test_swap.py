@@ -7,6 +7,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -29,10 +30,18 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import ArtifactKind, Owner
+from cst_core.domain.plan import PlanItem
+from cst_core.domain.values import GIB, MIB
 from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
 from tests.probes import NoUnitQueries, time_bound
 from swap.application.apply import SwapApplicationService
-from swap.application.memory_tuning import MM_TMPFILES_ENTRY, URESOURCED_ENTRY, effective_uresourced_memory_min
+from swap.application.memory_tuning import (
+    MM_TMPFILES_ENTRY,
+    URESOURCED_ENTRY,
+    effective_uresourced_memory_min,
+    parse_uresourced_max_memory_min,
+    parse_uresourced_memory_min,
+)
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
@@ -770,6 +779,21 @@ class _ClosedFolder(SwapTempFileSystem):
         return default if self._inside(path) else super().read_text(path, default, regular_only=regular_only)
 
 
+class _UnreadableAtTheWrite(SwapTempFileSystem):
+    """A marked file that inspection reads and apply's read right before its write cannot (it became a FIFO,
+    or the read failed with EIO, in between): read_text of path from _apply_marked_line gives None."""
+
+    def __init__(self, block_links: Mapping[str, str], *, path: str) -> None:
+        super().__init__(block_links)
+        self._path = path
+
+    @override
+    def read_text(self, path: str, default: str | None = None, *, regular_only: bool = False) -> str | None:
+        if path == self._path and sys._getframe(1).f_code.co_name == "_apply_marked_line":
+            return None
+        return super().read_text(path, default, regular_only=regular_only)
+
+
 class _BufferedToPipe(io.StringIO):
     """A stdout on a pipe: what is written reaches the pipe only when flushed."""
 
@@ -948,6 +972,7 @@ class FakeSwapSystem:
         self._swapon_text = swapon_text
         self._on_sleep = on_sleep
         self.modprobes: list[str] = []
+        self.blkid_calls: list[tuple[str, bool]] = []
         self.sysctl_calls: list[tuple[str, str | None]] = []
         self.zram_resets = 0
         self.sleeps: list[float] = []
@@ -956,8 +981,8 @@ class FakeSwapSystem:
         del dev_path
         return str(self._size_bytes)
 
-    def blkid_type(self, dev_path: str) -> str:
-        del dev_path
+    def blkid_type(self, dev_path: str, *, cache: bool = True) -> str:
+        self.blkid_calls.append((dev_path, cache))
         return self._part_type
 
     def modprobe(self, module: str) -> None:
@@ -1280,22 +1305,31 @@ class SwapApplicationTest(_SwapScratch):
 
     def test_a_fifo_at_the_old_drop_in_name_is_left_alone_and_nothing_blocks(self) -> None:
         # A FIFO (its open waits for a writer) at machine.slice.d/50-memory-low.conf, which an older CST
-        # wrote and its record still lists: not CST's file. plan shows no "remove" row and apply forgets the
-        # record line and leaves the FIFO. Before, plan and apply blocked in its open (bounded: CallBlocked).
+        # wrote and its record still lists: not CST's file, and one systemd's daemon-reload would wait on
+        # (since 2026-11 plan shows REFUSE for it and apply stops before its first write; before, apply ran
+        # its daemon-reloads). plan shows no "remove" row, and apply leaves the FIFO and the record. Before
+        # that, plan and apply blocked in its open (bounded: CallBlocked).
         record = os.path.join(self.tmp, "var/lib/cst/installed.json")
         env = dataclasses.replace(self.env, install_record=record)
         old = self._old_dropin_install(record, MAIN_DROPIN)
         os.remove(old)
         os.mkfifo(old)
+        with open(record, encoding="utf-8") as f:
+            recorded = f.read()
         with time_bound(5):
-            self.assertNotIn("50-memory-low.conf", self._plan_text(env))
+            plan = self._plan_text(env)
             rc, out, err, _ = self._apply_once(env, mapper_present=False)
-        self.assertEqual(rc, 0, err)
+        self.assertIn(
+            "machine.slice.d/50-memory-low.conf     not a regular file: systemd's daemon-reload would wait on it; apply stops",
+            plan,
+        )
+        self.assertNotIn("  remove    machine.slice.d/50-memory-low.conf", plan)
+        self.assertEqual(rc, 1, err)
+        self.assertIn(f"{old}: not a regular file: systemd's daemon-reload would wait on it; nothing was changed", err)
         self.assertNotIn("removed:", out)
         self.assertTrue(stat.S_ISFIFO(os.lstat(old).st_mode), "apply replaced the FIFO")
         with open(record, encoding="utf-8") as f:
-            files = json.load(f)["files"]
-        self.assertNotIn("/etc/systemd/system/machine.slice.d/50-memory-low.conf", files)
+            self.assertEqual(f.read(), recorded)
 
     def test_the_old_record_line_goes_also_when_the_file_is_gone_or_not_cst_s(self) -> None:
         old_dest = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
@@ -2627,6 +2661,29 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
 
+    def test_a_marked_file_apply_cannot_read_at_its_write_is_never_replaced_by_the_line_alone(self) -> None:
+        # Before, the read's None became "", and the file was replaced by the swap0 line alone (data loss).
+        for name in ("crypttab", "fstab"):
+            with self.subTest(name):
+                with open(self.env.crypttab, "w", encoding="utf-8") as f:
+                    f.write("other /dev/sdz none\n")
+                with open(self.env.fstab, "w", encoding="utf-8") as f:
+                    f.write("UUID=1 / btrfs defaults 0 0\n")
+                path = self.env.crypttab if name == "crypttab" else self.env.fstab
+                with open(path, encoding="utf-8") as f:
+                    before = f.read()
+                links = {self.spec.device_path: "/dev/nvme0n1p5"}
+                rc, _out, err, systemd, _system = self._apply_on(_UnreadableAtTheWrite(links, path=path))
+                self.assertEqual(rc, 1)
+                with open(path, encoding="utf-8") as f:
+                    self.assertEqual(f.read(), before)
+                self.assertFalse(os.path.exists(f"{path}.pre-swap-config.bak"))
+                self.assertIn(f"cst swap: ERROR: {path}: cannot be read: its swap0 entry was not written\n", err)
+                self.assertEqual(systemd.daemon_reloads, 0)
+                for p in (self.env.crypttab, self.env.fstab):
+                    if os.path.exists(f"{p}.pre-swap-config.bak"):
+                        os.remove(f"{p}.pre-swap-config.bak")
+
     def test_an_unreadable_fstab_stops_apply_before_it_writes_crypttab(self) -> None:
         with open(self.env.fstab, "w", encoding="utf-8") as f:
             f.write("UUID=1 / btrfs defaults 0 0\n")
@@ -2753,6 +2810,47 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertFalse(os.path.exists(self.env.settings_path))
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_plan_shows_apply_s_refusal_of_the_install_record(self) -> None:
+        # Before, plan showed apply's writes, and apply then refused at check_record.
+        newer = self._newer_record()
+        folder = os.path.join(self.tmp, "var/lib/cst/folder.json")
+        os.makedirs(folder)
+        cases = (
+            ("newer", newer, f"{newer}: format 99, written by a newer CST (this one reads format 1): "),
+            ("folder", folder, f"{folder}: cannot be read (Is a directory): "),
+        )
+        for label, record, words in cases:
+            with self.subTest(label):
+                self.env = dataclasses.replace(self.env, install_record=record)
+                row = PlanItem("REFUSE", "install record", words + "apply stops before it writes anything")
+                self.assertIn(row.format_line(), self._plan_text(self.env).splitlines())
+                rc, _out, err, _systemd = self._run(mapper_present=False)
+                self.assertEqual((rc, err), (1, f"cst swap: ERROR: {words}nothing was changed\n"))
+
+    def test_a_record_this_user_may_not_read_is_a_question_and_root_s_refusal(self) -> None:
+        record = self._newer_record()
+        denied = PermissionError(errno.EACCES, "Permission denied", record)
+        cases = (
+            (
+                "a user",
+                False,
+                PlanItem("?", "install record", "cannot be read as this user: on the host, cst swap plan --root"),
+            ),
+            (
+                "the host's root",
+                True,
+                PlanItem(
+                    "REFUSE",
+                    "install record",
+                    f"{record}: cannot be read (Permission denied): apply stops before it writes anything",
+                ),
+            ),
+        )
+        for label, as_root, row in cases:
+            with self.subTest(label), mock.patch.object(JsonInstallRecord, "read", side_effect=denied):
+                plan = self._plan_text(dataclasses.replace(self.env, as_root=as_root))
+                self.assertIn(row.format_line(), plan.splitlines())
 
     def test_an_unmarked_line_is_named_before_a_record_of_a_newer_cst(self) -> None:
         self._newer_record()
@@ -3125,6 +3223,10 @@ class SwapApplyBranchesTest(_SwapScratch):
         # before its first write with "<path>: cannot be read: nothing was changed". Before, plan blocked in
         # the FIFO's open (bounded here, each path on its own: CallBlocked).
         note = "cannot be read, even as root: apply refuses before it writes anything"
+        # crypttab and fstab name what is in the way (since 2026-11; before, the root note).
+        line_note = (
+            "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there"
+        )
         lines = {"crypttab": "crypttab: swap0 line", "fstab": "fstab: /dev/mapper/swap0 line"}
         written_whole = [os.path.relpath(dest, self.env.etc_dir) for _src, dest in self.env.managed_files]
         for which in [*written_whole, "crypttab", "fstab"]:
@@ -3138,7 +3240,8 @@ class SwapApplyBranchesTest(_SwapScratch):
                 os.mkfifo(path)
                 for verb, rows in self._file_rows().items():
                     target = lines.get(which) or next(t for t in rows if t.endswith(os.path.basename(path)))
-                    self.assertEqual({t: r for t, r in rows.items() if r[0] == "?"}, {target: ("?", note)}, verb)
+                    want = line_note if which in lines else note
+                    self.assertEqual({t: r for t, r in rows.items() if r[0] == "?"}, {target: ("?", want)}, verb)
                 before = file_tree(tmp)
                 self._assert_refused_before_any_write(
                     self._apply_on(self._fs()), f"cst swap: ERROR: {path}: cannot be read: nothing was changed"
@@ -3169,7 +3272,11 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.env = dataclasses.replace(self.env, as_root=True)
         rows = self._file_rows()["plan"]
         self.assertEqual(
-            rows["crypttab: swap0 line"], ("?", "cannot be read, even as root: apply refuses before it writes anything")
+            rows["crypttab: swap0 line"],
+            (
+                "?",
+                "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there",
+            ),
         )
         before = file_tree(tmp)
         self._assert_refused_before_any_write(
@@ -3177,6 +3284,153 @@ class SwapApplyBranchesTest(_SwapScratch):
         )
         self.assertEqual(file_tree(tmp), before)
         self.assertEqual(os.readlink(self.env.crypttab), os.devnull)
+
+    def test_crypttab_or_fstab_that_is_not_a_regular_file_has_a_note_of_its_own(self) -> None:
+        # As a user too: root cannot help, so no --root advice. Before, "needs root to read: ... --root".
+        note = (
+            "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there"
+        )
+        kinds: tuple[tuple[str, Callable[[str], None]], ...] = (
+            ("fifo", os.mkfifo),
+            ("folder", os.mkdir),
+            ("link to /dev/null", lambda p: os.symlink(os.devnull, p)),
+        )
+        lines = {"crypttab": "crypttab: swap0 line", "fstab": "fstab: /dev/mapper/swap0 line"}
+        for which, row in lines.items():
+            for kind, make in kinds:
+                self._fresh_scratch()
+                path = getattr(self.env, which)
+                with self.subTest(which=which, kind=kind), time_bound(5):
+                    if os.path.lexists(path):
+                        os.remove(path)
+                    make(path)
+                    self.assertEqual(self._file_rows()["plan"][row], ("?", note))
+
+    def test_on_an_older_cst_s_machine_a_crypttab_that_is_not_a_regular_file_is_no_missing_setting(self) -> None:
+        # No swap.conf: apply would write it from crypttab's marked line, which no one can read. Before,
+        # "no swap partition configured" (as if there were no line).
+        kinds: tuple[tuple[str, Callable[[str], None]], ...] = (
+            ("fifo", os.mkfifo),
+            ("folder", os.mkdir),
+            ("link to /dev/null", lambda p: os.symlink(os.devnull, p)),
+            ("link that leads nowhere", lambda p: os.symlink("nowhere", p)),
+        )
+        note = (
+            "not written yet, and /etc/crypttab is not a regular file (a FIFO, a device, a folder, or a link to"
+            " one): apply stops"
+        )
+        for kind, make in kinds:
+            self._fresh_scratch()
+            with self.subTest(kind), time_bound(5):
+                os.remove(self.env.settings_path)
+                os.remove(self.env.crypttab)
+                make(self.env.crypttab)
+                self.assertIn(
+                    PlanItem("REFUSE", "cst/swap.conf", note).format_line(), self._plan_text(self.env).splitlines()
+                )
+
+    def _plan_with(self, system: FakeSwapSystem, *, mapper_present: bool = False) -> list[str]:
+        fs = self._fs(mapper_present=mapper_present)
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            system,
+            installer=swap_installer(),
+        )
+        out = io.StringIO()
+        render_plan(service.plan_report(), out=out)
+        return out.getvalue().splitlines()
+
+    def test_plan_shows_apply_s_signature_refusal_where_apply_checks_it(self) -> None:
+        # Before, plan had no row: apply alone found the signature, after modprobe and its other checks.
+        target = f"partition {self.spec.partuuid[:8]}..."
+        refuse = PlanItem("REFUSE", target, "has a 'ext4' signature: apply refuses to overwrite it").format_line()
+        ask = PlanItem("?", target, "its signature needs root (blkid): on the host, cst swap plan --root").format_line()
+        cases: tuple[tuple[str, bool, bool, bool, str | None, list[tuple[str, bool]]], ...] = (
+            # (label, as_root, in a container, swap0 open, the row, blkid's calls)
+            ("the host's root", True, False, False, refuse, [(self.spec.device_path, False)]),
+            ("a user", False, False, False, ask, []),
+            ("root in a toolbox", True, True, False, ask, []),
+            ("swap0 open: apply does not look", True, False, True, None, []),
+        )
+        for label, as_root, container, mapper, row, calls in cases:
+            with self.subTest(label):
+                self.env = dataclasses.replace(self.env, as_root=as_root, in_container=container)
+                system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, part_type="ext4")
+                lines = self._plan_with(system, mapper_present=mapper)
+                rows = [ln for ln in lines if ln.lstrip().startswith(("REFUSE", "?")) and target in ln]
+                self.assertEqual(rows, [] if row is None else [row])
+                self.assertEqual(system.blkid_calls, calls)
+        self.env = dataclasses.replace(self.env, as_root=True, in_container=False)
+        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, part_type="swap")
+        self.assertNotIn(refuse, self._plan_with(system))
+
+    def test_plan_shows_a_compressor_missing_from_proc_crypto_and_loads_no_module(self) -> None:
+        crypto = os.path.join(self.env.proc_dir, "crypto")
+        row = PlanItem(
+            "?",
+            "compressor zstd",
+            "not in /proc/crypto now: apply loads its module (modprobe) and stops if it is still missing",
+        ).format_line()
+        for label, text, want in (
+            ("missing", "name         : deflate\n", True),
+            ("there", "name         : zstd\n", False),
+        ):
+            with self.subTest(label):
+                with open(crypto, "w", encoding="utf-8") as f:
+                    f.write(text)
+                system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+                self.assertEqual(row in self._plan_with(system), want)
+                self.assertEqual(system.modprobes, [])
+
+    def test_a_slice_drop_in_that_is_not_a_regular_file_stops_apply_before_its_daemon_reload(self) -> None:
+        # Before, apply went on and ran its daemon-reloads, and systemd waited in the FIFO's open (PID 1
+        # stopped answering).
+        kinds: tuple[tuple[str, Callable[[str], None]], ...] = (
+            ("fifo", os.mkfifo),
+            ("folder", os.mkdir),
+            ("link to a device", lambda p: os.symlink(os.devnull, p)),
+        )
+        for where in ("etc", "run"):
+            for sub in ("machine.slice.d", "slice.d"):
+                for kind, make in kinds:
+                    tmp = self._fresh_scratch()
+                    run = os.path.join(tmp, "run", "systemd", "system")
+                    self.env = dataclasses.replace(self.env, unit_dirs=(run,))
+                    base = os.path.join(self.env.etc_dir, "systemd", "system") if where == "etc" else run
+                    path = os.path.join(base, sub, "60-x.conf")
+                    with self.subTest(where=where, sub=sub, kind=kind), time_bound(5):
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
+                        make(path)
+                        short = path.removeprefix(self.env.etc_dir.rstrip("/") + "/").removeprefix("systemd/system/")
+                        row = PlanItem(
+                            "REFUSE", short, "not a regular file: systemd's daemon-reload would wait on it; apply stops"
+                        )
+                        self.assertIn(row.format_line(), self._plan_text(self.env).splitlines())
+                        before = file_tree(tmp)
+                        rc, out, err, systemd = self._run(mapper_present=False)
+                        self.assertEqual(rc, 1)
+                        self.assertEqual(
+                            err,
+                            f"cst swap: ERROR: {path}: not a regular file: systemd's daemon-reload would wait on it;"
+                            " nothing was changed\n",
+                        )
+                        self.assertNotIn("written:", out)
+                        self.assertEqual(file_tree(tmp), before)
+                        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_a_regular_slice_drop_in_a_link_to_one_or_a_dangling_link_is_no_obstacle(self) -> None:
+        folder = os.path.join(self.env.etc_dir, "systemd", "system", "machine.slice.d")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "60-a.conf"), "w", encoding="utf-8") as f:
+            f.write("[Slice]\n")
+        os.symlink("60-a.conf", os.path.join(folder, "61-b.conf"))
+        os.symlink("nowhere", os.path.join(folder, "62-c.conf"))
+        self.assertNotIn("daemon-reload would wait", self._plan_text(self.env))
+        rc, _out, err, _systemd = self._run(mapper_present=False)
+        self.assertNotIn("daemon-reload would wait", err)
+        self.assertEqual(rc, 0, err)
 
     def test_a_missing_source_stops_apply_before_any_write(self) -> None:
         # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the
@@ -3538,6 +3792,12 @@ class SwapWiringTest(unittest.TestCase):
                 prog="cst swap",
                 install_record="/x/var/lib/cst/installed.json",
                 in_container=True,
+                unit_dirs=(
+                    "/x/run/systemd/system",
+                    "/x/run/systemd/system.control",
+                    "/x/run/systemd/transient",
+                    "/usr/lib/systemd/system",
+                ),
             ),
         )
 
@@ -3784,18 +4044,67 @@ class Phase1MemoryTuningTest(_SwapScratch):
             ("[Global]\n#MaxMemoryMin=1%\n[ActiveUser]\nMaxMemoryMin=1%\nMemoryMin=1G\n", 64 * one_g, (one_g, False)),
             ("[Global]\nMaxMemoryMin=1%\n", 64 * one_g, (None, False)),
             # ASCII digits only, as uresourced reads them: Arabic-Indic "2G" was 2 GiB, and "512M" a cap of 512 MiB.
-            ("[ActiveUser]\nMemoryMin=\N{ARABIC-INDIC DIGIT TWO}G\n", 64 * one_g, (None, False)),
+            # uresourced reads a value with no number as 0 (its "Could not parse memory key"), so the floor is 0.
+            ("[ActiveUser]\nMemoryMin=\N{ARABIC-INDIC DIGIT TWO}G\n", 64 * one_g, (0, False)),
             (
                 (
                     "[Global]\nMaxMemoryMin=\N{ARABIC-INDIC DIGIT FIVE}\N{ARABIC-INDIC DIGIT ONE}"
                     "\N{ARABIC-INDIC DIGIT TWO}M\n[ActiveUser]\nMemoryMin=1G\n"
                 ),
                 64 * one_g,
-                (one_g, False),
+                (0, False),
             ),
         ):
             with self.subTest(text=text, total=total):
                 self.assertEqual(effective_uresourced_memory_min(text, total), want)
+
+    def test_uresourced_conf_is_read_as_gkeyfile_and_uresourced_read_it(self) -> None:
+        # uresourced reads its file with GLib's GKeyFile (ASCII blanks only, "#" comments only, the last
+        # key counts) and a memory value with g_ascii_strtoll, then only the one character after the
+        # number: K, M, G, T, % or none; any other character is an error, which it reads as 0 bytes.
+        # Before, CST stripped Unicode blanks, took ";" lines as comments and read the value with
+        # systemd's size rules: "4<NBSP>G" was 4 bytes, "<NBSP>MemoryMin=4G" and "4Gx" other answers.
+        g, nbsp = GIB, "\N{NO-BREAK SPACE}"
+        for line, want in (
+            (f"MemoryMin=4{nbsp}G", 0),
+            (f"{nbsp}MemoryMin=4G", None),
+            (f"MemoryMin=4G{nbsp}", 4 * g),
+            (";MemoryMin=1G", None),
+            ("#MemoryMin=1G", None),
+            ("  #MemoryMin=1G", None),
+            ("MemoryMin=4Gx", 4 * g),
+            ("MemoryMin=  4G", 4 * g),
+            ("  MemoryMin \t=\t4G", 4 * g),
+            ("MemoryMin=4", 4),
+            ("MemoryMin=4 ", 0),
+            ("MemoryMin=4 G", 0),
+            ("MemoryMin=", 0),
+            ("MemoryMin=G", 0),
+            ("MemoryMin=4G\r", 4 * g),
+            ("MemoryMin=4\r\r", 0),
+            ("MemoryMin=\\s4G", 4 * g),
+            ("MemoryMin=4G\\x", 0),
+            ("MemoryMin=50%", None),
+            ("MemoryMin=-1", 2**64 - 1),
+            ("MemoryMin=99999999999999999999K", (2**63 - 1) * 1024 % 2**64),
+            ("MemoryMin=1G\nMemoryMin=2G", 2 * g),
+            ("MemoryMin=1G\n[Global]\nMemoryMin=5G\n[ActiveUser] \t\nMemoryMin=3G", 3 * g),
+            ("MemoryMin\N{FULLWIDTH EQUALS SIGN}1G", None),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(parse_uresourced_memory_min(f"[ActiveUser]\n{line}\n"), want)
+        for line, want in (
+            ("MaxMemoryMin=10%", (10, None)),
+            ("MaxMemoryMin=150%", (100, None)),
+            ("MaxMemoryMin=-5%", (100, None)),
+            ("MaxMemoryMin=512M", (None, 512 * MIB)),
+            ("MaxMemoryMin=10 %", (None, 0)),
+            (f"MaxMemoryMin=10%{nbsp}", (10, None)),
+            (f"{nbsp}MaxMemoryMin=10%", (None, None)),
+            (";MaxMemoryMin=10%", (None, None)),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(parse_uresourced_max_memory_min(f"[Global]\n{line}\n"), want)
 
     def test_uresourced_floor_is_capped_by_max_memory_min(self) -> None:
         # 8 GiB of RAM: [Global] MaxMemoryMin=10% caps MemoryMin=1G to 10% of MemTotal, in whole pages.

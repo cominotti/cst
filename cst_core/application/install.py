@@ -200,9 +200,10 @@ class InstallService:
                 )
 
     def _prepare(
-        self, entries: Sequence[InstallEntry], req: InstallRequest
+        self, entries: Sequence[InstallEntry], req: InstallRequest, *, refuse_unreadable: bool
     ) -> tuple[list[tuple[Placement, bytes]], dict[str, InstallRecord]]:
-        """Every entry's placement and bytes, checked; and their records as they are now (_read_records)."""
+        """Every entry's placement and bytes, checked; and their records as they are now (_read_records,
+        refuse_unreadable as there)."""
         self._check(entries, req)
         for e in entries:
             self.destination(e, req)  # every destination checked before any payload is built
@@ -210,13 +211,18 @@ class InstallService:
             (self.placement(e, req, values), data)
             for e, (data, values) in zip(entries, self._render(entries, req.values), strict=True)
         ]
-        return places, self._read_records({p.record for p, _ in places})
+        return places, self._read_records({p.record for p, _ in places}, refuse_unreadable=refuse_unreadable)
 
-    def _read_records(self, records: set[str], outcome: str = "nothing was changed") -> dict[str, InstallRecord]:
+    def _read_records(
+        self, records: set[str], outcome: str = "nothing was changed", *, refuse_unreadable: bool
+    ) -> dict[str, InstallRecord]:
         """Each record, read once, as it is now. A record of a newer CST stops the call before any write or
         removal (it is never rewritten by an older one); outcome ends the refusal (what the call left undone). No record
-        yet, or one that is no record (install starts it again), is empty; a record that cannot be read is
-        left out (plan cannot tell; the update after the files says why)."""
+        yet, or one that is no record (install starts it again), is empty. A record that is there and cannot
+        be read (a folder, a FIFO, EACCES, EIO) stops a call that writes (refuse_unreadable) the same way,
+        before anything changes: its update after the files would fail. A plan leaves it out (it cannot
+        tell), and so does every call for a record whose folder is a file (ENOTDIR: no record is there;
+        the update after the files says why, as before)."""
         found: dict[str, InstallRecord] = {}
         if self._record is None:
             return found
@@ -227,7 +233,10 @@ class InstallService:
                 if e.newer:
                     raise InstallRefused(f"{path}: {e}: {outcome}") from None
                 found[path] = EMPTY_RECORD
-            except OSError:
+            except OSError as e:
+                if refuse_unreadable and not isinstance(e, NotADirectoryError):
+                    # from e: a plan that shows the refusal tells a reader who may not read it (PermissionError).
+                    raise InstallRefused(f"{path}: cannot be read ({e.strerror or e}): {outcome}") from e
                 continue
         return found
 
@@ -260,12 +269,12 @@ class InstallService:
         """Bring every entry's dest up to date; one report line each, yielded as it is written.
 
         Everything is checked first (here, before the iterator is returned):
-        a refused entry, a bad template value or a record of a newer CST
-        raises before any write. Programs are written before units (a unit
+        a refused entry, a bad template value, a record of a newer CST or one
+        that is there and cannot be read raises before any write. Programs are written before units (a unit
         is never there before what it runs). The record is updated after
         the last file, and also when a write fails (with the files before it).
         """
-        todo, _ = self._prepare(entries, req)
+        todo, _ = self._prepare(entries, req, refuse_unreadable=True)
         todo.sort(key=lambda pd: pd[0].kind == ArtifactKind.UNIT)
         # Only a program with a SettingsStep is read here (is_current reads the whole file).
         replaced = [
@@ -400,21 +409,24 @@ class InstallService:
     def plan_put(self, place: Placement, data: bytes, *, as_root: bool) -> str:
         """What put would do, changing nothing: its _plan_line. A place with a record reads it (a record of a
         newer CST refuses, as put does); one without (no component) is never `would record:`."""
-        return self._plan_line(self._read_records({place.record}), place, data, as_root=as_root)
+        return self._plan_line(
+            self._read_records({place.record}, refuse_unreadable=False), place, data, as_root=as_root
+        )
 
-    def check_record(self, record: str) -> None:
-        """Refuse a record of a newer CST (InstallRefused, "RECORD: ...: nothing was changed"): a module that
-        changes the machine before its first put calls it before its own first write, so that put cannot
-        refuse after the module changed something (swap's apply, crypttab first). No record yet, one that is
-        no record, one that cannot be read (as for install: _read_records) and "" (no record) pass."""
-        self._read_records({record})
+    def check_record(self, record: str, outcome: str = "nothing was changed") -> None:
+        """Refuse a record of a newer CST, or one that is there and cannot be read (InstallRefused,
+        "RECORD: ...: nothing was changed"): a module that changes the machine before its first put calls it
+        before its own first write, so that put cannot refuse after the module changed something (swap's
+        apply, crypttab first). No record yet, one that is no record and "" (no record) pass. outcome ends
+        the refusal (a plan that shows it says what apply would do)."""
+        self._read_records({record}, outcome, refuse_unreadable=True)
 
     def put(self, place: Placement, data: bytes, *, as_root: bool, keep_state: bool = False) -> bool:
         """Write one file a module checked itself (its own refusals first), unless current; record it.
         True when it was written. keep_state: the component keeps the state the record has for it (a command
         that rewrites one file of a component outside its setup command; with_files)."""
         # Only this file: the module may have changed other things before it (swap's crypttab).
-        self._read_records({place.record}, f"{place.path} was not written")
+        self._read_records({place.record}, f"{place.path} was not written", refuse_unreadable=True)
         written = self.write_if_changed(place.path, data, place.mode, place.owner, as_root=as_root).startswith(
             "written"
         )
@@ -447,7 +459,7 @@ class InstallService:
         """forget, in each record the places name, their destinations; the files stay. A record of a newer CST
         stops the call before any record is rewritten (_read_records), as remove does."""
         records = sorted({p.record for p in places if p.record})
-        self._read_records(set(records))
+        self._read_records(set(records), refuse_unreadable=True)
         for record in records:
             self.forget(record, [p.dest for p in places if p.record == record])
 
@@ -458,7 +470,7 @@ class InstallService:
         A record of a newer CST stops the call before anything changes (_read_records): no settings step,
         no removal. A program with a SettingsStep that is there runs it first, while its settings file is
         missing."""
-        self._read_records({p.record for p in places if p.record})
+        self._read_records({p.record for p in places if p.record}, refuse_unreadable=True)
         yield from self._settings_steps(
             [p for p in places if (p.src or "") in SETTINGS_STEPS and self._target.current(p.path) is not None]
         )
@@ -481,7 +493,7 @@ class InstallService:
         It is not counted here (it needs no write); `check` reads the lines and counts it as not current."""
         lines: list[str] = []
         replaced: list[Placement] = []
-        todo, records = self._prepare(entries, req)
+        todo, records = self._prepare(entries, req, refuse_unreadable=False)
         for p, data in todo:
             lines.append(self._plan_line(records, p, data, as_root=req.as_root))
             if lines[-1].startswith(InstallReportWord.WOULD_WRITE):

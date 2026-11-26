@@ -269,7 +269,13 @@ class FaultyStateFiles(GameStateFiles):
 
     @override
     def create(self, path: str, text: str) -> None:
-        self.plan.step(f"write {path}", functools.partial(super().create, path, text))
+        def emptied(err: OSError) -> None:
+            # The real open "w" truncates the file (or makes it empty) before its write fails.
+            with contextlib.suppress(OSError), open(path, "w", encoding="utf-8"):
+                pass
+            raise err
+
+        self.plan.step(f"write {path}", functools.partial(super().create, path, text), emptied)
 
     @override
     def append(self, path: str, text: str) -> None:

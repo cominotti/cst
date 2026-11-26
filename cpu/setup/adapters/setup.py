@@ -19,22 +19,25 @@ import pwd
 from typing import TextIO
 
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.adapters.terminal import stderr, stdout
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
 from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.units import user_manager_head
+from cst_core.domain.units import UNIT_PATH_PROP, show_manager_value_argv, user_manager_head, user_unit_dir
 from cst_core.domain.values import ROOT_ACCOUNT
-from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, InstallRecordPort, OutputMode
 from perf.adapters import LinuxPerfProbe, PerfPaths
 from perf.domain.evaluate import evaluate_perf_snapshot
 from perf.domain.models import PerfAxis
 from perf.presenter import render_perf_findings_block
 from cpu.game.adapters.host import holds, read_stripped
-from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
+from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, RUN_FOLDER_MODE, USER_SLICE, cpuset_in
 from cpu.power.adapters import read_cpu_topology
+from cpu.setup.adapters.experiments import ExperimentEnv, run_experiment
+from cpu.setup.adapters.user_dropins import OlderDropins, classify_older_dropins
 from cpu.setup.domain import (
     CORE_COMPONENT,
     CPU_POWER_SERVICE,
@@ -53,9 +56,7 @@ from cpu.setup.domain import (
     SchedExtState,
     SetupPaths,
     cgroup_parent_shown,
-    current_choice,
     docker_slice_status,
-    experiment_line,
     first_arg,
     first_conf_lines,
     first_four_and_last,
@@ -110,10 +111,10 @@ def target_user(sudo_user: str, conf: str) -> str:
     return target_user_in(read_text(conf) or "")
 
 
-def _make_run_dir(path: str) -> None:
+def _make_run_dir(path: str, mode: int = RUN_FOLDER_MODE) -> None:
     """install -d -m 0755 PATH (the mode also for a folder already there)."""
-    ensure_dir(path, 0o755)
-    os.chmod(path, 0o755)
+    ensure_dir(path, mode)
+    os.chmod(path, mode)
 
 
 def _touch(path: str) -> None:
@@ -139,6 +140,7 @@ class CpuSetup:
         home_of: Callable[[str], str] = passwd_home,
         has_group: Callable[[str], bool] = group_exists,
         me: Callable[[], str] = my_name,
+        records: InstallRecordPort | None = None,
         out: TextIO | None = None,
         err: TextIO | None = None,
     ) -> None:
@@ -152,6 +154,8 @@ class CpuSetup:
         self._home_of = home_of
         self._has_group = has_group
         self._me = me
+        self._records = JsonInstallRecord() if records is None else records
+        self._unit_paths: dict[str, str | None] = {}
         self._out = out
         self._err = err
 
@@ -237,6 +241,12 @@ class CpuSetup:
         if home:
             self.installer("remove-text", "--home", home, *dests, as_user=self.user)
 
+    def forget_user_text(self, *dests: str) -> None:
+        """Forget record lines under the target user's home without deleting the files."""
+        home = self._home_of(self.user)
+        if home and dests:
+            self.installer("forget-text", "--home", home, *dests, as_user=self.user)
+
     def required_home(self, user: str, who: str) -> str:
         """The user's home for a step in it (who: the helper that says so), or Halt(1)."""
         home = self._home_of(user)
@@ -263,11 +273,51 @@ class CpuSetup:
             with contextlib.suppress(OSError):
                 os.rmdir(p)
 
+    def _user_unit_path(self) -> str | None:
+        """The target user manager's UnitPath, asked once per run; None when it cannot be read."""
+        if not self.user:
+            return None
+        if self.user not in self._unit_paths:
+            self._o().flush()
+            self._e().flush()
+            res = self._runner.run(
+                show_manager_value_argv(user_manager_head(self.user), UNIT_PATH_PROP),
+                check=False,
+                timeout=20,
+                locale_c=True,
+                output=OutputMode.CAPTURE,
+            )
+            self._unit_paths[self.user] = res.stdout if res.returncode == 0 else None
+        return self._unit_paths[self.user]
+
+    def _user_unit_dir(self) -> str:
+        """Where the target user manager reads its own units from (user_unit_dir)."""
+        return user_unit_dir(self._user_unit_path(), self._home_of(self.user))
+
     def toolbox_dropin(self, name: str = DROPIN_NAME) -> str:
-        return toolbox_dropin(self._home_of(self.user), name)
+        return toolbox_dropin(self._user_unit_dir(), name)
 
     def helper_dropin(self, name: str = DROPIN_NAME) -> str:
-        return helper_dropin(self._home_of(self.user), name)
+        return helper_dropin(self._user_unit_dir(), name)
+
+    def _older_dropins(self, tb_path: str, helper_path: str) -> OlderDropins:
+        """Recorded older copies of the cpu:toolbox drop-ins split into remove vs forget-only."""
+        home = self._home_of(self.user)
+        if not home:
+            return OlderDropins((), ())
+        pairs = (
+            (tb_path, f"user.slice.d/{DROPIN_NAME}"),
+            (helper_path, f"flatpak-session-helper.service.d/{DROPIN_NAME}"),
+        )
+        return classify_older_dropins(self._records, home, self._user_unit_path(), pairs)
+
+    def _clean_older_dropins(self, tb_path: str, helper_path: str) -> None:
+        """Remove CST's older copies elsewhere than current; forget aliased or foreign ones."""
+        older = self._older_dropins(tb_path, helper_path)
+        self.forget_user_text(*older.forget)
+        if older.remove:
+            self.remove_user_text(*older.remove)
+            self.rmdir(*(dict.fromkeys(os.path.dirname(p) for p in older.remove)))
 
     def remove_old_dropins(self) -> None:
         """The baseline drop-ins under their old name, from before the rename to 10-: they would still
@@ -337,13 +387,15 @@ class CpuSetup:
             self.warn(f"NOTE: {p.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped")
         self._install_ntsync()
         ecores = self.e_cores()
+        tb_path, helper_path = self.toolbox_dropin(), self.helper_dropin()
+        self._clean_older_dropins(tb_path, helper_path)
         if ecores:
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
-            self.install_text(self.helper_dropin(), helper_dropin_text(ecores), user, TOOLBOX_COMPONENT)
+            self.install_text(tb_path, toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
+            self.install_text(helper_path, helper_dropin_text(ecores), user, TOOLBOX_COMPONENT)
         else:
             self.warn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped")
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(""), user, TOOLBOX_COMPONENT)
-            self.remove_user_text(self.helper_dropin())
+            self.install_text(tb_path, toolbox_dropin_text(""), user, TOOLBOX_COMPONENT)
+            self.remove_user_text(helper_path)
         self.remove_old_dropins()  # the daemon-reloads below then read without them
         link = os.path.join(self.root, "cst-link.bash")
         self.run(["bash", "-c", 'set -Eeuo pipefail; source "$1"; link_cst_command "$2"', "cpu-setup.sh", link, user])
@@ -459,8 +511,11 @@ class CpuSetup:
         self.rmdir(os.path.dirname(p.machine_dropin), os.path.dirname(p.delegate_dropin))
         if self.user:
             dropins = (self.toolbox_dropin(), self.helper_dropin())
+            older = self._older_dropins(*dropins)
+            all_dropins = (*dropins, *older.remove)
             try:
-                self.remove_user_text(*dropins)
+                self.forget_user_text(*older.forget)
+                self.remove_user_text(*all_dropins)
             except Halt:
                 # The installer failed (a record of a newer CST, a folder the user cannot write): the record
                 # stays as it is, the drop-ins go as before the record, and uninstall goes on to the reloads.
@@ -468,8 +523,8 @@ class CpuSetup:
                     f"WARNING: the install record of {self.user} was not changed (see above); "
                     "removing the drop-ins without it"
                 )
-                self.rm_v(*dropins)
-            self.rmdir(os.path.dirname(self.toolbox_dropin()), os.path.dirname(self.helper_dropin()))
+                self.rm_v(*all_dropins)
+            self.rmdir(*(dict.fromkeys(os.path.dirname(p) for p in all_dropins)))
             if holds(gamemode_ini(self._home_of(self.user)), MANAGED_MARK):
                 home = self.required_home(self.user, "cst-install.bash")
                 self.installer("remove", "--home", home, "--component", GAMEMODE_COMPONENT, as_user=self.user)
@@ -563,72 +618,17 @@ class CpuSetup:
     # ---- experiments --------------------------------------------------------------------------------
     def experiment(self, args: Sequence[str]) -> int:
         """experiment list|on NAME|off NAME: runtime-only memory knobs."""
-        action = first_arg(args, "list")
-        name = args[1] if len(args) > 1 else ""
-        if action == "list":
-            return self._experiment_list()
-        if action not in ("on", "off"):
-            raise Halt(2, "experiment: list|on NAME|off NAME")
-        if not name:
-            raise Halt(1, "cpu-setup.sh: EXPERIMENTS: bad array subscript")
-        spec = self.paths.experiments.get(name)
-        if spec is None:
-            raise Halt(2, f"experiment: unknown '{name}' (see: {self.prog} experiment list)")
-        file, value = spec
-        saved = self.paths.saved(name)
-        if action == "on":
-            return self._experiment_on(name, file, value, saved)
-        return self._experiment_off(name, file, saved)
-
-    def _experiment_list(self) -> int:
-        """experiment list: each knob, its value now, and whether it is on."""
-        for exp, (file, value) in self.paths.experiments.items():
-            try:
-                with open(file, encoding="utf-8", errors="replace") as fh:
-                    now = fh.read().replace("\n", "")
-            except OSError as e:
-                self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
-                now = ""
-            self.say(experiment_line(exp, file, value, now, on=os.path.exists(self.paths.saved(exp))))
-        return 0
-
-    def _experiment_on(self, name: str, file: str, value: str, saved: str) -> int:
-        """experiment on NAME: the value it replaces saved (the first time), then VALUE into FILE."""
-        _make_run_dir(self.paths.run)
-        if not os.path.exists(saved):
-            self._save_choice(file, saved)
-        if not self._echo_to(file, value):
-            raise Halt(1)
-        self.say(
-            f"{name}: on ({file} = {value}; runtime only, reverted by '{self.prog} experiment off {name}' or a reboot)"
+        return run_experiment(
+            ExperimentEnv(
+                self.paths,
+                self.prog,
+                self.say,
+                self.warn,
+                self._echo_to,
+                _make_run_dir,
+            ),
+            args,
         )
-        return 0
-
-    def _experiment_off(self, name: str, file: str, saved: str) -> int:
-        """experiment off NAME: the saved value back into FILE."""
-        if not os.path.exists(saved):
-            self.say(f"{name}: not on")
-            return 0
-        old = read_text(saved) or ""
-        try:
-            with open(file, "w", encoding="utf-8") as fh:
-                fh.write(old)
-        except OSError as e:
-            self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
-            raise Halt(1, f"{name}: could not restore {old.rstrip('\n')} into {file}") from None
-        os.remove(saved)
-        self.say(f"{name}: off ({file} restored)")
-        return 0
-
-    def _save_choice(self, file: str, saved: str) -> None:
-        """The value an experiment replaces, for 'off' (sysfs THP shows "[current]" among the choices).
-        Read first: a value that cannot be read saves nothing (off then has nothing to put back)."""
-        try:
-            with open(file, encoding="utf-8", errors="replace") as fh:
-                value = current_choice(fh.read())
-        except OSError as e:
-            raise Halt(2, f"sed: can't read {file}: {e.strerror}") from None
-        write_atomic(saved, value, mode="umask", durable=False, relabel=False)
 
     # ---- game, vm-pin -----------------------------------------------------------------------------
     def game(self, args: Sequence[str]) -> int:
