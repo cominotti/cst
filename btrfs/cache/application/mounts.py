@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The use cases of `cst btrfs cache`: status, plan, attach and detach of a user's cache and scratchpad binds.
+"""The use cases of `cst btrfs cache`: status, plan, attach, detach, provision, and unprovision.
 
-attach makes the folders (and the scratchpad's tag), mounts each bind not mounted yet, then writes
-/etc/fstab and reloads systemd: a failure takes back the binds this run mounted and /etc/fstab, so no
-line is left that would mount at the next boot. detach drops the user's lines and reloads first, then
-unmounts only the binds CST made; a failed umount mounts again what this run unmounted and puts back
-the lines of the binds that are mounted again. A run that writes no /etc/fstab reloads systemd when it
-has not loaded /etc/fstab as it is on disk (an earlier run stopped between its write and its reload).
+attach makes the folders (and the scratchpad's tag), optionally migrates existing ~/.cache contents when
+--migrate is given, mounts each bind not mounted yet, then writes /etc/fstab and reloads systemd: a failure
+takes back the binds this run mounted, any migration rename, and /etc/fstab, so no line is left that would
+mount at the next boot. detach drops the user's lines and reloads first, then unmounts only the binds CST made.
 Every read and write goes through the ports (ports.py).
 """
 
@@ -16,6 +14,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
+from btrfs.cache.application.provision import ProvisionEnv, run_provision, run_unprovision
 from btrfs.cache.domain import (
     BASE_FOR_KIND,
     BaseMountInfo,
@@ -29,10 +28,7 @@ from btrfs.cache.domain import (
     LiveMount,
     ManagedFstabEntry,
     build_user_bindings,
-    cache_seam_lines,
     detach_blockers,
-    format_cache_mount_plan,
-    format_cache_mount_status,
     has_managed_line,
     is_bind_from,
     mount_holding,
@@ -47,11 +43,26 @@ from btrfs.cache.domain import (
     unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
+from btrfs.cache.domain.format import (
+    CachePlanOptions,
+    cache_seam_lines,
+    format_cache_mount_plan,
+    format_cache_mount_status,
+)
+from btrfs.cache.domain.migrate import (
+    MigrationProbe,
+    backup_path_for,
+    cleanup_hint,
+    needs_migration,
+    validate_migration,
+)
 from btrfs.cache.domain.systemd_view import catch_up_words, fstab_lines_unread, systemd_behind_fstab
 from btrfs.cache.ports import (
     CacheAccountsPort,
     CacheFoldersPort,
     CacheHostViewPort,
+    CacheMigrationPort,
+    CacheProvisionPort,
     CacheSystemdPort,
     FstabPort,
     MountTablePort,
@@ -73,6 +84,8 @@ class CacheMounts:
     folders: CacheFoldersPort
     host: CacheHostViewPort
     accounts: CacheAccountsPort
+    provision: CacheProvisionPort | None = None
+    migration: CacheMigrationPort | None = None
     seam_root: str = ""
 
     def snapshot(self, parsed: CacheMountParsedArgs) -> CacheMountSnapshot:
@@ -81,6 +94,8 @@ class CacheMounts:
 
     def run(self, parsed: CacheMountParsedArgs, prog: str) -> ExitAndLines:
         """The requested subcommand: (exit status, its lines); prog: the command's name in plan's lines."""
+        if parsed.action in (CacheMountAction.PROVISION, CacheMountAction.UNPROVISION):
+            return _run_provision_action(parsed, self, prog)
         snap = self.snapshot(parsed)
         match parsed.action:
             case CacheMountAction.STATUS:
@@ -108,7 +123,21 @@ class CacheMounts:
             if new_fstab == cur_fstab:  # attach would only mount and reload
                 mounting = {p.binding.target for p in snap.bindings if not p.mounted_from_source}
                 snap = replace(snap, fstab_behind=_fstab_behind(snap, self, mounting))
-        return 0, format_cache_mount_plan(snap, prog, allow_nonempty=parsed.allow_nonempty, seam_root=self.seam_root)
+        return 0, format_cache_mount_plan(
+            snap,
+            prog,
+            options=CachePlanOptions(
+                allow_nonempty=parsed.allow_nonempty,
+                migrate=parsed.migrate,
+                allow_busy=parsed.allow_busy,
+                seam_root=self.seam_root,
+            ),
+        )
+
+
+def _run_provision_action(parsed: CacheMountParsedArgs, m: CacheMounts, prog: str) -> ExitAndLines:
+    env = ProvisionEnv(prov=m.provision, fstab=m.fstab, mounts=m.mounts, systemd=m.systemd, seam_root=m.seam_root)
+    return run_provision(parsed, env, prog) if parsed.action == CacheMountAction.PROVISION else run_unprovision(env)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +204,25 @@ def _probe_binding(
     )
 
 
+def _probe_migration(probes: tuple[BindingProbe, ...], m: CacheMounts) -> MigrationProbe | None:
+    if m.migration is None:
+        return None
+    cache_probe = next((p for p in probes if p.binding.kind == CacheMountKind.CACHE), None)
+    if cache_probe is None or not needs_migration(cache_probe):
+        return None
+    target = cache_probe.binding.target
+    backup = backup_path_for(target)
+    busy_procs, busy_error = m.migration.busy_processes(target)
+    return MigrationProbe(
+        backup_path=backup,
+        backup_exists=m.migration.backup_exists(backup),
+        source_nonempty=m.migration.source_nonempty(cache_probe.binding.source),
+        target_is_subvol=m.migration.is_btrfs_subvol(target),
+        busy_procs=busy_procs,
+        busy_error=busy_error,
+    )
+
+
 def _probe_snapshot(parsed: CacheMountParsedArgs, m: CacheMounts) -> CacheMountSnapshot:
     # Byte-transparent: the text is written back, and the bytes of the lines CST does not manage stay.
     # A file there that cannot be read is no missing file: a fstab built from "" would drop every line.
@@ -199,6 +247,7 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, m: CacheMounts) -> CacheMountS
     bases = {kind: _probe_base(kind, tables) for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD)}
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     probes = tuple(_probe_binding(k, user, bases[k], tables, m) for k in kinds) if user is not None else ()
+    mig = _probe_migration(probes, m) if parsed.migrate else None
     return CacheMountSnapshot(
         user,
         user_err,
@@ -211,6 +260,7 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, m: CacheMounts) -> CacheMountS
         mounts_error,
         home_missing=user is not None and not m.host.home_exists(user.home),
         fstab_error=fstab_error,
+        migration=mig,
     )
 
 
@@ -224,10 +274,7 @@ class _FstabFailure:
 
 def _commit_fstab(previous: str | None, new_text: str, m: CacheMounts) -> _FstabFailure | None:
     """Write /etc/fstab and reload systemd; None, or why it failed, after /etc/fstab was put back as
-    it was (the previous text, or no file when there was none) or, in undo_errors, why it could not be.
-    A first write that failed before its rename leaves the file as it was (write_atomic); one whose
-    folder sync failed after it (ReplacedNotSynced) may have left the new text in place: it is read
-    back and put back when it is there. systemd is not reloaded then: it still has the old text loaded."""
+    it was (the previous text, or no file when there was none) or, in undo_errors, why it could not be."""
     try:
         m.fstab.write(new_text)
     except ReplacedNotSynced as exc:
@@ -241,8 +288,7 @@ def _commit_fstab(previous: str | None, new_text: str, m: CacheMounts) -> _Fstab
 
 
 def _undo_replaced(previous: str | None, new_text: str, m: CacheMounts) -> tuple[str, ...]:
-    """After a write of new_text that raised once its rename was done: /etc/fstab read back, and put back
-    as it was when it holds new_text (nothing when it holds something else); what of it failed."""
+    """After a write of new_text that raised once its rename was done: /etc/fstab read back, and put back."""
     try:
         now = m.fstab.read()
     except OSError as exc:
@@ -251,27 +297,19 @@ def _undo_replaced(previous: str | None, new_text: str, m: CacheMounts) -> tuple
 
 
 def _fstab_behind(snap: CacheMountSnapshot, m: CacheMounts, mounting: Collection[str] = ()) -> bool | None:
-    """Whether systemd has not loaded /etc/fstab as it is on disk (systemd_behind_fstab over the mount
-    units it has loaded, active or not; mounting: the targets attach mounts); None when systemctl gives
-    no answer."""
+    """Whether systemd has not loaded /etc/fstab as it is on disk."""
     return systemd_behind_fstab(m.systemd.mount_units(), snap.bindings, mounting)
 
 
 def _cache_set_up(snap: CacheMountSnapshot) -> bool:
-    """Whether status asks systemd about /etc/fstab: a managed line, or a base in /etc/fstab or mounted (an
-    attach or detach may have stopped before its reload); not for a machine without the cache, where a hand
-    edit of /etc/fstab is no business of the cache's."""
+    """Whether status asks systemd about /etc/fstab."""
     return bool(snap.all_managed) or any(b.in_fstab or b.mounted for b in snap.bases.values())
 
 
 def _catch_up_reload(
     snap: CacheMountSnapshot, m: CacheMounts, mounting: Collection[str] = ()
 ) -> tuple[str | None, list[str]]:
-    """For a run that writes no /etc/fstab: daemon-reload when systemd has not loaded /etc/fstab as it is
-    on disk (an earlier run stopped between its write and its reload), or when systemctl cannot say:
-    (why the reload failed, or None; the lines to add), worded by catch_up_words. A run with nothing
-    pending reloads nothing; a failed reload when systemctl cannot say is a warning, and the run goes on
-    (a detach still unmounts)."""
+    """For a run that writes no /etc/fstab: daemon-reload when systemd has not loaded /etc/fstab as it is."""
     behind = _fstab_behind(snap, m, mounting)
     if behind is False:
         return None, []
@@ -298,12 +336,10 @@ class _PutBack:
 
 
 def _put_fstab_back(previous: str | None, m: CacheMounts) -> _PutBack:
-    """/etc/fstab as it was (the previous text, or no file when there was none). A write whose folder sync
-    failed after its rename (ReplacedNotSynced) put the old text in place, not synced: an error that says
-    so."""
+    """/etc/fstab as it was (the previous text, or no file when there was none)."""
     try:
         if previous is None:
-            m.fstab.remove()  # already gone: as it was
+            m.fstab.remove()
         else:
             m.fstab.write(previous)
     except ReplacedNotSynced as exc:
@@ -314,7 +350,7 @@ def _put_fstab_back(previous: str | None, m: CacheMounts) -> _PutBack:
 
 
 def _restore_fstab(previous: str | None, m: CacheMounts) -> list[str]:
-    """Put /etc/fstab back as it was and reload systemd when the old text is in place; what of it failed."""
+    """Put /etc/fstab back as it was and reload systemd when the old text is in place."""
     put_back = _put_fstab_back(previous, m)
     why = m.systemd.daemon_reload() if put_back.in_place else None
     return [*put_back.errors] if why is None else [*put_back.errors, why]
@@ -327,8 +363,7 @@ def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
 
 
 def _error_after_catch_up(cause: str, undo_errors: Sequence[str], mounted: Sequence[CacheMountBinding]) -> str:
-    """The ERROR line of attach's failed catch-up reload, a step that wrote no /etc/fstab: only the mounts
-    this run made are taken back."""
+    """The ERROR line of attach's failed catch-up reload."""
     if undo_errors:
         return _error_after_undo(cause, undo_errors)
     return f"ERROR: {cause}; the mounts this run made were taken back." if mounted else f"ERROR: {cause}"
@@ -337,8 +372,7 @@ def _error_after_catch_up(cause: str, undo_errors: Sequence[str], mounted: Seque
 def _undo_each(
     m: CacheMounts, done: Sequence[CacheMountBinding], *, mounted: bool
 ) -> list[tuple[CacheMountBinding, str]]:
-    """Take back what this run did, last first: unmount the binds it mounted (mounted=True) or
-    mount again the ones it unmounted; each binding that could not be taken back, with why."""
+    """Take back what this run did, last first."""
     step = m.mounts.unbind if mounted else m.mounts.bind
     return [(b, err) for b in reversed(done) if (err := step(b)) is not None]
 
@@ -346,6 +380,74 @@ def _undo_each(
 def _undo(m: CacheMounts, done: Sequence[CacheMountBinding], *, mounted: bool) -> list[str]:
     """_undo_each's failures, the reasons only."""
     return [err for _, err in _undo_each(m, done, mounted=mounted)]
+
+
+@dataclass(frozen=True, slots=True)
+class _PerformedMigration:
+    binding: CacheMountBinding
+    backup_path: str
+    target_is_subvol: bool
+
+
+def _rollback_migration(mig_done: _PerformedMigration | None, m: CacheMounts) -> list[str]:
+    if mig_done is None or m.migration is None:
+        return []
+    errors: list[str] = []
+    b = mig_done.binding
+    try:
+        m.migration.remove_empty_dir(b.target)
+    except OSError as exc:
+        errors.append(f"cannot remove empty {b.target}: {exc.strerror or exc}")
+    try:
+        m.migration.rename(mig_done.backup_path, b.target)
+    except OSError as exc:
+        errors.append(f"cannot restore {mig_done.backup_path} -> {b.target}: {exc.strerror or exc}")
+    m.migration.clear_dir_contents(b.source)
+    return errors
+
+
+def _swap_cache_target(b: CacheMountBinding, backup: str, user: CacheMountUser, m: CacheMounts) -> str | None:
+    assert m.migration is not None
+    try:
+        m.migration.rename(b.target, backup)
+    except OSError as exc:
+        m.migration.clear_dir_contents(b.source)
+        return f"ERROR: cannot move {b.target} to {backup}: {exc.strerror or exc}"
+    try:
+        m.migration.ensure_empty_dir(b.target, user)
+    except OSError as exc:
+        undo_errs: list[str] = []
+        try:
+            m.migration.rename(backup, b.target)
+        except OSError as r_exc:
+            undo_errs.append(f"cannot restore {backup} -> {b.target}: {r_exc.strerror or r_exc}")
+        m.migration.clear_dir_contents(b.source)
+        return _error_after_undo(f"cannot recreate empty {b.target}: {exc.strerror or exc}", undo_errs)
+    return None
+
+
+def _perform_migration(
+    snap: CacheMountSnapshot, user: CacheMountUser, m: CacheMounts
+) -> tuple[_PerformedMigration | None, str | None]:
+    if m.migration is None or snap.migration is None:
+        return None, None
+    cache_probe = next((p for p in snap.bindings if p.binding.kind == CacheMountKind.CACHE), None)
+    if cache_probe is None or not needs_migration(cache_probe):
+        return None, None
+    b = cache_probe.binding
+    backup = snap.migration.backup_path
+    try:
+        m.folders.ensure_private(b.source, user)
+    except OSError as exc:
+        return None, f"ERROR: cannot prepare migration destination {b.source}: {exc.strerror or exc}"
+    copy_err = m.migration.copy_tree(b.target, b.source)
+    if copy_err is not None:
+        m.migration.clear_dir_contents(b.source)
+        return None, f"ERROR: {copy_err}; original {b.target} left untouched."
+    swap_err = _swap_cache_target(b, backup, user, m)
+    if swap_err is not None:
+        return None, swap_err
+    return _PerformedMigration(b, backup, snap.migration.target_is_subvol), None
 
 
 def _prepare_attach_dirs(snap: CacheMountSnapshot, user: CacheMountUser, m: CacheMounts) -> str | None:
@@ -363,22 +465,21 @@ def _prepare_attach_dirs(snap: CacheMountSnapshot, user: CacheMountUser, m: Cach
     return None
 
 
-def _bind_missing(snap: CacheMountSnapshot, m: CacheMounts) -> tuple[list[CacheMountBinding], str | None]:
-    """mount --bind each binding not mounted yet; on a failure, the binds this run mounted are taken
-    back and the ERROR line comes with them."""
+def _bind_missing(snap: CacheMountSnapshot, m: CacheMounts) -> tuple[list[CacheMountBinding], str | None, list[str]]:
+    """mount --bind each binding not mounted yet; returns `(mounted, error_cause, undo_errors)`."""
     mounted: list[CacheMountBinding] = []
     for probe in snap.bindings:
         if probe.mounted_from_source:
             continue
         err = m.mounts.bind(probe.binding)
         if err is not None:
-            return mounted, _error_after_undo(err, _undo(m, mounted, mounted=True))
+            return mounted, err, _undo(m, mounted, mounted=True)
         mounted.append(probe.binding)
-    return mounted, None
+    return mounted, None, []
 
 
 def _unbind_cst_mounts(snap: CacheMountSnapshot, m: CacheMounts) -> tuple[list[CacheMountBinding], str | None]:
-    """Unmount the binds CST made, until one fails: the binds unmounted, and why the one failed."""
+    """Unmount the binds CST made, until one fails."""
     unmounted: list[CacheMountBinding] = []
     for probe in snap.bindings:
         if not probe.mounted_from_source:
@@ -390,65 +491,119 @@ def _unbind_cst_mounts(snap: CacheMountSnapshot, m: CacheMounts) -> tuple[list[C
     return unmounted, None
 
 
-def _commit_fstab_or_undo(
-    snap: CacheMountSnapshot, new_fstab: str, m: CacheMounts, mounted: Sequence[CacheMountBinding]
-) -> str | None:
-    """Write /etc/fstab and reload systemd; on a failure, unmount the binds this run mounted and give
-    the ERROR line."""
+def _validate_attach_request(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> list[str]:
+    if parsed.migrate and m.migration is None:
+        return ["migration adapter is unavailable"]
+    blockers = validate_attach_snapshot(
+        snap,
+        allow_nonempty=parsed.allow_nonempty,
+        allow_nonempty_kinds=(CacheMountKind.CACHE,) if parsed.migrate else (),
+    )
+    if parsed.migrate and snap.migration is not None:
+        cache_probe = next((p for p in snap.bindings if p.binding.kind == CacheMountKind.CACHE), None)
+        if cache_probe is not None:
+            for msg in validate_migration(cache_probe, snap.migration, allow_busy=parsed.allow_busy):
+                if msg not in blockers:
+                    blockers.append(msg)
+    return blockers
+
+
+def _rollback_mig_if_unmounted(
+    m: CacheMounts, undo_msgs: Sequence[str], mig_done: _PerformedMigration | None
+) -> list[str]:
+    # Only restore the renamed target folder if its mountpoint was actually unmounted.
+    target_still_mounted = mig_done is not None and any(mig_done.binding.target in err for err in undo_msgs)
+    return (
+        [f"kept {mig_done.binding.target} mounted over {mig_done.backup_path}"]
+        if mig_done is not None and target_still_mounted
+        else _rollback_migration(mig_done, m)
+    )
+
+
+def _undo_attach_failure(
+    m: CacheMounts,
+    mounted: Sequence[CacheMountBinding],
+    extra_undo: Sequence[str],
+    mig_done: _PerformedMigration | None,
+) -> list[str]:
+    mount_undo = _undo(m, mounted, mounted=True)
+    return [*mount_undo, *extra_undo, *_rollback_mig_if_unmounted(m, mount_undo, mig_done)]
+
+
+def _commit_attach_fstab(
+    snap: CacheMountSnapshot,
+    m: CacheMounts,
+    mounted: Sequence[CacheMountBinding],
+    mig_done: _PerformedMigration | None,
+) -> tuple[bool, list[str], str | None]:
+    cur_fstab, new_fstab = _attach_fstab(snap)
+    if new_fstab == cur_fstab:
+        now = tuple(replace(p, mounted_from_source=True) if p.binding in mounted else p for p in snap.bindings)
+        cause, reloaded = _catch_up_reload(replace(snap, bindings=now), m, {b.target for b in mounted})
+        if cause is None:
+            return False, reloaded, None
+        undo_errs = _undo_attach_failure(m, mounted, (), mig_done)
+        msg = (
+            _error_after_undo(cause, undo_errs)
+            if undo_errs or mig_done is not None
+            else _error_after_catch_up(cause, [], mounted)
+        )
+        return False, [], msg
     failed = _commit_fstab(snap.fstab_text, new_fstab, m)
-    if failed is None:
-        return None
-    undo_errors = [*_undo(m, mounted, mounted=True), *failed.undo_errors]
-    return _error_after_undo(failed.cause, undo_errors)
+    if failed is not None:
+        return True, [], _error_after_undo(failed.cause, _undo_attach_failure(m, mounted, failed.undo_errors, mig_done))
+    return True, [], None
 
 
 def _apply_attach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> ExitAndLines:
-    """Folders, then mount --bind, then /etc/fstab and daemon-reload: a failure takes back the
-    binds this run mounted (and /etc/fstab), so no line is left that would mount at the next boot."""
-    blockers = validate_attach_snapshot(snap, allow_nonempty=parsed.allow_nonempty)
+    """Optionally migrate ~/.cache, make folders, mount --bind, then write /etc/fstab and daemon-reload."""
+    blockers = _validate_attach_request(snap, parsed, m)
     if blockers or snap.user is None:
         return 1, [f"ERROR: {msg}" for msg in (blockers or [snap.user_error or "invalid state"])]
 
     user = snap.user
     lines = cache_seam_lines(m.seam_root)
-    error = _prepare_attach_dirs(snap, user, m)
-    if error is not None:
-        return 1, [*lines, error]
+    mig_done, err = _perform_migration(snap, user, m) if parsed.migrate else (None, None)
+    if err is not None:
+        return 1, [*lines, err]
 
-    cur_fstab, new_fstab = _attach_fstab(snap)
-    mounted, error = _bind_missing(snap, m)
-    if error is not None:
-        return 1, [*lines, error]
+    prep_err = _prepare_attach_dirs(snap, user, m)
+    if prep_err is not None:
+        msg = (
+            prep_err
+            if mig_done is None
+            else _error_after_undo(prep_err.removeprefix("ERROR: "), _rollback_migration(mig_done, m))
+        )
+        return 1, [*lines, msg]
 
-    reloaded: list[str] = []
-    if new_fstab == cur_fstab:
-        # After the mounts: a bind this run mounted whose line is in /etc/fstab shows whether systemd
-        # read that line (systemd_behind_fstab). A catch-up reload that fails takes them back.
-        now = tuple(replace(p, mounted_from_source=True) if p.binding in mounted else p for p in snap.bindings)
-        cause, reloaded = _catch_up_reload(replace(snap, bindings=now), m, {b.target for b in mounted})
-        if cause is not None:
-            return 1, [*lines, _error_after_catch_up(cause, _undo(m, mounted, mounted=True), mounted)]
-    else:
-        error = _commit_fstab_or_undo(snap, new_fstab, m, mounted)
-        if error is not None:
-            return 1, [*lines, error]
+    mounted, mount_err, mount_undo = _bind_missing(snap, m)
+    if mount_err is not None:
+        return 1, [
+            *lines,
+            _error_after_undo(mount_err, [*mount_undo, *_rollback_mig_if_unmounted(m, mount_undo, mig_done)]),
+        ]
+
+    wrote_fstab, reloaded, fstab_err = _commit_attach_fstab(snap, m, mounted, mig_done)
+    if fstab_err is not None:
+        return 1, [*lines, fstab_err]
+
+    if mig_done is not None:
+        hint = cleanup_hint(mig_done.backup_path, is_subvol=mig_done.target_is_subvol)
+        lines.append(
+            f"Migrated {mig_done.binding.target} -> {mig_done.binding.source} "
+            f"(previous files kept at {mig_done.backup_path}; remove manually after checking: `{hint}`)."
+        )
     lines.extend(f"Mounted {b.source} -> {b.target}." for b in mounted)
     lines.extend(reloaded)
-    if new_fstab != cur_fstab:
+    if wrote_fstab:
         lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")
-    if new_fstab == cur_fstab and not mounted and not reloaded:
+    elif not mounted and not reloaded:
         lines.append(f"Already attached for {user.name}; nothing to do.")
     return 0, lines
 
 
 def _apply_detach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: CacheMounts) -> ExitAndLines:
-    """Drop the user's managed lines from /etc/fstab and reload systemd first, then unmount only the
-    binds CST made (the mirror of attach), so no line is left for a bind that is not mounted, even
-    when the run dies halfway. A failed write or reload puts /etc/fstab back; a failed umount mounts
-    again what this run unmounted, then puts the lines back and reloads (only those of the binds
-    that are mounted again: a bind that cannot be mounted again keeps no line). A mount CST did not make
-    stays (its managed line still goes); a target whose mount cannot be told (base not mounted) or
-    that hides CST's bind under another mount makes detach change nothing."""
+    """Drop the user's managed lines from /etc/fstab and reload systemd first, then unmount only CST binds."""
     err = snapshot_error(snap)
     if err is not None or snap.user is None:
         return 1, [f"ERROR: {err or 'cannot resolve target user'}"]
@@ -469,7 +624,6 @@ def _apply_detach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: Cac
         if failed is not None:
             return 1, [*lines, _error_after_undo(failed.cause, failed.undo_errors)]
     else:
-        # Before any umount: a catch-up reload that fails leaves nothing to take back.
         cause, reloaded = _catch_up_reload(snap, m)
         if cause is not None:
             return 1, [*lines, f"ERROR: {cause}"]
@@ -479,7 +633,6 @@ def _apply_detach(snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, m: Cac
     if cause is not None:
         not_back = _undo_each(m, unmounted, mounted=False)
         undo_errors = [err for _, err in not_back]
-        # The lines of the binds that are not mounted again stay out of /etc/fstab.
         put_back = (
             snap.fstab_text if not not_back else plan_detach_fstab(cur_fstab, user.name, {b.kind for b, _ in not_back})
         )

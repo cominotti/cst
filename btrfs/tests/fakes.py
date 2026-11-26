@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, override
 
-from btrfs.cache.application import CacheMounts
+from btrfs.cache.application.mounts import CacheMounts
 from btrfs.cache.domain import (
     FINDMNT_COLUMNS,
     MIN_HUMAN_UID,

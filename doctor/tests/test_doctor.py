@@ -1774,6 +1774,43 @@ class BtrfsCacheDoctorTest(Scratch):
         if os.geteuid() != 0:
             self.assertIn("info   btrfs cache: /etc/crypttab is not readable as this user", btrfs_text)
 
+    def test_cache_conf_ok_corrupt_missing_partuuid_and_fifo(self) -> None:
+        partuuid = "12345678-1234-1234-1234-123456789abc"
+        by_part = os.path.join(self.root, "dev", "disk", "by-partuuid", partuuid)
+        os.makedirs(os.path.dirname(by_part), exist_ok=True)
+        with open(by_part, "w", encoding="utf-8") as fh:
+            fh.write("")
+        self._put(
+            "etc",
+            "cst",
+            "btrfs-cache.conf",
+            text=f"CACHE_MAPPER_NAME=cache\nCACHE_PARTUUID={partuuid}\nCACHE_SIZE_BYTES=500107862016\n",
+        )
+        ok_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertIn(
+            f"ok     btrfs cache: /etc/cst/btrfs-cache.conf (/dev/disk/by-partuuid/{partuuid}, mapper=cache)", ok_text
+        )
+
+        os.remove(by_part)
+        miss_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertIn(
+            f"WARN   btrfs cache: /etc/cst/btrfs-cache.conf names /dev/disk/by-partuuid/{partuuid} which is missing",
+            miss_text,
+        )
+
+        self._put("etc", "cst", "btrfs-cache.conf", text="CACHE_PARTUUID=BAD\nCACHE_SIZE_BYTES=0\n")
+        bad_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: /etc/cst/btrfs-cache.conf:", bad_text)
+        self.assertIn("CACHE_PARTUUID='BAD'", bad_text)
+        self.assertNotIn("fix:", bad_text)
+
+        conf_path = os.path.join(self.root, "etc", "cst", "btrfs-cache.conf")
+        os.remove(conf_path)
+        os.mkfifo(conf_path)
+        with time_bound(5):
+            fifo_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: /etc/cst/btrfs-cache.conf is unreadable or not a regular file", fifo_text)
+
 
 class SnapshotsWritableTest(Scratch):
     """check_snapshots_writable: the lists btrfs-snapshot-core keeps in

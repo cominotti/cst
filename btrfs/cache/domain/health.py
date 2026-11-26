@@ -32,7 +32,7 @@ from cst_core.domain.units import SYSTEMD_WHITESPACE, systemd_lines
 _NOFAIL: Final = "nofail"
 _DEFAULT_MAPPER: Final = "cache"
 _DEFAULT_MAPPER_PREFIXES: Final = ("cache-", "luks-cache")
-_CRYPTTAB_MIN_FIELDS: Final = 2
+CRYPTTAB_MIN_FIELDS: Final = 2
 _CRYPTTAB_OPT_IDX: Final = 3
 _DM_DEVICE_RE: Final = re.compile(r"/dev/dm-\d+", re.ASCII)
 _MAPPER_PREFIX: Final = "/dev/mapper/"
@@ -85,7 +85,7 @@ def _crypttab_issue(raw: str, mappers: frozenset[str]) -> str | None:
     if not stripped or stripped.startswith("#"):
         return None
     fields = split_ascii_blanks(stripped)
-    if len(fields) < _CRYPTTAB_MIN_FIELDS:
+    if len(fields) < CRYPTTAB_MIN_FIELDS:
         return None
     name = fields[0]
     is_cache_drive = name == _DEFAULT_MAPPER or name.startswith(_DEFAULT_MAPPER_PREFIXES) or name in mappers

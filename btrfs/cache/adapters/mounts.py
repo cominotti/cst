@@ -39,7 +39,7 @@ _ACCOUNT_DB_PATH: Final = "/etc/passwd"
 _FINDMNT_TIMEOUT_S: Final = 15
 _ACCOUNT_MIN_FIELDS: Final = 6
 _FSTAB_MODE: Final = 0o644
-_MOUNT_TIMEOUT_S: Final = 30
+MOUNT_TIMEOUT_S: Final = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +53,7 @@ class CacheMountRuntime:
     env_map: Mapping[str, str]
 
 
-def _map_path(host_path: str, rt: CacheMountRuntime, *, read_only: bool) -> str:
+def map_path(host_path: str, rt: CacheMountRuntime, *, read_only: bool) -> str:
     if rt.seam_root:
         return f"{rt.seam_root.rstrip('/')}{host_path}"
     return host_view_path(rt.ctx, host_path) if read_only else host_path
@@ -102,10 +102,8 @@ def _resolve_target_user(requested: str | None, rt: CacheMountRuntime) -> tuple[
 
 
 def _real_home(home: str, rt: CacheMountRuntime) -> str:
-    """The home as the kernel and findmnt name it: passwd's /home/u is /var/home/u on Silverblue
-    (/home is a link). Resolved where the program sees the host (the test root, /run/host); a path
-    that leaves that view, or a home that cannot be resolved, stays as passwd has it."""
-    view = _map_path(home, rt, read_only=True)
+    """The home as the kernel and findmnt name it: passwd's /home/u is /var/home/u on Silverblue."""
+    view = map_path(home, rt, read_only=True)
     if not view.endswith(home):
         return home
     prefix = view.removesuffix(home)
@@ -115,17 +113,16 @@ def _real_home(home: str, rt: CacheMountRuntime) -> str:
     return real.removeprefix(prefix) if real.startswith(f"{prefix}/") else home
 
 
-def _from_toolbox(rt: CacheMountRuntime) -> bool:
+def from_toolbox(rt: CacheMountRuntime) -> bool:
     """Whether the probes go to the host: a run inside a toolbox with no seam root."""
     return not rt.seam_root and rt.ctx.is_container()
 
 
 def _read_live_mounts(rt: CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str | None]:
-    """Every live mount, from one `findmnt -J -l` call (on the host from a toolbox); (), and why,
-    when findmnt cannot answer: nothing is guessed from another table."""
+    """Every live mount, from one `findmnt -J -l` call (on the host from a toolbox)."""
     res = rt.runner.run(
         ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS],
-        on_host=_from_toolbox(rt),
+        on_host=from_toolbox(rt),
         timeout=_FINDMNT_TIMEOUT_S,
         locale_c=True,
         output=OutputMode.CAPTURE,
@@ -138,7 +135,7 @@ def _read_live_mounts(rt: CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str
     return mounts, None
 
 
-def _dir_is_nonempty(path: str) -> bool:
+def dir_is_nonempty(path: str) -> bool:
     try:
         st = os.lstat(path)
     except OSError:
@@ -152,10 +149,8 @@ def _dir_is_nonempty(path: str) -> bool:
         return False
 
 
-def _ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
-    """The folder at host_path (created 0700, and labelled as root, when missing), then made 0700 and
-    the user's through a descriptor opened without following a link: a link put there after the
-    probe fails (ENOTDIR, as O_NOFOLLOW with O_DIRECTORY gives) instead of having its target changed."""
+def ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
+    """Create folder at host_path, set 0700 and user ownership through O_NOFOLLOW|O_DIRECTORY fd."""
     ensure_dir(host_path, DIR_MODE_PRIVATE, relabel=True)
     fd = os.open(host_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -175,29 +170,29 @@ def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
 
 
 def _run_mount(rt: CacheMountRuntime, argv: list[str], what: str) -> str | None:
-    """Run mount or umount; None, or why it failed (what: the command as the message names it)."""
-    res = rt.runner.run(argv, timeout=_MOUNT_TIMEOUT_S, locale_c=True, output=OutputMode.CAPTURE)
+    """Run mount or umount; None, or why it failed."""
+    res = rt.runner.run(argv, timeout=MOUNT_TIMEOUT_S, locale_c=True, output=OutputMode.CAPTURE)
     return None if res.returncode == 0 else res.failure(what)
 
 
 class FstabFile:
-    """FstabPort over the host's /etc/fstab: read where the program sees the host, written where it writes."""
+    """FstabPort over the host's /etc/fstab."""
 
     def __init__(self, rt: CacheMountRuntime) -> None:
         self._rt = rt
 
     def read(self) -> str | None:
-        return LocalFileSystemAdapter().read_existing_text(_map_path(FSTAB_PATH, self._rt, read_only=True))
+        return LocalFileSystemAdapter().read_existing_text(map_path(FSTAB_PATH, self._rt, read_only=True))
 
     def write(self, text: str) -> None:
-        write_atomic(_map_path(FSTAB_PATH, self._rt, read_only=False), text, mode=_FSTAB_MODE)
+        write_atomic(map_path(FSTAB_PATH, self._rt, read_only=False), text, mode=_FSTAB_MODE)
 
     def remove(self) -> None:
-        LocalFileSystemAdapter().remove_file(_map_path(FSTAB_PATH, self._rt, read_only=False))
+        LocalFileSystemAdapter().remove_file(map_path(FSTAB_PATH, self._rt, read_only=False))
 
 
 class CacheMountTable:
-    """MountTablePort over findmnt (on the host from a toolbox), mount --bind and umount (30 s, C locale)."""
+    """MountTablePort over findmnt, mount --bind and umount."""
 
     def __init__(self, rt: CacheMountRuntime) -> None:
         self._rt = rt
@@ -210,37 +205,30 @@ class CacheMountTable:
         argv = [
             "mount",
             "--bind",
-            _map_path(binding.source, rt, read_only=False),
-            _map_path(binding.target, rt, read_only=False),
+            map_path(binding.source, rt, read_only=False),
+            map_path(binding.target, rt, read_only=False),
         ]
         return _run_mount(rt, argv, f"mount --bind {binding.source} {binding.target}")
 
     def unbind(self, binding: CacheMountBinding) -> str | None:
         rt = self._rt
-        return _run_mount(rt, ["umount", _map_path(binding.target, rt, read_only=False)], f"umount {binding.target}")
+        return _run_mount(rt, ["umount", map_path(binding.target, rt, read_only=False)], f"umount {binding.target}")
 
 
 def loaded_mount_units(runner: CommandRunnerPort, *, from_toolbox: bool) -> list[dict[str, str]] | None:
-    """The mount units systemd has loaded, MOUNT_UNIT_PROPS of each, from one `systemctl show --state=loaded
-    -p ... '*.mount'` (without --state=loaded a glob hides the inactive units, and a stale /etc/fstab whose
-    units are all inactive would look current), asked of the host's systemd when from_toolbox; None when
-    systemctl gives no answer. cache's CacheSystemd and compress-force's and commit-interval's adapter
-    (LinuxCompressHostAdapter) ask with it."""
+    """The mount units systemd has loaded."""
     on_host = SystemctlHost.SHOW_ONLY if from_toolbox else SystemctlHost.LOCAL
     return SystemctlAdapter(runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
 
 
 def reload_failure(runner: CommandRunnerPort, *, timeout: float | None = None) -> str | None:
-    """`systemctl daemon-reload` here, never on the host, at most timeout seconds (None: no limit): None when
-    it worked, else why it failed ("systemctl daemon-reload failed: ...", "timed out after Ns" for one that
-    did not end in time). CacheSystemd and LinuxCompressHostAdapter reload with it."""
+    """`systemctl daemon-reload` here, never on the host."""
     res = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL, timeout=timeout).daemon_reload_result()
     return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
 
 
 class CacheSystemd:
-    """CacheSystemdPort over systemctl: the reload local (reload_failure), the mount units on the host from a
-    toolbox as findmnt is (loaded_mount_units)."""
+    """CacheSystemdPort over systemctl."""
 
     def __init__(self, rt: CacheMountRuntime) -> None:
         self._rt = rt
@@ -249,7 +237,7 @@ class CacheSystemd:
         return reload_failure(self._rt.runner)
 
     def mount_units(self) -> list[dict[str, str]] | None:
-        return loaded_mount_units(self._rt.runner, from_toolbox=_from_toolbox(self._rt))
+        return loaded_mount_units(self._rt.runner, from_toolbox=from_toolbox(self._rt))
 
 
 class CacheFolders:
@@ -259,10 +247,10 @@ class CacheFolders:
         self._rt = rt
 
     def ensure_private(self, path: str, user: CacheMountUser) -> None:
-        _ensure_private_dir(_map_path(path, self._rt, read_only=False), user)
+        ensure_private_dir(map_path(path, self._rt, read_only=False), user)
 
     def ensure_tag(self, source: str, user: CacheMountUser) -> None:
-        _ensure_scratchpad_tag(_map_path(source, self._rt, read_only=False), user)
+        _ensure_scratchpad_tag(map_path(source, self._rt, read_only=False), user)
 
 
 class CacheHostView:
@@ -272,28 +260,28 @@ class CacheHostView:
         self._rt = rt
 
     def crypttab(self) -> str | None:
-        return read_text(_map_path(_CRYPTTAB_PATH, self._rt, read_only=True))
+        return read_text(map_path(_CRYPTTAB_PATH, self._rt, read_only=True))
 
     def binding_paths(self, binding: CacheMountBinding) -> BindingPaths:
-        src = _map_path(binding.source, self._rt, read_only=True)
-        tgt = _map_path(binding.target, self._rt, read_only=True)
+        src = map_path(binding.source, self._rt, read_only=True)
+        tgt = map_path(binding.target, self._rt, read_only=True)
         is_link = os.path.islink(tgt)
         exists = os.path.lexists(tgt)
         return BindingPaths(
             target_is_link=is_link,
             target_exists=exists,
-            target_nonempty=False if is_link else _dir_is_nonempty(tgt),
+            target_nonempty=False if is_link else dir_is_nonempty(tgt),
             source_is_dir=os.path.isdir(src),
             source_is_link=os.path.islink(src),
             target_is_dir=exists and not is_link and os.path.isdir(tgt),
         )
 
     def home_exists(self, home: str) -> bool:
-        return os.path.isdir(_map_path(home, self._rt, read_only=True))
+        return os.path.isdir(map_path(home, self._rt, read_only=True))
 
 
 class CacheAccounts:
-    """CacheAccountsPort over the test root's passwd (when there is one) and the account database."""
+    """CacheAccountsPort over the test root's passwd and account database."""
 
     def __init__(self, rt: CacheMountRuntime) -> None:
         self._rt = rt
@@ -305,7 +293,7 @@ class CacheAccounts:
 def cache_runtime(
     env_map: Mapping[str, str], ctx: ExecutionContextPort | None, runner: CommandRunnerPort | None
 ) -> CacheMountRuntime:
-    """The runtime of one run: the test root from env_map, ctx and runner (None: the host's, a subprocess)."""
+    """The runtime of one run: the test root from env_map, ctx and runner."""
     return CacheMountRuntime(
         seam_root=(env_map.get(CACHE_SEAM_ROOT_ENV) or "").strip(),
         ctx=HostExecutionContext() if ctx is None else ctx,

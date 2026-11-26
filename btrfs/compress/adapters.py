@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import os
 from typing import Final
 
-from btrfs.cache.adapters import loaded_mount_units, reload_failure
+from btrfs.cache.adapters.mounts import loaded_mount_units, reload_failure
 from btrfs.compress.domain import (
     KARGS_SETTLE_POLL_S,
     KARGS_SETTLE_TIMEOUT_S,

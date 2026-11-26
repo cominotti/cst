@@ -29,16 +29,12 @@ from btrfs.compress.domain import (
     parse_top_mount_unit,
     pick_root_mounts,
 )
-from btrfs.cache.domain import parse_all_mounts, parse_managed_fstab_entries
 from btrfs.snapshot_runtime.domain import DEFAULTS as SNAPSHOT_DEFAULTS, GUARD_KEYS, guard_number, nas_unreadable
-from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
-from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread
-from cst_core.domain.units import parse_show_units, show_units_argv
 from cst_core.domain.text import YES_WORDS, ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
-from doctor.application import docker_nocow
+from doctor.application import btrfs_cache, docker_nocow
 from doctor.application.cpu import unit_props
-from doctor.application.findmnt import findmnt_all_mounts, findmnt_root_btrfs_info
+from doctor.application.findmnt import findmnt_root_btrfs_info
 from doctor.application.shared import (
     check,
     conf_value,
@@ -724,61 +720,9 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(OK, f"{_COMMIT_INTERVAL_LABEL}: {report.summary}")
 
 
-def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Result]:
-    """WARN when systemd has not loaded /etc/fstab as it is on disk (fstab_lines_unread over the mount units
-    it has loaded, active or not, one `systemctl show --state=loaded '*.mount'`: a glob without
-    --state=loaded hides the inactive ones with no job queued): an edit, or a cache attach or detach that
-    stopped between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked.
-    Asked only where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a
-    machine without one is no warning of the cache's."""
-    rc, out, _ = host.run(show_units_argv(["systemctl"], "*.mount", MOUNT_UNIT_PROPS), timeout=20, locale_c=True)
-    if rc != 0:
-        return
-    if fstab_lines_unread(parse_show_units(out), {e.target for e in parse_managed_fstab_entries(fstab_raw)}) is True:
-        yield Result(
-            WARN,
-            "btrfs cache: systemd has not loaded /etc/fstab as it is on disk (an edit, or a "
-            "`cst btrfs cache attach` or `detach` that stopped before its daemon-reload), so it keeps the mounts "
-            "of the /etc/fstab it loaded before",
-            "sudo systemctl daemon-reload",
-        )
-
-
 @check(CHECKS, "btrfs")
 def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
-    """Check the dedicated NVMe cache drive's mounts, crypttab `nofail`, and user bind mounts."""
-    fstab_raw = read_text(host, host.path(FSTAB), 65536)
-    proc_raw = read_text(host, host.path(HostPath("/proc/mounts")), 65536)
-    hint_text = f"{fstab_raw}\n{proc_raw}"
-    has_hints = any(k in hint_text for k in ("/var/mnt/cache", "/var/mnt/scratchpad", "btrfs-cache"))
-    if not (has_hints or _btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS))):
-        return
-    crypttab_path = host.path(HostPath("/etc/crypttab"))
-    crypttab_raw, crypttab_unreadable = "", False
-    try:
-        with host.open_regular_text(crypttab_path) as fh:
-            crypttab_raw = fh.read(65536)
-    except PermissionError:
-        crypttab_unreadable = True
-    except OSError:
-        pass
-    live_findmnt = findmnt_all_mounts(host)
-    mounts_text = f"{proc_raw}\n{live_findmnt}" if live_findmnt is not None else proc_raw
-    sev_map = {
-        CacheMountFindingSeverity.OK: OK,
-        CacheMountFindingSeverity.INFO: INFO,
-        CacheMountFindingSeverity.WARN: WARN,
-    }
-    sources = [m.source for m in parse_all_mounts(f"{mounts_text}\n{fstab_raw}")]
-    dm_names = {
-        dm: name
-        for dm in sorted(dm_device_names(sources))
-        if (name := read_text(host, host.path(HostPath(f"/sys/class/block/{dm}/dm/name"))))
-    }
-    for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None, dm_names):
-        fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
-        yield Result(sev_map[finding.severity], f"btrfs cache: {finding.message}", fix_cmd)
-    if has_hints:
-        yield from _fstab_loaded_results(host, fstab_raw)
-    if crypttab_unreadable and has_hints:
-        yield Result(INFO, "btrfs cache: /etc/crypttab is not readable as this user (nofail not checked)")
+    """Check the dedicated NVMe cache drive's config, mounts, crypttab `nofail`, and user bind mounts."""
+    return btrfs_cache.run_btrfs_cache_check(
+        host, has_sysfs_btrfs=bool(_btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS)))
+    )
