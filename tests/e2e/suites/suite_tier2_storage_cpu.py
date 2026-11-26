@@ -3471,11 +3471,30 @@ assert d["samples"] >= 1, d["samples"]
             mountpoint -q /var/mnt/cache
             mountpoint -q /var/mnt/scratchpad
             if findmnt -rn -o OPTIONS --target /var/mnt/cache | grep -qw flushoncommit; then exit 1; fi
+            findmnt -rn -o OPTIONS --target /var/mnt/cache | tr ',' '\\n' | grep -qxF "compress-force=zstd:1"
+            findmnt -rn -o OPTIONS --target /var/mnt/scratchpad | tr ',' '\\n' | grep -qxF "compress-force=zstd:1"
             grep -qF "cache25 UUID=" /etc/crypttab
             grep -qF "nofail" /etc/crypttab
             grep -qF "/dev/mapper/cache25 /var/mnt/cache btrfs" /etc/fstab
+            grep -qE "/var/mnt/cache .*compress-force=zstd:1" /etc/fstab
             grep -qF "nothing to do" <<<"$(/opt/cst-rw/cst btrfs cache provision apply)"
             btrfs scrub status /var/mnt/cache | grep -qE "Status:[[:space:]]+finished"
+
+            # 3a. Live remount upgrade from older compress=zstd:1 provision: doctor warns, plan lists remount, apply upgrades cleanly.
+            mount -o remount,compress=zstd:1 /var/mnt/cache
+            sed -i '/provision=base/s/compress-force=zstd:1/compress=zstd:1/g' /etc/fstab
+            systemctl daemon-reload
+            doc_old="$(/opt/cst-rw/cst doctor 2>&1 || true)"
+            grep -qF "WARN   btrfs cache: /var/mnt/cache is not using 'compress-force=zstd:1'" <<<"$doc_old"
+            grep -qF "btrfs cache provision apply" <<<"$doc_old"
+            plan_upg="$(/opt/cst-rw/cst btrfs cache provision plan)"
+            grep -qF "remount base subvolume(s) with compress-force=zstd:1:" <<<"$plan_upg"
+            upg_out="$(/opt/cst-rw/cst btrfs cache provision apply)"
+            grep -qF "Remounted /var/mnt/cache with compress-force=zstd:1." <<<"$upg_out"
+            findmnt -rn -o OPTIONS --target /var/mnt/cache | tr ',' '\\n' | grep -qxF "compress-force=zstd:1"
+            findmnt -rn -o OPTIONS --target /var/mnt/scratchpad | tr ',' '\\n' | grep -qxF "compress-force=zstd:1"
+            grep -qE "/var/mnt/cache .*compress-force=zstd:1" /etc/fstab
+            grep -qF "nothing to do" <<<"$(/opt/cst-rw/cst btrfs cache provision apply)"
 
             # 3b. Weekly scrub unit + 10-cst-limit.conf also limit, scrub, and reset /var/mnt/cache when mounted.
             cache_uuid="$(findmnt -rn -o UUID --target /var/mnt/cache)"

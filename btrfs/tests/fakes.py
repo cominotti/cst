@@ -1311,6 +1311,12 @@ class MountTable:
             }
         )
 
+    def set_options(self, tgt: str, options: str) -> None:
+        """Update mount options recorded for `tgt`."""
+        for m in self.mounts:
+            if m["target"] == tgt:
+                m["options"] = options
+
     def holding(self, path: str) -> dict[str, str | None]:
         """The mount whose target is the longest leading folder of path (the last one of equal length)."""
         best = self.mounts[0]

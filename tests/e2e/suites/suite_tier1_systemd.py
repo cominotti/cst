@@ -15616,17 +15616,24 @@ echo E2E-OK
             {fstab_saved(w)}
             {file_saved("/etc/crypttab", w, "crypttab")}
 
-            # 1. Verify render_crypttab_line generates systemd-cryptsetup@cache.service without blocking boot.
-            python3 -I -B - {w}/crypttab.test {w}/crypttab.fail <<'EOF'
+            # 1. Verify render_crypttab_line in real systemd-cryptsetup-generator and compress-force in fstab lines.
+            python3 -I -B - {w}/crypttab.test {w}/crypttab.fail {w}/fstab.base <<'EOF'
 import sys
 sys.path.insert(0, "/opt/cst-rw")
-from btrfs.cache.domain.provision import CacheHardwareSpec, render_crypttab_line
+from btrfs.cache.domain import CacheMountKind, OPT_COMPRESS_FORCE, PROVISION_BASE_MARKER
+from btrfs.cache.domain.provision import CacheHardwareSpec, render_base_fstab_line, render_crypttab_line
 spec = CacheHardwareSpec(partuuid="12345678-1234-1234-1234-123456789abc", size_bytes=500107862016)
 line = render_crypttab_line(spec, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     fh.write(line + "\\n")
 with open(sys.argv[2], "w", encoding="utf-8") as fh:
     fh.write(line.replace("nofail,", "") + "\\n")
+base_lines = [render_base_fstab_line(spec, CacheMountKind.CACHE), render_base_fstab_line(spec, CacheMountKind.SCRATCHPAD)]
+for bl in base_lines:
+    assert OPT_COMPRESS_FORCE in bl, bl
+    assert PROVISION_BASE_MARKER in bl, bl
+with open(sys.argv[3], "w", encoding="utf-8") as fh:
+    fh.write("\\n".join(base_lines) + "\\n")
 EOF
             SYSTEMD_CRYPTTAB={w}/crypttab.test "$gen" {w}/genout {w}/genout {w}/genout
             SYSTEMD_CRYPTTAB={w}/crypttab.fail "$gen" {w}/genout_fail {w}/genout_fail {w}/genout_fail

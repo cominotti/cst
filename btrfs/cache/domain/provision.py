@@ -15,10 +15,13 @@ from typing import Final
 from btrfs.cache.domain import (
     CACHE_BASE,
     FSTYPE_BTRFS,
+    OPT_COMPRESS_FORCE,
+    PROVISION_BASE_MARKER,
     SCRATCHPAD_BASE,
     CacheMountKind,
     ManagedFstabEntry,
     escape_mount_field,
+    has_mount_option,
     parse_all_mounts,
     split_tagged_fstab_line,
     upsert_marked_lines,
@@ -41,9 +44,8 @@ DEFAULT_MAPPER_NAME: Final = "cache"
 DEFAULT_SUBVOL_TOP_PREFIX: Final = "cst-btrfs-cache-top-"
 
 PROVISION_CRYPTTAB_MARKER: Final = "# managed-by: btrfs-cache (CST) provision=crypttab"
-PROVISION_BASE_MARKER: Final = "# managed-by: btrfs-cache (CST) provision=base"
 CRYPTTAB_OPTIONS: Final = "nofail,discard,no-read-workqueue,no-write-workqueue"
-BASE_MOUNT_OPTIONS: Final = "noatime,discard=async,compress=zstd:1,commit=60,nofail"
+BASE_MOUNT_OPTIONS: Final = f"noatime,discard=async,{OPT_COMPRESS_FORCE},commit=60,nofail"
 BTRFS_CACHE_LABEL: Final = "cache"
 
 KEYFILE_BYTES: Final = 64
@@ -131,6 +133,7 @@ class ProvisionBaseState:
     mounted_fstype: str = ""
     mounted_uuid: str = ""
     mounted_fsroot: str = ""
+    mounted_options: str = ""
     fstab_source: str = ""
     fstab_managed: bool = False
     fstab_unmanaged: bool = False
@@ -591,6 +594,13 @@ def format_provision_device_plan(
     return lines
 
 
+def needs_base_remount(base: ProvisionBaseState) -> bool:
+    """True when an already-mounted base lacks `compress-force=zstd:1` in its observed mount options."""
+    return bool(
+        base.mounted_source and base.mounted_options and not has_mount_option(base.mounted_options, OPT_COMPRESS_FORCE)
+    )
+
+
 def _provision_plan_steps(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_format: bool) -> list[str]:
     steps: list[str] = []
     luks = probe.luks
@@ -622,6 +632,10 @@ def _provision_plan_steps(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_
     if to_mount:
         paths = ", ".join(CACHE_BASE if k == CacheMountKind.CACHE else SCRATCHPAD_BASE for k in to_mount)
         steps.append(f"mount base subvolume(s): {paths}")
+    to_remount = [k for k in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD) if needs_base_remount(probe.bases[k])]
+    if to_remount:
+        paths = ", ".join(CACHE_BASE if k == CacheMountKind.CACHE else SCRATCHPAD_BASE for k in to_remount)
+        steps.append(f"remount base subvolume(s) with {OPT_COMPRESS_FORCE}: {paths}")
     return steps
 
 

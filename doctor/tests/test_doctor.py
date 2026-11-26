@@ -1663,6 +1663,34 @@ class BtrfsCacheDoctorTest(Scratch):
         btrfs_text = "\n".join(area_lines(warn_r.stdout, "btrfs"))
         self.assertIn("WARN   btrfs cache: /var/mnt/cache has 'flushoncommit'", btrfs_text)
         self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'cache' is missing 'nofail'", btrfs_text)
+
+        self._put(
+            "etc",
+            "fstab",
+            text=(
+                f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1,flushoncommit 0 0\n"
+                "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0 "
+                "# managed-by: btrfs-cache (CST) provision=base kind=cache\n"
+                "/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress-force=zstd:1,nofail 0 0 "
+                "# managed-by: btrfs-cache (CST) provision=base kind=scratchpad\n"
+            ),
+        )
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key nofail,discard\n")
+        self._set_findmnt(
+            f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n"
+            "/dev/mapper/cache /var/mnt/cache noatime,compress=zstd:1,subvol=/cache cache-u\n"
+            "/dev/mapper/cache /var/mnt/scratchpad noatime,compress-force=zstd:1,subvol=/scratchpad cache-u\n"
+        )
+        self._set_findmnt_all(
+            "/dev/dm-0 /var btrfs compress-force=zstd:1,flushoncommit\n"
+            "/dev/mapper/cache /var/mnt/cache btrfs noatime,compress=zstd:1,subvol=/cache\n"
+            "/dev/mapper/cache /var/mnt/scratchpad btrfs noatime,compress-force=zstd:1,subvol=/scratchpad\n"
+        )
+        cf_warn = self.run_tool()
+        self.assertEqual(cf_warn.returncode, 1)
+        cf_text = "\n".join(area_lines(cf_warn.stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: /var/mnt/cache is not using 'compress-force=zstd:1'", cf_text)
+        self.assertIn("fix: cst btrfs cache provision apply", cf_text)
         self.assertIn("fix: cst btrfs cache attach --user danilo", btrfs_text)
 
     def test_systemd_behind_on_fstab_warns_with_the_reload(self) -> None:

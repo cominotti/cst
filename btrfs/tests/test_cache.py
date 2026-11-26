@@ -19,6 +19,8 @@ from btrfs.cache.adapters import mounts as cache_adapters
 from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,
+    OPT_COMPRESS_FORCE,
+    PROVISION_BASE_MARKER,
     SCRATCHPAD_BASE,
     CACHE_MOUNT_MARKER,
     CacheMountAction,
@@ -406,6 +408,25 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertIn("missing 'nofail'", msgs)
         self.assertIn("in /etc/fstab but not mounted", msgs)
         self.assertTrue(any(f.fix == "btrfs cache attach --user tester" for f in warns))
+
+        # CST-provisioned bases (provision=base) warn when missing compress-force=zstd:1 in fstab or live mount.
+        prov_old_fstab = (
+            f"/dev/mapper/cache {CACHE_BASE} btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0 {PROVISION_BASE_MARKER} kind=cache\n"
+            f"/dev/mapper/cache {SCRATCHPAD_BASE} btrfs subvol=scratchpad,noatime,{OPT_COMPRESS_FORCE},nofail 0 0 {PROVISION_BASE_MARKER} kind=scratchpad\n"
+        )
+        prov_mounts_force = (
+            f"/dev/mapper/cache {CACHE_BASE} btrfs rw,noatime,{OPT_COMPRESS_FORCE} 0 0\n"
+            f"/dev/mapper/cache {SCRATCHPAD_BASE} btrfs rw,noatime,{OPT_COMPRESS_FORCE} 0 0\n"
+        )
+        warns_fstab = assess_cache_mount_health(prov_old_fstab, prov_mounts_force, good_crypt)
+        self.assertTrue(any(f.fix == "btrfs cache provision apply" and CACHE_BASE in f.message for f in warns_fstab))
+
+        prov_force_fstab = prov_old_fstab.replace("compress=zstd:1", OPT_COMPRESS_FORCE)
+        warns_live = assess_cache_mount_health(prov_force_fstab, good_mounts, good_crypt)
+        self.assertTrue(any(f.fix == "btrfs cache provision apply" and CACHE_BASE in f.message for f in warns_live))
+
+        ok_prov = assess_cache_mount_health(prov_force_fstab, prov_mounts_force, good_crypt)
+        self.assertEqual([f.severity for f in ok_prov], [CacheMountFindingSeverity.OK])
 
 
 class CacheMountAdapterAndCliTests(unittest.TestCase):

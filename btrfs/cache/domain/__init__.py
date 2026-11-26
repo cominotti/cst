@@ -42,6 +42,8 @@ CACHE_SEAM_ROOT_ENV: Final = "CST_BTRFS_CACHE_ROOT"
 
 FSTYPE_BTRFS: Final = "btrfs"
 OPT_FLUSHONCOMMIT: Final = "flushoncommit"
+OPT_COMPRESS_FORCE: Final = "compress-force=zstd:1"
+PROVISION_BASE_MARKER: Final = "# managed-by: btrfs-cache (CST) provision=base"
 FSTAB_MIN_FIELDS: Final = 4
 _FSTAB_TARGET_FIELDS: Final = 2
 _MOUNTS_MIN_FIELDS: Final = 4
