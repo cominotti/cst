@@ -37,6 +37,7 @@ from bluetooth.setup.domain import (
     is_running,
     parse_command_line,
     resolve,
+    wp_config_dir,
 )
 from bluetooth.tests.setup_fakes import DEV, ISO, MAC, REPO, Machine, SetupModel
 from bluetooth.tests.test_ldac_watch import cards, pw_dump
@@ -1060,7 +1061,10 @@ class SetupModelParityTest(unittest.TestCase):
             m.flag("race-backup")
             os.utime(m.main_conf, (1_000_000, 1_000_000))  # its backup is the oldest, whatever the clock
         self.assertEqual(self.runs(model, model=True), self.runs(fake, model=False))
-        self.assertEqual(self.files(model), self.files(fake))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
         self.assertIn("another run's backup\n", self.files(model).values())
 
     def test_a_raced_backup_name_in_another_language_as_fake_does(self) -> None:
@@ -1072,7 +1076,10 @@ class SetupModelParityTest(unittest.TestCase):
             os.utime(m.main_conf, (1_000_000, 1_000_000))
         on_model = self.runs(model, model=True, lang="pt_BR.UTF-8")
         self.assertEqual(on_model, self.runs(fake, model=False, lang="pt_BR.UTF-8"))
-        self.assertEqual(self.files(model), self.files(fake))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
         self.assertEqual(on_model[0][0], 0, on_model[0])
 
     def test_apply_then_revert_as_fake_does(self) -> None:
@@ -1082,9 +1089,33 @@ class SetupModelParityTest(unittest.TestCase):
         for (rc_f, out_f, err_f, calls_f), (rc_m, out_m, err_m, calls_m) in zip(on_fake, on_model, strict=True):
             self.assertEqual(calls_m, calls_f)
             self.assertEqual((rc_m, out_m, err_m), (rc_f, out_f, err_f))
-        self.assertEqual(self.files(model), self.files(fake))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
         self.assertIn("restart:   bluetooth.service", on_model[0][1])
         self.assertIn("restart:   bluetooth.service", on_model[1][1])
+
+    def test_wireplumber_follows_user_manager_env_as_fake_does(self) -> None:
+        fake, model = self.machine(), self.machine()
+        for m in (fake, model):
+            m.put("user-env", f"HOME={m.home}\nXDG_CONFIG_HOME={m.home}/mgr-xdg\n")
+        on_fake = self.runs(fake, model=False)
+        on_model = self.runs(model, model=True)
+        for (rc_f, out_f, err_f, calls_f), (rc_m, out_m, err_m, calls_m) in zip(on_fake, on_model, strict=True):
+            self.assertEqual(calls_m, calls_f)
+            self.assertEqual((rc_m, out_m, err_m), (rc_f, out_f, err_f))
+        self.assertEqual(
+            {k: v.replace(model.tmp, "<machine>") for k, v in self.files(model).items()},
+            {k: v.replace(fake.tmp, "<machine>") for k, v in self.files(fake).items()},
+        )
+        self.assertIn("mgr-xdg/wireplumber/wireplumber.conf.d/50-bluez-", on_model[0][1])
+
+    def test_wp_config_dir_resolution(self) -> None:
+        self.assertEqual(wp_config_dir(None, "/home/u"), "/home/u/.config")
+        self.assertEqual(wp_config_dir("HOME=/home/u\n", "/home/u"), "/home/u/.config")
+        self.assertEqual(wp_config_dir("XDG_CONFIG_HOME=relative\n", "/home/u"), "/home/u/.config")
+        self.assertEqual(wp_config_dir("XDG_CONFIG_HOME=/home/u/cfg/\n", "/home/u"), "/home/u/cfg")
 
 
 if __name__ == "__main__":

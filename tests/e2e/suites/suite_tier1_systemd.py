@@ -15344,3 +15344,79 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_279_bluetooth_wireplumber_follows_user_manager_env(self) -> None:
+        """r30.1: `cst bluetooth` writes WirePlumber files under the user manager's XDG_CONFIG_HOME
+        (~/.config for tester), ignores the shell's XDG_CONFIG_HOME for WirePlumber while keeping it
+        for cst/bluetooth.conf, removes marked stale WirePlumber files from the shell's folder, warns
+        and keeps unmarked ones, and checks wp-roles under the manager's folder."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "XDG_CONFIG_HOME=/home/tester/.e2e279-xdg /opt/cst-rw/cst bluetooth revert --yes --no-restart "
+            ">/dev/null 2>&1 || true\n"
+            "rm -rf /home/tester/.e2e279-xdg",
+            check=False,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            "mkdir -p /etc/bluetooth\nprintf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf",
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_279 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            H=/home/tester
+            S="$H/.e2e279-xdg"
+            rm -rf "$S"
+            mkdir -p "$S/cst" "$S/wireplumber/wireplumber.conf.d"
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_QUALITY=auto\nLDAC_RATE=\nLE_AUDIO=off\n' >"$S/cst/bluetooth.conf"
+            printf '# managed-by: bluetooth-setup.sh (CST)\n' >"$S/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf"
+            printf '# hand-edited\n' >"$S/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf"
+
+            wp_pid="$(systemctl --user show -P MainPID wireplumber.service || echo 0)"
+            if [[ "$wp_pid" =~ ^[0-9]+$ ]] && [[ "$wp_pid" -gt 0 ]] && [[ -r "/proc/$wp_pid/environ" ]]; then
+                if tr '\0' '\n' <"/proc/$wp_pid/environ" | grep -q '^XDG_CONFIG_HOME='; then
+                    mgr_xdg="$(systemctl --user show-environment | sed -n 's/^XDG_CONFIG_HOME=//p' | head -n1)"
+                    proc_xdg="$(tr '\0' '\n' <"/proc/$wp_pid/environ" | sed -n 's/^XDG_CONFIG_HOME=//p' | head -n1)"
+                    [[ "$proc_xdg" == "$mgr_xdg" ]]
+                else
+                    if systemctl --user show-environment | grep -q '^XDG_CONFIG_HOME='; then exit 1; fi
+                fi
+            fi
+
+            export XDG_CONFIG_HOME="$S"
+            set +e
+            plan_out="$(/opt/cst-rw/cst bluetooth plan 2>&1)"
+            plan_rc=$?
+            set -e
+            [[ "$plan_rc" -eq 10 ]] || { echo "plan rc=$plan_rc out=$plan_out" >&2; exit 1; }
+            grep -qF "90-cst-le-audio-off.conf" <<<"$plan_out"
+            grep -qF "not written by CST: left alone" <<<"$plan_out"
+
+            apply_out="$(/opt/cst-rw/cst bluetooth apply --yes 2>&1 || true)"
+            [[ -f "$H/.config/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf" ]]
+            [[ -f "$H/.config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" ]]
+            [[ ! -e "$S/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" ]]
+            [[ -f "$S/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf" ]]
+            grep -qF "removed:   $S/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" <<<"$apply_out"
+            grep -qF "WARNING: $S/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf was not written by CST: left alone" <<<"$apply_out"
+            grep -qE 'WirePlumber bluez5\.roles.*\(no LE Audio roles\)' <<<"$apply_out" ||
+                { echo "unexpected wp-roles output: $apply_out" >&2; exit 1; }
+
+            plan2_rc=0
+            /opt/cst-rw/cst bluetooth plan >/dev/null || plan2_rc=$?
+            [[ "$plan2_rc" -eq 0 ]]
+            apply2_out="$(/opt/cst-rw/cst bluetooth apply --yes 2>&1 || true)"
+            if grep -qF "restarted: wireplumber" <<<"$apply2_out"; then exit 1; fi
+
+            /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null
+            [[ ! -e "$H/.config/wireplumber/wireplumber.conf.d/50-bluez-00_11_22_33_44_55.conf" ]]
+            [[ ! -e "$H/.config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

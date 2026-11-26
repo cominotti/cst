@@ -28,7 +28,7 @@ from bluetooth.domain import (
 )
 from bluetooth.setup.application import watcher_unit
 from bluetooth.setup.application.checks import Checks
-from bluetooth.setup.application.inputs import is_cst_rule
+from bluetooth.setup.application.inputs import is_cst_rule, shell_wp_stale
 from bluetooth.setup.application.survey import StepFailed
 from bluetooth.setup.domain import (
     A2DP_SINK_UUID,
@@ -82,6 +82,7 @@ class Change(Checks):
             self.need_tmp()  # every command made it first (TMP="$(mktemp)"), before the ERR trap
         except StepFailed as e:
             return e.status
+        self.resolve_wp_env()
         try:
             return commands[self.o.cmd]()
         except BrokenPipeError:
@@ -412,6 +413,7 @@ class Change(Checks):
             self.owe(WIREPLUMBER_UNIT)
             self.m.files.remove_file(p.legacy_wp_conf)
             self.out(f"removed:   {p.legacy_wp_conf} (older name of the same rule)\n")
+        self._clean_shell_wp_stale(check=False)
         match self.wp_state:
             case WpState.OK:
                 self.out(f"unchanged: {self.wp_conf}\n")
@@ -741,7 +743,20 @@ class Change(Checks):
                 self.out(
                     f"removed:   {p.le_conf} (LE Audio on again; LE_AUDIO=off in the settings writes it again at the next apply)\n"
                 )
+        self._clean_shell_wp_stale(check=check)
         return wp, le
+
+    def _clean_shell_wp_stale(self, *, check: bool) -> None:
+        """Remove marked older CST WirePlumber copies under the shell's XDG_CONFIG_HOME (warn & keep
+        unmarked ones; check: only print what revert would remove)."""
+        for path, ours in shell_wp_stale(self.m.files, self.p, self.wp_conf, has_headset=self.headset):
+            if not ours:
+                self.err(f"WARNING: {path} was not written by CST: left alone\n")
+            elif check:
+                self.out(f"would remove {path}\n")
+            else:
+                self.m.files.remove_file(path)
+                self.out(f"removed:   {path} (an older CST's copy)\n")
 
     # ---- the user's settings ----------------------------------------------------------------
     def save_setting(self, key: str, value: str) -> None:

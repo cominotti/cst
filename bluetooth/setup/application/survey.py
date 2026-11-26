@@ -8,7 +8,7 @@ runs, their arguments and where their output goes are bluetooth-setup.sh's.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 import re
 from typing import Final, Literal
@@ -63,7 +63,7 @@ from bluetooth.setup.domain import (
     wp_word,
 )
 from bluetooth.setup.application import watcher_unit
-from bluetooth.setup.application.inputs import rule_headsets
+from bluetooth.setup.application.inputs import resolve_headset, shell_wp_stale
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.application.user_units import manager_unit_path
 from cst_core.domain.errors import Refused, shell_exit_status
@@ -119,25 +119,8 @@ class Survey:
         self.o = opts
         self.p = paths
         self.m = m
-        # The headset: --device, DEVICE in the settings, else (the user's file has no DEVICE line) the
-        # one LDAC rule CST wrote. CST set a default headset until 2026-11, so a machine set up with it
-        # has that rule and no DEVICE line: its headset is used, and apply (or revert) saves it.
-        self.device_save = False
-        self.device_rules: tuple[str, ...] = ()
-        if not cfg.device and "DEVICE" not in cfg.user_keys:
-            rules = rule_headsets(m.files, paths.wp_dir)
-            if len(rules) == 1:
-                cfg = replace(
-                    cfg,
-                    device=rules[0],
-                    device_from=f"from CST's LDAC rule; apply saves it as DEVICE in {self.tilde(paths.user_settings)}",
-                )
-                self.device_save = True
-            elif len(rules) > 1:
-                self.device_rules = tuple(rules)
-        self.c = cfg
-        self.headset = bool(cfg.device)  # none: its parts are skipped and say how to set one
-        self.wp_conf = paths.wp_conf(cfg.device_id) if self.headset else ""
+        self._base_cfg = cfg
+        self._apply_headset()
         self.le_on_hint = f"{cfg.prog} le-audio on"
         self.le_off_hint = f"{cfg.prog} le-audio off"
         self.tmp = ""  # main.conf as apply would write it (a mktemp file)
@@ -147,6 +130,7 @@ class Survey:
         self.mc_changed = False
         self.wp_state: WpState | Literal[""] = ""  # "": not read yet
         self.legacy = False
+        self.wp_stale: list[tuple[str, bool]] = []
         self.le_state: LeState | Literal[""] = ""
         self.le_change = False
         self.bearer_state = BearerState.NONE
@@ -261,6 +245,11 @@ class Survey:
 
     def no_headset(self) -> str:
         return no_headset_note(self.device_rules, self.tilde(self.p.user_settings))
+
+    def _apply_headset(self) -> None:
+        self.c, self.device_save, self.device_rules = resolve_headset(self.m.files, self.p, self._base_cfg, self.tilde)
+        self.headset = bool(self.c.device)  # none: its parts are skipped and say how to set one
+        self.wp_conf = self.p.wp_conf(self.c.device_id) if self.headset else ""
 
     def wp_title(self) -> str:
         """The rule as the WirePlumber section of apply and revert names it."""
@@ -418,6 +407,7 @@ class Survey:
         )
         # The rule's oldest name is renamed to the headset's rule; with no headset it is left alone.
         self.legacy = self.headset and f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
+        self.wp_stale = shell_wp_stale(f, self.p, self.wp_conf, has_headset=self.headset)
         self.le_plan()
         self.bearer_state = self._bearer_state()
         self.lw_plan()
@@ -563,6 +553,10 @@ class Survey:
             self.item("skip", "the headset's LDAC rule", self.no_headset())
         if self.legacy:
             self.item("remove", wp_label(self.p.legacy_wp_conf), "older name of the same rule (apply-le-audio.sh)")
+        for path, ours in self.wp_stale:
+            tag = "remove" if ours else "warn"
+            note = "an older CST's copy under the shell's XDG_CONFIG_HOME" if ours else "not written by CST: left alone"
+            self.item(tag, self.tilde(path), note)
         self.le_report()
         self.le_others_report()
         b, dev = self.c.bearer, self.c.device
@@ -781,6 +775,7 @@ class Survey:
             or self.legacy
             or self.lw_change
             or self.le_change
+            or any(ours for _, ours in self.wp_stale)
             or self.device_save
             or self.wp_state not in (WpState.OK, WpState.NONE)
             or self.bearer_state == BearerState.SET

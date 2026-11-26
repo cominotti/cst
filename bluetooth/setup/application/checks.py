@@ -2,6 +2,8 @@
 """The live checks of `cst bluetooth status` (and the end of apply): the services, LE Audio,
 the adapter, PipeWire's BAP endpoint, the bearer and the headset in PipeWire."""
 
+from dataclasses import replace
+
 from bluetooth.domain import (
     BLUETOOTH_UNIT,
     ISO_UUID,
@@ -20,6 +22,7 @@ from bluetooth.setup.domain import (
     WpState,
     is_running,
     preferred_bearer,
+    wp_config_dir,
 )
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.units import ActiveState
@@ -29,11 +32,18 @@ from cst_core.ports import OutputMode
 class Checks(Survey):
     """Survey and the checks; their counters are in Survey (fails, warns)."""
 
+    def resolve_wp_env(self) -> None:
+        """Set the WirePlumber config folder from the user manager's environment."""
+        shown = self.m.user_systemd_host.show_environment()
+        wp_config = wp_config_dir(shown.stdout if shown.returncode == 0 else None, self.p.home)
+        self.p = replace(self.p, wp_config=wp_config)
+        self._apply_headset()
+
     # ---- the live checks (status, and the end of apply) --------------------------------------
     def wp_roles(self) -> str | None:
         """STATE|VALUE of bluez5.roles as WirePlumber resolves its config (bt-helper wp-roles, on the host)."""
         r = self.run(
-            ["env", f"XDG_CONFIG_HOME={self.p.config}", "python3", "-I", "-B", self.p.helper, "wp-roles"],
+            ["env", f"XDG_CONFIG_HOME={self.p.wp_root}", "python3", "-I", "-B", self.p.helper, "wp-roles"],
             host=True,
             output=OutputMode.STDOUT,
         )

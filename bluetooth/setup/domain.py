@@ -287,15 +287,29 @@ def home_tilde(path: str, home: str) -> str:
     return "~" + path[len(home) :] if home and path.startswith(home) else path
 
 
+def wp_config_dir(shown_env: str | None, home: str) -> str:
+    """WirePlumber's config folder from `systemctl --user show-environment` (XDG_CONFIG_HOME
+    given to user services), else HOME/.config."""
+    if shown_env is not None:
+        for line in shown_env.splitlines():
+            if line.startswith("XDG_CONFIG_HOME="):
+                val = line[len("XDG_CONFIG_HOME=") :]
+                if val.startswith("/"):
+                    return os.path.normpath(val)
+                break
+    return os.path.join(home, ".config") if home else ".config"
+
+
 @dataclass(frozen=True, slots=True)
 class Paths:
     """Where the program's files are, for one user and one host root."""
 
     home: str
-    config: str  # XDG_CONFIG_HOME or ~/.config
+    config: str  # shell's XDG_CONFIG_HOME or ~/.config (settings + older WirePlumber copies)
     etc: str
     usr_share: str
     checkout: str  # the CST folder
+    wp_config: str = ""  # user manager's XDG_CONFIG_HOME or ~/.config ("" uses config)
 
     @property
     def main_conf(self) -> str:
@@ -326,8 +340,20 @@ class Paths:
         return f"{self.checkout}/{SETUP_SCRIPT}"
 
     @property
+    def wp_root(self) -> str:
+        """The XDG config root WirePlumber uses (user manager's environment, else config)."""
+        return self.wp_config or self.config
+
+    @property
     def wp_dir(self) -> str:
-        return f"{self.config}/wireplumber/wireplumber.conf.d"
+        return f"{self.wp_root}/wireplumber/wireplumber.conf.d"
+
+    @property
+    def shell_wp_dir(self) -> str | None:
+        """WirePlumber's conf.d under the shell's XDG_CONFIG_HOME when it differs from wp_root."""
+        if os.path.normpath(self.config) == os.path.normpath(self.wp_root):
+            return None
+        return f"{os.path.normpath(self.config)}/wireplumber/wireplumber.conf.d"
 
     def wp_conf(self, device_id: str) -> str:
         return f"{self.wp_dir}/50-bluez-{device_id}.conf"

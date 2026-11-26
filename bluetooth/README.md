@@ -27,9 +27,12 @@ The entry point of the whole repository is [../README.md](../README.md).
 >   `KernelExperimental = 6fbaf188-05e0-496a-9885-d6ddfdb4e03e` (the ISO
 >   socket). A backup is taken before each change.
 > - **WirePlumber** (your audio session): one rule file,
->   `~/.config/wireplumber/wireplumber.conf.d/50-bluez-<ID>.conf` (`<ID>`: the
->   headset's address with `_` for `:`, in capitals), that
->   sets the headset's LDAC quality to `auto` (adaptive).
+>   `50-bluez-<ID>.conf` (`<ID>`: the headset's address with `_` for `:`, in
+>   capitals), in `$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d/` using the
+>   user manager's `XDG_CONFIG_HOME` (`systemctl --user show-environment`), or
+>   `~/.config/wireplumber/wireplumber.conf.d/` when unset, that
+>   sets the headset's LDAC quality to `auto` (adaptive). A shell-only
+>   `XDG_CONFIG_HOME` still selects `cst/bluetooth.conf`, not WirePlumber's folder.
 > - **LE Audio off in PipeWire** (the default, `LE_AUDIO=off`): a second
 >   WirePlumber file, `90-cst-le-audio-off.conf`, so that PipeWire offers
 >   only classic Bluetooth audio (A2DP and HFP), for all devices.
@@ -50,7 +53,8 @@ The entry point of the whole repository is [../README.md](../README.md).
 
 **What it means.** BlueZ stays ready for LE Audio (the two `main.conf`
 lines below are still set), but PipeWire does not offer it. `apply` writes
-`~/.config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf`, which
+`90-cst-le-audio-off.conf` into WirePlumber's config folder (see above,
+usually `~/.config/wireplumber/wireplumber.conf.d/`), which
 tells WirePlumber to register only the classic Bluetooth roles with BlueZ:
 
 ```
@@ -154,7 +158,12 @@ the bearer by itself: only when `BEARER` or `--bearer` is set.
   PipeWire moves the sound; WirePlumber, its session manager, decides which
   device uses which profile and codec. Both run in your user session, not as
   root. WirePlumber reads extra rules from
-  `~/.config/wireplumber/wireplumber.conf.d/*.conf` when it starts.
+  `$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d/*.conf` (taking
+  `XDG_CONFIG_HOME` from `systemctl --user show-environment`, else
+  `~/.config`) when it starts; a shell-only `XDG_CONFIG_HOME` does not move
+  this folder, and marked CST WirePlumber files left under a shell
+  `XDG_CONFIG_HOME` are removed by `apply` and `revert` (unmarked files there
+  are left alone with a warning).
 - **A2DP**: the classic ("BR/EDR") Bluetooth profile for music. Its best
   codec on this headset is **LDAC**, at 990, 660 or 330 kbps.
 - **HFP**: the classic profile for calls (microphone, low quality, mono).

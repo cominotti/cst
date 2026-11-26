@@ -2452,5 +2452,120 @@ class ClosedOutputTest(SetupCase):
         self.assertEqual(os.listdir(scratch), [])
 
 
+class WirePlumberConfigDirTest(SetupCase):
+    """r30.1: WirePlumber files go to the user manager's XDG_CONFIG_HOME (or ~/.config when unset),
+    not the shell's XDG_CONFIG_HOME (which still selects cst/bluetooth.conf); marked older CST
+    copies under the shell's XDG_CONFIG_HOME are cleaned up by apply and revert."""
+
+    def test_shell_xdg_does_not_move_wireplumber_and_cleans_marked_stale(self) -> None:
+        m = self.machine(DONE)
+        m.services()
+        shell_xdg = os.path.join(m.home, "shell-xdg")
+        os.makedirs(os.path.join(shell_xdg, "cst"))
+        with open(os.path.join(shell_xdg, "cst", "bluetooth.conf"), "w", encoding="utf-8") as f:
+            f.write(f"DEVICE={MAC}\n")
+        stale_dir = os.path.join(shell_xdg, "wireplumber", "wireplumber.conf.d")
+        os.makedirs(stale_dir)
+        stale_wp = os.path.join(stale_dir, f"50-bluez-{DEV}.conf")
+        stale_le = os.path.join(stale_dir, "90-cst-le-audio-off.conf")
+        stale_unmarked = os.path.join(stale_dir, "50-jbl-live-beam-4.conf")
+        with open(stale_wp, "w", encoding="utf-8") as f:
+            f.write("# Gerado por apply-le-audio.sh\n")
+        with open(stale_le, "w", encoding="utf-8") as f:
+            f.write("# managed-by: bluetooth-setup.sh (CST)\n")
+        with open(stale_unmarked, "w", encoding="utf-8") as f:
+            f.write("# hand-edited rule\n")
+        env = {"XDG_CONFIG_HOME": shell_xdg}
+
+        plan = m.run("plan", env=env)
+        self.assertEqual(plan.returncode, 10, plan.text)
+        self.assertIn(
+            row(
+                "remove",
+                f"~/shell-xdg/wireplumber/wireplumber.conf.d/50-bluez-{DEV}.conf",
+                "an older CST's copy under the shell's XDG_CONFIG_HOME",
+            ),
+            plan.stdout,
+        )
+        self.assertIn(
+            row(
+                "remove",
+                "~/shell-xdg/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf",
+                "an older CST's copy under the shell's XDG_CONFIG_HOME",
+            ),
+            plan.stdout,
+        )
+        self.assertIn(
+            row(
+                "warn",
+                "~/shell-xdg/wireplumber/wireplumber.conf.d/50-jbl-live-beam-4.conf",
+                "not written by CST: left alone",
+            ),
+            plan.stdout,
+        )
+
+        r = m.run("apply", "--yes", env=env)
+        self.assertTrue(os.path.isfile(m.wp_conf) and os.path.isfile(m.le_conf), r.text)
+        self.assertFalse(os.path.exists(stale_wp))
+        self.assertFalse(os.path.exists(stale_le))
+        self.assertTrue(os.path.isfile(stale_unmarked))
+        self.assertIn(f"removed:   {stale_wp} (an older CST's copy)\n", r.stdout)
+        self.assertIn(f"removed:   {stale_le} (an older CST's copy)\n", r.stdout)
+        self.assertIn(f"WARNING: {stale_unmarked} was not written by CST: left alone\n", r.stderr)
+
+        again = m.run("plan", env=env)
+        self.assertEqual(again.returncode, 0, again.text)
+
+        # Marked older copy under the shell's XDG_CONFIG_HOME is also removed by revert (not --check).
+        with open(stale_le, "w", encoding="utf-8") as f:
+            f.write("# managed-by: bluetooth-setup.sh (CST)\n")
+        chk = m.run("revert", "--check", env=env)
+        self.assertEqual(chk.returncode, 10, chk.text)
+        self.assertIn(f"would remove {stale_le}\n", chk.stdout)
+        self.assertTrue(os.path.isfile(stale_le))
+        rev = m.run("revert", "--yes", "--no-restart", env=env)
+        self.assertEqual(rev.returncode, 0, rev.text)
+        self.assertFalse(os.path.exists(stale_le))
+        self.assertIn(f"removed:   {stale_le} (an older CST's copy)\n", rev.stdout)
+
+    def test_user_manager_xdg_places_wireplumber_and_wp_roles_there(self) -> None:
+        m = self.machine(DONE)
+        m.services()
+        m.flag("iso-socket")
+        m.put("wp-roles", CLASSIC)
+        m.put("pw-dump.json", json.dumps(pw_dump(rate=48000)))
+        mgr_xdg = os.path.join(m.home, "mgr-xdg")
+        m.put("user-env", f"HOME={m.home}\nXDG_CONFIG_HOME={mgr_xdg}\n")
+        r = m.run("apply", "--yes")
+        mgr_wp_dir = os.path.join(mgr_xdg, "wireplumber", "wireplumber.conf.d")
+        self.assertTrue(os.path.isfile(os.path.join(mgr_wp_dir, f"50-bluez-{DEV}.conf")), r.text)
+        self.assertTrue(os.path.isfile(os.path.join(mgr_wp_dir, "90-cst-le-audio-off.conf")), r.text)
+        self.assertFalse(os.path.exists(m.wp_conf) or os.path.exists(m.le_conf))
+        self.assertIn(f"  XDG_CONFIG_HOME={mgr_xdg}", r.calls)
+        self.assertEqual(m.run("plan").returncode, 0)
+        m.adapter()
+        st = m.run("status", container=True)
+        self.assertEqual(st.returncode, 0, st.text)
+        self.assertIn(f"  XDG_CONFIG_HOME={mgr_xdg}", st.calls)
+
+        # When user manager has no XDG_CONFIG_HOME, falls back cleanly to ~/.config even with shell env set.
+        m2 = self.machine(DONE)
+        m2.services()
+        m2.flag("iso-socket")
+        m2.put("wp-roles", CLASSIC)
+        m2.put("pw-dump.json", json.dumps(pw_dump(rate=48000)))
+        shell_xdg2 = os.path.join(m2.home, "shell-xdg")
+        os.makedirs(os.path.join(shell_xdg2, "cst"))
+        with open(os.path.join(shell_xdg2, "cst", "bluetooth.conf"), "w", encoding="utf-8") as f:
+            f.write(f"DEVICE={MAC}\n")
+        r2 = m2.run("apply", "--yes", "--no-restart", env={"XDG_CONFIG_HOME": shell_xdg2})
+        self.assertTrue(os.path.isfile(m2.wp_conf) and os.path.isfile(m2.le_conf), r2.text)
+        self.assertIn(f"  XDG_CONFIG_HOME={m2.home}/.config", r2.calls)
+        m2.adapter()
+        st2 = m2.run("status", container=True, env={"XDG_CONFIG_HOME": shell_xdg2})
+        self.assertEqual(st2.returncode, 0, st2.text)
+        self.assertIn(f"  XDG_CONFIG_HOME={m2.home}/.config", st2.calls)
+
+
 if __name__ == "__main__":
     unittest.main()
