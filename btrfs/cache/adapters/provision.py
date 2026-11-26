@@ -236,16 +236,20 @@ class CacheProvisionAdapter:
         mps = tuple(m for m in raw_mps if m is not None and m != "") if raw_mps is not None else ()
         kname = os.path.basename(real_path)
         holders, holder_dm = _sysfs_holders(kname, self._rt)
+        dev_type = entry.get("type") or ""
+        # On a partition, lsblk's PTTYPE reports the enclosing disk's table (udev ID_PART_TABLE_TYPE),
+        # not a nested partition table inside the partition; only blkid -p detects an inner PTTYPE.
+        pttype = blkid.get("PTTYPE", "") if dev_type == "part" else (entry.get("pttype") or blkid.get("PTTYPE", ""))
         return (
             BlockDeviceFacts(
                 dev_path=device_path,
                 real_path=real_path,
-                dev_type=entry.get("type") or "",
+                dev_type=dev_type,
                 partuuid=(entry.get("partuuid") or blkid.get("PARTUUID") or blkid.get("PART_ENTRY_UUID", "")).lower(),
                 size_bytes=_lsblk_size(entry.get("size")),
                 model=(entry.get("model") or "").strip(),
                 fstype=entry.get("fstype") or blkid.get("TYPE", ""),
-                pttype=entry.get("pttype") or blkid.get("PTTYPE", ""),
+                pttype=pttype,
                 uuid=entry.get("uuid") or blkid.get("UUID", ""),
                 mountpoints=mps,
                 holders=holders,

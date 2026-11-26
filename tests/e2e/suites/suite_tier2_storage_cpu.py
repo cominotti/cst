@@ -3449,6 +3449,13 @@ assert d["samples"] >= 1, d["samples"]
             [[ "$rc" -eq 1 ]]
             grep -qF -- "--format" {w}/nofmt.out
 
+            # Nested partition table inside $part (genuine blkid -p PTTYPE=dos) must refuse even with --format.
+            printf 'label: dos\\n' | sfdisk --force --no-reread "$part" >/dev/null
+            rc_nested=0; /opt/cst-rw/cst btrfs cache provision apply --format --yes >{w}/nested.out 2>&1 || rc_nested=$?
+            [[ "$rc_nested" -eq 1 ]]
+            grep -qF "pttype=dos" {w}/nested.out
+            wipefs --force -a "$part" >/dev/null
+
             # 3. provision apply --format --yes -> verify LUKS2, Btrfs subvols, crypttab, fstab, mounts, idempotency.
             quiet /opt/cst-rw/cst btrfs cache provision apply --format --yes
             cryptsetup isLuks "$part"
