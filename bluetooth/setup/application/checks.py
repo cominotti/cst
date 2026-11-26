@@ -291,6 +291,7 @@ class Checks(Survey):
             or self.device_save
             or self.wp_state not in (WpState.OK, WpState.ADOPT, WpState.NONE)
             or self.le_state == LeState.CONFLICT
+            or any(ours for _, ours in self.wp_stale)
         ):
             self.out(f"Some files or services differ from what apply sets up: {self.c.prog} plan\n")
         elif self.wp_state == WpState.ADOPT or self.le_state == LeState.ADOPT:

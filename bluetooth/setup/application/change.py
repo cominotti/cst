@@ -654,7 +654,7 @@ class Change(Checks):
         self.read_owed()  # before any change: what an earlier run (apply or revert) left owed
         changed_mc = self.revert_main_conf()
         self.save_headset()  # the rule goes next: it may be the only place that names the headset
-        wp, le = self.revert_files()
+        wp, le, wp_stale = self.revert_files()
         self.out(f"== LDAC rate watcher: {LDAC_UNIT}\n")
         self.lw_plan()
         lw = self.lw_removes() or bool(self.lw_stale)
@@ -667,7 +667,7 @@ class Change(Checks):
             elif restart:
                 self.out("would restart wireplumber\n")
             self.owed_report()
-            return 10 if restart or lw else 0
+            return 10 if restart or lw or wp_stale else 0
         self.out("== restarts\n")
         if not restart:
             self.out("none needed\n")
@@ -709,8 +709,8 @@ class Change(Checks):
             self.err(f"WARNING: no backup {mc}.bak-* found; main.conf not changed\n")
         return changed_mc
 
-    def revert_files(self) -> tuple[bool, bool]:
-        """The rule and the drop-in removed when they are CST's; whether each was."""
+    def revert_files(self) -> tuple[bool, bool, bool]:
+        """The rule and the drop-in removed when they are CST's; whether each (or stale WP) was."""
         p, f, check = self.p, self.m.files, self.o.check
         wp = le = False
         self.out(f"== WirePlumber: {self.wp_title()}\n")
@@ -743,20 +743,23 @@ class Change(Checks):
                 self.out(
                     f"removed:   {p.le_conf} (LE Audio on again; LE_AUDIO=off in the settings writes it again at the next apply)\n"
                 )
-        self._clean_shell_wp_stale(check=check)
-        return wp, le
+        return wp, le, self._clean_shell_wp_stale(check=check)
 
-    def _clean_shell_wp_stale(self, *, check: bool) -> None:
+    def _clean_shell_wp_stale(self, *, check: bool) -> bool:
         """Remove marked older CST WirePlumber copies under the shell's XDG_CONFIG_HOME (warn & keep
-        unmarked ones; check: only print what revert would remove)."""
+        unmarked ones; check: only print what revert would remove). Return whether any CST copy was seen."""
+        had = False
         for path, ours in shell_wp_stale(self.m.files, self.p, self.wp_conf, has_headset=self.headset):
             if not ours:
                 self.err(f"WARNING: {path} was not written by CST: left alone\n")
-            elif check:
-                self.out(f"would remove {path}\n")
             else:
-                self.m.files.remove_file(path)
-                self.out(f"removed:   {path} (an older CST's copy)\n")
+                had = True
+                if check:
+                    self.out(f"would remove {path}\n")
+                else:
+                    self.m.files.remove_file(path)
+                    self.out(f"removed:   {path} (an older CST's copy)\n")
+        return had
 
     # ---- the user's settings ----------------------------------------------------------------
     def save_setting(self, key: str, value: str) -> None:

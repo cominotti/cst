@@ -2566,6 +2566,31 @@ class WirePlumberConfigDirTest(SetupCase):
         self.assertEqual(st2.returncode, 0, st2.text)
         self.assertIn(f"  XDG_CONFIG_HOME={m2.home}/.config", st2.calls)
 
+    def test_shell_xdg_stale_only_differs_in_status_and_revert_check(self) -> None:
+        m = self.machine(DONE)
+        m.services()
+        shell_xdg = os.path.join(m.home, "shell-xdg")
+        stale_dir = os.path.join(shell_xdg, "wireplumber", "wireplumber.conf.d")
+        os.makedirs(os.path.join(shell_xdg, "cst"))
+        os.makedirs(stale_dir)
+        with open(os.path.join(shell_xdg, "cst", "bluetooth.conf"), "w", encoding="utf-8") as f:
+            f.write("LE_AUDIO=on\n")
+        stale_le = os.path.join(stale_dir, "90-cst-le-audio-off.conf")
+        with open(stale_le, "w", encoding="utf-8") as f:
+            f.write("# managed-by: bluetooth-setup.sh (CST)\n")
+        env = {"XDG_CONFIG_HOME": shell_xdg}
+
+        chk = m.run("revert", "--check", env=env)
+        self.assertEqual(chk.returncode, 10, chk.text)
+        self.assertIn(f"would remove {stale_le}\n", chk.stdout)
+        self.assertTrue(os.path.isfile(stale_le))
+
+        m.adapter()
+        m.flag("iso-socket")
+        st = m.run("status", container=True, env=env)
+        self.assertEqual(st.returncode, 0, st.text)
+        self.assertIn("Some files or services differ from what apply sets up:", st.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
