@@ -2388,6 +2388,27 @@ class ReadsNeverWaitTest(Scratch):
                     os.remove(path)
                 self.assertEqual([r.message for r in rows], want)
 
+    def test_installed_files_sha256_and_check_install_do_not_wait_on_fifo(self) -> None:
+        fifo = self._fifo("/etc/tmpfiles.d/zswap.conf")
+        self.addCleanup(os.remove, fifo)
+        installed = doc_adapters.InstalledFiles(REPO)
+        with time_bound(5):
+            with self.assertRaises(OSError) as cm:
+                installed.file_sha256(doc_domain.ViewPath(fifo))
+            self.assertEqual(cm.exception.errno, errno.EINVAL)
+            list(doc_install.check_install(doc_adapters.Host(dict(self.env)), installed=installed))
+
+    def test_btrfs_cache_check_does_not_wait_on_fifo_crypttab(self) -> None:
+        os.makedirs(
+            os.path.join(self.root, "sys", "fs", "btrfs", "11111111-2222-3333-4444-555555555555", "allocation"),
+            exist_ok=True,
+        )
+        fifo = self._fifo("/etc/crypttab")
+        self.addCleanup(os.remove, fifo)
+        with time_bound(5):
+            rows = list(doc_btrfs.check_btrfs_cache(doc_adapters.Host(dict(self.env))))
+        self.assertEqual(rows, [])
+
 
 class SnapshotNumbersDoctorTest(Scratch):
     """check_snapshot_numbers: a number of snapshots.conf the hourly run cannot use, judged by the runtime's

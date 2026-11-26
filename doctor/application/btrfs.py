@@ -756,7 +756,7 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     crypttab_path = host.path(HostPath("/etc/crypttab"))
     crypttab_raw, crypttab_unreadable = "", False
     try:
-        with host.open_text(crypttab_path) as fh:
+        with host.open_regular_text(crypttab_path) as fh:
             crypttab_raw = fh.read(65536)
     except PermissionError:
         crypttab_unreadable = True

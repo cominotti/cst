@@ -14,7 +14,7 @@ from btrfs.docker_volumes_nocow.adapters import LocalVolumeTree, docker_root as 
 from btrfs.docker_volumes_nocow.domain import NocowPaths
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
-from cst_core.adapters.files import open_regular_text
+from cst_core.adapters.files import open_regular_bytes, open_regular_text
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template
@@ -214,8 +214,8 @@ class InstalledFiles:
         return JsonInstallRecord().read(path)
 
     def file_sha256(self, path: ViewPath) -> str:
-        """sha256 of the file's bytes (OSError when it cannot be read)."""
-        with open(path, "rb") as f:
+        """sha256 of a regular file's bytes (OSError when not a regular file or unreadable)."""
+        with open_regular_bytes(path) as f:
             return hashlib.sha256(f.read()).hexdigest()
 
     def desired_sha256(self, src: str, values: Mapping[str, str] | None) -> str | None:
