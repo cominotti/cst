@@ -7,6 +7,7 @@ from collections.abc import Generator, Sequence
 import contextlib
 from dataclasses import dataclass, field
 import errno
+import io
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -973,3 +975,33 @@ class ProvisionAndMigrationAdapterTests(unittest.TestCase):
 
         whole_disk = inspect_case("disk", "gpt", "")
         self.assertEqual(whole_disk.pttype, "gpt")
+
+    def test_confirm_format_accepts_y_yes_s_and_declines_n(self) -> None:
+        class _FakeTty(io.StringIO):
+            @override
+            def isatty(self) -> bool:
+                return True
+
+        rt = CacheMountRuntime(seam_root="", ctx=CacheTestCtx(), runner=FakeMountRunner("/"), env_map={})
+        prov = CacheProvisionAdapter(rt)
+
+        self.assertEqual(prov.confirm_format("Continue? [y/N]: ", assume_yes=True), (True, None))
+        with mock.patch.object(sys, "stdin", io.StringIO("y\n")):
+            ok_non_tty, err_non_tty = prov.confirm_format("Continue? [y/N]: ", assume_yes=False)
+        self.assertFalse(ok_non_tty)
+        self.assertIn("--yes", err_non_tty or "")
+
+        for answer, want in (
+            ("y\n", True),
+            ("Y\n", True),
+            ("yes\n", True),
+            ("s\n", True),
+            ("n\n", False),
+            ("\n", False),
+        ):
+            out = io.StringIO()
+            with mock.patch.object(sys, "stdin", _FakeTty(answer)), mock.patch.object(sys, "stdout", out):
+                res = prov.confirm_format("Continue? [y/N]: ", assume_yes=False)
+            self.assertEqual(res[0], want, answer)
+            if not want:
+                self.assertEqual(res[1], "aborted by user (confirmation declined)")
