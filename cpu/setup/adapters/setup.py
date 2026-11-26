@@ -650,16 +650,16 @@ class CpuSetup:
             return
         hr = "/" if p.sys_dir == "/sys" else os.path.dirname(p.sys_dir)
         paths = PerfPaths(
-            p.proc_dir,
-            p.sys_dir,
-            p.cgroot,
-            os.path.join(hr, "etc"),
-            os.path.join(hr, "run"),
-            os.path.join(hr, "dev"),
-            os.path.join(p.sys_dir, "module", "zswap", "parameters"),
-            p.conf,
-            p.preempt,
-            p.sched_ext,
+            proc_dir=p.proc_dir,
+            sys_dir=p.sys_dir,
+            cgroup_dir=p.cgroot,
+            etc_dir=os.path.join(hr, "etc"),
+            run_dir=os.path.join(hr, "run"),
+            dev_dir=os.path.join(hr, "dev"),
+            zswap_params_dir=os.path.join(p.sys_dir, "module", "zswap", "parameters"),
+            cpu_conf_path=p.conf,
+            preempt_path=p.preempt,
+            sched_ext_path=p.sched_ext,
         )
         axes = (PerfAxis.CPU, PerfAxis.GPU)
         rep = evaluate_perf_snapshot(LinuxPerfProbe(paths).collect_snapshot(axes), axes)

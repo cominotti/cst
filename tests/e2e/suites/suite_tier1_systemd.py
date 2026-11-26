@@ -2209,8 +2209,9 @@ cmp "$SRC/units/machine.slice.d-10-swap-memory-low.conf" "$DROPIN_DIR/10-swap-me
 [[ "$(readlink /etc/systemd/zram-generator.conf)" == /dev/null ]]
 [[ "$(cat "$W/sys/module/zswap/parameters/compressor")" == zstd ]]
 [[ "$(cat "$W/proc/sys/vm/swappiness")" == 100 ]]
+[[ "$(cat "$W/proc/sys/vm/watermark_scale_factor")" == 300 ]]
 [[ "$(cat "$W/proc/sys/vm/min_free_kbytes")" == 262144 ]]
-[[ "$(cat "$W/sys/kernel/mm/transparent_hugepage/defrag")" == defer+madvise ]]
+[[ "$(cat "$W/sys/kernel/mm/transparent_hugepage/defrag")" == defer ]]
 [[ "$(cat "$W/sys/kernel/mm/lru_gen/min_ttl_ms")" == 1000 ]]
 python3 -I - "$REC" <<'PY'
 import json, sys
@@ -7549,6 +7550,8 @@ PY
             for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "GPU runtime PM and CPU C-states" "irqbalance" "last measurements"; do
                 grep -qx "== $s" <<<"$st" || {{ echo "status without '$s'" >&2; exit 1; }}
             done
+            [[ "$st" != *"Kernel preemption is 'disabled'"* ]] \
+                || {{ echo "false positive preempt warning in status: $st" >&2; exit 1; }}
             # A second install writes nothing.
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-again.txt
             if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi

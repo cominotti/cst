@@ -24,7 +24,7 @@ Exit codes:
 1. **memory** (`/proc/meminfo`, `/proc/vmstat`, `/proc/pressure/memory`, `/proc/sys/vm/*`, `/sys/kernel/mm/*`, `/sys/module/zswap/parameters/*`, cgroup `session.slice` / `user-*.slice`):
    - `vm.min_free_kbytes`: expects at least `192 MiB` headroom on hosts with `>= 32 GiB` RAM (`32 MiB` on smaller hosts); emits `fix: cst swap apply` when low.
    - Direct reclaim & compaction stalls (`allocstall_*`, `compact_stall`): computes hourly rates once uptime exceeds 10 minutes (`>= 5/h` `allocstall` or `>= 10/h` `compact_stall` -> `ATTENTION`; `>= 30/h` or `>= 60/h` -> `BOTTLENECK`).
-   - THP (`transparent_hugepage/defrag`): flags `always` and `madvise` (synchronous page-fault compaction pauses) in favor of `defer+madvise` (`fix: cst swap apply`).
+   - THP (`transparent_hugepage/defrag`): flags `always`, `madvise`, and `defer+madvise` (synchronous page-fault compaction pauses on `MADV_HUGEPAGE` callers) in favor of `defer` (`fix: cst swap apply`).
    - MGLRU (`lru_gen/enabled`, `lru_gen/min_ttl_ms`): flags disabled MGLRU or `min_ttl_ms = 0` (`fix: cst swap apply`).
    - `zswap`: flags disabled `zswap` with `fix: cst swap apply`.
    - Memory PSI (`avg60`): flags `some >= 1%` (`ATTENTION`), `some >= 5%` or `full >= 1%` (`BOTTLENECK`).

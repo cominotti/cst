@@ -29,6 +29,7 @@ from perf.domain.models import (
 )
 
 _BRACKET_RE: Final = re.compile(r"\[([^\]]+)\]")
+_PAREN_CHOICE_RE: Final = re.compile(r"\(([a-z]+)\)")
 _AMD_PROFILE_ACTIVE_RE: Final = re.compile(r"^\s*\d+\s+([A-Za-z0-9_-]+)\*\s*:?")
 _PREEMPT_TOKEN_RE: Final = re.compile(r"\bpreempt=([a-z]+)\b")
 _ALLOCSTALL_PREFIX: Final = "allocstall_"
@@ -162,9 +163,14 @@ def parse_uptime_seconds(text: str | None) -> float | None:
 
 def parse_preempt_mode(debugfs_text: str | None, cmdline_text: str | None) -> str | None:
     """Extract preemption mode from debugfs `sched/preempt` or kernel cmdline."""
-    bracketed = parse_bracket_choice(debugfs_text)
-    if bracketed is not None:
-        return bracketed
+    cleaned_debugfs = clean_opt_str(debugfs_text)
+    if cleaned_debugfs is not None:
+        paren_match = _PAREN_CHOICE_RE.search(cleaned_debugfs)
+        if paren_match is not None:
+            return group(paren_match, 1)
+        bracketed = parse_bracket_choice(cleaned_debugfs)
+        if bracketed is not None:
+            return bracketed
     cleaned_cmd = clean_opt_str(cmdline_text)
     if cleaned_cmd is not None:
         match = _PREEMPT_TOKEN_RE.search(cleaned_cmd)

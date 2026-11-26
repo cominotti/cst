@@ -1222,6 +1222,21 @@ class StatusTest(CpuSetupCase):
             f"runuser -u tester -- env HOME={self.home} python3 -I -B {REPO}/cpu/cpu-watch report", self.runner.joined()
         )
 
+    def test_status_diagnosis_reads_preempt_not_sched_ext(self) -> None:
+        self.write(f"{self.paths.proc_dir}/interrupts", "           CPU0\n  10: 0 nvme\n")
+        self.write(self.paths.sched_ext, "disabled\n")
+        self.write(self.paths.preempt, "none voluntary full (lazy)\n")
+        rc, out, err = self.command("status", user="")
+        self.assertEqual((rc, err), (1, ""))
+        self.assertIn("\n== diagnosis\n", out)
+        self.assertNotIn("Kernel preemption", out)
+
+        self.write(self.paths.preempt, "none (voluntary) full lazy\n")
+        rc2, out2, err2 = self.command("status", user="")
+        self.assertEqual((rc2, err2), (1, ""))
+        self.assertIn("Kernel preemption is 'voluntary'", out2)
+        self.assertNotIn("Kernel preemption is 'disabled'", out2)
+
     def test_without_a_target_user_the_user_parts_are_left_out_and_it_exits_1(self) -> None:
         rc, out, _ = self.command("status", user="")
         self.assertEqual(rc, 1)

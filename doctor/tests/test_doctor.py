@@ -1961,7 +1961,7 @@ class MmResponsivenessDoctorTest(Scratch):
         defrag = os.path.join(self.root, "sys", "kernel", "mm", "transparent_hugepage", "defrag")
         os.makedirs(os.path.dirname(defrag), exist_ok=True)
         with open(defrag, "w", encoding="utf-8") as f:
-            f.write("defer+madvise\n")
+            f.write("defer\n")
         r_missing = self.run_tool()
         self.assertEqual(r_missing.returncode, 1, r_missing.stdout)
         self.assertEqual(
@@ -6056,7 +6056,7 @@ class ResponsivenessAreaTest(Scratch):
         self._write_host("etc/sysctl.d/99-swap-tuning.conf", "vm.swappiness = 60\n")
         self._write_host("proc/meminfo", "MemTotal: 67108864 kB\nMemAvailable: 50000000 kB\n")
         self._write_host("proc/sys/vm/min_free_kbytes", "262144\n")
-        self._write_host("sys/kernel/mm/transparent_hugepage/defrag", "always defer [defer+madvise] madvise never\n")
+        self._write_host("sys/kernel/mm/transparent_hugepage/defrag", "always [defer] defer+madvise madvise never\n")
         self._write_host("sys/kernel/mm/lru_gen/enabled", "0x0007\n")
         self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "1000\n")
         self._write_host("sys/module/zswap/parameters/enabled", "Y\n")
@@ -6102,6 +6102,13 @@ class ResponsivenessAreaTest(Scratch):
         self.assertEqual(mglru_res.returncode, 1, mglru_res.stdout + mglru_res.stderr)
         self.assertIn("WARN   memory: MGLRU min_ttl_ms is 0", mglru_res.stdout)
         self.assertIn("fix: cst swap apply", mglru_res.stdout)
+
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "1000\n")
+        self._write_host("sys/kernel/mm/transparent_hugepage/defrag", "always defer [defer+madvise] madvise never\n")
+        thp_res = self.run_tool()
+        self.assertEqual(thp_res.returncode, 1, thp_res.stdout + thp_res.stderr)
+        self.assertIn("WARN   memory: THP defrag is 'defer+madvise'", thp_res.stdout)
+        self.assertIn("fix: cst swap apply", thp_res.stdout)
 
         self._write_host("sys/module/zswap/parameters/enabled", "N\n")
         warn_res = self.run_tool()
