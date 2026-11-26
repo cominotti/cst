@@ -79,6 +79,8 @@ from cst_core.ports import (
     UnitName,
 )
 
+_FOREIGN_NOTE: Final = "not written by CST: left alone"
+
 
 # The states of the watcher's program that are CST's (revert and apply with the watcher off remove it).
 _LW_PROG_OURS: Final = (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE)
@@ -553,10 +555,7 @@ class Survey:
             self.item("skip", "the headset's LDAC rule", self.no_headset())
         if self.legacy:
             self.item("remove", wp_label(self.p.legacy_wp_conf), "older name of the same rule (apply-le-audio.sh)")
-        for path, ours in self.wp_stale:
-            tag = "remove" if ours else "warn"
-            note = "an older CST's copy under the shell's XDG_CONFIG_HOME" if ours else "not written by CST: left alone"
-            self.item(tag, self.tilde(path), note)
+        self._wp_stale_report()
         self.le_report()
         self.le_others_report()
         b, dev = self.c.bearer, self.c.device
@@ -675,12 +674,20 @@ class Survey:
         else:
             self.item("ok", LDAC_WATCHER_LABEL, "off (LDAC_RATE empty; 48000 turns it on)")
         if self.lw_unit_st == OwnedState.CONFLICT:
-            self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
+            self.item("CONFLICT", self.lw_unit_label(), _FOREIGN_NOTE)
         if self.lw_prog_st == OwnedState.CONFLICT:
-            self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
+            self.item("CONFLICT", self.lw_prog_label(), _FOREIGN_NOTE)
         if self.lw_keeps_prog():
             self.item("note", self.lw_prog_label(), LW_KEPT_NOTE)
         self._lw_stale_report()
+
+    def _wp_stale_report(self) -> None:
+        """The rows of WirePlumber files under the shell's XDG_CONFIG_HOME when it differs."""
+        for path, ours in self.wp_stale:
+            if ours:
+                self.item("remove", self.tilde(path), "an older CST's copy under the shell's XDG_CONFIG_HOME")
+            else:
+                self.item("warn", self.tilde(path), _FOREIGN_NOTE)
 
     def _lw_stale_report(self) -> None:
         """The rows of an older CST's copies of the watcher's unit (watcher_unit.stale_rows)."""

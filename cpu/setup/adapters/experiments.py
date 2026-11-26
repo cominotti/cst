@@ -4,9 +4,12 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import os
+from typing import Final
 
 from cst_core.adapters.files import read_text, write_atomic
 from cpu.setup.domain import Halt, SetupPaths, current_choice, experiment_line, first_arg
+
+_UTF8: Final = "utf-8"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +48,7 @@ def _experiment_list(env: ExperimentEnv) -> int:
     """experiment list: each knob, its value now, and whether it is on."""
     for exp, (file, value) in env.paths.experiments.items():
         try:
-            with open(file, encoding="utf-8", errors="replace") as fh:
+            with open(file, encoding=_UTF8, errors="replace") as fh:
                 now = fh.read().replace("\n", "")
         except OSError as e:
             env.warn(f"cpu-setup.sh: {file}: {e.strerror}")
@@ -73,7 +76,7 @@ def _experiment_off(env: ExperimentEnv, name: str, file: str, saved: str) -> int
         return 0
     old = read_text(saved) or ""
     try:
-        with open(file, "w", encoding="utf-8") as fh:
+        with open(file, "w", encoding=_UTF8) as fh:
             fh.write(old)
     except OSError as e:
         env.warn(f"cpu-setup.sh: {file}: {e.strerror}")
@@ -87,7 +90,7 @@ def _save_choice(file: str, saved: str) -> None:
     """The value an experiment replaces, for 'off' (sysfs THP shows "[current]" among the choices).
     Read first: a value that cannot be read saves nothing (off then has nothing to put back)."""
     try:
-        with open(file, encoding="utf-8", errors="replace") as fh:
+        with open(file, encoding=_UTF8, errors="replace") as fh:
             value = current_choice(fh.read())
     except OSError as e:
         raise Halt(2, f"sed: can't read {file}: {e.strerror}") from None

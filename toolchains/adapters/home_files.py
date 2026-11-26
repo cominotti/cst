@@ -404,20 +404,8 @@ class HomeFiles:
         out: list[tuple[str, OlderUnitAction, str | None]] = []
         for name in (SERVICE, TIMER):
             cur = os.path.join(udir, name)
-            for p in RecordedUnitCopies(self._records, self.home, Component.TOOLCHAINS_AUTO, name).older(cur, answer):
-                if os.path.lexists(p) and os.path.realpath(p) == os.path.realpath(cur):
-                    out.append((p, OlderUnitAction.FORGET, None))
-                elif not os.path.lexists(p) or file_state(p, None, MARKER) in (OwnedState.OK, OwnedState.CHANGE):
-                    link: str | None = None
-                    if name == TIMER:
-                        cand = os.path.join(os.path.dirname(p), "timers.target.wants", TIMER)
-                        if os.path.islink(cand) and (
-                            os.path.realpath(cand) == os.path.realpath(p) or not os.path.exists(cand)
-                        ):
-                            link = cand
-                    out.append((p, OlderUnitAction.REMOVE, link))
-                else:
-                    out.append((p, OlderUnitAction.FOREIGN, None))
+            copies = RecordedUnitCopies(self._records, self.home, Component.TOOLCHAINS_AUTO, name)
+            out.extend(_classify_older_unit(name, p, cur) for p in copies.older(cur, answer))
         return out
 
     def auto_copies(self) -> dict[str, bytes]:
@@ -493,3 +481,18 @@ class HomeFiles:
 
     def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
         return put_wrapper(self.home, wrapper_path(self.home), text, values, self.installer)
+
+
+def _timer_wants_link(path: str) -> str | None:
+    cand = os.path.join(os.path.dirname(path), "timers.target.wants", TIMER)
+    if os.path.islink(cand) and (os.path.realpath(cand) == os.path.realpath(path) or not os.path.exists(cand)):
+        return cand
+    return None
+
+
+def _classify_older_unit(name: str, path: str, current: str) -> tuple[str, OlderUnitAction, str | None]:
+    if os.path.lexists(path) and os.path.realpath(path) == os.path.realpath(current):
+        return path, OlderUnitAction.FORGET, None
+    if not os.path.lexists(path) or file_state(path, None, MARKER) in (OwnedState.OK, OwnedState.CHANGE):
+        return path, OlderUnitAction.REMOVE, _timer_wants_link(path) if name == TIMER else None
+    return path, OlderUnitAction.FOREIGN, None
