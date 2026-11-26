@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runner import on_host_argv
 from cst_core.adapters.runtime import program_argv
+from cst_core.domain.errors import Refused, Usage
+from cst_core.ports import WriteFailed
 from toolchains.adapters.build_tree import CargoBuildTree
 from toolchains.adapters.home_files import HomeFiles, RunSummaries, ToolchainsLock, load_settings
 from toolchains.adapters.processes import cargo_procs
@@ -32,6 +34,7 @@ from toolchains.adapters.program import (
 )
 from toolchains.adapters.rustup import InstalledTools
 from toolchains.adapters.sccache import SccacheInstaller
+from toolchains.adapters.tmpfs import TmpfsHost
 from toolchains.adapters.units import UserUnits, user_systemctl
 from toolchains.adapters.uv import UvTool
 from toolchains.application.auto import AutoTimer
@@ -40,21 +43,24 @@ from toolchains.application.status import ToolchainsStatus
 from toolchains.application.prune import TargetPorts
 from toolchains.application.python_uv import PythonUv
 from toolchains.application.rust_build import RustBuild
-from toolchains.domain.common import NAME
+from toolchains.application.tmpfs import TmpfsManager
+from toolchains.domain.common import NAME, USAGE, ConfigError
 from toolchains.domain.prune import PYTHON_UV, RUST_BUILD, Limits
+from toolchains.domain.tmpfs import TmpfsAction
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
-    from toolchains.domain.common import ToolchainsAction, ToolchainsCommand
+    from toolchains.domain.common import ParsedArgs, ToolchainsAction, ToolchainsCommand
     from toolchains.domain.prune import Settings
     from toolchains.ports import (
         BuildTreePort,
         HomeFilesPort,
         RunOutputPort,
         SccacheInstallerPort,
+        TmpfsHostPort,
         UserUnitsPort,
         UvPort,
     )
@@ -89,6 +95,7 @@ class Parts:
     tree: BuildTreePort | None = None
     uv: UvPort | None = None
     sccache_installer: SccacheInstallerPort | None = None
+    tmpfs: TmpfsHostPort | None = None
     journal: bool | None = None
 
 
@@ -168,10 +175,34 @@ def target(s: Session, checked: Settings | None, tid: str) -> Target:
     (None: bad settings; only location, check and status_lines work then).
     KeyError for an id of no target here (a target in SPECS that nothing builds)."""
     if tid == RUST_BUILD.id:
-        return RustBuild(s.home, s.now, checked.rust if checked else None, s.machine, s.limits)
+        rb = RustBuild(s.home, s.now, checked.rust if checked else None, s.machine, s.limits)
+        if checked:
+            rb.user_keys = checked.user_keys
+        return rb
     if tid == PYTHON_UV.id:
         return PythonUv(s.home, s.now, checked.uv if checked else None, s.machine, s.limits)
     raise KeyError(tid)
+
+
+def run_tmpfs(args: ParsedArgs, entry_file: str, parts: Parts | None = None) -> int:
+    """Run `cst toolchains tmpfs ...` with system mount host adapter."""
+    p = Parts() if parts is None else parts
+    journal = journal_stdout(os.environ.get("JOURNAL_STREAM", "")) if p.journal is None else p.journal
+    out = RunOutput("/", journal=journal)
+    host = p.tmpfs if p.tmpfs is not None else TmpfsHost(entry_file)
+    act = args["action"]
+    assert act is not None
+    try:
+        try:
+            return TmpfsManager(host, out, prog_name()).run(TmpfsAction(act), user=args["user"], size_text=args["size"])
+        except ConfigError as e:
+            raise Usage(f"tmpfs {act}: {e}") from None
+    except Usage as e:
+        print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
+        return 2
+    except (Refused, WriteFailed) as e:
+        out.say(f"{NAME}: {e}", 3, err=True)
+        return 1
 
 
 def auto_timer(s: Session) -> AutoTimer:

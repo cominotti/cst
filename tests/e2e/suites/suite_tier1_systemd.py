@@ -15840,3 +15840,111 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-283-OK", out)
+
+    @e2e_tags(E2ETag.TOOLCHAINS, E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_284_toolchains_build_tmpfs_cycle(self) -> None:
+        """Full systemd lifecycle for dedicated cargo build-dir tmpfs:
+        plan changes nothing -> apply mounts real tmpfs + unit + tmpfiles -> 2nd apply idempotent ->
+        live resize remount preserves files -> config apply targets tmpfs & status/prune show RAM
+        policy -> cst doctor ok -> revert unmounts & removes unit/tmpfiles/record -> doctor warns ->
+        config apply falls back cleanly to NVMe -> doctor clean -> 2nd revert idempotent."""
+        c = self.SYSTEMD_CONTAINER
+
+        def _cleanup() -> None:
+            exec_bash(
+                c,
+                """
+                set +e
+                /opt/cst-rw/cst toolchains tmpfs revert --user tester >/dev/null 2>&1 || true
+                runuser -u tester -- /opt/cst-rw/cst toolchains config apply --no-lean-debuginfo --no-sccache >/dev/null 2>&1 || true
+                rm -rf /home/tester/.cache/cargo-build-tmpfs
+                printf '[build]\\nbuild-dir = "/home/tester/.cache/cargo-build/{workspace-path-hash}"\\n' >/home/tester/.cargo/config.toml
+                chown tester:tester /home/tester/.cargo/config.toml
+                """,
+                check=False,
+            )
+
+        self.addCleanup(_cleanup)
+        unit_name = exec_bash(
+            c, "systemd-escape -p --suffix=mount /home/tester/.cache/cargo-build-tmpfs"
+        ).stdout.strip()
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+            mp=/home/tester/.cache/cargo-build-tmpfs
+            unit="/etc/systemd/system/{unit_name}"
+            tf="/etc/tmpfiles.d/cst-cargo-build-tmpfs-tester.conf"
+
+            "$cst" toolchains tmpfs revert --user tester >/dev/null 2>&1 || true
+            rm -rf "$mp"
+            runuser -u tester -- "$cst" toolchains config apply --no-lean-debuginfo --no-sccache >/dev/null
+
+            # 1. Plan is dry-run: writes nothing and creates nothing.
+            plan=$(runuser -u tester -- "$cst" toolchains tmpfs plan)
+            grep -q 'would write:' <<<"$plan"
+            test ! -e "$unit"
+            test ! -e "$tf"
+            test ! -e "$mp"
+
+            # 2. Apply creates 0700 mountpoint, installs unit + tmpfiles, mounts tmpfs, records install.
+            apply_out=$("$cst" toolchains tmpfs apply --user tester)
+            grep -q 'mounted:' <<<"$apply_out"
+            findmnt -n -o FSTYPE "$mp" | grep -qx 'tmpfs'
+            stat -c '%a %U %G' "$mp" | grep -qx '700 tester tester'
+            systemctl is-active "{unit_name}" | grep -qx 'active'
+            systemctl is-enabled "{unit_name}" | grep -qx 'enabled'
+            test -f "$tf"
+
+            # 3. 2nd apply is idempotent.
+            again=$("$cst" toolchains tmpfs apply --user tester)
+            grep -q 'unchanged:' <<<"$again"
+
+            # 4. Live resize remounts preserving existing build files inside tmpfs.
+            runuser -u tester -- touch "$mp/keep.sentinel"
+            "$cst" toolchains tmpfs apply --user tester --size 512M >/dev/null
+            test -f "$mp/keep.sentinel"
+            rm -f "$mp/keep.sentinel"
+            grep -q 'Options=.*size=512M' "$unit"
+
+            # 5. config apply switches ~/.cargo/config.toml to tmpfs; status/prune show RAM policy; doctor ok.
+            runuser -u tester -- "$cst" toolchains config apply --no-lean-debuginfo --no-sccache >/dev/null
+            grep -q '/home/tester/.cache/cargo-build-tmpfs/{{workspace-path-hash}}' /home/tester/.cargo/config.toml
+            mkdir -p "$mp/aa/0123456789abcd"
+            chown -R tester:tester "$mp/aa"
+            st=$(runuser -u tester -- "$cst" toolchains status)
+            grep -q 'cargo-build-tmpfs' <<<"$st"
+            grep -q 'effective RAM policy:' <<<"$st"
+            pp=$(runuser -u tester -- "$cst" toolchains prune plan rust:build)
+            grep -q 'in RAM on tmpfs' <<<"$pp"
+            doc_ok=$(runuser -u tester -- env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true)
+            tc_sec=$(awk '/^== toolchains$/,/^$/' <<<"$doc_ok")
+            inst_sec=$(awk '/^== install$/,/^$/' <<<"$doc_ok")
+            grep -qF "ok     cargo build-dir tmpfs: mounted at $mp" <<<"$tc_sec"
+            if grep -qF 'WARN   ' <<<"$tc_sec"; then echo "$tc_sec" >&2; exit 1; fi
+            if grep -qF 'WARN   ' <<<"$inst_sec"; then echo "$inst_sec" >&2; exit 1; fi
+            rm -rf "$mp/aa"
+
+            # 6. Revert unmounts, disables, removes unit/tmpfiles/record/empty dir; doctor warns while cargo points to tmpfs.
+            rev=$("$cst" toolchains tmpfs revert --user tester)
+            grep -q 'unmounted:' <<<"$rev"
+            if findmnt -n "$mp" >/dev/null 2>&1; then exit 1; fi
+            test ! -e "$unit"
+            test ! -e "$tf"
+            test ! -e "$mp"
+            doc_warn=$(runuser -u tester -- env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true)
+            grep -q 'WARN   cargo build-dir tmpfs:' <<<"$doc_warn"
+
+            # 7. config apply transparently falls back to NVMe and 2nd revert is idempotent.
+            runuser -u tester -- "$cst" toolchains config apply --no-lean-debuginfo --no-sccache >/dev/null
+            grep -q '/home/tester/.cache/cargo-build/{{workspace-path-hash}}' /home/tester/.cargo/config.toml
+            rev2=$("$cst" toolchains tmpfs revert --user tester)
+            grep -q 'already reverted:' <<<"$rev2"
+            doc_clean=$(runuser -u tester -- env CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true)
+            if grep -q 'cargo build-dir tmpfs' <<<"$doc_clean"; then exit 1; fi
+            echo E2E-284-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-284-OK", out)

@@ -113,10 +113,13 @@ def home_folder(home: str | None) -> str:
 
 
 def output_mode(cmd: ToolchainsCommand, action: ToolchainsAction | None) -> None:
-    """A command that only reads (help, status, prune plan, config plan) gets
+    """A command that only reads (help, status, prune plan, config plan, tmpfs status/plan) gets
     SIGPIPE back at its default, so `cst toolchains status | head` ends
-    quietly. The ones that change files (prune, auto, config apply) keep
+    quietly. The ones that change files (prune, auto, config apply, tmpfs apply/revert) keep
     Python's handling: a closed pipe never cuts their lock release or file
     writes short."""
-    if cmd in (ToolchainsCommand.HELP, ToolchainsCommand.STATUS) or action == ToolchainsAction.PLAN:
+    if cmd in (ToolchainsCommand.HELP, ToolchainsCommand.STATUS) or action in (
+        ToolchainsAction.PLAN,
+        ToolchainsAction.STATUS,
+    ):
         restore_default_signals()

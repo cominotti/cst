@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, TypedDict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
+    from collections.abc import Callable, Iterator, Mapping, Sequence, Set as AbstractSet
 
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
@@ -185,6 +185,14 @@ class RustIncremental(StrEnum):
     OFF = "off"
 
 
+class RustBuildTmpfs(StrEnum):
+    """Policy for using CST's dedicated tmpfs mount for cargo build-dir (RUST_BUILD_TMPFS)."""
+
+    AUTO = "auto"
+    YES = "yes"
+    NO = "no"
+
+
 def parse_rust_incremental(text: str) -> RustIncremental:
     """'auto' or 'off' (any case, ASCII blanks around dropped); ConfigError otherwise."""
     val = enum_member(RustIncremental, strip_ascii_blanks(text).lower())
@@ -193,8 +201,17 @@ def parse_rust_incremental(text: str) -> RustIncremental:
     return val
 
 
+def parse_rust_build_tmpfs(text: str) -> RustBuildTmpfs:
+    """'auto', 'yes' or 'no' (any case, ASCII blanks around dropped); ConfigError otherwise."""
+    val = enum_member(RustBuildTmpfs, strip_ascii_blanks(text).lower())
+    if val is None:
+        raise ConfigError(f"'{text}' is not auto, yes or no")
+    return val
+
+
 # Settings that belong to no prune target: {KEY: parser}.
 OPTIONS: dict[str, Callable[[str], bool | str]] = {
+    "RUST_BUILD_TMPFS": parse_rust_build_tmpfs,
     "RUST_INCREMENTAL": parse_rust_incremental,
     "RUST_LEAN_DEBUGINFO": parse_bool,
     "RUST_SCCACHE": parse_bool,
@@ -265,7 +282,8 @@ usage: cst-toolchains status [--brief]
        cst-toolchains prune plan|apply [TARGET...]
        cst-toolchains auto on [--unless-off] | auto off
        cst-toolchains config plan|apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]
-       (each also takes --home DIR; help: cst-toolchains help)"""
+       cst-toolchains tmpfs status|plan|apply|revert [--size SIZE] [--user USER]
+       (commands except tmpfs also take --home DIR; help: cst-toolchains help)"""
 
 
 class ToolchainsCommand(StrEnum):
@@ -276,15 +294,18 @@ class ToolchainsCommand(StrEnum):
     PRUNE = "prune"
     AUTO = "auto"
     CONFIG = "config"
+    TMPFS = "tmpfs"
 
 
 class ToolchainsAction(StrEnum):
-    """The word after a command: plan or apply (prune, config), on or off (auto)."""
+    """The word after a command: plan/apply/status/revert or on/off."""
 
     PLAN = "plan"
     APPLY = "apply"
     ON = "on"
     OFF = "off"
+    STATUS = "status"
+    REVERT = "revert"
 
 
 class ParsedArgs(TypedDict):
@@ -296,6 +317,8 @@ class ParsedArgs(TypedDict):
     home: str | None
     lean: bool | None
     sccache: bool | None
+    user: str | None
+    size: str | None
 
 
 def _split_home_option(argv: Sequence[str]) -> tuple[list[str], str | None]:
@@ -362,6 +385,36 @@ def _config_argv(rest: Sequence[str], out: ParsedArgs) -> None:
             raise Usage(f"config {rest[0]}: unknown argument '{a}'")
 
 
+def _value_option(it: Iterator[str], flag: str, a: str) -> str:
+    """Extract value from `--flag VALUE` or `--flag=VALUE`; raises Usage."""
+    val = a.split("=", 1)[1] if "=" in a else next(it, None)
+    if val is None or not val:
+        raise Usage(f"{flag} needs a value")
+    return val
+
+
+def _tmpfs_argv(rest: Sequence[str], out: ParsedArgs) -> None:
+    """Arguments after `tmpfs`, into OUT; raises Usage."""
+    act = _action(rest, ToolchainsAction.STATUS, ToolchainsAction.PLAN, ToolchainsAction.APPLY, ToolchainsAction.REVERT)
+    if act is None:
+        raise Usage("tmpfs: status, plan, apply or revert [--size SIZE] [--user USER]")
+    out["action"] = act
+    it = iter(rest[1:])
+    for a in it:
+        if a == "--user" or a.startswith("--user="):
+            if out["user"] is not None:
+                raise Usage(f"tmpfs {act}: --user given twice")
+            out["user"] = _value_option(it, "--user", a)
+        elif a == "--size" or a.startswith("--size="):
+            if act in (ToolchainsAction.STATUS, ToolchainsAction.REVERT):
+                raise Usage(f"tmpfs {act}: --size only applies to plan or apply")
+            if out["size"] is not None:
+                raise Usage(f"tmpfs {act}: --size given twice")
+            out["size"] = _value_option(it, "--size", a)
+        else:
+            raise Usage(f"tmpfs {act}: unknown argument '{a}'")
+
+
 def parse_args(argv: Sequence[str]) -> ParsedArgs:
     """{cmd, action, targets, brief, unless_off, home}; raises Usage."""
     args, home = _split_home_option(argv)
@@ -374,11 +427,15 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
         "home": home,
         "lean": None,
         "sccache": None,
+        "user": None,
+        "size": None,
     }
     if not args or args[0] in HELP_WORDS:
         return out
     cmd, rest = args[0], args[1:]
     command = enum_member(ToolchainsCommand, cmd)
+    if command == ToolchainsCommand.TMPFS and home is not None:
+        raise Usage("tmpfs manages a system mount unit and takes --user NAME, not --home DIR")
     match command:
         case ToolchainsCommand.STATUS:
             _status_argv(rest, out)
@@ -388,6 +445,8 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
             _auto_argv(rest, out)
         case ToolchainsCommand.CONFIG:
             _config_argv(rest, out)
+        case ToolchainsCommand.TMPFS:
+            _tmpfs_argv(rest, out)
         case _:
             raise Usage(f"unknown command '{cmd}'")
     out["cmd"] = command

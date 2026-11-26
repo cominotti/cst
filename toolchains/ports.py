@@ -13,12 +13,13 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from cst_core.ports import CommandResult
+    from cst_core.ports import CommandResult, UnitName
     from cst_core.domain.files import UnitFileState, WholeFileState
     from toolchains.domain.auto import OlderUnitAction, TimerFacts
     from toolchains.domain.build import BuildTreeResult, CargoCache, Folder, Workspaces
     from toolchains.domain.config import SccacheInstallMethod, SettingsRewrite, WrapperValues
     from toolchains.domain.prune import RunRecord, SavedRun
+    from toolchains.domain.tmpfs import TmpfsSnapshot, TmpfsTargetUser
     from toolchains.domain.uv import UvCacheKind
 
 # (folders, leftovers of an interrupted run, other entries with why they are left alone)
@@ -94,6 +95,10 @@ class BuildTreePort(Protocol):
 
     def workspaces(self, root: str) -> Workspaces:
         """Which folders of ROOT a workspace under ~/Workspace still claims."""
+        ...
+
+    def tmpfs_capacity(self, root: str) -> int | None:
+        """Mounted tmpfs capacity in bytes when ROOT is on an active tmpfs mount, else None."""
         ...
 
 
@@ -321,6 +326,66 @@ class HomeFilesPort(Protocol):
     def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
         """The wrapper TEXT, at its place in the home, through the installer, listed with VALUES,
         its component marked done; True when written (WriteFailed when it cannot be written)."""
+        ...
+
+    def tmpfs_mounted(self) -> bool:
+        """True when the dedicated per-user cargo build tmpfs is actively mounted."""
+        ...
+
+
+class TmpfsHostPort(Protocol):
+    """System-level operations for managing the dedicated cargo build-dir tmpfs mount."""
+
+    def snapshot(self, user: str | None, *, size_bytes: int | None) -> TmpfsSnapshot:
+        """Read-only snapshot of target user, unit/tmpfiles states, live mount, RAM, and cargo config."""
+        ...
+
+    def ensure_mountpoint(self, target: TmpfsTargetUser) -> None:
+        """Create cache parent (if absent) and 0700 mountpoint owned by TARGET."""
+        ...
+
+    def put_managed_file(self, path: str, text: str) -> bool:
+        """Write root-owned generated file via installer and record it under toolchains:tmpfs."""
+        ...
+
+    def mark_installed(self) -> None:
+        """Mark toolchains:tmpfs complete in the root install record."""
+        ...
+
+    def forget_managed_files(self, paths: Sequence[str]) -> None:
+        """Drop removed toolchains:tmpfs files from the root install record."""
+        ...
+
+    def remove_file(self, path: str) -> bool:
+        """Remove file or link PATH if present."""
+        ...
+
+    def remove_empty_dir(self, path: str) -> None:
+        """Remove mountpoint directory PATH if empty."""
+        ...
+
+    def daemon_reload(self) -> None:
+        """Reload the system systemd manager."""
+        ...
+
+    def apply_tmpfiles(self, path: str) -> None:
+        """Run `systemd-tmpfiles --create` for PATH."""
+        ...
+
+    def enable_now(self, unit: UnitName) -> None:
+        """Enable and start systemd mount UNIT."""
+        ...
+
+    def enable_unit(self, unit: UnitName) -> None:
+        """Enable systemd mount UNIT without restarting an active mount."""
+        ...
+
+    def remount_tmpfs(self, mountpoint: str, options: str) -> None:
+        """Apply updated mount OPTIONS live to already-mounted MOUNTPOINT."""
+        ...
+
+    def disable_now(self, unit: UnitName) -> None:
+        """Stop and disable systemd mount UNIT (Refused if busy/unstoppable)."""
         ...
 
 

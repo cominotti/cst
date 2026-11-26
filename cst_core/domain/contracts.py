@@ -196,10 +196,14 @@ if sorted(_FORMATS) != sorted(StateFormatKey):
 
 # The program every CST alert goes through (its manifest destination); it also keeps the alert spool.
 NOTIFY_PROGRAM: Final = manifest_by_src()["btrfs/btrfs-notify"].dest
-# Cargo config path and CST's sccache wrapper destination relative to the user's home:
-# toolchains writes both and cst doctor checks wrapper readiness against them.
+# Cargo config path and CST's sccache/build paths relative to the user's home:
+# toolchains writes them and cst doctor checks readiness against them without importing toolchains.
 CARGO_CONFIG_REL: Final = ".cargo/config.toml"
 SCCACHE_WRAPPER_REL: Final = manifest_by_src()["toolchains/rustc-wrapper"].dest.removeprefix("~/")
+CARGO_BUILD_DIR_REL: Final = ".cache/cargo-build"
+CARGO_BUILD_TMPFS_REL: Final = ".cache/cargo-build-tmpfs"
+CARGO_BUILD_TMPFS_TMPFILES_PREFIX: Final = "/etc/tmpfiles.d/cst-cargo-build-tmpfs-"
+CARGO_BUILD_TMPFS_MARKER: Final = "# managed-by: toolchains-setup.sh (CST) [toolchains:tmpfs]"
 # The cpu settings file: cst cpu, its game profile and vm-pin read it, and so do cst doctor and cst vm.
 CPU_SETTINGS: Final = "/etc/cpu-setup/cpu-setup.conf"
 

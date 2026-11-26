@@ -43,12 +43,13 @@ from toolchains.domain.build import (
     LOCK_NAMES,
     TRASH_NAME,
     classify,
-    expected_template,
+    expected_templates,
 )
 from toolchains.domain.common import tilde
 from toolchains.adapters.cargo import cargo_users, claimed_folders
 from toolchains.adapters.processes import cargo_procs, proc_users
 from toolchains.adapters.program import RUNNER
+from toolchains.adapters.tmpfs import is_active_tmpfs_mount
 from cst_core.ports import CommandFault, OutputMode
 
 
@@ -60,11 +61,11 @@ def cargo_config_path(home: str) -> str:
 
 def resolve_root(home: str, prog: str) -> str | None:
     """The root folder, from build-dir in the user's cargo config. Raises
-    Refused when the setting is not the one CST writes, or the folder is odd
+    Refused when the setting is not one CST writes, or the folder is odd
     (PROG: how the hint names the program). Returns None when the folder does
     not exist yet (nothing to do)."""
     cfg = cargo_config_path(home)
-    want = expected_template(home)
+    wants = expected_templates(home)
     try:
         with open(cfg, "rb") as f:
             data = parse_toml(f.read())
@@ -74,11 +75,11 @@ def resolve_root(home: str, prog: str) -> str | None:
         raise Refused(f"cannot read {tilde(cfg, home)}: {e}") from None
     build = data.get("build") if json_object(data) else None  # tomllib gives a table
     value = build.get("build-dir") if isinstance(build, dict) else None
-    if value != want:
+    if not isinstance(value, str) or value not in wants:
         raise Refused(
-            f"build-dir in {tilde(cfg, home)} is {value!r}, not the one CST writes ({want!r}): nothing is done"
+            f"build-dir in {tilde(cfg, home)} is {value!r}, not the one CST writes ({wants[0]!r}): nothing is done"
         )
-    root = want[: -len("/" + HASH_VAR)]
+    root = value[: -len("/" + HASH_VAR)]
     try:
         st = os.lstat(root)
     except FileNotFoundError:
@@ -383,6 +384,9 @@ class CargoBuildTree:
 
     def workspaces(self, root: str) -> Workspaces:
         return claimed_folders(root, self.home, self.limits)
+
+    def tmpfs_capacity(self, root: str) -> int | None:
+        return is_active_tmpfs_mount(root)
 
     def guarded(
         self,

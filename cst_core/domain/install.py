@@ -76,6 +76,7 @@ class Component(StrEnum):
     SWAP_CORE = "swap:core"
     TOOLCHAINS_AUTO = "toolchains:auto"
     TOOLCHAINS_SCCACHE = "toolchains:sccache"
+    TOOLCHAINS_TMPFS = "toolchains:tmpfs"
     VM_BACKUP_TIMER = "vm:backup-timer"
 
 
@@ -238,6 +239,7 @@ _COMMANDS: Final = {
     "swap:core": "cst swap apply",
     "toolchains:auto": "cst toolchains auto on",
     "toolchains:sccache": "cst toolchains config apply",
+    "toolchains:tmpfs": "cst toolchains tmpfs apply",
     "vm:backup-timer": "cst vm backup-timer on",
 }
 # One row of _COMMANDS per member (a member without one is a KeyError at import; tests/test_install.py
@@ -252,6 +254,7 @@ GENERATED_COMPONENTS: Final[Mapping[Component, Owner]] = {
     Component.BTRFS_REPORT_LAUNCHER: Owner.USER,
     Component.CPU_IRQ: Owner.ROOT,
     Component.CPU_TOOLBOX: Owner.USER,
+    Component.TOOLCHAINS_TMPFS: Owner.ROOT,
 }
 
 

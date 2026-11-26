@@ -311,6 +311,7 @@ class DefaultsTest(Scratch):
         self.assertEqual(
             raw,
             {
+                "RUST_BUILD_TMPFS": "auto",
                 "RUST_BUILD_ENABLED": "yes",
                 "RUST_BUILD_MAX_IDLE": "48h",
                 "RUST_BUILD_MAX_TOTAL": "150G",

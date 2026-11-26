@@ -39,6 +39,7 @@ from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState
 from cst_core.domain.install import INSTALL_MANIFEST, Component, GeneratedKind, Owner, expand_dest, manifest_by_src
 from cst_core.domain.units import user_unit_dir
 from toolchains.adapters.program import program_folder
+from toolchains.adapters.tmpfs import is_active_tmpfs_mount
 from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, OlderUnitAction, render_timer
 from toolchains.domain.common import (
     CONF_REL,
@@ -58,7 +59,7 @@ from toolchains.domain.common import (
     TIMER,
     UNIT_DIR_REL,
 )
-from toolchains.domain.build import expected_template
+from toolchains.domain.build import TMPFS_ROOT_REL, expected_templates
 from toolchains.domain.config import (
     CARGO_CFG_REL,
     SCCACHE_SIZE_LINE,
@@ -338,7 +339,7 @@ def cargo_build_dir_is_csts(home: str) -> bool:
         build = data.get("build") if json_object(data) else None  # tomllib gives a table
     except OSError, tomllib.TOMLDecodeError:
         return False
-    return json_object(build) and build.get("build-dir") == expected_template(home)
+    return json_object(build) and build.get("build-dir") in expected_templates(home)
 
 
 def wrapper_text(values: WrapperValues, entry_file: str) -> str | None:
@@ -481,6 +482,10 @@ class HomeFiles:
 
     def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
         return put_wrapper(self.home, wrapper_path(self.home), text, values, self.installer)
+
+    def tmpfs_mounted(self) -> bool:
+        target = os.path.join(os.path.realpath(self.home), TMPFS_ROOT_REL)
+        return is_active_tmpfs_mount(target, require_uid=os.getuid()) is not None
 
 
 def _timer_wants_link(path: str) -> str | None:
