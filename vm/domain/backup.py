@@ -4,7 +4,7 @@ the fingerprint of a source, the two ways a backup stops (Stop, Uncertain) and t
 backup run (NasRun); the NAS backup's snapshot arguments, index, torn records and last lines, and the
 lines status and backup-timer status print about them. Pure."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field
 import datetime
 import json
@@ -17,6 +17,7 @@ from cst_core.domain.values import MINUTE, Json
 from vm.domain import (
     ADOPTED_TAG,
     KEEP_TAG,
+    NAS_DEFAULTS,
     ON_CALENDAR,
     TAG,
     DomainParts,
@@ -122,11 +123,34 @@ class IndexRefused(Refused):
 
 def not_indexed_text(backup: str, kept: str, e: IndexRefused) -> str:
     """The message of a backup that is made but cannot be recorded: the index changed while it ran
-    (a newer cst vm rewrote it, or it was damaged). backup names it, kept says where it stays and
+    (a newer cst vm rewrote it, or it is damaged). backup names it, kept says where it stays and
     how it is restored."""
     return (
         f"{backup} is complete but not in the index: {e.problem}, so the index was left as it is and "
         f"cst vm does not list this backup; {kept}. Then: {e.advice}"
+    )
+
+
+def not_indexed_backup_text(snap: str, vm: str, e: IndexRefused) -> str:
+    """What a NAS backup the index could not take says of its snapshot."""
+    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept_unindexed_text(snap), e)
+
+
+def index_write_failed_text(snap: str, vm: str, e: OSError) -> str:
+    """What a NAS backup whose index write failed says of its snapshot: true whether the index was replaced
+    or not (write_atomic can fail at the folder's fsync, after the rename)."""
+    return (
+        f"the restic snapshot {snap[:8]} of {vm} is a backup, but writing the index failed ({e}): the index may "
+        f"not name it; {kept_unindexed_text(snap)}"
+    )
+
+
+def kept_unindexed_text(snap: str) -> str:
+    """Where a NAS backup left out of the index stays, what the next runs do with it, and how to keep it."""
+    return (
+        "the snapshot stays in the repository: the next NAS backups may name it as a snapshot no record names, "
+        f"and their retention waits for it until it is kept as a backup (restic tag --add {ADOPTED_TAG} {snap}) or "
+        f'forgotten (restic forget {snap}) (restore it by its ID: vm/README.md, section "Restore from the NAS")'
     )
 
 
@@ -180,6 +204,9 @@ NO_TORN_LIST = 'no "torn" list'
 
 # How long a change of the torn record waits for another one (a NAS backup of another VM) to end.
 TORN_LOCK_TIMEOUT: Final = MINUTE
+# How long a backup waits for the index's lock (another VM's backup writing the index) before it leaves
+# its backup out of the index.
+INDEX_LOCK_TIMEOUT: Final = MINUTE
 
 
 def stored_torn(data: object) -> list[object] | None:
@@ -468,42 +495,81 @@ def restic_failure_why(rc: int) -> str:
     }.get(rc, f"restic exit {rc}")
 
 
-def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: Mapping[str, str] | None) -> list[IndexEntry]:
+class NasListing(NamedTuple):
+    """The VM's snapshots restic lists, as the index reads them (nas_index): alive, each id they answer to
+    (snapshot_names: its own, and the one it had first when its tags were changed) with the id restic lists
+    that snapshot under (a listed id: itself); unkept, the listed ids whose tags restic gives (a list of
+    text) without KEEP_TAG."""
+
+    alive: dict[str, str]
+    unkept: frozenset[str]
+
+
+def nas_listing(snaps: Sequence[ResticSnapshot]) -> NasListing:
+    """The NasListing of restic's listing snaps."""
+    # A listed id is always its own snapshot's; an original names its copy only when restic does not
+    # list it itself (restic rewrite without --forget keeps both), whatever the listing's order.
+    originals = {n: s["id"] for s in snaps for n in snapshot_names(s)[1:]}
+    unkept = frozenset(
+        s["id"]
+        for s in snaps
+        if isinstance(tags := s.get("tags"), list) and all(isinstance(t, str) for t in tags) and KEEP_TAG not in tags
+    )
+    return NasListing({**originals, **{s["id"]: s["id"] for s in snaps}}, unkept)
+
+
+def nas_index(
+    entries: Sequence[IndexEntry],
+    entry: IndexEntry,
+    alive: Mapping[str, str] | None,
+    *,
+    unkept: AbstractSet[str] = frozenset(),
+) -> list[IndexEntry]:
     """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: each id
     the VM's snapshots restic lists answer to (snapshot_names), with the id restic lists that snapshot
     under (None: not readable). The VM's NAS entries of entry's repository that answer to none leave
     the index; one that answers only to the original a restic tag kept takes the listed id, the one
     restic restores, lists and forgets the snapshot by, and keeps its first id as its original
-    (entry_names): restic keeps that first id as the original of every later tag change."""
+    (entry_names): restic keeps that first id as the original of every later tag change. An entry kept
+    (keep) whose listed id is in unkept (its tags no longer have KEEP_TAG: restic tag --remove) is kept no
+    longer: the retention may forget it; entry itself stays as the run made it."""
     snap = entry["snapshot"]
     out = [e for e in entries if not (e.get("mode") == BackupMode.NAS and e.get("snapshot") == snap)]
     out.append(entry)
     if alive is not None:
         alive = {**alive, snap: snap}
-        kept: list[IndexEntry] = []
-        for e in out:
-            if (
-                e["vm"] == entry["vm"]
-                and e.get("mode") == BackupMode.NAS
-                and e.get("repository") == entry["repository"]
-            ):
-                now = _listed_as(entry_names(e), alive)
-                if now is None:
-                    continue
-                if now != e["snapshot"]:
-                    moved = e.copy()  # the entry under the id restic lists it by, its first id kept
-                    first = e.get("original") or e["snapshot"]
-                    moved["snapshot"] = now
-                    if first != now:
-                        moved["original"] = first
-                    else:
-                        moved.pop("original", None)
-                    kept.append(moved)
-                    continue
-            kept.append(e)
-        out = kept
+        out = [kept for e in out if (kept := _sync_nas_entry(e, entry, alive, unkept)) is not None]
     out.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
     return out
+
+
+def _sync_nas_entry(
+    e: IndexEntry, entry: IndexEntry, alive: Mapping[str, str], unkept: AbstractSet[str]
+) -> IndexEntry | None:
+    """One index entry reconciled against restic's alive snapshots: dropped (None), updated, or kept."""
+    if e["vm"] != entry["vm"] or e.get("mode") != BackupMode.NAS or e.get("repository") != entry["repository"]:
+        return e
+    now = _listed_as(entry_names(e), alive)
+    if now is None:
+        return None
+    if now != e["snapshot"] or (now in unkept and now != entry["snapshot"] and e.get("keep") is not None):
+        return _as_listed(e, now, unkept)
+    return e
+
+
+def _as_listed(e: IndexEntry, now: str, unkept: AbstractSet[str]) -> IndexEntry:
+    """Index entry e as restic lists its snapshot (nas_index): under the id now, its first id kept as its
+    original, and no longer kept when now's tags have no KEEP_TAG (unkept)."""
+    moved = e.copy()
+    first = e.get("original") or e["snapshot"]
+    moved["snapshot"] = now
+    if first != now:
+        moved["original"] = first
+    else:
+        moved.pop("original", None)
+    if now in unkept and moved.get("keep") is not None:
+        moved["keep"] = None
+    return moved
 
 
 def entry_names(e: IndexEntry) -> list[str]:
@@ -540,6 +606,48 @@ def nas_done_lines(notes: Sequence[str], snap: str, vm: str, consistency: str, k
     ]
 
 
+# What a NAS backup does while a number of NAS_DEFAULTS is set in vm.conf and does not read.
+NAS_NUMBER_STEPS: Final = {
+    "VM_NAS_KEEP_WEEKLY": "a NAS backup skips its retention (nothing forgotten) and ends with exit 1 until it is fixed",
+    "VM_NAS_KEEP_MONTHLY": "a NAS backup skips its retention (nothing forgotten) and ends with exit 1 until it is fixed",
+    "VM_NAS_TIMEOUT_HOURS": "a NAS backup refuses to start (nothing backed up) until it is fixed",
+}
+
+
+def unreadable_nas_number(key: str, path: str, value: str | None = None) -> str:
+    """The words for KEY of vm.conf (path), set to VALUE (when given), that is not a whole number in ASCII
+    digits: a NAS backup's own words go on after them, and a command that only reads vm.conf adds
+    NAS_NUMBER_STEPS[KEY]."""
+    shown = key if value is None else f"{key}={value!r}"
+    return f"{shown} in {path} is not a whole number in ASCII digits"
+
+
+class NasNumbers(NamedTuple):
+    """The numbers of vm.conf a NAS backup reads once, before anything changes (SettingsPort.number):
+    the time limit of restic's read in hours (0: the default), and the weekly and monthly snapshots the
+    retention keeps; None: set to a value that is not a whole number in ASCII digits."""
+
+    timeout_hours: int = NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"]
+    keep_weekly: int | None = NAS_DEFAULTS["VM_NAS_KEEP_WEEKLY"]
+    keep_monthly: int | None = NAS_DEFAULTS["VM_NAS_KEEP_MONTHLY"]
+
+
+def unreadable_keep_keys(numbers: NasNumbers) -> list[str]:
+    """The keep numbers of vm.conf that do not read: the retention is skipped while one is."""
+    keep = (("VM_NAS_KEEP_WEEKLY", numbers.keep_weekly), ("VM_NAS_KEEP_MONTHLY", numbers.keep_monthly))
+    return [k for k, v in keep if v is None]
+
+
+@dataclass(frozen=True, slots=True)
+class NasRead:
+    """restic's read of a NAS run once it is a backup (what _nas_read returns): its consistency,
+    snapshot and summary."""
+
+    consistency: str
+    snap: str
+    summary: ResticSummary
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NasRun:
     """One NAS backup: what its checks read before restic is asked anything (the definition, the
@@ -562,6 +670,9 @@ class NasRun:
     agent: str
     versions: dict[str, str]
     deployment: BootedDeployment | None
+    numbers: NasNumbers = field(default_factory=NasNumbers)
+    # The read once it is a backup (nas_run adds it when _nas_read returns; empty before).
+    read: list[NasRead] = field(default_factory=list)
     before: dict[str, Fingerprint] = field(default_factory=dict)
     overlaid: dict[str, tuple[str, str]] = field(default_factory=dict)
     # The snapshot's unclear outcome (virsh did not answer, and some disk never showed its overlay): the

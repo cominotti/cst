@@ -13,6 +13,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import hashlib
 import io
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 from types import ModuleType
 from typing import override
 import unittest
@@ -195,7 +197,8 @@ class FetchTest(Base):
             self.assertEqual(f.read(), b"jar")
         with open(os.path.join(dest, M.STAMP), encoding="utf-8") as f:
             self.assertEqual(f.read(), self.tools[0].sha256 + "\n")
-        self.assertEqual(sorted(os.listdir(home)), ["apalache-x"])  # no download or staging folder left
+        # No download or staging folder left; the lock file stays (removing it could part two runs' locks).
+        self.assertEqual(sorted(os.listdir(home)), [".apalache-x.lock", "apalache-x"])
         M.fetch(self.tools[0], home, self.run_, {})
         self.assertEqual(len(self.run_.commands("curl")), 1, "a stamped tool is used as it is")
 
@@ -208,7 +211,7 @@ class FetchTest(Base):
             str(caught.exception),
             f"{wrong.url}: SHA-256 {self.tools[0].sha256}, want {'0' * 64}: the download was removed",
         )
-        self.assertEqual(os.listdir(home), [])
+        self.assertEqual(os.listdir(home), [".apalache-x.lock"])
 
     def test_a_folder_without_the_checked_hash_is_fetched_again(self) -> None:
         home = os.path.join(self.cache, "quint-home")
@@ -229,7 +232,7 @@ class FetchTest(Base):
         with self.assertRaises(M.StepError) as caught:
             M.fetch(self.tools[0], home, failing, {})
         self.assertIn("download failed (exit 22): curl: (22)", str(caught.exception))
-        self.assertEqual(os.listdir(home), [])
+        self.assertEqual(os.listdir(home), [".apalache-x.lock"])
 
 
 class InstallQuintTest(Base):
@@ -247,6 +250,76 @@ class InstallQuintTest(Base):
         self.assertEqual(sorted(os.listdir(prefix)), [M.STAMP, "node_modules", "package-lock.json", "package.json"])
         M.install_quint(self.cache, pin, self.run_, {})
         self.assertEqual(len(self.run_.calls), 1, "installed once")
+
+
+class GatedRun:
+    """FakeRun's part for one command word, held until the test lets it go: shows how many runs entered it."""
+
+    WAIT: float = 10.0  # seconds: no wait of the test blocks for good
+
+    def __init__(self, run: FakeRun, word: str) -> None:
+        self.run, self.word = run, word
+        self.first, self.second, self.release = threading.Event(), threading.Event(), threading.Event()
+        self.entered = 0
+        self.guard = threading.Lock()
+
+    def __call__(self, argv: Sequence[str], cwd: str, env: Mapping[str, str]) -> object:
+        if self.word in argv:
+            with self.guard:
+                self.entered += 1
+                (self.first if self.entered == 1 else self.second).set()
+            self.release.wait(self.WAIT)
+        return self.run(argv, cwd, env)
+
+
+class SharedFirstRunTest(Base):
+    """Two runs that start together on an empty cache (two CI jobs, or a run started twice): one download,
+    or one npm ci, and both use it. flock conflicts between two open file descriptions of one process, so
+    two threads stand for the two runs."""
+
+    def race(self, word: str, first_run: Callable[[GatedRun], str]) -> tuple[list[str], GatedRun]:
+        gated = GatedRun(self.run_, word)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                runs = [pool.submit(first_run, gated)]
+                self.assertTrue(gated.first.wait(GatedRun.WAIT), "the first run did not start its command")
+                runs.append(pool.submit(first_run, gated))
+                # The second run waits on the lock: it must not start the command too. Before, it did at once.
+                gated.second.wait(0.5)
+            finally:
+                gated.release.set()
+            # result() raises what a run raised, and gives up after WAIT seconds.
+            return [r.result(timeout=GatedRun.WAIT) for r in runs], gated
+
+    def test_one_download_for_two_runs(self) -> None:
+        home = os.path.join(self.cache, "quint-home")
+        got, gated = self.race("curl", lambda run: M.fetch(self.tools[0], home, run, {}))
+        self.assertEqual(gated.entered, 1)
+        self.assertEqual(len(self.run_.commands("curl")), 1)
+        self.assertEqual(got, [os.path.join(home, "apalache-x")] * 2)
+        with open(os.path.join(home, "apalache-x", M.STAMP), encoding="utf-8") as f:
+            self.assertEqual(f.read(), self.tools[0].sha256 + "\n")
+        self.assertEqual(sorted(os.listdir(home)), [".apalache-x.lock", "apalache-x"])
+
+    def test_one_npm_ci_for_two_runs(self) -> None:
+        pin = os.path.join(self.checkout, "tests", "quint")
+        got, gated = self.race("npm", lambda run: M.install_quint(self.cache, pin, run, {}))
+        self.assertEqual(gated.entered, 1)
+        self.assertEqual(len(self.run_.commands("npm")), 1)
+        self.assertEqual(len(set(got)), 1)
+        self.assertEqual(len(got), 2)
+        self.assertTrue(os.path.exists(got[0]))
+
+    def test_a_lock_held_past_the_timeout_names_it(self) -> None:
+        home = os.path.join(self.cache, "quint-home")
+        os.makedirs(home)
+        lock = os.path.join(home, ".apalache-x.lock")
+        held = M.held_lock(lock, 1)
+        self.addCleanup(os.close, held)
+        with mock.patch.object(M, "FETCH_TIMEOUT", 0.2), self.assertRaises(M.StepError) as caught:
+            M.fetch(self.tools[0], home, self.run_, {})
+        self.assertEqual(str(caught.exception), f"{lock}: another run still holds this lock after 0.2 s")
+        self.assertEqual(self.run_.commands("curl"), [])
 
 
 class ArgvTest(unittest.TestCase):

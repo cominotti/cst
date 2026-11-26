@@ -134,7 +134,13 @@ of the backups with the VM, time, path, mode, package versions and
 deployment, and **no secrets**. `cst vm list`, `cst vm status` and
 `cst doctor` read it as your user. It is replaced atomically and written to
 disk (fsync) at once, so a power loss right after a backup cannot hide it.
-Its `"version"` (format 1; an index without it is read as before) tells the
+Every backup (local or NAS, of any VM) reads, changes and writes it under one
+lock, `/run/cst-vm/backup-index.lock`: two VMs' backups that end at the same
+time (two timers) never lose each other's entry. A NAS backup asks restic for
+its listing before it takes the lock, so a slow NAS never holds another VM's
+backup. A backup that waits a minute for the lock (another backup still
+writing the index) is kept but left out of the index, with exit 1 and a
+message that says so. Its `"version"` (format 1; an index without it is read as before) tells the
 readers which format they read: an index of a newer `cst vm` (after you went
 back to an older CST) is left as it is, and `backup`, `backup --nas`, `list` and
 `status` stop with exit 1 and a message that names the format, before anything
@@ -152,7 +158,12 @@ its notes (a TPM state not found, ...) and its restore lines, as a backup that
 is indexed prints them. For a NAS backup the message also says that the next
 NAS backups may name the snapshot as one no record names (section 10.6), and
 wait with their retention until it is kept as a backup (`restic tag --add
-cst-adopted ID`) or forgotten. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+cst-adopted ID`) or forgotten. When writing the index fails after a good NAS
+backup (a full `/var`, or its folder's fsync after the file was already
+replaced), the backup is kept and the run ends with exit 1 after its notes
+and restore lines, with "writing the index failed (...): the index may not
+name it" and the same commands: the words hold whether the index was
+replaced or not. An entry this `cst vm` does not understand (no `vm`, a NAS entry
 without its snapshot, a local one without its folder, a known key of another
 type) is not listed or pruned, and is written back as it is after the others.
 
@@ -559,6 +570,9 @@ backup is stopped (Ctrl-C, a closed terminal, `systemctl stop`, the time
 limit): the program catches the stop, ends restic, and merges first. Some
 details keep a stop from cutting the merge short:
 
+- A stop that comes while restic starts waits until restic has started,
+  then ends it: restic never runs on unwatched while the overlay is merged
+  back. restic itself starts with the stops at their default and unblocked.
 - After the first stop, further ones are ignored, and every command of the
   merge runs in its own session. A second Ctrl-C or a terminal that closes
   cannot reach `virsh blockcommit` (virsh cancels the merge on Ctrl-C).
@@ -607,8 +621,8 @@ QEMU still runs, so the merge runs as usual.
 **If the VM is shut down during the backup**, the merge cannot run (it needs
 QEMU running). The backup stops with an error, an alert and the commands to
 merge offline (`qemu-img commit`, then `virsh edit`; section 10.8). The data
-restic read is still a good backup, but it is not recorded: the next backup
-names it as a snapshot no record names (section 10.6), to keep or forget.
+restic read is still a good backup, and it is indexed before the refusal so
+the next backup's retention handles it by policy (section 10.6).
 
 A VM that is **shut off** (and not saved: see the managed-save note in
 section 3) is read directly, without a snapshot. CST checks the state again
@@ -640,15 +654,18 @@ indexed after the merge back, and then the stop ends the run with "restic
 snapshot ID of VM is a backup: indexed (the retention runs at the next
 backup)", after the run's notes (a TPM copy that may be torn, ...): no
 retention and no listing then, nothing forgotten. A stop that
-comes after the merge back of a good read (while the retention, a listing or
-the index's write runs) ends the run the same way: the snapshot is indexed
+comes after the merge back of a good read (while the "restic snapshot ID: ...
+read" line is printed, or the retention, a listing or the index's write runs)
+ends the run the same way: the snapshot is indexed
 first, with the same words, and nothing more is forgotten or listed. If the
-index cannot be written then (a full disk, say), the stop says so instead,
+index cannot be written then (a full disk, say), the stop says so instead
+("writing the index failed (...): the index may not name it"),
 names the snapshot as a backup and gives the commands that keep or forget
 it. If the merge
-back fails, the snapshot is not indexed, as without a stop (above); the
-refusal then names it as a backup whose read was checked, with the commands
-that keep it (`restic tag --add cst-adopted ID`) or forget it. After a
+back fails after a checked read, the alert is sent and the snapshot is indexed
+the same way before the refusal is raised ("(the backup itself: ... indexed
+(the retention runs at the next backup))"), or the refusal says why writing the
+index failed with the commands to keep or forget it. After a
 stop that ended restic, a snapshot whose check could not be done at all (an
 error of libvirt or of a file read, not a change it found) is recorded as
 torn (what tore it: "check failed"), and the next NAS backup forgets it;
@@ -854,7 +871,7 @@ restic forget --host <NAS_RESTIC_HOST> --tag cst-vm,vm:<name> --group-by host \
 - A backup made with `--keep-tag NAME` carries `cst-keep` and is kept until
   you remove it: `restic forget <ID>` (the ID from `restic snapshots --tag
   cst-vm`), or `restic tag --remove cst-keep <ID>` to let the retention have
-  it.
+  it (`cst vm list` follows at the next backup: no longer "kept").
 - `forget` only removes the snapshot records. The space is freed by
   `restic prune`, which the `/home` NAS job runs for the whole repository,
   at most every `NAS_PRUNE_EVERY_DAYS` (7). The VM backup never prunes.
@@ -944,7 +961,10 @@ keeps that first ID through every later change of the tags), and finds it by
 the new ID only (`restic restore` of the old one says "no matching ID
 found"). The next NAS backup of the VM gives the entry the new ID, which
 `cst vm list` then shows, and keeps the first ID in the entry's `original`
-key, so the entry follows its snapshot through later tag changes too. An
+key, so the entry follows its snapshot through later tag changes too. Its
+keep tag follows restic's tags too: when the listed snapshot no longer has
+`cst-keep`, the entry is no longer kept (`cst vm list` drops "kept: NAME"); when
+restic gives no tags, the entry keeps what it had. An
 older CST reads such an entry by its new ID and keeps it until the tags
 change again. An entry whose ID restic still lists keeps it, also when
 another listed snapshot has that ID as its `original` (a `restic rewrite`
@@ -965,8 +985,19 @@ In `/etc/cst/vm.conf` (all optional):
 | `VM_NAS_KEEP_MONTHLY` | 3 | monthly restic snapshots kept |
 | `VM_NAS_TIMEOUT_HOURS` | 6 | restic is stopped after this long (the overlay is merged back) |
 
-A value that is not a whole number in ASCII digits (`bad`, `²`, digits of
-another script) uses the default.
+A missing or empty value uses the default. A value that is not a whole number
+in ASCII digits (`bad`, `4w`, `²`, digits of another script) is never read
+as the default:
+
+- `VM_NAS_TIMEOUT_HOURS`: the NAS backup refuses to start, before anything is
+  changed (nothing backed up), and names the setting;
+- `VM_NAS_KEEP_WEEKLY` or `VM_NAS_KEEP_MONTHLY`: the NAS backup runs and is
+  indexed, its retention is skipped (`retention skipped: ...`, nothing
+  forgotten), and the run ends with exit 1, naming the setting, until it is
+  fixed.
+
+Every other `cst vm` command (status, list, the plans, `backup-timer`, a
+local backup) prints the same line on stderr and goes on.
 
 `cst-vm` reads these files with CST's one settings reader
 (`cst_core.domain.text.parse_shell_assignments`); the last line of a key wins,
@@ -1155,7 +1186,8 @@ removed backups leave the index, and `list` and `status`.
 
 For the NAS backup (`test_vm_nas.py`; `ResticBackupStopTest`: a stop while
 restic runs keeps the snapshot's ID from restic's lines, kept or still in
-the pipe): virsh and restic are stateful fakes
+the pipe; `ResticStartStopTest` in `test_vm_nas_run.py`: a stop while restic
+starts ends it, and restic gets the stops unblocked): virsh and restic are stateful fakes
 (the VM's disk sources live in a JSON file, so `domblklist` shows what the
 snapshot and the merge did). The tests check the snapshot's arguments, the
 quiesce attempt and its fallback (agent missing, disconnected, failing,

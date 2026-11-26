@@ -244,7 +244,8 @@ health check makes sure you hear about it.
 It **never changes the filesystem**. It only writes its own small state files in
 `/var/lib/btrfs-health-check` (and markers of the degraded-boot part, see
 section 8). Every number it reads and computes (counters, sizes, the
-scrub's age, the times since the last snapshot and the last NAS backup)
+scrub's age, the times since the last snapshot and the last NAS backup,
+the time of the last resume from suspend)
 follows the old bash version's 64-bit arithmetic: a result past 2**63 - 1
 wraps around to a negative number, as bash's did, so a damaged date or
 state file gives the same answer as before the port. It alerts about:
@@ -921,8 +922,13 @@ docker volume rm <name>         # or one volume by name
   work to do (a scheduled migration, or a volumes folder without `+C`):
   `/var/lib/docker-volumes-nocow/postponed` keeps the latest reason, the time
   and how many boots were held back (counted once per boot; written to disk
-  with fsync, like the count of attempts). `status` shows
-  it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
+  with fsync, like the count of attempts). The record is 0644 and a state
+  folder made for it 0755, whatever the umask the boot or a `sudo` hands on,
+  so `cst doctor` reads it as the user. A file in place of the state folder
+  holds no record: `migrate` and `unmark` go on as with none. `status` shows
+  it as `migration postponed at N boot(s) in a row, last ...: <reason>` (a
+  record it cannot read as `cannot read <file> (<why>)`, as `cst doctor`
+  names one), and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
   The first boot that is not held back removes the record. When Docker or
@@ -953,8 +959,12 @@ docker volume rm <name>         # or one volume by name
   JSON: the migration is requested, and mark sets no +C on the volumes
   folder: fix the file, and the first boot after that runs it` (the folder
   keeps the `+C` an earlier install may have set). When the request
-  cannot be written, the line before it says why, and mark's own line is
-  `... mark sets no +C on the volumes folder`. Another dockerd whose config file cannot be read that way
+  cannot be written, the line before it says why, as for any install's
+  request: when the default folder has `+C` already and no earlier request
+  is there, it says that, if Docker uses that folder, no boot asks again, and
+  the `not-scheduled` record keeps it for `status` and `cst doctor`, naming the
+  unknown folder (neither claims the default folder is Docker's). mark's own
+  line is then `... mark sets no +C on the volumes folder`. Another dockerd whose config file cannot be read that way
   counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
@@ -1048,7 +1058,7 @@ Read-only. Sections:
 | `last scrub` | start, status, duration, error summary |
 | `weekly scrub speed limit (per device)` | `SCRUB_LIMIT` (section 4.3), the limit the scrub service sets (`DIFFERS from the setting (run install)` when they do not match; `INVALID` with the line for a bad setting), and `scrub_speed_max` of each device in sysfs now (0 = no limit) |
 | `last fstrim` | the last trim results |
-| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled` (then `no boot asks for it` when the folder has `+C` and no outcome is known: no record, or one it cannot read); under that folder's line, `migration gave up <time>: <why>` after a give-up; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
+| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled` (then `no boot asks for it` when the folder has `+C` and no outcome is known: no record, or one it cannot read); under that folder's line, `migration gave up <time>: <why>` after a give-up; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10), or `cannot read <file> (<why>)` when that record is not JSON, not an object or has a format version that is not a number |
 | `docker-gc` | last cleanup, or `off` |
 | `space and automatic reclaim` | unallocated space per disk, data/metadata use, reclaim switches and counters |
 | `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry either `compress=zstd[:N]` or `compress-force=zstd[:N]` plus `flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file; the journald write budget; the NVMe APST settings of `cst-nvme-apst.conf`: `nvme default_ps_latency` and one `nvmeN latency tolerance` line per controller (`ok` at 0, `DRIFT (expected 0; run install)`, or `(not managed: run install)` without the file) |
@@ -1184,6 +1194,12 @@ btrfs-stall-report --since '20 min ago'
 `cst btrfs report` uses the copy in this repository. The command
 `btrfs-stall-report` uses the installed copy. Your user must be in the `wheel`
 group to read the data (check with `id -nG`).
+
+Records written by a newer CST (a newer record format, named by the
+monitor's `meta` records) stop the report with one line on stderr instead
+("... is format N of the stall-records (this CST reads format M and older):
+written by a newer CST: use the btrfs-stall-report of that CST", exit 1,
+also with `--json`): a newer format may change what the other records hold.
 
 ### 7.2 Options
 
@@ -2446,7 +2462,9 @@ as written it would match no image and leave its registry unprotected. The
 recorder does not read it. `DOCKER_GC_PROTECT` in docker-gc's
 environment (a drop-in of the unit) wins over the file's list (the file is
 still read: a line it cannot read stops it the same way); an item there with
-such a blank beside it stops it the same way too (exit 78, nothing removed).
+such a blank beside it, or one that is not a registry (`a.io;b.io`, a list
+written with `;`), stops it the same way too (exit 78, one line naming it,
+nothing removed).
 
 **Upgrade from an older CST.** Older versions had one registry built into the
 program and no file. While the file is missing, docker-gc reads the

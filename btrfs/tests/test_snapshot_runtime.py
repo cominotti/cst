@@ -136,6 +136,55 @@ class SetupHandsNoSeamTest(unittest.TestCase):
         )
 
 
+class NasNumbersCommandTest(unittest.TestCase):
+    """btrfs-snapshot nas-numbers FILE (for cst btrfs snapshots status): handed to the runtime before
+    anything of the bash front or the runtime's start runs; it reads FILE only and creates nothing, also
+    under the test seam's root."""
+
+    def _nas_numbers(self, text: str) -> tuple[subprocess.CompletedProcess[str], str, list[str]]:
+        """(the run, FILE, what the test seam's root holds after it)."""
+        with tempfile.TemporaryDirectory() as d:
+            root, conf = os.path.join(d, "root"), os.path.join(d, "snapshots.conf")
+            os.mkdir(root)
+            with open(conf, "w", encoding="utf-8") as f:
+                f.write(text)
+            r = subprocess.run(
+                ["bash", os.path.join(BTRFS, "btrfs-snapshot"), "nas-numbers", conf],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CST_SNAPSHOT_ROOT": root},
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+            )
+            return r, conf, os.listdir(root)
+
+    def test_each_number_a_nas_run_cannot_compute_is_named(self) -> None:
+        r, conf, made = self._nas_numbers("NAS_ENABLED=1\nNAS_PRUNE_EVERY_DAYS='1 x'\nNAS_STALE_DAYS=abc\n")
+        self.assertEqual(
+            (r.returncode, r.stderr, made, r.stdout.splitlines()),
+            (
+                0,
+                "",
+                [],
+                [
+                    (
+                        f"  NAS_STALE_DAYS='abc' in {conf}: not a number CST's arithmetic reads: no alert for a stale "
+                        "NAS backup until it is fixed; each NAS run ends with an error"
+                    ),
+                    (
+                        f"  NAS_PRUNE_EVERY_DAYS='1 x' in {conf}: not a number CST's arithmetic reads: no prune "
+                        "(forget runs without --prune) until it is fixed; each NAS run ends with an error"
+                    ),
+                ],
+            ),
+        )
+
+    def test_numbers_that_read_give_no_line(self) -> None:
+        r, _conf, made = self._nas_numbers("NAS_ENABLED=1\nNAS_PRUNE_EVERY_DAYS=7\n")
+        self.assertEqual((r.returncode, r.stdout, r.stderr, made), (0, "", "", []))
+
+
 class ShippedUnitsTest(unittest.TestCase):
     def test_no_unit_hands_the_test_seam_or_any_setting_to_btrfs_snapshot(self) -> None:
         # CST_SNAPSHOT_ROOT moves every path of a root program into a test folder: the units

@@ -398,16 +398,45 @@ def outcome_line(read: OutcomeRead) -> str:
             )
 
 
-def postponed_line(rec: StoredPostponed | None, path: str) -> str:
-    """The status line of a postponed migration (path: its record's file), or "": no record, an empty
-    one or one whose version is no whole number (as a record that is not an object). A record of a newer
-    format is named so; a time no clock can show reads as "?", the rest of the line kept."""
+@dataclass(frozen=True, slots=True)
+class PostponedRead:
+    """The postponed file as read back: no file (record None, problem ""), a JSON object (record), or
+    why it cannot be read (problem: status's words)."""
+
+    record: StoredPostponed | None = None
+    problem: str = ""
+
+
+def parse_postponed(text: str | None, path: str) -> PostponedRead:
+    """The postponed file's text (None: there is none; "": empty, or there and not readable), as status
+    and migrate read it: a text that is not JSON, or JSON that is no object, cannot be read."""
+    if text is None:
+        return PostponedRead()
+    if not text:
+        return PostponedRead(problem=f"cannot read {path} (empty, or it cannot be opened)")
+    try:
+        data = parse_json(text)
+    except ValueError, RecursionError:
+        return PostponedRead(problem=f"cannot read {path} (not JSON)")
+    if not is_stored_postponed(data):
+        return PostponedRead(problem=f"cannot read {path} (not a JSON object)")
+    return PostponedRead(data)
+
+
+def postponed_line(read: PostponedRead, path: str) -> str:
+    """The status line of a postponed migration (path: its record's file), or "": no record, or an empty
+    object. A record that cannot be read (not JSON, not an object, a format version that is not a
+    number) is named so, as cst doctor names it; one of a newer format is named so; a time no clock can
+    show reads as "?", the rest of the line kept."""
+    if read.problem:
+        return f"  {read.problem}"
+    rec = read.record
     if rec is None or len(rec) == 0:
         return ""
     newer = postponed_newer(rec, path)
     if newer is not None:
         return f"  {newer}"
     if not POSTPONED_FORMAT.readable(rec, POSTPONED_VERSION):
-        return ""
+        return f"  cannot read {path} (its format version is not a number)"
     when = postponed_time(rec.get("last")) or "?"
     return f"  migration postponed at {rec.get('boots', '?')} boot(s) in a row, last {when}: {rec.get('reason', '?')}"

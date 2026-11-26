@@ -24,15 +24,20 @@ from vm.domain import (
 from vm.domain.backup import (
     STRAYS_TITLE,
     BackupMode,
+    NasListing,
+    NasNumbers,
     ResticSnapshot,
     Stop,
     TornEntry,
     is_restic_snapshot,
     entry_names,
+    nas_listing,
     snapshot_names,
     stray_snapshots,
     strays_alert,
     strays_text,
+    unreadable_keep_keys,
+    unreadable_nas_number,
 )
 from vm.ports import ResticPort
 
@@ -40,17 +45,11 @@ if TYPE_CHECKING:
     from vm.application.nas import NasBackup
 
 
-def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> dict[str, str] | None:
-    """Each id the VM's restic snapshots answer to (snapshot_names: its own, and the one it had first
-    when its tags were changed) with the id restic lists that snapshot under (a listed id: itself), or
-    None when not readable."""
+def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> NasListing | None:
+    """The VM's restic snapshots as the index reads them (nas_listing: each id they answer to, with the id
+    restic lists that snapshot under, and the listed ids no longer kept), or None when not readable."""
     snaps = nas_snapshots(restic, vm, nas)
-    if snaps is None:
-        return None
-    # A listed id is always its own snapshot's; an original names its copy only when restic does not
-    # list it itself (restic rewrite without --forget keeps both), whatever the listing's order.
-    originals = {n: s["id"] for s in snaps for n in snapshot_names(s)[1:]}
-    return {**originals, **{s["id"]: s["id"] for s in snaps}}
+    return None if snaps is None else nas_listing(snaps)
 
 
 def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = None) -> list[ResticSnapshot] | None:
@@ -249,22 +248,30 @@ def unaccounted(p: NasBackup, vm: str, nas: NasRepo, made: str) -> tuple[str, bo
     return strays_text(vm, strays), True
 
 
-def retention_after_torn(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo, *, made: str = "") -> None:
-    """The retention, once the torn snapshots of earlier runs are forgotten (retry_torn) and no snapshot
+def retention_after_torn(
+    cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo, numbers: NasNumbers, *, made: str = ""
+) -> None:
+    """The retention (numbers: the run's keep numbers), once the torn snapshots of earlier runs are forgotten (retry_torn) and no snapshot
     of vm that no record names is left (unaccounted; made: this run's own snapshot); skipped while one
     is: a torn snapshot would take a good backup's place among those kept."""
     why = retry_torn(p, vm, nas)
     strays = unaccounted(p, vm, nas, made)
     if why is None and strays is None:
-        retention(cfg, p, vm, nas)
+        retention(cfg, p, vm, nas, numbers)
         return
     reasons = "; ".join([*([why] if why is not None else []), *([strays[0]] if strays is not None else [])])
     until = "each is forgotten or kept" if strays is not None and strays[1] else "the next backup"
     p.out.say(f"  retention skipped: {reasons}; the repository keeps more until {until}")
 
 
-def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
-    weekly, monthly = p.settings.number("VM_NAS_KEEP_WEEKLY"), p.settings.number("VM_NAS_KEEP_MONTHLY")
+def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo, numbers: NasNumbers) -> None:
+    """restic forget by the keep policy of numbers (the run's, read once); skipped while a keep number of
+    vm.conf does not read (the run then ends with exit 1, naming it)."""
+    weekly, monthly = numbers.keep_weekly, numbers.keep_monthly
+    if weekly is None or monthly is None:
+        unread = "; ".join(unreadable_nas_number(k, cfg.paths.vm_conf) for k in unreadable_keep_keys(numbers))
+        p.out.say(f"  retention skipped: {unread}: nothing forgotten until it is fixed")
+        return
     if weekly + monthly == 0:
         p.out.say(
             f"  retention: VM_NAS_KEEP_WEEKLY and VM_NAS_KEEP_MONTHLY are 0 in {cfg.paths.vm_conf}: nothing forgotten"

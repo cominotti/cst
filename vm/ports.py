@@ -168,8 +168,11 @@ class BackupStorePort(Protocol):
         that cannot be read as an index."""
         ...
 
-    def write_index(self, entries: Sequence[IndexEntry]) -> None:
-        """Replace the index, durably; IndexRefused as read_index (it reads the index again)."""
+    def update_index(self, change: Callable[[list[IndexEntry]], list[IndexEntry]]) -> None:
+        """Under the index's lock (one for every VM's backups): read the index, change its entries (a pure
+        function: no restic, no other lock), and replace it with change's answer, durably (the stored
+        entries this cst vm does not understand kept as they are). IndexRefused as read_index, or when
+        the lock stays taken INDEX_LOCK_TIMEOUT seconds; OSError when it cannot be written."""
         ...
 
     def read_torn(self) -> list[TornEntry]:
@@ -191,8 +194,9 @@ class SettingsPort(Protocol):
     """The settings files cst vm reads (/etc/cst/vm.conf, the /home NAS backup's snapshots.conf),
     read again at each call."""
 
-    def number(self, key: str) -> int:
-        """A whole number of vm.conf (its default when missing or not a number >= 0)."""
+    def number(self, key: str) -> int | None:
+        """A whole number of vm.conf: its default when missing or empty; None when set to a value that is
+        not a whole number in ASCII digits."""
         ...
 
     def nas_repo(self) -> NasRepo:

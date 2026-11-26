@@ -466,9 +466,11 @@ def nas_overdue(now: int, nas_last: int) -> bool:
 
 def awake_since(suspend_journal: str, boot_since: int) -> int:
     """Since when the machine runs without a pause: the last resume from suspend (journalctl's one
-    short-unix line), or the boot."""
+    short-unix line), or the boot. The old (( ${awake_since:-0} > boot_since )): awk's number read by
+    bash's 64-bit arithmetic, so a resume time past 2**63 - 1 wraps first (and the boot wins when it
+    wraps below it)."""
     lines = file_lines(suspend_journal)
-    last = awk_int(lines[0]) if len(lines) == 1 else 0
+    last = bash_wrap(awk_int(lines[0])) if len(lines) == 1 else 0
     return max(boot_since, last)
 
 

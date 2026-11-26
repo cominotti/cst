@@ -16,7 +16,7 @@ import os
 import shutil
 import signal
 import sys
-from typing import Final, TextIO
+from typing import TextIO
 
 from btrfs.health_check.domain import bash_int, bash_wrap, days_between, latest_epoch
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
@@ -42,6 +42,7 @@ from btrfs.snapshot_runtime.domain import (
     features_type,
     guard_number,
     nas_unreadable,
+    nas_unreadable_lines,
     next_check_failures,
     repo_id,
     restic_line,
@@ -51,12 +52,6 @@ from cst_core.ports import OutputMode
 from cst_core.domain.errors import ResticExit
 
 UMOUNT_TRIES = 5
-# What the run leaves out while the NAS number it needs cannot be computed (Nas.name_unreadable).
-_LEFT_OUT: Final = {
-    "NAS_STALE_DAYS": "no alert for a stale NAS backup",
-    "NAS_PRUNE_EVERY_DAYS": "no prune (forget runs without --prune)",
-    "NAS_CHECK_EVERY_DAYS": "no repository check",
-}
 
 
 class _Capture:
@@ -517,12 +512,8 @@ class Nas:
         whether this run would read it or not; nas() then ends with exit 1. What does not depend on them
         still runs (the backup, nas-last-ok, forget). A run skipped for another one's lock names none."""
         m = self.m
-        for key in self.unreadable:
-            m.log(
-                3,
-                f"{key}={m.settings[key]!r} in {m.conf}: not a number CST's arithmetic reads: {_LEFT_OUT[key]} "
-                "until it is fixed; this NAS run ends with an error",
-            )
+        for line in nas_unreadable_lines(m.settings, m.conf, self.unreadable, ends="this NAS run ends with an error"):
+            m.log(3, line)
         self.unreadable_named = bool(self.unreadable)
 
     def run(self) -> None:

@@ -725,18 +725,18 @@ sys.exit(r.returncode)
 """
 
 
-# test_224: the checkout's docker-gc (argv[1]) with a DOCKER_GC_PROTECT item that has a no-break space
-# beside it (the real bytes C2 A0), against the fake docker and systemctl of test_103 and its scenario
-# (an old image of registry.example.com and old unprotected ones, the recorder running). In the settings
-# file, run --dry-run under LC_ALL=C and C.UTF-8; in the environment of a real systemd unit
-# (systemd-run, Environment=): both exit 78 naming the item and the blank, and docker is asked to remove
-# nothing. Without the blank the same unit holds the registry's image back (cannot bite otherwise).
-GC_PROTECT_BLANK = r"""
+# The setup of test_224 and test_264: the checkout's docker-gc (argv[1]) against the fake docker and
+# systemctl of test_103 and its scenario (an old image of registry.example.com and old unprotected ones,
+# the recorder running); argv[2] is the test's number. write_conf writes the settings file, unit runs the
+# dry run as a real systemd unit (systemd-run) with DOCKER_GC_PROTECT in its Environment=, and removing
+# names what docker was asked to remove.
+GC_UNIT_SETUP = r"""
 import json, os, subprocess, sys, tempfile, time
 sys.path.insert(0, "/opt/cst-rw")
 from btrfs.tests import test_docker_gc_program as t
 prog = ["/usr/bin/python3", "-I", "-B", sys.argv[1]]
-tmp = tempfile.mkdtemp(prefix="e2e-gc-blank-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
+TEST = sys.argv[2]  # the test's number: its unit's name and its lines
+tmp = tempfile.mkdtemp(prefix=f"e2e-gc-{TEST}-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
 fakes = os.path.join(tmp, "bin")
 os.mkdir(fakes)
 for name, text in (("docker", t.FAKE_DOCKER), ("systemctl", t.FAKE_SYSTEMCTL)):
@@ -759,8 +759,6 @@ env = {
     "FAKE_DOCKER_STATE": os.path.join(tmp, "docker.json"), "FAKE_DOCKER_LOG": calls_log,
 }
 reg = "registry.example.com"
-item = "\N{NO-BREAK SPACE}" + reg
-blank = "a no-break space (U+00A0) at the start of the value"
 
 
 def removing():
@@ -777,7 +775,7 @@ def write_conf(value):
 
 def unit(protect):
     # The dry run as a real unit, DOCKER_GC_PROTECT in its Environment=: (exit status, its journal).
-    name = "e2e-224-gc.service"
+    name = f"e2e-{TEST}-gc.service"
     props = [f"--property=Environment={k}={v}" for k, v in env.items()]
     props.append(f"--property=Environment=DOCKER_GC_PROTECT=other.example.org,{protect}")
     start = time.time()
@@ -789,10 +787,22 @@ def unit(protect):
     log = subprocess.run(["journalctl", "-q", "--no-pager", "-o", "cat", "-u", name, "--since", f"@{int(start) - 1}"],
                          capture_output=True, text=True, encoding="utf-8", errors="replace", check=False).stdout
     subprocess.run(["systemctl", "reset-failed", name], capture_output=True, check=False)
-    sys.stderr.write(f"test_224 unit {protect!r}: status={status}\n{log}")
+    sys.stderr.write(f"test_{TEST} unit {protect!r}: status={status}\n{log}")
     return status, log
 
 
+"""
+
+# test_224 (on GC_UNIT_SETUP): a DOCKER_GC_PROTECT item that has a no-break space beside it (the real
+# bytes C2 A0). In the settings file, run --dry-run under LC_ALL=C and C.UTF-8; in the environment of a
+# real systemd unit (systemd-run, Environment=): both exit 78 naming the item and the blank, and docker
+# is asked to remove nothing. Without the blank the same unit holds the registry's image back (cannot
+# bite otherwise).
+GC_PROTECT_BLANK = (
+    GC_UNIT_SETUP
+    + r"""
+item = "\N{NO-BREAK SPACE}" + reg
+blank = "a no-break space (U+00A0) at the start of the value"
 # 1. The settings file: exit 78 under both locales, docker asked to remove nothing.
 write_conf(item)
 for locale in ("C", "C.UTF-8"):
@@ -817,6 +827,25 @@ if status != "0" or "protected registry" not in log:
     sys.exit("test_224: without the blank: expected exit 0 and the protected image held back")
 print("E2E-OK")
 """
+)
+
+# test_264 (on GC_UNIT_SETUP): DOCKER_GC_PROTECT in a real unit's Environment= with an item that is no
+# registry ("registry.example.com;ghcr.io": a list written with ";"): the dry run exits 78 naming it, and
+# docker is asked to remove nothing. Before, the environment's value got only the blank-edge check: the
+# item matched no image and protected nothing.
+GC_PROTECT_NOT_REGISTRY = (
+    GC_UNIT_SETUP
+    + r"""
+bad = "registry.example.com;ghcr.io"
+write_conf(reg)
+status, log = unit(bad)
+if status != "78" or f"DOCKER_GC_PROTECT in the environment: not a registry: {bad}" not in log:
+    sys.exit("test_264: the unit's environment: expected exit 78 naming the item that is no registry")
+if removing():
+    sys.exit(f"test_264: docker was asked to remove {removing()}")
+print("E2E-OK")
+"""
+)
 
 # test_145: the program at argv[1] with its settings file at argv[2] against the same fake docker and
 # scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
@@ -1038,7 +1067,7 @@ else:
     p = wiring.nas_backup(cfg)
     repo = p.settings.nas_repo()
     if step == "retry":
-        nas.retention_after_torn(cfg, p, vm, repo)
+        nas.retention_after_torn(cfg, p, vm, repo, nas._nas_numbers(cfg, p.settings))
     elif step == "index_step":  # nas_run's index step for the indexed snapshot argv[3]: its entry again, with the listing
         entry = {"vm": vm, "mode": "nas", "snapshot": sys.argv[3], "repository": repo["repo"], "host": repo["host"],
                  "epoch": 1795000000, "timestamp": "20261124T000000Z", "consistency": "shut-off", "keep": None,
@@ -1046,16 +1075,19 @@ else:
         print(f"index: {nas._index_nas_backup(p, vm, repo, entry)}")
     elif step == "after_read":  # nas_run's steps after a shut-off run's good read of snapshot argv[3], merged back
         from vm.domain import DomainParts
-        from vm.domain.backup import NasRun, Stop, nas_index_entry
+        from vm.domain.backup import NasRead, NasRun, Stop, nas_index_entry
         p.signals.catch_stops()
+        snap_id = sys.argv[3]
         run = NasRun(
             vm=vm, live=False, quiesce=False, xml_text="<domain/>",
             parts=DomainParts(uuid="e2e", disks=[], nvram="", tpm=False, skipped=[], problems=[]),
+            numbers=nas._nas_numbers(cfg, p.settings),
             notes=[], sources=[], epoch=1795000000.0, stamp="20261124T000000Z", specs={}, others=[],
             agent="none", versions={}, deployment=None,
+            read=[NasRead(consistency="shut-off", snap=snap_id, summary={})],
         )
         try:
-            nas._nas_after_read(cfg, p, run, repo, nas_index_entry(run, repo, sys.argv[3], "shut-off", None))
+            nas._nas_after_read(cfg, p, run, repo, nas_index_entry(run, repo, snap_id, "shut-off", None))
         except Stop as e:
             print(f"stop: {e}")
         else:
@@ -5596,12 +5628,12 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.addCleanup(
             exec_bash,
             c,
-            "systemctl reset-failed e2e-224-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-blank-*",
+            "systemctl reset-failed e2e-224-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-224-*",
             check=False,
         )
         out = exec_bash(
             c,
-            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_BLANK)} /opt/cst-rw/btrfs/docker-gc",
+            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_BLANK)} /opt/cst-rw/btrfs/docker-gc 224",
         ).stdout
         self.assertIn("E2E-OK", out)
 
@@ -10376,6 +10408,169 @@ echo test_111-ok
 """,
         ).stdout
         self.assertIn("test_111-ok", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_263_snapshots_status_names_a_nas_number_a_run_cannot_compute(self) -> None:
+        """cst btrfs snapshots status as root with the NAS backup on and NAS_PRUNE_EVERY_DAYS='1 x': its NAS
+        part names the number with the NAS run's words (btrfs-snapshot nas-numbers) and status exits 0;
+        with 7, no such line."""
+        d = "/var/tmp/e2e-snapshot-nas-numbers"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_263 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf}
+rm -rf "$d"
+install -d -m 0700 "$d"
+install -d -m 0755 /etc/btrfs-setup
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+line="  NAS_PRUNE_EVERY_DAYS='1 x' in $conf: not a number CST's arithmetic reads: no prune (forget runs without --prune) until it is fixed; each NAS run ends with an error"
+for value in "1 x" 7; do
+    printf '%s
+' "HOME_DIR='/home/tester'" NAS_ENABLED=1 "NAS_PATH='/volume1/backup'"         "NAS_PRUNE_EVERY_DAYS='$value'" >"$conf"
+    rc=0; SUDO_USER=tester /opt/cst-rw/cst btrfs snapshots status >"$d/out" 2>"$d/err" || rc=$?
+    cat "$d/out" "$d/err"
+    [ "$rc" = 0 ]
+    grep -q "^NAS backup (restic): sftp:btrfs-setup-nas:/volume1/backup " "$d/out"
+    if [ "$value" = 7 ]; then
+        test "$(grep -c NAS_PRUNE_EVERY_DAYS "$d/out")" = 0
+    else
+        grep -qxF "$line" "$d/out"
+    fi
+done
+echo test_263-ok
+""",
+        ).stdout
+        self.assertIn("test_263-ok", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_264_docker_gc_refuses_an_environment_protection_that_is_no_registry(self) -> None:
+        """This checkout's docker-gc as a real systemd unit (systemd-run) whose Environment= has
+        DOCKER_GC_PROTECT=other.example.org,registry.example.com;ghcr.io, against test_103's fake docker and
+        scenario: the dry run exits 78 naming "not a registry: registry.example.com;ghcr.io" in its journal,
+        and docker is asked to remove nothing. Before, it exited 0 and the item protected nothing. A fake
+        cannot show how systemd hands Environment= to the program."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            "systemctl reset-failed e2e-264-gc.service 2>/dev/null; rm -rf /var/tmp/e2e-gc-264-*",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"/usr/bin/python3 -I -c {shlex.quote(GC_PROTECT_NOT_REGISTRY)} /opt/cst-rw/btrfs/docker-gc 264",
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_265_docker_volumes_nocow_postponed_record_s_new_folder_is_0755_under_umask_077(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root) postpones the boot's migration
+        (/etc/docker/daemon.json is not JSON) under a umask of 077, as sudo hands on the user's, with no
+        /var/lib/docker-volumes-nocow yet: the folder it makes for the record is 0755 and the record
+        0644, so cst doctor as tester reads it and names the postponed boot. Before, a makedirs of its
+        own made the folder 0700 before write_atomic saw it, and doctor as the user could not read the
+        record."""
+        c = self.SYSTEMD_CONTAINER
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -rf {state} /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-265-made-docker ] && rm -rf /etc/docker || true; "
+            "rm -f /var/tmp/e2e-265-made-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_265 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            rec={state}/postponed
+            ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-265-made-docker; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e {state} ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            printf '{{' >/etc/docker/daemon.json
+            rc=0; out="$(umask 077 && $prog migrate 2>&1)" || rc=$?
+            echo "test_265 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            echo "test_265 modes: $(stat -c '%a %n' {state} "$rec")" >&2
+            [[ "$(stat -c %a {state})" == 755 ]]
+            [[ "$(stat -c %a "$rec")" == 644 ]]
+            d="$({{ ut /opt/cst-rw/cst doctor 2>&1 || true; }} | grep -F "Docker volumes NOCOW" || true)"
+            echo "test_265 doctor: $d" >&2
+            if grep -qF "cannot read $rec" <<<"$d"; then echo "doctor as tester could not read the record" >&2; exit 1; fi
+            grep -qF "Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last " <<<"$d"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_266_docker_volumes_nocow_a_file_in_place_of_its_state_folder_is_nothing_postponed(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root) with a file at
+        /var/lib/docker-volumes-nocow, and /etc/docker/daemon.json naming a data root of the test's own
+        on a tmpfs whose one volume holds a leftover of an interrupted copy (_data.nocow-new): the boot's
+        migrate exits 0 with no "Not a directory" line for the record and gets past the record's removal to the
+        recovery, which removes the leftover; unmark exits 0 with no such line (its line about the outcome record in the same file is
+        another matter, not checked here). Before, removing the
+        record of postponed boots in that file raised NotADirectoryError: migrate wrote that error to
+        the journal and stopped before the recovery (the leftover stayed), and unmark stopped on it."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-266-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} {state} /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-266-made-docker ] && rm -rf /etc/docker || true; "
+            "rm -f /var/tmp/e2e-266-made-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_266 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow"
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-266-made-docker; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e {state} ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p {root}/volumes/v1/_data {root}/volumes/v1/_data.nocow-new
+            echo data >{root}/volumes/v1/_data/f
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            printf 'in the way\n' >{state}
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_266 migrate: rc=$rc $out" >&2
+            if grep -qF "Not a directory: '{state}/postponed'" <<<"$out"; then echo "migrate stopped at the record's removal" >&2; exit 1; fi
+            [[ "$rc" == 0 ]]
+            [ ! -e {root}/volumes/v1/_data.nocow-new ] || {{ echo "the recovery did not run" >&2; exit 1; }}
+            rc=0; out="$($prog unmark 2>&1)" || rc=$?
+            echo "test_266 unmark: rc=$rc $out" >&2
+            if grep -qF "Not a directory: '{state}/postponed'" <<<"$out"; then echo "unmark stopped at the record's removal" >&2; exit 1; fi
+            [[ "$rc" == 0 ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:

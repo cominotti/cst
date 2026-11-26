@@ -23,7 +23,6 @@ from vm.application.backup import (
 )
 from vm.application.nas_torn import forget_torn, nas_snapshot_ids, retention_after_torn
 from vm.domain import (
-    ADOPTED_TAG,
     LIVE_STATES,
     NAS_DEFAULTS,
     OVERLAY_MARK,
@@ -48,6 +47,8 @@ from vm.domain.backup import (
     IndexRefused,
     Manifest,
     NasMergeBack,
+    NasNumbers,
+    NasRead,
     NasRun,
     CopiedFile,
     ResticSummary,
@@ -55,16 +56,19 @@ from vm.domain.backup import (
     StopAfterBackup,
     StopAfterSnapshot,
     Uncertain,
+    index_write_failed_text,
     manifest_text,
     nas_done_lines,
     nas_index,
     nas_index_entry,
     nas_manifest,
     nas_tags,
-    not_indexed_text,
+    not_indexed_backup_text,
     restic_failure_why,
     snapshot_args,
     torn_entry,
+    unreadable_keep_keys,
+    unreadable_nas_number,
 )
 from vm.ports import (
     BackupStorePort,
@@ -247,9 +251,8 @@ def nas_run(
         f"{vm}: backup to the NAS ({nas['repo']}), {'running: live snapshot' if live else 'shut off'}", flush=True
     )
     failure: BaseException | None = None
-    consistency, snap, summary = "shut-off", "", ResticSummary()
     try:
-        consistency, snap, summary = _nas_read(cfg, p, run, nas, keep)
+        run.read.append(NasRead(*_nas_read(cfg, p, run, nas, keep)))
     # Any failure, a stop included: the overlays are merged back first, then it is raised again.
     except BaseException as e:  # noqa: BLE001
         failure = e
@@ -262,33 +265,42 @@ def nas_run(
         if run.unclear:
             merge.problems.extend(run.unclear)
             _add_overlay_files(p, run)
-        refused = _nas_not_merged_back(cfg, p, run, merge, failure) if merge.problems else None
-        # A stop after a read whose check passed, all merged back: the snapshot is a backup, indexed
-        # before the stop ends the run (no listing, no retention: those wait for the next backup).
-        if refused is None and isinstance(failure, StopAfterBackup):
-            _say_notes(p, run.notes)
-            failure = _index_stopped_backup(
-                p, vm, failure, nas_index_entry(run, nas, failure.snap, failure.consistency, keep)
-            )
+        if merge.problems:
+            refused = _nas_not_merged_back(cfg, p, run, merge, failure)
+            backup_note = _index_unmerged_backup(p, run, nas, keep, failure)
+            if backup_note is not None:
+                refused = Refused(f"{refused}\n{backup_note}")
+        else:
+            refused = None
+            # A stop after a read whose check passed, all merged back: the snapshot is a backup, indexed
+            # before the stop ends the run (no listing, no retention: those wait for the next backup).
+            if isinstance(failure, StopAfterBackup):
+                _say_notes(p, run.notes)
+                failure = _index_stopped_backup(
+                    p, vm, failure, nas_index_entry(run, nas, failure.snap, failure.consistency, keep)
+                )
     if refused is not None:
         raise refused
     if failure is not None:
         raise failure
-    p.out.say(
-        f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
-        f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
-    )
-    _nas_after_read(cfg, p, run, nas, nas_index_entry(run, nas, snap, consistency, keep))
+    read = run.read[0]
+    _nas_after_read(cfg, p, run, nas, nas_index_entry(run, nas, read.snap, read.consistency, keep))
 
 
 def _nas_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, entry: IndexEntry) -> None:
-    """After a good read, all merged back (entry: its index entry): the retention (retention_after_torn),
+    """After a good read, all merged back (entry: its index entry): what restic read, the retention (retention_after_torn),
     the index, the notes and how to restore it. A stop before the index is written (in the retention, a
     listing or the write) ends the run only once the snapshot is indexed, with no listing
     (_index_stopped_backup): else the next run names that backup as a snapshot no record names."""
     snap, vm = entry["snapshot"], run.vm
     try:
-        retention_after_torn(cfg, p, vm, nas, made=snap)
+        # Here, not before: a stop that comes while it is printed still indexes the snapshot.
+        summary = run.read[0].summary
+        p.out.say(
+            f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
+            f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({entry['consistency']})"
+        )
+        retention_after_torn(cfg, p, vm, nas, run.numbers, made=snap)
         refused = _index_nas_backup(p, vm, nas, entry)
     except Stop as e:
         with p.signals.ignored():
@@ -296,13 +308,29 @@ def _nas_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, en
             raise _index_stopped_backup(p, vm, e, entry) from None
     for line in nas_done_lines(run.notes, snap, vm, entry["consistency"], entry["keep"]):
         p.out.say(line)
-    if refused is not None:
-        raise refused
+    # A keep number that does not read: the backup is done, its retention skipped (retention), exit 1.
+    unread = [
+        f"{unreadable_nas_number(k, cfg.paths.vm_conf)}: the backup is done; its retention is skipped until it is fixed"
+        for k in unreadable_keep_keys(run.numbers)
+    ]
+    if refused is not None or unread:
+        raise Refused("\n".join([*([str(refused)] if refused is not None else []), *unread]))
+
+
+def _nas_numbers(cfg: VmSettings, settings: SettingsPort) -> NasNumbers:
+    """The numbers of vm.conf the run reads, once, before anything changes: Refused, with nothing backed up,
+    when the time limit does not read (a keep number that does not read is named at the end of the run)."""
+    timeout = settings.number("VM_NAS_TIMEOUT_HOURS")
+    if timeout is None:
+        raise Refused(f"{unreadable_nas_number('VM_NAS_TIMEOUT_HOURS', cfg.paths.vm_conf)}: nothing backed up; fix it")
+    return NasNumbers(timeout, settings.number("VM_NAS_KEEP_WEEKLY"), settings.number("VM_NAS_KEEP_MONTHLY"))
 
 
 def _nas_preflight(cfg: VmSettings, p: NasBackup, vm: str, *, live: bool, quiesce: bool) -> NasRun:
     """What a NAS backup reads and checks before restic is asked anything: Refused, with nothing
-    changed, for a definition, a disk or a running VM it cannot back up."""
+    changed, for a definition, a disk or a running VM it cannot back up, or a time limit of vm.conf that
+    does not read (read first: _nas_numbers)."""
+    numbers = _nas_numbers(cfg, p.settings)
     xml_text, parts = read_backup_definition(p.commands, vm, "nothing backed up")
     notes = list(parts.skipped)
     sources = nas_sources(cfg, p.store, vm, parts, notes)
@@ -314,6 +342,7 @@ def _nas_preflight(cfg: VmSettings, p: NasBackup, vm: str, *, live: bool, quiesc
         quiesce=quiesce,
         xml_text=xml_text,
         parts=parts,
+        numbers=numbers,
         versions=p.commands.package_versions(),
         deployment=p.commands.booted_deployment(),
         notes=notes,
@@ -473,7 +502,7 @@ def _nas_restic_backup(
     store, out = p.store, p.out
     stage = store.stage(run.vm, run.xml_text, manifest_text(manifest))
     paths = [src for src, _ in run.sources] + [stage]
-    timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * HOUR or NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"] * HOUR
+    timeout = run.numbers.timeout_hours * HOUR or NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"] * HOUR
     for src, k in run.sources:
         a, s = store.sizes(src)
         out.say(
@@ -586,14 +615,23 @@ def _nas_not_merged_back(
         + "\nNothing was undone or removed. Put each disk back by hand (read each line first):\n  "
         + "\n  ".join(lines)
     )
-    if isinstance(failure, StopAfterBackup):  # a good read: its snapshot named, with what keeps it
-        msg += (
-            f"\n(the backup itself: {failure}; the restic snapshot {failure.snap[:8]} of {run.vm} is a backup, its "
-            f"read checked, but it is not in the index: {_kept_unindexed(failure.snap)})"
-        )
-    elif failure is not None and not isinstance(failure, Uncertain):
+    if failure is not None and not isinstance(failure, (Uncertain, StopAfterBackup)):
         msg += f"\n(the backup itself: {failure})"
     return Refused(msg)
+
+
+def _index_unmerged_backup(
+    p: NasBackup, run: NasRun, nas: NasRepo, keep: str | None, failure: BaseException | None
+) -> str | None:
+    """Index a checked NAS read whose merge back failed (no listing), returning the note for the refusal."""
+    if isinstance(failure, StopAfterBackup):
+        snap, consistency = failure.snap, failure.consistency
+    elif failure is None and run.read:
+        snap, consistency = run.read[0].snap, run.read[0].consistency
+    else:
+        return None
+    note = _index_alone(p, run.vm, nas_index_entry(run, nas, snap, consistency, keep))
+    return f"(the backup itself: {f'{failure}; ' if failure else ''}{note})"
 
 
 def _add_overlay_files(p: NasBackup, run: NasRun) -> None:
@@ -612,46 +650,40 @@ def _index_stopped_backup(p: NasBackup, vm: str, stop: Stop, entry: IndexEntry) 
     """The index with the backup a stop came after (a stop held through its checked read, or one after
     the merge back; no listing: its other entries stay as they are); the stop to raise, which says so,
     or that the index is not this cst vm's."""
+    return Stop(f"{stop}; {_index_alone(p, vm, entry)}")
+
+
+def _index_alone(p: NasBackup, vm: str, entry: IndexEntry) -> str:
+    """The index with the backup of entry and no listing (its other entries stay as they are): the words
+    that say it is indexed, or why it is not."""
     snap = entry["snapshot"]
     try:
-        p.store.write_index(nas_index(p.store.read_index(), entry, None))
+        p.store.update_index(lambda entries: nas_index(entries, entry, None))
     except IndexRefused as e:
-        return Stop(f"{stop}; {_not_indexed(snap, vm, e)}")
+        return not_indexed_backup_text(snap, vm, e)
     except OSError as e:
-        return Stop(
-            f"{stop}; the restic snapshot {snap[:8]} of {vm} is a backup, but the index could not be written ({e}); "
-            f"{_kept_unindexed(snap)}"
-        )
-    return Stop(
-        f"{stop}; restic snapshot {snap[:8]} of {vm} is a backup: indexed (the retention runs at the next backup)"
-    )
-
-
-def _not_indexed(snap: str, vm: str, e: IndexRefused) -> str:
-    """What a NAS backup the index could not take says of its snapshot."""
-    return not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", _kept_unindexed(snap), e)
-
-
-def _kept_unindexed(snap: str) -> str:
-    """Where a NAS backup left out of the index stays, what the next runs do with it, and how to keep it."""
-    return (
-        "the snapshot stays in the repository: the next NAS backups may name it as a snapshot no record names, "
-        f"and their retention waits for it until it is kept as a backup (restic tag --add {ADOPTED_TAG} {snap}) or "
-        f'forgotten (restic forget {snap}) (restore it by its ID: vm/README.md, section "Restore from the NAS")'
-    )
+        return index_write_failed_text(snap, vm, e)
+    return f"restic snapshot {snap[:8]} of {vm} is a backup: indexed (the retention runs at the next backup)"
 
 
 def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) -> Refused | None:
     """The index with the new NAS backup (and without the VM's NAS entries whose snapshot restic no
-    longer lists); the refusal to raise after the notes when the index is not this cst vm's."""
+    longer lists); the refusal to raise after the notes when the index is not this cst vm's or cannot
+    be written."""
     # The index was read before the snapshot too, but a newer cst vm (or a damage) can have changed it
     # since: the snapshot stays, and its notes and restore line are printed before the refusal.
     snap = entry["snapshot"]
     try:
-        entries = p.store.read_index()
-        p.store.write_index(nas_index(entries, entry, nas_snapshot_ids(p.restic, vm, nas)))
+        # An index this cst vm cannot write refuses before restic is asked. The listing comes before the
+        # index's lock: a restic call never holds another VM's backup.
+        p.store.read_index()
+        listing = nas_snapshot_ids(p.restic, vm, nas)
+        alive, unkept = (None, frozenset[str]()) if listing is None else listing
+        p.store.update_index(lambda entries: nas_index(entries, entry, alive, unkept=unkept))
     except IndexRefused as e:
-        return Refused(_not_indexed(snap, vm, e))
+        return Refused(not_indexed_backup_text(snap, vm, e))
+    except OSError as e:
+        return Refused(index_write_failed_text(snap, vm, e))
     return None
 
 

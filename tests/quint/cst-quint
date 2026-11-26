@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import errno
+import fcntl
 import re
 import secrets
 import shutil
@@ -81,6 +82,7 @@ TLC_TIMEOUT: Final = 300
 APALACHE_TIMEOUT: Final = 600
 SIMULATOR_TIMEOUT: Final = 300
 FETCH_TIMEOUT: Final = 600
+LOCK_POLL: Final = 0.1  # seconds between two tries of a lock another run holds
 REPLAY_TIMEOUT: Final = 300
 EX_FAILED: Final = 1
 EX_USAGE: Final = 2
@@ -171,6 +173,8 @@ NAS_PROPERTIES: Final = (
     "strayNotCounted",
     "goodKeptAll",
     "checkedIndexed",
+    "pcClassified",
+    "envOutsideFrozen",
 )
 NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed", "nas_partial", "nas_strays")
 CHECKS: Final[tuple[Check, ...]] = (
@@ -217,6 +221,7 @@ NAS_WITNESSES: Final = (
     ("killed_refused", "nas_mixed", "neverKilledRefused"),
     ("late_switch", "nas_mixed", "neverLateSwitch"),
     ("indexed", "nas_mixed", "neverIndexed"),
+    ("unmerged_indexed", "nas_mixed", "neverUnmergedIndexed"),
     ("ready_failed", "nas_mixed", "neverReadyFailed"),
     ("backup_failed", "nas_mixed", "neverBackupFailed"),
     ("state_unreadable", "nas_mixed", "neverStateUnreadable"),
@@ -229,6 +234,7 @@ NAS_WITNESSES: Final = (
     ("partial_stop_dropped", "nas_partial", "neverPartialStopDropped"),
     ("partial_ok", "nas_partial", "neverPartialOk"),
     ("stop_after_commit", "nas_mixed", "neverStopAfterCommit"),
+    ("retention_ok", "nas_mixed", "neverRetentionOk"),
     ("retention_failed", "nas_mixed", "neverRetentionFailed"),
     ("stop_after_commit_recorded", "nas_shutoff", "neverStopAfterCommitRecorded"),
     ("stop_answered", "nas_shutoff", "neverStopAnswered"),
@@ -284,7 +290,7 @@ TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
     TraceJob("walk_live1", NAS_SPEC, "nas_live1", "simulator", 60, seed=5),
     TraceJob("walk_shutoff", NAS_SPEC, "nas_shutoff", "simulator", 60, seed=2),
     *(
-        TraceJob(name, NAS_SPEC, main, "simulator", 40, seed=7, invariant=invariant, samples=100000)
+        TraceJob(name, NAS_SPEC, main, "simulator", 40, seed=7, invariant=invariant, samples=300000)
         for name, main, invariant in NAS_WITNESSES
     ),
     *(
@@ -366,12 +372,46 @@ def ready(folder: str, digest: str, marker: str) -> bool:
     return read_stamp(folder) == digest and os.path.exists(os.path.join(folder, marker))
 
 
+def held_lock(path: str, timeout: float) -> int:
+    """An open fd holding an exclusive flock on path (a 0600 file, created when absent): close it to unlock.
+    StepError naming the lock when another run still holds it after timeout seconds.
+
+    cst_core.adapters.locks.take_lock does the same, but this program runs on CI's runner Python (3.12), and
+    importing it brings in cst_core's adapters and ports, newer Python than that: a few lines of flock here."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StepError(f"{path}: another run still holds this lock after {timeout:g} s") from None
+                time.sleep(LOCK_POLL)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def fetch(tool: Tool, home: str, run: Exec, env: Mapping[str, str]) -> str:
-    """tool unpacked into home/tool.folder: downloaded and checked first, unless its stamp is there."""
+    """tool unpacked into home/tool.folder: downloaded and checked first, unless its stamp is there. Under a
+    lock (home/.tool.folder.lock): runs that start together download it once, and the others use that copy."""
     dest = os.path.join(home, tool.folder)
     if ready(dest, tool.sha256, tool.marker):
         return dest
     os.makedirs(home, exist_ok=True)
+    lock = held_lock(os.path.join(home, f".{tool.folder}.lock"), FETCH_TIMEOUT)
+    try:
+        if not ready(dest, tool.sha256, tool.marker):  # another run may have finished it while this one waited
+            download_into(tool, home, dest, run, env)
+    finally:
+        os.close(lock)
+    return dest
+
+
+def download_into(tool: Tool, home: str, dest: str, run: Exec, env: Mapping[str, str]) -> None:
+    """tool downloaded into home, checked against its hash, unpacked and stamped, then moved to dest."""
     fd, download = tempfile.mkstemp(prefix=".download-", dir=home)
     os.close(fd)
     try:
@@ -394,18 +434,35 @@ def fetch(tool: Tool, home: str, run: Exec, env: Mapping[str, str]) -> str:
             shutil.rmtree(unpacked, ignore_errors=True)
     finally:
         os.remove(download)
-    return dest
 
 
 def install_quint(cache: str, pin: str, run: Exec, env: Mapping[str, str]) -> str:
     """quint from the lock in pin (npm ci --ignore-scripts, which checks every package's hash), in a folder
-    of cache named after the lock's hash; the path of its program."""
+    of cache named after the lock's hash; the path of its program. Under a lock (cache/.npm-HASH.lock), as
+    fetch: runs that start together install it once."""
     digest = sha256_of(os.path.join(pin, "package-lock.json"))
-    prefix = os.path.join(cache, f"npm-{digest[:16]}")
+    prefix = npm_prefix(cache, digest)
     marker = os.path.join("node_modules", ".bin", "quint")
     if ready(prefix, digest, marker):
         return os.path.join(prefix, marker)
     os.makedirs(cache, exist_ok=True)
+    lock = held_lock(os.path.join(cache, f".npm-{digest[:16]}.lock"), FETCH_TIMEOUT)
+    try:
+        if not ready(prefix, digest, marker):  # another run may have finished it while this one waited
+            npm_ci_into(cache, pin, digest, run, env)
+    finally:
+        os.close(lock)
+    return os.path.join(prefix, marker)
+
+
+def npm_prefix(cache: str, digest: str) -> str:
+    """The folder of cache that holds quint installed from the lock whose hash is digest."""
+    return os.path.join(cache, f"npm-{digest[:16]}")
+
+
+def npm_ci_into(cache: str, pin: str, digest: str, run: Exec, env: Mapping[str, str]) -> None:
+    """npm ci of pin's lock in a staging folder of cache, stamped with digest, then moved to its npm_prefix."""
+    prefix = npm_prefix(cache, digest)
     staging = tempfile.mkdtemp(prefix=".npm-", dir=cache)
     try:
         for name in ("package.json", "package-lock.json"):
@@ -420,7 +477,6 @@ def install_quint(cache: str, pin: str, run: Exec, env: Mapping[str, str]) -> st
         os.rename(staging, prefix)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    return os.path.join(prefix, marker)
 
 
 def quint_env(env: Mapping[str, str], home: str, work: str) -> dict[str, str]:

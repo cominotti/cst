@@ -761,6 +761,33 @@ class SettingsDomainTest(unittest.TestCase):
         self.assertTrue(str(cm.exception).endswith("nothing is removed until it is fixed"))
         self.assertEqual(resolve(PATHS, env="a.io, b.io", file_text=None, installed=None).registries, ("a.io", "b.io"))
 
+    def test_the_environment_s_value_is_checked_as_the_file_s(self) -> None:
+        # The environment's DOCKER_GC_PROTECT (a drop-in of the unit) got only the blank-edge check: an item
+        # that is no registry was taken as one, matched no image and protected nothing.
+        resolve = gc_domain.resolve_protection
+        for env, bad in (
+            ("registry.example.com;ghcr.io", "registry.example.com;ghcr.io"),
+            ("a b", "a b"),
+            ("ok.example, x/Y, ghcr.io", "x/Y"),
+        ):
+            with self.subTest(env=env):
+                with self.assertRaises(gc_domain.UnknownProtection) as cm:
+                    resolve(PATHS, env=env, file_text=f"DOCKER_GC_PROTECT={REGISTRY}\n", installed=None)
+                self.assertEqual(
+                    cm.exception.lines,
+                    (
+                        f"DOCKER_GC_PROTECT in the environment: not a registry: {bad}",
+                        "nothing is removed until it is fixed",
+                    ),
+                )
+        for env, registries in (
+            ("", ()),
+            ("ghcr.io/team, registry.example.com:5000", ("ghcr.io/team", "registry.example.com:5000")),
+        ):
+            with self.subTest(env=env):
+                p = resolve(PATHS, env=env, file_text=None, installed=None)
+                self.assertEqual((p.registries, p.source), (registries, "DOCKER_GC_PROTECT in the environment"))
+
     def test_the_file_it_writes_reads_back(self) -> None:
         for regs in ((), (REGISTRY,), ("a.example", "ghcr.io/team")):
             self.assertEqual(gc_domain.parse_settings_file("/f", gc_domain.render_settings_file(regs)), regs)

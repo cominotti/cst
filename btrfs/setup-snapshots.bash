@@ -256,6 +256,15 @@ snap_conf_read() {   # KEY...
     eval "${lines}"
 }
 
+# snap_nas_numbers: a line for each NAS number of snapshots.conf a NAS run
+# cannot compute (btrfs-snapshot nas-numbers: the runtime's words), for status.
+# The test seam is never handed to the runtime (as snap_runtime); a failure here
+# never fails status.
+snap_nas_numbers() {
+    [[ -r "${SNAP_CONF}" ]] || return 0
+    ( unset CST_SNAPSHOT_ROOT; bash "${SRC}/btrfs-snapshot" nas-numbers "${SNAP_CONF}" ) 2>/dev/null || true
+}
+
 # For the setup preview: the lines of snapshots.conf that snap_conf_set
 # rewrites in quotes (an older CST wrote them with printf %q).
 snap_conf_plan() {
@@ -675,6 +684,7 @@ snap_status() {
         [[ -r "${SNAP_STATE}/nas-summary" ]] && sed 's/^/  latest /' "${SNAP_STATE}/nas-summary"
         [[ -r "${SNAP_STATE}/nas-last-prune" ]] && echo "  last prune:   $(date -d "@$(cat "${SNAP_STATE}/nas-last-prune")" '+%F')"
         [[ -r "${SNAP_STATE}/nas-last-check" ]] && echo "  last check:   $(date -d "@$(cat "${SNAP_STATE}/nas-last-check")" '+%F')"
+        snap_nas_numbers
         echo "  password: ${SNAP_RESTIC_PW} (without it the backups cannot be read: keep a copy in your password manager)"
     else
         echo "NAS backup: off"

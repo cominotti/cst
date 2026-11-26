@@ -699,5 +699,51 @@ class SnapExcludeTest(unittest.TestCase):
                 self.assertFalse(rel == path or rel.startswith(path + "/"), (rel, e))
 
 
+NBSP: str = chr(0xA0)  # a no-break space: not an ASCII blank (g_ascii_isspace says no)
+VT: str = chr(0x0B)  # a vertical tab: an ASCII blank, but no line end for cobalt
+
+
+class InspectAsCobaltTest(unittest.TestCase):
+    """chrome-flags.conf read as cobalt's launcher reads it (src/cobalt-launcher.c): lines end at \\n only,
+    each is stripped of ASCII blanks, an empty or # line is skipped, and g_shell_parse_argv splits the rest:
+    a line it cannot parse is skipped, and a # starts a comment only at the start of a word."""
+
+    def test_the_flag_lines_read_as_cobalt_reads_them(self) -> None:
+        cases: list[tuple[str, str, str | None, str | None]] = [
+            # Each case: what it shows, the file's text, the cache folder and size read.
+            (
+                "a no-break space stays in the value",
+                f"--disk-cache-dir=/tmp/chrome-cache{NBSP}\n",
+                f"/tmp/chrome-cache{NBSP}",
+                None,
+            ),
+            (
+                "a line that starts with a no-break space is no comment",
+                f"{NBSP}# note --disk-cache-size=1\n",
+                None,
+                "1",
+            ),
+            ("a line with an unclosed quote is skipped", "--disk-cache-dir=/x\n--disk-cache-size='5\n", "/x", None),
+            (
+                "a vertical tab ends no line",
+                f"--disk-cache-dir=/x{VT}--disk-cache-size=5\n",
+                f"/x{VT}--disk-cache-size=5",
+                None,
+            ),
+            ("a # inside a word is part of it", "--disk-cache-dir=/a#b\n", "/a#b", None),
+            ("a # that starts a word is a comment", "--disk-cache-dir=/a #--disk-cache-size=5\n", "/a", None),
+            ("ASCII blanks around a line go", f"{VT} --disk-cache-size=7\t\r\n", None, "7"),
+        ]
+        for what, text, want_dir, want_size in cases:
+            with self.subTest(what):
+                got = chrome_domain.inspect(text)
+                self.assertEqual((got["dir"], got["size"]), (want_dir, want_size))
+
+    def test_a_marker_line_is_read_stripped_of_ascii_blanks_only(self) -> None:
+        marker = chrome_domain.MARKS[0]
+        self.assertTrue(chrome_domain.inspect(f"{VT}{marker}: x\n")["on"])
+        self.assertFalse(chrome_domain.inspect(f"{NBSP}{marker}: x\n")["on"])
+
+
 if __name__ == "__main__":
     unittest.main()

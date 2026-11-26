@@ -31,6 +31,7 @@ from btrfs.snapshot_runtime.domain import (
     guard_number,
     nas_out_of_range,
     nas_unreadable,
+    nas_unreadable_lines,
 )
 from btrfs.tests.snapshot_fakes import SCRIPT
 from cst_core.domain.text import file_lines, parse_snapshots_conf
@@ -246,6 +247,32 @@ class GuardNumberTest(unittest.TestCase):
         ):
             with self.subTest(change=change):
                 self.assertEqual(nas_unreadable({**DEFAULTS, **change}), want)
+
+    def test_nas_unreadable_lines_name_the_value_and_what_the_run_leaves_out(self) -> None:
+        # One wording for the NAS run's journal line and cst btrfs snapshots status (ends: each one's tail).
+        left = {
+            "NAS_STALE_DAYS": "no alert for a stale NAS backup",
+            "NAS_PRUNE_EVERY_DAYS": "no prune (forget runs without --prune)",
+            "NAS_CHECK_EVERY_DAYS": "no repository check",
+        }
+        for key, value in (
+            ("NAS_PRUNE_EVERY_DAYS", "1 x"),
+            ("NAS_STALE_DAYS", "abc"),
+            ("NAS_CHECK_EVERY_DAYS", "08"),
+            ("NAS_PRUNE_EVERY_DAYS", "1<<8"),
+            ("NAS_STALE_DAYS", "7"),
+        ):
+            with self.subTest(key=key, value=value):
+                settings = {**DEFAULTS, key: value}
+                got = nas_unreadable_lines(settings, "/c", nas_unreadable(settings), ends="E")
+                want = (
+                    []
+                    if value == "7"
+                    else [
+                        f"{key}={value!r} in /c: not a number CST's arithmetic reads: {left[key]} until it is fixed; E"
+                    ]
+                )
+                self.assertEqual(got, want)
 
     def want(self, value: str, free: int) -> str:
         """What bash prints for VALUE and FREE, by guard_number's answer."""

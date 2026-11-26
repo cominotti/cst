@@ -67,11 +67,13 @@ from btrfs.docker_volumes_nocow.domain import (
     NocowCommand,
     NocowPaths,
     OutcomeRecord,
+    PostponedRead,
     TreeScan,
     VolumeLeftovers,
     old_copy_name,
     old_copy_stamp,
     oldest_first,
+    parse_postponed,
     postponed_line,
     recovery,
 )
@@ -1642,6 +1644,21 @@ class DaemonJsonProblemTest(PostponeBase):
         self.assertIn(f"{self.PROBLEM}: the boot's migration waits until it is fixed\n", self.call(self.cli.status)[1])
         self.assertIn("migration postponed at 1 boot(s) in a row", self.call(self.cli.status)[1])
 
+    def test_the_postponed_record_s_new_folder_is_0755_whatever_the_umask(self) -> None:
+        # The boot's migrate runs as root with the umask it was given (sudo keeps the user's: 077, say), and
+        # the state folder is not there yet: the folder made for the record must still let cst doctor, as
+        # the user, read it. A makedirs of its own made it 0700 before write_atomic's ensure_dir saw it.
+        state = os.path.dirname(self.postponed)
+        shutil.rmtree(state)
+        old = os.umask(0o077)
+        try:
+            rc, _out = self.call(self.cli.migrate)
+        finally:
+            os.umask(old)
+        self.assertEqual(rc, 0)
+        self.assertEqual(stat.S_IMODE(os.stat(state).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(self.postponed).st_mode), 0o644)
+
     def test_recorded_with_nothing_scheduled_and_no_default_folder(self) -> None:
         # The default folder says nothing about the one Docker uses (data-root may have pointed
         # elsewhere before the file broke): the boot is recorded all the same, for status and doctor.
@@ -1700,6 +1717,65 @@ class DaemonJsonProblemTest(PostponeBase):
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
         self.assertTrue(self.fs.nocow(self.vols))  # +C from an earlier install, as the line allows
         self.assertFalse(os.path.exists(self.flag))
+
+    def test_mark_whose_request_fails_on_a_default_folder_with_nocow_says_no_boot_asks(self) -> None:
+        # This branch's request is mark's own (an install's), so a failure is probed as install's mark
+        # probes it: +C on the default folder and no earlier flag means no boot asks again, and the
+        # outcome record keeps it. Before, the line said "the next boot tries again" and nothing was
+        # recorded. The words do not claim that the default folder is the one Docker uses.
+        os.remove(self.flag)
+        self.set_attempts("2")
+        eio = OSError(errno.EIO, "Input/output error")
+        with (
+            mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=eio),
+            mock.patch.object(time, "time", return_value=1_700_000_000.0),
+        ):
+            rc, out, err = self.main("mark")
+        self.assertEqual((rc, err), (2, ""))
+        unknown = f"{self.PROBLEM}: which volumes folder Docker uses is unknown"
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols}, the default "
+            f"volumes folder ({unknown}), has +C already: if Docker uses it, no boot asks again; fix both, then "
+            "run cst btrfs install\n"
+            f"<3>{TAG}: {self.PROBLEM}: mark sets no +C on the volumes folder\n",
+        )
+        self.assertFalse(os.path.exists(self.flag))
+        with open(self.outcome) as f:
+            self.assertEqual(
+                object_of(parse_json(f.read())),
+                {
+                    "v": 1,
+                    "outcome": "not-scheduled",
+                    "at": 1_700_000_000,
+                    "volumes": self.vols,
+                    "reason": f"cannot schedule the migration: [Errno 5] Input/output error; {unknown}",
+                },
+            )
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+        self.assertIn(
+            f"  migration not scheduled by the install at {when} (cannot schedule the migration: [Errno 5] "
+            f"Input/output error; {unknown}); no boot asks for it: fix that, then run cst btrfs install\n",
+            self.call(self.cli.status)[1],
+        )
+
+    def test_mark_whose_request_fails_beside_an_earlier_flag_says_the_earlier_request_stays(self) -> None:
+        # The flag of an earlier request is there (the default folder has +C): the next boot after the
+        # fix runs that request, and nothing is recorded. Before, the line said the folder "keeps
+        # copy-on-write", which its +C does not show.
+        self.set_attempts("1")
+        eio = OSError(errno.EIO, "Input/output error")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=eio):
+            rc, out, err = self.main("mark")
+        self.assertEqual((rc, err), (2, ""))
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); {self.vols} has +C and "
+            "its volumes keep copy-on-write data, and the earlier request stays: the next boot tries again\n"
+            f"<3>{TAG}: {self.PROBLEM}: mark sets no +C on the volumes folder\n",
+        )
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertFalse(os.path.exists(self.outcome))
 
 
 class DockerRunningTest(PostponeBase):
@@ -1953,10 +2029,16 @@ class DockerdTest(PostponeBase):
         blocked = os.path.join(d, "root", "etc/docker/daemon.json")
         real_open = builtins.open
 
-        def fake_open(path: str, mode: str = "r", encoding: str | None = None) -> object:
+        def fake_open(
+            path: str,
+            mode: str = "r",
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> object:
             if path == blocked:
                 raise PermissionError(13, "Permission denied", path)
-            return real_open(path, mode, encoding=encoding)
+            return real_open(path, mode, encoding=encoding, errors=errors, newline=newline)
 
         with mock.patch.object(builtins, "open", fake_open):
             rc, out = self.call(self.cli.migrate)
@@ -2128,6 +2210,46 @@ class PostponedRecordTest(PostponeBase):
         self.assertIsNone(self.record())
         self.assertNotIn("postponed", self.call(self.cli.status)[1])
 
+    def test_status_names_a_record_it_cannot_read(self) -> None:
+        # As cst doctor's "cannot read": before, status said nothing of a damaged record, and the
+        # migration it may hold back went unseen there.
+        cases = (
+            ("not JSON", "{"),
+            ("not a JSON object", "[1, 2]\n"),
+            ("its format version is not a number", '{"v": "1", "boots": 2, "last": 3000, "reason": "r"}\n'),
+            ("empty, or it cannot be opened", None),  # a folder in place of the record
+        )
+        for why, text in cases:
+            with self.subTest(why=why):
+                if os.path.isdir(self.postponed):
+                    os.rmdir(self.postponed)
+                if text is None:
+                    os.remove(self.postponed)
+                    os.mkdir(self.postponed)
+                else:
+                    with open(self.postponed, "w") as f:
+                        f.write(text)
+                rc, out = self.call(self.cli.status)
+                self.assertEqual(rc, 0)
+                self.assertIn(f"\n  cannot read {self.postponed} ({why})\n", out)
+
+    def test_a_file_in_place_of_the_state_folder_is_nothing_postponed(self) -> None:
+        # A file where /var/lib/docker-volumes-nocow belongs holds no record: removing "the record" in it
+        # raised NotADirectoryError, which stopped the boot's migrate before recover() and uninstall's
+        # unmark before it cleared +C.
+        state = os.path.dirname(self.postponed)
+        shutil.rmtree(state)
+        with open(state, "w") as f:
+            f.write("in the way\n")
+        os.remove(self.flag)  # nothing scheduled: the run needs no count of attempts in that folder
+        self.fs.docker_state = "inactive"
+        self.assertEqual(self.boot("b1", 1000), (0, ""))
+        self.assertFalse(os.path.exists(self.top + ".nocow-new"))  # recover() ran
+        rc, _out = self.call(self.cli.unmark)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.fs.sets, [self.vols])
+        self.assertEqual(self.fs.flags_of(self.vols), 0)  # +C cleared
+
     def test_recorded_when_the_folder_has_no_nocow_flag(self) -> None:
         # Nothing scheduled, but the volumes folder lost +C (Docker installed
         # after install): that is work the boot could not do either.
@@ -2217,15 +2339,16 @@ class PostponedRecordTest(PostponeBase):
         self.assertIsNone(self.record())
 
     def test_a_version_that_is_no_whole_number_starts_afresh(self) -> None:
-        # Not a record this helper wrote: status shows no line for it, and the next boot starts afresh.
+        # Not a record this helper wrote: status names it as one it cannot read (before, it showed no
+        # line for it), and the next boot starts afresh.
         self.fs.docker_state = "active"
         for version in ('"x"', "true", "-1", "1.0"):
             with self.subTest(version=version):
                 self.plant(f'{{"v": {version}, "reason": "r", "boots": 2, "first": 500, "last": 600, "boot_id": "o"}}')
                 rc, out = self.call(self.cli.status)
                 self.assertEqual(rc, 0)
-                self.assertNotIn("postponed", out)
-                self.assertNotIn(self.postponed, out)
+                self.assertNotIn("migration postponed", out)
+                self.assertIn(f"\n  cannot read {self.postponed} (its format version is not a number)\n", out)
                 self.boot("b1", 1000)
                 self.assertEqual(
                     self.record(),
@@ -2863,14 +2986,14 @@ class PostponedLineTest(unittest.TestCase):
     def test_last_must_be_an_integer(self) -> None:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
         self.assertEqual(
-            postponed_line({"boots": 2, "last": 3000, "reason": "r"}, "/p"),
+            postponed_line(PostponedRead({"boots": 2, "last": 3000, "reason": "r"}), "/p"),
             f"  migration postponed at 2 boot(s) in a row, last {when}: r",
         )
         # A bool is no time (next_postponed and cst doctor refuse it too); before, True read as 1970.
         for last in (True, False, "3000", None):
             with self.subTest(last=last):
                 self.assertEqual(
-                    postponed_line({"boots": 2, "last": last, "reason": "r"}, "/p"),
+                    postponed_line(PostponedRead({"boots": 2, "last": last, "reason": "r"}), "/p"),
                     "  migration postponed at 2 boot(s) in a row, last ?: r",
                 )
 
@@ -2879,18 +3002,36 @@ class PostponedLineTest(unittest.TestCase):
         for last in (100000000000000000000, 1000000000000000000, 67768036191676799):
             with self.subTest(last=last):
                 self.assertEqual(
-                    postponed_line({"v": 1, "boots": 2, "last": last, "reason": "r"}, "/p"),
+                    postponed_line(PostponedRead({"v": 1, "boots": 2, "last": last, "reason": "r"}), "/p"),
                     "  migration postponed at 2 boot(s) in a row, last ?: r",
                 )
 
-    def test_a_newer_format_is_named_and_a_broken_version_shows_nothing(self) -> None:
+    def test_a_newer_format_and_a_broken_version_are_named(self) -> None:
         self.assertEqual(
-            postponed_line({"v": 2, "boots": 2, "last": 3000, "reason": "r"}, "/p"),
+            postponed_line(PostponedRead({"v": 2, "boots": 2, "last": 3000, "reason": "r"}), "/p"),
             "  /p is format 2 of the docker-nocow-postponed (this CST reads format 1 and older): written by a newer CST",
         )
+        # Before, a record whose version is not a number, or that cannot be read at all, showed nothing.
         for v in ("1", True, -1, 1.0, None):
             with self.subTest(v=v):
-                self.assertEqual(postponed_line({"v": v, "boots": 2, "last": 3000, "reason": "r"}, "/p"), "")
+                self.assertEqual(
+                    postponed_line(PostponedRead({"v": v, "boots": 2, "last": 3000, "reason": "r"}), "/p"),
+                    "  cannot read /p (its format version is not a number)",
+                )
+
+    def test_a_record_that_cannot_be_read_is_named(self) -> None:
+        # status reads the file as cst doctor does ("cannot read"); before, each of these showed nothing.
+        cases = (
+            ("{", "not JSON"),
+            ("[1, 2]\n", "not a JSON object"),
+            ('"r"\n', "not a JSON object"),
+            ("", "empty, or it cannot be opened"),
+        )
+        for text, why in cases:
+            with self.subTest(text=text):
+                self.assertEqual(postponed_line(parse_postponed(text, "/p"), "/p"), f"  cannot read /p ({why})")
+        self.assertEqual(postponed_line(parse_postponed(None, "/p"), "/p"), "")  # no file: no record
+        self.assertEqual(postponed_line(parse_postponed("{}", "/p"), "/p"), "")  # an empty object: none either
 
 
 if __name__ == "__main__":

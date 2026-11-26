@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's record formats, no I/O: the window limits, the diskstats fields, the JSON units, what the daemon's records hold and what the analysis of one window returns."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Final
 from typing import NotRequired
@@ -8,6 +9,8 @@ from typing import Required
 from typing import TypedDict
 from typing import TypeIs
 
+from btrfs.stall_monitord.domain import StallRecordTag
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, number_or_none
 
 GAP_MAX = 30.0  # s; a larger gap between samples means the daemon was not running
@@ -416,3 +419,18 @@ def is_notice(r: object) -> TypeIs[Notice]:
 def record_ts(r: object) -> float | None:
     """A record's own time ("ts"), when it is a number."""
     return number_or_none(r.get("ts")) if json_object(r) else None
+
+
+def newer_format_text(log_dir: str, metas: Sequence[object]) -> str | None:
+    """What the report says, instead of a report, when one of the meta records read (metas: the damaged
+    ones too) names a format ("v") newer than this report reads: the highest one found; None when there is
+    none. A newer format may change what the other records hold."""
+    fmt = state_format(StateFormatKey.STALL_RECORDS)
+    found = [
+        v
+        for r in metas
+        if json_object(r) and r.get("t") == StallRecordTag.META and (v := fmt.newer(r, "v")) is not None
+    ]
+    if not found:
+        return None
+    return f"{fmt.newer_text(log_dir, max(found))}: use the btrfs-stall-report of that CST"

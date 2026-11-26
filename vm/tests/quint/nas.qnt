@@ -15,11 +15,13 @@
 // change of order in nas.py changes this spec and its traces in the same commit.
 //
 // How a stop reaches the code (vm/adapters/backup.py, StopSignals): before the read it ends the run;
-// during the read (snapshot, restic, the check after it, forget_torn) it is the read's failure, and
+// during the read (snapshot, restic, the check after it, forget_torn) it is the read's failure (one
+// that comes while restic starts waits until Popen has returned, so restic is ended too), and
 // the overlays are merged back first; inside signals_held (the snapshot call, the torn record) it
 // waits for the block's end; during the merge back the stops are ignored; after it (retention,
 // index) it ends the run, once the good read's snapshot is indexed (index_stop). A kill (SIGKILL, power loss) ends the run where it is: nothing more is
-// called, no alert.
+// called, no alert. The environment acts only at a pc of ENV_OPEN (pcClassified, envOutsideFrozen): the
+// replay applies its steps at the code's port calls outside the frozen stretches.
 //
 // Abstraction: one VM, one host, one repository. A disk's source is 0 (its image) or r (the overlay
 // of run r), in the live and in the persistent definition (a shut-off VM's live listing is its
@@ -149,9 +151,43 @@ module nas {
   pure val TSET = TARGETS.foldl(Set(), (acc, t) => acc.union(Set(t)))
   pure val PRE = Set("preflight", "ready")
   pure val READ = Set("snapshot", "drop", "backup", "after", "record", "forget", "drop_torn")
-  pure val MERGE = Set("merge", "domstate", "commit", "check", "remove", "alert")
+  pure val MERGE = Set("merge", "domstate", "commit", "check", "remove", "alert", "index_unmerged")
   pure val ANSWERED = Set("after", "record") // the stops held since restic's answer (_ResticAnswer)
   pure val POST = Set("retry", "retry_forget", "retry_drop", "strays", "alert_strays", "retention", "index", "write")
+  // Where the environment (kill, guest, lateSwitch) may act while a run runs. The replay applies an
+  // environment step at the code's next port call outside a frozen stretch (Recorder.port's early return:
+  // before catch_stops, holding, checking; the second listing of a pair has no port call). A pc is FROZEN
+  // when the code takes its step inside such a stretch with no port call before it where the replay lets
+  // the environment act; kill, guest and lateSwitch are then not enabled there. Every pc a run reaches is
+  // in one of the two sets (pcClassified): a new pc fails until it is classified. Each pc's reason:
+  pure val ENV_OPEN = Set(
+    "preflight",      // Recorder.preflight: the environment acts once the run started (catch_stops is ~start's)
+    "ready",          // restic_ready's call
+    "snapshot",       // Signals.held's port, before the snapshot's hold freezes its poll (holding)
+    "drop",           // Store.drop: holding is off for each drop_overlay call in the snapshot's hold
+    "backup",         // restic backup's call, after the snapshot's hold ended
+    "after",          // check_after's call (domstate): it ends checking before its port; restic's answered hold does not freeze
+    "record",         // Signals.held's port, before the record's hold freezes (it ends checking: after check_after too)
+    "forget",         // restic forget's call, after the record's hold ended
+    "drop_torn",      // drop_torn's call
+    "merge",          // find_overlays: the live listing is the call (a stop is dropped there: ignored)
+    "domstate",       // domstate's call
+    "commit",         // blockcommit's call
+    "check",          // the live listing of the pair after the commits is the call (the --inactive one is no step)
+    "remove",         // remove_overlay's call
+    "alert",          // the alert's call
+    "index_unmerged", // write_index's call (signals ignored, environment still open)
+    "retry",        // restic snapshots' call (the torn listing), or the next call after ~no_torn (no call of its own)
+    "retry_forget", // restic forget's call
+    "retry_drop",   // drop_torn's call
+    "strays",       // restic snapshots' call, or the next call after ~no_index (no call of its own)
+    "alert_strays", // the alert's call
+    "retention",    // the retention's call (restic forget)
+    "index",        // restic snapshots' call
+    "write",        // write_index's call
+    "index_stop",   // write_index's call
+  )
+  pure val ENV_FROZEN: Set[str] = Set()
 
   pure def lbl(name: str, target: str, outcome: str): Label = { name: name, target: target, id: 0, outcome: outcome, stop: false, ctx: "" }
   pure def lblId(name: str, id: int, outcome: str): Label = { ...lbl(name, "", outcome), id: id }
@@ -511,10 +547,22 @@ module nas {
     val left = base.exclude(back)
     val named = if (left == Set()) base else left
     def kind(t: str): str = if (s.how.get(t) == "") "unknown" else s.how.get(t)
+    val checkedRead = s.snap != 0 and (s.failure == "none" or s.checked)
+    val st = { ...s, alerted: s.alerted.union(named.map(t => (t, s.r, kind(t)))) }
     all {
-      s' = finish({ ...s, alerted: s.alerted.union(named.map(t => (t, s.r, kind(t)))) }, "refused"),
+      s' = if (checkedRead) { ...st, pc: "index_unmerged", listOk: false } else finish(st, "refused"),
       step' = { ...lbl("alert", "", ""), ctx: s.failure },
     }
+  }
+  // _nas_not_merged_back after a checked read: the snapshot is indexed with no listing before the refusal.
+  action indexUnmerged = all {
+    s.pc == "index_unmerged",
+    s' = finish({
+      ...s, index: s.index.union(Set(s.snap)),
+      indexBad: s.indexBad or kindOf(s, s.snap) == TORN,
+      mixedIndexed: s.mixedIndexed or kindOf(s, s.snap) != GOOD,
+    }, "refused"),
+    step' = { ...lblId("write_index", s.snap, "refused"), ctx: "unmerged" },
   }
 
   // ---- after a good read: retention_after_torn, then the index ----------------------------------
@@ -677,6 +725,7 @@ module nas {
   }
   action kill = all {
     running(s),
+    not(ENV_FROZEN.contains(s.pc)),
     s.kills < MAX_KILLS,
     s' = finish({ ...s, kills: s.kills + 1 }, "killed"),
     step' = lbl("~kill", "", s.pc),
@@ -685,34 +734,36 @@ module nas {
   // libvirt switches nothing more), pauses or resumes; a shut-off run's VM is started.
   action guest = all {
     running(s),
+    not(ENV_FROZEN.contains(s.pc)),
     s.guest < MAX_GUEST,
     nondet ev = Set("shutdown", "pause", "resume", "start").oneOf()
     val g = { ...s, guest: s.guest + 1 }
     if (ev == "shutdown") all {
       s.mode == "live", s.vm != SHUTOFF,
-      s' = { ...g, vm: SHUTOFF, live: s.pers, pending: Set() }, step' = lbl("~guest", "", ev),
+      s' = { ...g, vm: SHUTOFF, live: s.pers, pending: Set() }, step' = { ...lbl("~guest", "", ev), ctx: s.pc },
     } else if (ev == "pause") all {
       s.mode == "live", s.vm == RUNNING,
-      s' = { ...g, vm: PAUSED }, step' = lbl("~guest", "", ev),
+      s' = { ...g, vm: PAUSED }, step' = { ...lbl("~guest", "", ev), ctx: s.pc },
     } else if (ev == "resume") all {
       s.mode == "live", s.vm == PAUSED,
-      s' = { ...g, vm: RUNNING }, step' = lbl("~guest", "", ev),
+      s' = { ...g, vm: RUNNING }, step' = { ...lbl("~guest", "", ev), ctx: s.pc },
     } else all {
       s.mode == "shutoff", s.vm == SHUTOFF,
       s' = { ...g, vm: RUNNING, live: s.pers, started: s.started or Set("preflight", "ready", "backup", "after").contains(s.pc) },
-      step' = lbl("~guest", "", ev),
+      step' = { ...lbl("~guest", "", ev), ctx: s.pc },
     },
   }
   // libvirt switches a disk late to a file of a snapshot that timed out (during its run, or before the next).
   action lateSwitch = all {
     s.pending != Set(),
+    not(ENV_FROZEN.contains(s.pc)),
     nondet o = s.pending.oneOf()
     val t = o._1
     val r = o._2
     all {
       s' = { ...s, live: s.live.set(t, r), pers: s.pers.set(t, r), unmerged: s.unmerged.union(Set(o)),
              pending: s.pending.exclude(Set(o)), lostOverlay: s.lostOverlay or not(s.files.contains(o)) },
-      step' = lbl("~late_switch", t, ""),
+      step' = { ...lbl("~late_switch", t, ""), ctx: s.pc },
     }
   }
   // The user between runs: starts the VM (from its definition) or shuts it down; or does what the
@@ -744,14 +795,14 @@ module nas {
 
   action step_ = any {
     startRun, preflight, ready, snapshot, drop, backup, after, record, forget, dropTorn,
-    merge, domstate, commit, check, remove, alert, retry, retryForget, retryDrop, strays, alertStrays, retention,
+    merge, domstate, commit, check, remove, alert, indexUnmerged, retry, retryForget, retryDrop, strays, alertStrays, retention,
     index, write, indexStop, stop, kill, guest, lateSwitch, user,
   }
   // The protocol alone (no stop, kill, guest or user): the checked-in traces that need several runs
   // to reach a witness (a torn snapshot recorded, then retried) are walks of it, each step one of step_'s.
   action step_calm = any {
     startRun, preflight, ready, snapshot, drop, backup, after, record, forget, dropTorn,
-    merge, domstate, commit, check, remove, alert, retry, retryForget, retryDrop, strays, alertStrays, retention,
+    merge, domstate, commit, check, remove, alert, indexUnmerged, retry, retryForget, retryDrop, strays, alertStrays, retention,
     index, write, indexStop,
   }
 
@@ -803,6 +854,15 @@ module nas {
   // After an index write with a listing read, every index entry names a snapshot in the repository.
   val indexInRepo = (step.name == "write_index" and s.listOk) implies s.index.forall(i => ids(s).contains(i))
 
+  // Every pc a run reaches is classified (ENV_OPEN or ENV_FROZEN, never both): a new pc fails here until its
+  // stretch in the replay is looked at.
+  val pcClassified = ENV_OPEN.intersect(ENV_FROZEN) == Set() and (running(s) implies ENV_OPEN.union(ENV_FROZEN).contains(s.pc))
+  // No environment step comes at a pc the replay cannot apply it at (~stop and ~kill carry the pc in
+  // outcome, ~guest and ~late_switch in ctx).
+  val envOutsideFrozen =
+    (Set("~stop", "~kill").contains(step.name) implies not(ENV_FROZEN.contains(step.outcome))) and
+    (Set("~guest", "~late_switch").contains(step.name) implies not(ENV_FROZEN.contains(step.ctx)))
+
   // Witnesses: the parts of the protocol a trace reaches (for the checked-in traces).
   val wStrayDropped = step.name == "drop_overlay"
   val wTimeoutAll = step.name == "snapshot" and step.outcome == "timeout_all"
@@ -824,6 +884,7 @@ module nas {
   val wStartedDuringRead = step.name == "check_after" and step.outcome == "changed"
   val wLateSwitch = step.name == "~late_switch"
   val wIndexed = step.name == "write_index" and step.outcome == "ok"
+  val wUnmergedIndexed = step.name == "write_index" and step.outcome == "refused"
   val wStoppedIndexed = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "shutoff"
   val wStoppedIndexedLive = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "live"
   val wStoppedIndexedPost = step.name == "write_index" and step.outcome == "stopped" and step.ctx == "post"
@@ -843,6 +904,7 @@ module nas {
   val wStopAfterCommitRecorded = step.name == "record_torn" and step.ctx == "stop" and step.outcome == "ok"
   val wStopAnswered = step.name == "restic_backup" and step.outcome == "stopped_answered"
   val wStopHeldCheck = step.name == "check_after" and step.stop
+  val wRetentionOk = step.name == "retention" and step.outcome == "ok"
   val wRetentionFailed = step.name == "retention" and step.outcome == "fail"
   val wTornForgetFailed = step.name == "forget" and step.outcome == "fail" and step.target == ""
   val wTornDropFailed = step.name == "drop_torn" and step.outcome == "fail" and step.target == ""
@@ -869,6 +931,7 @@ module nas {
   val neverStartedDuringRead = not(wStartedDuringRead)
   val neverLateSwitch = not(wLateSwitch)
   val neverIndexed = not(wIndexed)
+  val neverUnmergedIndexed = not(wUnmergedIndexed)
   val neverStoppedIndexed = not(wStoppedIndexed)
   val neverStoppedIndexedLive = not(wStoppedIndexedLive)
   val neverStoppedIndexedPost = not(wStoppedIndexedPost)
@@ -888,6 +951,7 @@ module nas {
   val neverStopAfterCommitRecorded = not(wStopAfterCommitRecorded)
   val neverStopAnswered = not(wStopAnswered)
   val neverStopHeldCheck = not(wStopHeldCheck)
+  val neverRetentionOk = not(wRetentionOk)
   val neverRetentionFailed = not(wRetentionFailed)
   val neverTornForgetFailed = not(wTornForgetFailed)
   val neverTornDropFailed = not(wTornDropFailed)

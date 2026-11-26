@@ -25,6 +25,7 @@ from vm.domain import (
     stored_name,
 )
 from vm.domain.backup import (
+    IndexEntry,
     DOMAIN_XML,
     MANIFEST_JSON,
     BackupMode,
@@ -169,7 +170,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         store.remove_tree(dest_dir)
         out.warn(f"  incomplete backup removed: {dest_dir}")
         raise
-    refused = _index_local_backup(store, manifest, dest_dir)
+    refused = index_local_backup(store, manifest, dest_dir)
     _say_local_done(out, notes, dest_dir, len(copied), reflink=mode == BackupMode.REFLINK)
     out.say("\nTo restore (never done automatically; read each line first):")
     for line in restore_lines(vm, dest_dir, copied, tpm_dir):
@@ -292,20 +293,22 @@ def _check_copy_unchanged(
         )
 
 
-def _index_local_backup(store: BackupStorePort, manifest: Manifest, dest_dir: str) -> Refused | None:
+def index_local_backup(store: BackupStorePort, manifest: Manifest, dest_dir: str) -> Refused | None:
     """The index with the new backup (entries whose folder was removed by hand leave it); the refusal
     to raise once the notes and restore lines are printed when the index is not this cst vm's."""
+
     # The index was read before the copy too, but a newer cst vm (or a damage) can have changed it
     # since: the backup stays, and its notes and restore lines are printed before the refusal.
-    try:
+    def change(stored: list[IndexEntry]) -> list[IndexEntry]:
         entries = [
-            e
-            for e in store.read_index()
-            if e.get("mode") == BackupMode.NAS or (store.is_dir(e["path"]) and e["path"] != dest_dir)
+            e for e in stored if e.get("mode") == BackupMode.NAS or (store.is_dir(e["path"]) and e["path"] != dest_dir)
         ]
         entries.append(index_entry(manifest, dest_dir))
         entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
-        store.write_index(entries)
+        return entries
+
+    try:
+        store.update_index(change)  # under the index's lock: another VM's backup may end at the same time
     except IndexRefused as e:
         kept = (
             f"the folder stays until removed by hand, and its {MANIFEST_JSON} says what it holds "

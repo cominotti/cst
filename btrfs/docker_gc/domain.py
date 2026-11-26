@@ -266,6 +266,11 @@ def registries_of(value: str) -> tuple[str, ...]:
     return tuple(r.removesuffix("/") for r in map(strip_ascii_blanks, value.split(",")) if r)
 
 
+def _not_registries(value: str) -> list[str]:
+    """The items of a DOCKER_GC_PROTECT value that are no registry (REGISTRY_RE), in order."""
+    return [r for r in registries_of(value) if not REGISTRY_RE.fullmatch(r)]
+
+
 def item_blank_problems(value: str) -> list[str]:
     """For each item of DOCKER_GC_PROTECT with a blank other than space or tab beside it (a no-break
     space, U+3000: blank_edge_problem), why it is a problem and the item. Such an item is never
@@ -288,7 +293,7 @@ def parse_settings_file(path: str, text: str) -> tuple[str, ...]:
             problems.append(f"{path} line {a.line}: {a.key}: unknown setting (known: {', '.join(SETTINGS_KEYS)})")
         elif blanks := item_blank_problems(a.value):
             problems.extend(f"{path} line {a.line}: {a.key}: {why}" for why in blanks)
-        elif bad := [r for r in registries_of(a.value) if not REGISTRY_RE.fullmatch(r)]:
+        elif bad := _not_registries(a.value):
             problems.append(f"{path} line {a.line}: {a.key}: not a registry: {', '.join(bad)}")
     if problems:
         raise UnknownProtection(*problems, f"nothing is removed until {path} is fixed")
@@ -401,6 +406,13 @@ def resolve_protection(
     if blanks := item_blank_problems(env):
         raise UnknownProtection(
             *(f"DOCKER_GC_PROTECT in the environment: {why}" for why in blanks), "nothing is removed until it is fixed"
+        )
+    # Checked as the file's value is: an item that is no registry (a ";" list, a blank inside) matches no
+    # image, so the registry it means would lose its protection.
+    if bad := _not_registries(env):
+        raise UnknownProtection(
+            f"DOCKER_GC_PROTECT in the environment: not a registry: {', '.join(bad)}",
+            "nothing is removed until it is fixed",
         )
     return Protection(registries_of(env), "DOCKER_GC_PROTECT in the environment", to_write=base.to_write)
 

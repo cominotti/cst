@@ -9,8 +9,8 @@ from typing import Protocol
 from btrfs.docker_volumes_nocow.domain import (
     OutcomeRead,
     OutcomeRecord,
+    PostponedRead,
     PostponedRecord,
-    StoredPostponed,
     TreeScan,
     VolumeLeftovers,
 )
@@ -104,7 +104,7 @@ class NocowStatePort(Protocol):
         """The kernel's boot id ("" when unknown)."""
         ...
 
-    def read_postponed(self) -> StoredPostponed | None: ...
+    def read_postponed(self) -> PostponedRead: ...
 
     def write_postponed(self, record: PostponedRecord) -> None: ...
 

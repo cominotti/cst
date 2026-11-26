@@ -19,6 +19,7 @@ from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.adapters.terminal import confirm, stdout
 from cst_core.domain.errors import Refused
+from cst_core.domain.text import split_ascii_blanks
 from cpu.adapters import (
     cpu_paths,
     define_domain,
@@ -67,7 +68,7 @@ def pin_vm(argv: Sequence[str], doc: str, paths: CpuPaths) -> int:
     c = vm_pin_settings(paths.conf, action)
     name = argv[1] if len(argv) > 1 else c["VM_NAME"]
     vcpus, cpus = int(c["VM_VCPUS"]), c["BUILD_CPUS"]
-    disable = c["VM_CPU_DISABLE"].split()
+    disable = split_ascii_blanks(c["VM_CPU_DISABLE"])
     if action == VmPinAction.STATUS:
         state = virsh("domstate", name).strip()
         print(f"{name}: {state}")

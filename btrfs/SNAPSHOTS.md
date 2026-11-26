@@ -797,7 +797,11 @@ the folder `/run/user/<your user id>/.flatpak/com.google.Chrome/tmp`. `setup`
 tells Chrome to put its HTTP cache there. Chrome's Flatpak reads extra
 command-line options ("flags") from
 `~/.var/app/com.google.Chrome/config/chrome-flags.conf`: one flag per line,
-and lines starting with `#` are comments. `setup` adds three lines at the end
+and lines starting with `#` are comments. CST reads it as Chrome's
+launcher (cobalt) does: a line ends at a newline only, the ASCII blanks
+around it are dropped (a no-break space stays), each line is split into
+shell words (a `#` starts a comment only at the start of a word), and a
+line that cannot be split (an unclosed quote) is skipped. `setup` adds three lines at the end
 of that file, as your user. Your other lines are not changed or moved.
 
 ```
@@ -1420,7 +1424,10 @@ so the `btrfs-snapshot-nas` service shows as failed until the line is
 fixed. A run that only stops at "not configured completely" or at an
 unreachable NAS names it too and ends with exit 1; a run skipped because
 another one holds the NAS lock names nothing and ends with exit 0, as
-before. Before, a name stopped the run where it read the number, and any
+before. `cst btrfs snapshots status` names it too, in its NAS part, with
+the same words and the tail `each NAS run ends with an error` (it reads
+`snapshots.conf` through `btrfs-snapshot nas-numbers`, which reads only that
+file and creates nothing). Before, a name stopped the run where it read the number, and any
 other such value made that comparison false without a word: no prune, no
 check or no stale alert, ever.
 

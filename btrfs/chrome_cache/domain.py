@@ -9,7 +9,7 @@ from typing import Literal, TypedDict
 import shlex
 
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib, parse_whole_number
-from cst_core.domain.text import enum_member
+from cst_core.domain.text import enum_member, strip_ascii_blanks
 
 APP = "com.google.Chrome"
 CACHE_DIR = "/tmp/chrome-cache"
@@ -97,12 +97,35 @@ def marked(s: str, rest: str) -> bool:
     return any(s.startswith(m + rest) for m in MARKS)
 
 
+def _uncommented(line: str) -> str:
+    """line up to its comment, as g_shell_parse_argv finds it: a # that starts a word, outside quotes and not
+    escaped (a # inside a word is part of it)."""
+    quote, escaped, at_start = "", False, True
+    for i, c in enumerate(line):
+        if escaped:
+            escaped = False
+        elif c == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c in " \t\n":
+            at_start = True
+            continue
+        elif c == "#" and at_start:
+            return line[:i]
+        at_start = False
+    return line
+
+
 def words(line: str) -> list[str]:
-    """The shell words of one non-comment line (cobalt parses each line so)."""
+    """The shell words of one line, as cobalt's launcher parses each line (g_shell_parse_argv): a line it
+    cannot parse (an unclosed quote) is skipped, so it gives no word."""
     try:
-        return shlex.split(line, comments=True)
+        return shlex.split(_uncommented(line))
     except ValueError:
-        return line.split()
+        return []
 
 
 def flag_value(tokens: Sequence[str], name: str) -> str | None:
@@ -118,10 +141,13 @@ def flag_value(tokens: Sequence[str], name: str) -> str | None:
 
 
 def inspect(text: str) -> _InspectResult:
-    lines = text.splitlines()
+    """What chrome-flags.conf sets, read as cobalt's launcher reads it: lines end at \\n only, each is
+    stripped of ASCII blanks (g_strstrip), an empty or # line is skipped, and the rest is split into
+    words (words)."""
+    lines = text.split("\n")
     tokens, on, off = [], False, False
     for ln in lines:
-        s = ln.strip()
+        s = strip_ascii_blanks(ln)
         if marked(s, " off"):
             off = True
         elif marked(s, ":"):
