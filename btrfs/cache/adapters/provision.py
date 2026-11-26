@@ -32,7 +32,7 @@ from btrfs.cache.domain.provision import (
 from btrfs.cache.ports import CachePathKind
 from cst_core.adapters.files import FileOwner, LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
 from cst_core.domain.shapes import json_object, parse_json
-from cst_core.domain.text import YES_WORDS
+from cst_core.domain.text import is_yes
 from cst_core.domain.values import parse_whole_number
 from cst_core.ports import OutputMode
 
@@ -489,9 +489,9 @@ class CacheProvisionAdapter:
             return False, "stdin is not a terminal; pass --yes with --format to confirm non-interactive formatting"
         print(prompt, end="", flush=True)
         try:
-            ans = sys.stdin.readline().strip().lower()
+            ans = sys.stdin.readline()
         except OSError:
             return False, "cannot read confirmation from stdin"
-        if ans in YES_WORDS:
+        if is_yes(ans):
             return True, None
         return False, "aborted by user (confirmation declined)"
