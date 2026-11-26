@@ -154,10 +154,11 @@ RUST_BUILD_MAX_TOTAL=200G
 | `RUST_BUILD_INCREMENTAL_IDLE` | `6h` | In a folder not used for longer than this, delete only cargo's incremental folders ([section 7](#incremental-folders)). `0` or `off`: never. Not shorter than `MIN_KEEP`. |
 | `PYTHON_UV_ENABLED` | `yes` | `no`: the timer and a bare `prune` leave `python:uv` out. |
 | `PYTHON_UV_INTERVAL` | `1d` | The timer runs `uv cache prune` at most once per this. Named on the command line (`prune apply python:uv`) it always runs. `0`: every hourly run. |
-| `RUST_LEAN_DEBUGINFO` | `no` | `yes`: `config apply` writes lean debug info for dev builds ([section 6](#lean-debug-info-opt-in)). Not a prune setting. |
-| `RUST_SCCACHE` | `no` | `yes`: `config apply` sets up sccache for rustc ([section 6](#sccache-opt-in)). `no` does not remove it; `config apply --no-sccache` does. Not a prune setting. |
+| `RUST_LEAN_DEBUGINFO` | `no` | `yes`: `config apply` writes lean debug info (`debug = "line-tables-only"`, `split-debuginfo = "unpacked"`) for dev builds ([section 6](#lean-debug-info-opt-in)). Not a prune setting. |
+| `RUST_INCREMENTAL` | `auto` | `off`: `config apply` writes `[build] incremental = false` in `~/.cargo/config.toml` to eliminate incremental disk churn (`auto` keeps Cargo's default and removes CST's line again; use `CARGO_INCREMENTAL=0` for agent/CI shells under `auto`). Not a prune setting. |
+| `RUST_SCCACHE` | `no` | `yes`: `config apply` sets up sccache for rustc and tries to install `sccache` into `~/.cargo/bin` when missing (fail-open; [section 6](#sccache-opt-in)). `no` does not remove the wrapper; `config apply --no-sccache` does. Not a prune setting. |
 | `RUST_SCCACHE_CACHE_SIZE` | `25G` | The size cap of `~/.cache/sccache`. sccache itself deletes the least recently used entries above it. A whole number with `K`, `M`, `G` or `T`; `0` is an error. |
-| `RUST_SCCACHE_WORKSPACE` | `yes` | `no`: your own crates (workspace members and path dependencies) skip sccache; only dependencies from a registry or git go through it. Matters only for builds without incremental compilation. `CST_SCCACHE_WORKSPACE=0` or `1` sets it for one build ([section 6](#local-crates-rust_sccache_workspace)). |
+| `RUST_SCCACHE_WORKSPACE` | `no` | `no` (default): your own crates (workspace members and path dependencies) skip sccache; only dependencies from a registry or git go through it. Matters only for builds without incremental compilation. `yes` or per-build `CST_SCCACHE_WORKSPACE=1` opts local crates back in ([section 6](#local-crates-rust_sccache_workspace)). |
 
 Every key is `<LANG>_<CACHE>_<SETTING>`. Numbers are ASCII digits (`0`-`9`) and
 the unit letters and blanks ASCII ones, as bash and systemd read them, around
@@ -205,25 +206,28 @@ own value: `rust:build` then prunes nothing) or `BY HAND`.
 
 ### Lean debug info (opt-in)
 
-By default a dev build (`cargo build`, `cargo test`) stores full debug
+By default a dev build (`cargo build`, `cargo test`) stores full packed debug
 information for every crate, also for every dependency. That is a large part
 of each build folder, and few people step through a dependency in a
 debugger. With `RUST_LEAN_DEBUGINFO=yes` in `~/.config/cst/toolchains.conf`
 (or `cst toolchains config apply --lean-debuginfo` once), `config apply`
-appends this to `~/.cargo/config.toml`:
+ensures these keys in `~/.cargo/config.toml`:
 
 ```
 # Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes: smaller dev builds.
 ...
 [profile.dev]
 debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
 debug = false
 ```
 
 Your own crates keep line tables (a panic's backtrace still shows file and
-line); dependencies get no debug information. Things to know first:
+line) with `split-debuginfo = "unpacked"` so rustc avoids re-packing DWARF
+sections into `.dwp`/executables on every link; dependencies get no debug
+information. Things to know first:
 
 - **It is off unless you turn it on.** `config plan` shows it as
   `off (opt-in)`. `cst btrfs snapshots setup` passes `--no-lean-debuginfo`,
@@ -238,14 +242,35 @@ line); dependencies get no debug information. Things to know first:
   `~/.cargo/config.toml` before the one in a project's `Cargo.toml`. A project
   that sets `debug = true` gets the lean value too (an environment variable
   such as `CARGO_PROFILE_DEV_DEBUG=true` still overrides it for one build).
-- **Your own keys are never changed.** If `~/.cargo/config.toml` already sets
-  `debug` in `[profile.dev]` or `[profile.dev.package."*"]`, that key stays and
-  `config` reports it (`keep ... is yours: left as it is`). If the file
-  already has one of these tables (with other keys), appending a second copy
-  would break the file, so `config` prints the lines to add by hand instead.
+- **Your own keys are never changed, and existing `[profile.dev]` upgrades cleanly.**
+  If `~/.cargo/config.toml` already sets `debug` or `split-debuginfo` in
+  `[profile.dev]` or `[profile.dev.package."*"]`, that key stays and `config`
+  reports it (`keep ... is yours: left as it is`). If `[profile.dev]` already
+  exists as a standard `[table]` header (for example from an earlier CST run
+  with `debug = "line-tables-only"`), `config apply` inserts only the missing
+  key(s) into it safely; only dotted/inline `[profile.dev]` tables ask you to
+  add the key by hand.
 - To undo, delete the lines under the `# Added by toolchains-setup.sh (CST)
-  for RUST_LEAN_DEBUGINFO=yes` comment (and set the setting back to `no`);
-  the next build compiles everything once more.
+  for RUST_LEAN_DEBUGINFO=yes` comment (and `split-debuginfo = "unpacked"`, if
+  inserted into an existing table; set the setting back to `no`). The next
+  build compiles everything once more.
+
+### Incremental compilation (`RUST_INCREMENTAL`)
+
+Cargo enables incremental compilation for dev builds by default, which rewrites
+large dep-graph files on every edit and bypasses `sccache` for workspace
+crates.
+
+- **`RUST_INCREMENTAL=auto` (default):** leaves `[build] incremental` unset so
+  Cargo keeps its default for interactive IDE/cargo-watch workflows, while
+  automated agents and CI shells can set `CARGO_INCREMENTAL=0` per session.
+  If CST previously wrote `incremental = false`, switching back to `auto` and
+  running `cst toolchains config apply` removes only CST's line (a
+  hand-written `incremental = false` without CST's comment is left alone).
+- **`RUST_INCREMENTAL=off`:** `cst toolchains config apply` inserts
+  `incremental = false` into `[build]` (or appends `[build]`) in
+  `~/.cargo/config.toml`. Existing user keys (including `incremental = true`)
+  are never overwritten.
 
 ### sccache (opt-in)
 
@@ -254,11 +279,13 @@ project compile the same registry dependencies (tokio, syn, memchr, ...)
 ten times. [sccache](https://github.com/mozilla/sccache) keeps a cache of
 compiled crates in `~/.cache/sccache`: a crate compiled once with the same
 compiler, the same flags and the same sources is copied from there instead
-of being compiled again. Install sccache yourself (for example `cargo
-install sccache --locked`, which lands in `~/.cargo/bin` and so is on the
-PATH of the host and every toolbox), then turn it on with `RUST_SCCACHE=yes`
-in `~/.config/cst/toolchains.conf` or with `cst toolchains config apply
---sccache` once. `config apply` then:
+of being compiled again. Turn it on with `RUST_SCCACHE=yes` in
+`~/.config/cst/toolchains.conf` or with `cst toolchains config apply --sccache`
+once. If `sccache` is missing on `PATH` and in `~/.cargo/bin`, `config apply`
+also tries to install it automatically into `~/.cargo/bin` (`cargo-binstall
+--no-confirm sccache`, else `cargo install sccache --locked` with
+`CARGO_TARGET_DIR` in `/tmp`), failing open with a `NOTE:` if `cargo` is
+absent, offline, or fails. `config apply` then:
 
 1. copies `toolchains/rustc-wrapper` to `~/.local/libexec/cst/rustc-wrapper`
    (mode 0755, `RUST_SCCACHE_CACHE_SIZE` and `RUST_SCCACHE_WORKSPACE`
@@ -306,13 +333,17 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   `rustc-wrapper <passthrough> rustc ...` for its workspace members) to keep
   them out of sccache, and that keeps working. `RUST_SCCACHE_WORKSPACE=no`
   (below) does the same for every project without such a script.
-- **No sccache on the PATH: rustc runs directly.** A toolbox without sccache
-  builds as before; the wrapper never fails a build by itself.
+- **No sccache on PATH or in `$CARGO_HOME/bin` (`~/.cargo/bin`): rustc runs directly.**
+  The wrapper checks `PATH` first and then `${CARGO_HOME:-$HOME/.cargo}/bin/sccache`
+  so host builds still find `cargo install`ed `sccache` even outside interactive
+  shells. If neither has it, the wrapper never fails a build by itself (`cst
+  doctor` and `cst toolchains status` warn when `rustc-wrapper` is active without
+  an installed `sccache` binary).
 - **`CST_SCCACHE=0` skips sccache for one build**: `CST_SCCACHE=0 cargo
   build`.
-- **Local crates follow `RUST_SCCACHE_WORKSPACE`** (default `yes`: through
-  sccache); `CST_SCCACHE_WORKSPACE=0` or `1` overrides it for one build
-  ([below](#local-crates-rust_sccache_workspace)).
+- **Local crates follow `RUST_SCCACHE_WORKSPACE`** (default `no`: local crates
+  straight to `rustc`); `CST_SCCACHE_WORKSPACE=0` or `1` overrides it for one
+  build ([below](#local-crates-rust_sccache_workspace)).
 - **One sccache server per environment.** The host and every toolbox share
   `$HOME` and the network, and sccache's client finds its server on
   `127.0.0.1:4226` by default: a server started in one toolbox would compile
@@ -487,13 +518,14 @@ project that uses CST's wrapper.
 - **When it matters.** In a dev build cargo compiles local crates
   incrementally, and incremental compiles never go through sccache anyway.
   The setting changes something only for builds without incremental
-  compilation: `CARGO_INCREMENTAL=0`, `--release`, or a profile with
-  `incremental = false`.
-- **Why the default stays `yes`.** Within one worktree, switching branches
-  back and forth compiles a local crate again with the same path and the
-  same sources, and sccache does hit then. This rests on that reasoning, not
-  on a measurement. With many worktrees built from scratch, `no` is likely
-  the better choice.
+  compilation: `CARGO_INCREMENTAL=0`, `RUST_INCREMENTAL=off`, `--release`, or a
+  profile with `incremental = false`.
+- **Why the default is `no`.** With many worktrees built cleanly or by coding
+  agents, compiling local crates through sccache produces per-worktree path keys
+  that miss in other worktrees, evicting reusable registry crates and writing
+  extra data to SSD. Keeping local crates direct maximizes reusable cache
+  entries and cuts cache churn; opt back in per build with
+  `CST_SCCACHE_WORKSPACE=1` or globally with `RUST_SCCACHE_WORKSPACE=yes`.
 - **For one build:** `CST_SCCACHE_WORKSPACE=0 cargo build --release` keeps
   local crates out, `CST_SCCACHE_WORKSPACE=1` sends them through, whatever
   the setting says. Other values are ignored. `CST_SCCACHE=0` still wins
@@ -795,6 +827,15 @@ says which are still needed:
 
 It also lists toolchains that a project pins but that are not installed (the
 next build there downloads them).
+
+### Workspace feature unification (`cargo-hakari` advisory)
+
+Using the same read-only `~/Workspace` walk, `status` checks multi-crate Cargo
+workspaces (deduplicated per git repository across linked worktrees). When a
+workspace has **8 or more crates** without `.config/hakari.toml` or `hakari.toml`,
+`status` prints an advisory section suggesting `cargo hakari init && cargo
+hakari generate` (plus `cargo binstall --no-confirm cargo-hakari` if missing).
+CST **never** edits repository files or runs `cargo hakari`.
 
 ## 10. The timer: files and logs
 

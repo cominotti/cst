@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from cst_core.domain.files import UnitFileState, WholeFileState
     from toolchains.domain.auto import OlderUnitAction, TimerFacts
     from toolchains.domain.build import BuildTreeResult, CargoCache, Folder, Workspaces
-    from toolchains.domain.config import SettingsRewrite, WrapperValues
+    from toolchains.domain.config import SccacheInstallMethod, SettingsRewrite, WrapperValues
     from toolchains.domain.prune import RunRecord, SavedRun
     from toolchains.domain.uv import UvCacheKind
 
@@ -324,6 +324,22 @@ class HomeFilesPort(Protocol):
         ...
 
 
+class SccacheInstallerPort(Protocol):
+    """Installing and finding sccache on the user's machine (fail-open)."""
+
+    def find_sccache(self) -> str | None:
+        """Executable sccache on PATH or in $CARGO_HOME/bin (~/.cargo/bin), or None."""
+        ...
+
+    def install_method(self) -> SccacheInstallMethod | None:
+        """Preferred installer available now (cargo-binstall, cargo, or None)."""
+        ...
+
+    def install(self) -> tuple[bool, str]:
+        """Try installing sccache into ~/.cargo/bin; returns (installed, detail)."""
+        ...
+
+
 class InstalledToolsPort(Protocol):
     """What status reports of the tools installed besides the caches (read only)."""
 
@@ -334,4 +350,8 @@ class InstalledToolsPort(Protocol):
 
     def sccache(self) -> list[str]:
         """The sccache cache's size and, per running server, its numbers and where it runs."""
+        ...
+
+    def hakari_advisory(self) -> list[str]:
+        """Read-only advisory lines for large workspaces that lack .config/hakari.toml."""
         ...

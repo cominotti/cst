@@ -4690,7 +4690,19 @@ class CommandLineTest(Scratch):
             if a not in areas:
                 areas.append(a)
         self.assertEqual(
-            areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "responsiveness", "install"]
+            areas,
+            [
+                "rpm-ostree",
+                "services",
+                "alerts",
+                "btrfs",
+                "cpu",
+                "swap",
+                "vm",
+                "responsiveness",
+                "toolchains",
+                "install",
+            ],
         )
 
     def test_every_module_that_registers_checks_is_an_area(self) -> None:
@@ -6163,6 +6175,42 @@ class ResponsivenessAreaTest(Scratch):
         self.assertIn("fix: ./cst cpu irq apply", p4_res.stdout)
         self.assertIn("fix: ./cst btrfs iocost apply", p4_res.stdout)
         self.assertNotIn("fix: sudo cst ", p4_res.stdout)
+
+
+class ToolchainsCheckTest(Scratch):
+    """Doctor's `toolchains` area checks sccache binary readiness when CST's rustc-wrapper is active."""
+
+    def _home_file(self, rel: str, content: str, *, mode: int = 0o644) -> str:
+        full = os.path.join(self.root, self.tmp.lstrip("/"), rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(full, mode)
+        return full
+
+    def test_silent_unless_cst_wrapper_is_active(self) -> None:
+        r0 = self.run_tool()
+        self.assertNotIn("== toolchains", r0.stdout)
+        self._home_file(".cargo/config.toml", '[build]\nrustc-wrapper = "/usr/bin/other-wrapper"\n')
+        r1 = self.run_tool()
+        self.assertNotIn("== toolchains", r1.stdout)
+
+    def test_warns_when_missing_and_ok_when_sccache_present(self) -> None:
+        wrapper = os.path.join(self.tmp, ".local/libexec/cst/rustc-wrapper")
+        self._home_file(".cargo/config.toml", f'[build]\nrustc-wrapper = "{wrapper}"\n')
+        warn_res = self.run_tool()
+        self.assertEqual(warn_res.returncode, 1, warn_res.stdout + warn_res.stderr)
+        lines = area_lines(warn_res.stdout, "toolchains")
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("WARN   sccache binary: missing", lines[0])
+        self.assertIn("fix: cst toolchains config apply", lines[1])
+
+        self._home_file(".cargo/bin/sccache", "#!/bin/sh\nexit 0\n", mode=0o755)
+        ok_res = self.run_tool()
+        self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
+        ok_lines = area_lines(ok_res.stdout, "toolchains")
+        self.assertEqual(len(ok_lines), 1, ok_lines)
+        self.assertIn(f"ok     sccache binary: {self.tmp}/.cargo/bin/sccache", ok_lines[0])
 
 
 if __name__ == "__main__":

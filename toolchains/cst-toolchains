@@ -58,14 +58,17 @@ program (toolchains/toolchains.conf in CST), yours in
   PYTHON_UV_ENABLED=yes      uv cache prune ...
   PYTHON_UV_INTERVAL=1d      ... at most once per this (0: every run)
   RUST_LEAN_DEBUGINFO=no     yes: `config apply` writes lean debug info for
-                             dev builds into ~/.cargo/config.toml
+                             dev builds (plus split-debuginfo = "unpacked")
+                             into ~/.cargo/config.toml
+  RUST_INCREMENTAL=auto      off: `config apply` sets [build] incremental = false
+                             in ~/.cargo/config.toml (auto removes CST's line)
   RUST_SCCACHE=no            yes: `config apply` installs
-                             ~/.local/libexec/cst/rustc-wrapper and names it
-                             as [build] rustc-wrapper (rustc through sccache)
+                             ~/.local/libexec/cst/rustc-wrapper, names it
+                             as [build] rustc-wrapper, and tries to install
+                             sccache into ~/.cargo/bin if missing (fail-open)
   RUST_SCCACHE_CACHE_SIZE=25G  sccache's size cap for ~/.cache/sccache
-  RUST_SCCACHE_WORKSPACE=yes  no: local crates (workspace members, path
-                             dependencies) skip sccache; CST_SCCACHE_WORKSPACE=0
-                             or 1 sets it for one build
+  RUST_SCCACHE_WORKSPACE=no  no (default): local crates skip sccache; yes or
+                             CST_SCCACHE_WORKSPACE=1 opts them back in
 Durations: a number with s, m, h, d or w. Sizes: a number with K, M, G or T
 (binary: G = GiB; "GiB", "GB" and "G" all mean 2^30 bytes); the unit is
 required (a bare 150 is an error, not 150 bytes). An unknown key or a bad

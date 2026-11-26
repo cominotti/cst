@@ -8,17 +8,100 @@ import shutil
 import socket
 import stat
 import struct
+import tempfile
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-from toolchains.domain.common import gib
+from toolchains.domain.common import gib, tilde
 from cst_core.adapters.files import read_bytes, read_text
-from toolchains.domain.config import SCCACHE_DIR_REL, SCCACHE_STATS, ScopeFacts, server_place
+from toolchains.domain.config import (
+    SCCACHE_DIR_REL,
+    SCCACHE_STATS,
+    SccacheInstallMethod,
+    ScopeFacts,
+    server_place,
+)
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.program import RUNNER, where_text
-from cst_core.ports import OutputMode
+from cst_core.ports import CommandResult, OutputMode
+
+
+def find_cargo_tool(home: str, name: str, *, cargo_bin_first: bool = True) -> str | None:
+    """Find executable NAME in $CARGO_HOME/bin (~/.cargo/bin) or on PATH."""
+    ch = os.environ.get("CARGO_HOME", "")
+    cargo_bin = os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", name)
+    has_cargo_bin = cargo_bin if os.path.isfile(cargo_bin) and os.access(cargo_bin, os.X_OK) else None
+    on_path = shutil.which(name)
+    order = (has_cargo_bin, on_path) if cargo_bin_first else (on_path, has_cargo_bin)
+    return next((cand for cand in order if cand is not None and cand != ""), None)
+
+
+def find_sccache_binary(home: str) -> str | None:
+    """Find executable sccache on PATH or in $CARGO_HOME/bin (~/.cargo/bin)."""
+    return find_cargo_tool(home, "sccache", cargo_bin_first=False)
+
+
+def _failure_detail(r: CommandResult, tool: str) -> str:
+    if r.cause is not None:
+        return f"{tool}: {r.cause}"
+    last = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
+    return f"{tool}: {last}"
+
+
+class SccacheInstaller:
+    """SccacheInstallerPort: fail-open install of sccache into ~/.cargo/bin."""
+
+    def __init__(self, home: str) -> None:
+        self.home = home
+
+    def find_sccache(self) -> str | None:
+        return find_sccache_binary(self.home)
+
+    def install_method(self) -> SccacheInstallMethod | None:
+        if find_cargo_tool(self.home, "cargo-binstall") is not None:
+            return SccacheInstallMethod.BINSTALL
+        if find_cargo_tool(self.home, "cargo") is not None:
+            return SccacheInstallMethod.CARGO
+        return None
+
+    def _base_env(self, tmpdir: str) -> dict[str, str]:
+        ch = os.environ.get("CARGO_HOME", "")
+        cargo_home = ch if os.path.isabs(ch) else os.path.join(self.home, ".cargo")
+        env = {k: v for k, v in os.environ.items() if k not in ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER")}
+        env.update(HOME=self.home, CARGO_HOME=cargo_home, CARGO_TARGET_DIR=tmpdir, CARGO_TERM_COLOR="never")
+        return env
+
+    def install(self) -> tuple[bool, str]:
+        existing = self.find_sccache()
+        if existing is not None:
+            return True, f"already present at {tilde(existing, self.home)}"
+        if os.environ.get("CARGO_NET_OFFLINE", "").lower() in ("1", "true"):
+            return False, "CARGO_NET_OFFLINE is set"
+        binstall = find_cargo_tool(self.home, "cargo-binstall")
+        cargo = find_cargo_tool(self.home, "cargo")
+        if binstall is None and cargo is None:
+            return False, "cargo not found on PATH or ~/.cargo/bin"
+        errors: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="cst-sccache-build-", dir="/tmp") as tmpdir:
+            env = self._base_env(tmpdir)
+            for name, argv, timeout in (
+                ("cargo-binstall", [binstall, "--no-confirm", "sccache"] if binstall is not None else None, 120),
+                (
+                    "cargo install --locked",
+                    [cargo, "install", "sccache", "--locked"] if cargo is not None else None,
+                    600,
+                ),
+            ):
+                if argv is None:
+                    continue
+                r = RUNNER.run(argv, cwd=self.home, base_env=env, timeout=timeout)
+                installed = self.find_sccache()
+                if r.cause is None and r.returncode == 0 and installed is not None:
+                    return True, f"installed into {tilde(installed, self.home)} via {name}"
+                errors.append(_failure_detail(r, name))
+        return False, "; ".join(errors) if errors else "installation did not produce sccache"
 
 
 def sccache_stats(exe: str, env: Mapping[str, str]) -> dict[str, str]:
@@ -110,12 +193,7 @@ def sccache_status_lines(home: str) -> list[str]:
         )
     else:
         out.append(f"sccache cache: ~/{SCCACHE_DIR_REL} not there yet")
-    exe = shutil.which("sccache") or ""
-    if not exe:
-        # `cargo install sccache` lands in ~/.cargo/bin, which a PATH may lack.
-        ch = os.environ.get("CARGO_HOME", "")
-        c = os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "sccache")
-        exe = c if os.access(c, os.X_OK) else ""
+    exe = find_sccache_binary(home) or ""
     socks = [p for p in sccache_sockets(home) if socket_answers(p)]
     if not exe and socks:
         out.append(f"sccache servers running: {len(socks)} (no sccache on the host's PATH to ask them)")

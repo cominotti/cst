@@ -48,6 +48,7 @@ from toolchains.adapters import home_files as tc_home_files
 from toolchains.adapters import build_tree as tc_build_tree
 from toolchains.adapters import processes as tc_processes
 from toolchains.adapters import cargo as tc_cargo
+from toolchains.adapters import sccache as tc_sccache
 from toolchains.adapters import units as tc_units
 
 sys.dont_write_bytecode = True
@@ -87,6 +88,17 @@ def quiet_signals(test: unittest.TestCase) -> None:
     p = mock.patch.object(tc_program, "restore_default_signals", return_value=None)
     p.start()
     test.addCleanup(p.stop)
+
+
+class _SafeSccacheInstaller(tc_sccache.SccacheInstaller):
+    """Real lookup against scratch home/PATH, never invokes real cargo install."""
+
+    @override
+    def install(self) -> tuple[bool, str]:
+        existing = self.find_sccache()
+        if existing is not None:
+            return True, existing
+        return False, "stubbed in unit tests"
 
 
 class Base(unittest.TestCase):
@@ -196,6 +208,7 @@ class Base(unittest.TestCase):
             units=lambda out: tc_units.UserUnits(out, lambda: fake_manager(self.fake_systemctl)),
             procs=lambda: list(self.cargo_running),
             tree=tree,
+            sccache_installer=_SafeSccacheInstaller(self.home),
             journal=False,
         )
 

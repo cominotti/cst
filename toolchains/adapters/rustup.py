@@ -14,16 +14,23 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from toolchains.domain.build import Workspaces
     from toolchains.domain.prune import Limits
 
 from cst_core.domain.shapes import json_object, parse_toml
 
-from toolchains.domain.build import TOOL_FILE_MAX, WORKSPACE_REL, short_toolchain, toolchain_pattern
+from toolchains.domain.build import (
+    TOOL_FILE_MAX,
+    WORKSPACE_REL,
+    hakari_advisory_lines,
+    short_toolchain,
+    toolchain_pattern,
+)
 from toolchains.domain.common import gib, tilde
 from toolchains.adapters.build_tree import tree_size
-from toolchains.adapters.cargo import claimed_folders
+from toolchains.adapters.cargo import claimed_folders, hakari_candidates
 from toolchains.adapters.program import RUNNER, where_text
-from toolchains.adapters.sccache import sccache_status_lines
+from toolchains.adapters.sccache import find_cargo_tool, sccache_status_lines
 
 
 def rustup_home(home: str) -> str:
@@ -101,7 +108,7 @@ def named_in(files: Sequence[str], names: Sequence[str], max_files: int) -> tupl
     return found, True
 
 
-def toolchain_lines(home: str, limits: Limits) -> list[str]:
+def toolchain_lines(home: str, limits: Limits, *, ws: Workspaces | None = None) -> list[str]:
     """The report of `status`: installed rustup toolchains, their size, and
     which rust-toolchain files under ~/Workspace pin them (LIMITS: how many
     build files it reads at most, and the seconds one git call may take)."""
@@ -111,7 +118,7 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
         names = sorted(e.name for e in os.scandir(tdir) if e.is_dir())
     except OSError:
         return [f"{where_text(tdir, home)}: none installed (or not readable)"]
-    ws = claimed_folders(None, home, limits, with_cargo=False)
+    ws = claimed_folders(None, home, limits, with_cargo=False) if ws is None else ws
     pins = _toolchain_pins(ws.pins, rh)
     default = rustup_default(home, rh)
     out = [f"where:    {where_text(tdir, home)}", f"default:  {short_toolchain(default) if default else 'unknown'}"]
@@ -223,9 +230,21 @@ class InstalledTools:
     def __init__(self, home: str, limits: Limits) -> None:
         self.home = home
         self.limits = limits
+        self._ws: Workspaces | None = None
+
+    def _workspaces(self) -> Workspaces:
+        if self._ws is None:
+            self._ws = claimed_folders(None, self.home, self.limits, with_cargo=False)
+        return self._ws
 
     def rust_toolchains(self) -> list[str]:
-        return toolchain_lines(self.home, self.limits)
+        return toolchain_lines(self.home, self.limits, ws=self._workspaces())
 
     def sccache(self) -> list[str]:
         return sccache_status_lines(self.home)
+
+    def hakari_advisory(self) -> list[str]:
+        ws = self._workspaces()
+        candidates = hakari_candidates(ws, self.home)
+        has_hakari = find_cargo_tool(self.home, "cargo-hakari") is not None
+        return hakari_advisory_lines(candidates, has_hakari=has_hakari, home=self.home)

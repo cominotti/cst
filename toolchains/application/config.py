@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from cst_core.domain.files import OwnedState
 from cst_core.ports import WriteFailed
 from toolchains.domain.build import HASH_VAR, ROOT_REL
-from toolchains.domain.common import CONF_REL, ConfigError, NAME, ToolchainsAction, tilde
+from toolchains.domain.common import CONF_REL, ConfigError, NAME, RustIncremental, ToolchainsAction, tilde
 from toolchains.domain.config import (
     CANNOT_READ,
     CARGO_CFG_REL,
@@ -25,9 +25,11 @@ from toolchains.domain.config import (
     ConfigMark,
     ConfigTool,
     ConfigView,
+    IncrementalState,
     LEAN_REBUILD,
     LeanState,
     SCCACHE_REBUILD,
+    SccacheInstallMethod,
     SccacheState,
     ToolSettingState,
     UV_CFG_REL,
@@ -38,6 +40,7 @@ from toolchains.domain.config import (
     WRAPPER_REL,
     WrapperValues,
     cargo_text,
+    incremental_state,
     lean_state,
     sccache_state,
     wrapper_path,
@@ -47,7 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from toolchains.domain.prune import Settings
-    from toolchains.ports import HomeFilesPort, RunOutputPort
+    from toolchains.ports import HomeFilesPort, RunOutputPort, SccacheInstallerPort
 
 
 def _flag_wanted(settings: Settings | None, flag: bool | None, option: str, name: str) -> tuple[bool, str]:
@@ -66,6 +69,14 @@ def lean_wanted(settings: Settings | None, lean: bool | None) -> tuple[bool, str
 
 def sccache_wanted(settings: Settings | None, flag: bool | None) -> tuple[bool, str]:
     return _flag_wanted(settings, flag, "RUST_SCCACHE", "sccache")
+
+
+def incremental_wanted(settings: Settings | None) -> tuple[bool, str]:
+    """(disable_incremental, why) from RUST_INCREMENTAL=auto|off."""
+    if settings is None:
+        return False, "bad settings"
+    off = settings.options["RUST_INCREMENTAL"] == RustIncremental.OFF
+    return off, "RUST_INCREMENTAL=off" if off else "RUST_INCREMENTAL=auto"
 
 
 def wrapper_values(settings: Settings | None) -> WrapperValues:
@@ -92,6 +103,7 @@ class ToolConfig:
     files: HomeFilesPort
     out: RunOutputPort
     settings: Callable[[], Settings]
+    sccache_installer: SccacheInstallerPort
 
     def items(self) -> list[tuple[ConfigTool, str, ToolSettingState, str]]:
         """[(name, path, state, text to append)]; state: set | by-hand | write |
@@ -151,8 +163,8 @@ class ToolConfig:
             if not st["conflicts"]:
                 out.append((ConfigMark.OK, shown, f"lean debug info set ({why})"))
             return out
-        what = "; ".join(b.replace("\n", " ").strip() for _, b in st["add"])
-        if st["append"]:
+        what = "; ".join(item for _, item in st["add"])
+        if st["rewrite"]:
             out.append(
                 (
                     ConfigMark.WRITE,
@@ -186,15 +198,12 @@ class ToolConfig:
             if not st["conflicts"]:
                 self.out.say(f"kept:      {path} (lean debug info already set)")
             return 0
-        if not st["append"]:
+        if not st["rewrite"]:
             self.out.say(f"NOTE: lean debug info: {path} already has these tables: add by hand:", 5, err=True)
-            for _, block in st["add"]:
-                for line in block.splitlines():
-                    self.out.say(f"      {line}", 5, err=True)
+            for _, item in st["add"]:
+                self.out.say(f"      {item}", 5, err=True)
             return 0
-        err = self.files.append(path, st["append"])
-        if err:
-            self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+        if self._rewrite_failed(path, st["rewrite"]):
             return 1
         self.out.say(
             f"written:   {path} (lean debug info, {why}; the next dev build of each workspace compiles everything once)"
@@ -260,7 +269,8 @@ class ToolConfig:
                         ),
                     )
                 ]
-                return out + [ln for ln in self.wrapper_lines(verb, text, values) if ln[0] != ConfigMark.OK]
+                out += [ln for ln in self.wrapper_lines(verb, text, values) if ln[0] != ConfigMark.OK]
+                return out + self._sccache_binary_lines(verb, want=False)
             return [(ConfigMark.OFF, shown, off + (f"; {yours}" if foreign else ""))]
         if foreign:
             return [(ConfigMark.KEEP, shown, f"sccache ({why}): {yours} (CST never overwrites it)")]
@@ -287,7 +297,54 @@ class ToolConfig:
                     ),
                 )
             )
-        return out
+        return out + self._sccache_binary_lines(verb, want=True)
+
+    def _sccache_binary_lines(self, verb: ConfigView, *, want: bool) -> list[ConfigLine]:
+        """Status or plan lines when sccache binary itself is absent while rustc-wrapper applies."""
+        if self.sccache_installer.find_sccache() is not None:
+            return []
+        target = "~/.cargo/bin/sccache"
+        if not want:
+            return [
+                (
+                    ConfigMark.UNKNOWN,
+                    target,
+                    "sccache binary missing (rustc-wrapper runs rustc directly until sccache is installed)",
+                )
+            ]
+        method = self.sccache_installer.install_method()
+        fix = "" if verb == ConfigView.PLAN else f" (fix: {self.prog} config apply)"
+        if method == SccacheInstallMethod.BINSTALL:
+            note = (
+                "sccache binary missing: apply tries cargo-binstall --no-confirm sccache "
+                "(fallback: cargo install sccache --locked; fail-open)" + fix
+            )
+            return [(ConfigMark.WRITE, target, note)]
+        if method == SccacheInstallMethod.CARGO:
+            note = "sccache binary missing: apply tries cargo install sccache --locked (fail-open)" + fix
+            return [(ConfigMark.WRITE, target, note)]
+        return [
+            (
+                ConfigMark.UNKNOWN,
+                target,
+                "sccache binary missing and cargo not found (wrapper runs rustc directly until sccache is installed)",
+            )
+        ]
+
+    def _ensure_sccache_binary(self) -> None:
+        """Install sccache into ~/.cargo/bin if missing (fail-open)."""
+        if self.sccache_installer.find_sccache() is not None:
+            return
+        ok, detail = self.sccache_installer.install()
+        if ok:
+            self.out.say(f"installed: sccache ({detail})")
+        else:
+            self.out.say(
+                f"NOTE: sccache: could not install sccache ({detail}); "
+                "rustc-wrapper will run rustc directly until sccache is installed",
+                5,
+                err=True,
+            )
 
     def _sccache_off_lines(self, st: SccacheState, shown: str, why: str) -> list[ConfigLine]:
         """The lines of --no-sccache (WHY: what turns it off) for cargo's config SHOWN in state ST."""
@@ -399,16 +456,135 @@ class ToolConfig:
             return 1
         if st["ours"]:
             self.out.say(f"kept:      {path} (rustc-wrapper already set)")
+            self._ensure_sccache_binary()
             return 0
         if not st["add"]:
             self.out.say(
                 f"NOTE: sccache: {path}: CST cannot add the key safely: put this into [build] by hand:", 5, err=True
             )
             self.out.say(f"      rustc-wrapper = {json.dumps(wrapper_path(home))}", 5, err=True)
+            self._ensure_sccache_binary()
             return 0
         if self._rewrite_failed(path, st["add"]):
             return 1
         self.out.say(f"written:   {path} (rustc-wrapper, {why}: rustc goes through sccache where it is on PATH)")
+        self._ensure_sccache_binary()
+        return 0
+
+    def incremental_state(self) -> IncrementalState:
+        """See toolchains.domain.config.incremental_state (cargo's config in the home)."""
+        path = os.path.join(self.home, CARGO_CFG_REL)
+        return incremental_state(path, self.files.read_settings(path))
+
+    def incremental_lines(self, verb: ConfigView, settings: Settings | None) -> list[ConfigLine]:
+        """Plan or status line for RUST_INCREMENTAL=auto|off."""
+        st = self.incremental_state()
+        shown = tilde(st["path"], self.home)
+        want, why = incremental_wanted(settings)
+        if st["error"]:
+            return [(ConfigMark.UNKNOWN, shown, f"incremental builds: the file {st['error']}")]
+        if not want:
+            return self._incremental_auto_lines(st, shown, why)
+        if st["value"] is False:
+            return [(ConfigMark.OK, shown, f"incremental builds: off ({why})")]
+        if st["value"] is not None:
+            return [
+                (
+                    ConfigMark.KEEP,
+                    shown,
+                    f"incremental builds ({why}): [build] incremental = {json.dumps(st['value'])} is yours: left as it is",
+                )
+            ]
+        if st["add"]:
+            fix = "" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"
+            return [(ConfigMark.WRITE, shown, f"incremental builds ({why}): [build] incremental = false{fix}")]
+        return [
+            (
+                ConfigMark.BY_HAND,
+                shown,
+                f"incremental builds ({why}): CST cannot add the key safely here: put incremental = false into [build] yourself",
+            )
+        ]
+
+    @staticmethod
+    def _incremental_auto_lines(st: IncrementalState, shown: str, why: str) -> list[ConfigLine]:
+        if st["ours"]:
+            if st["remove"]:
+                return [
+                    (ConfigMark.REMOVE, shown, f"incremental builds: CST's [build] incremental = false line ({why})")
+                ]
+            return [
+                (
+                    ConfigMark.BY_HAND,
+                    shown,
+                    f"incremental builds ({why}): CST cannot remove its incremental = false line safely: delete it yourself",
+                )
+            ]
+        if st["value"] is not None:
+            return [
+                (
+                    ConfigMark.KEEP,
+                    shown,
+                    f"incremental builds ({why}): [build] incremental = {json.dumps(st['value'])} is yours: left as it is",
+                )
+            ]
+        return [
+            (
+                ConfigMark.OFF,
+                shown,
+                f"incremental builds: cargo default ({why}; set RUST_INCREMENTAL=off to disable globally, or CARGO_INCREMENTAL=0 in agent/CI shells)",
+            )
+        ]
+
+    def incremental_apply(self, settings: Settings | None) -> int:
+        want, why = incremental_wanted(settings)
+        st = self.incremental_state()
+        path = st["path"]
+        if st["error"]:
+            if want or st["ours"]:
+                self.out.say(f"{NAME}: incremental builds: {path} {st['error']}: left as it is", 3, err=True)
+                return 1
+            return 0
+        if not want:
+            return self._incremental_remove(st, path, why)
+        return self._incremental_write(st, path, why)
+
+    def _incremental_remove(self, st: IncrementalState, path: str, why: str) -> int:
+        if not st["ours"]:
+            return 0
+        if not st["remove"]:
+            self.out.say(
+                f"NOTE: incremental builds: {path}: CST cannot remove its incremental = false line safely: delete it yourself",
+                5,
+                err=True,
+            )
+            return 0
+        if self._rewrite_failed(path, st["remove"]):
+            return 1
+        self.out.say(f"removed:   {path} (CST's [build] incremental = false line, {why})")
+        return 0
+
+    def _incremental_write(self, st: IncrementalState, path: str, why: str) -> int:
+        if st["value"] is False:
+            self.out.say(f"kept:      {path} (incremental = false already set)")
+            return 0
+        if st["value"] is not None:
+            self.out.say(
+                f"NOTE: incremental builds: {path}: incremental = {json.dumps(st['value'])} is yours: left as it is",
+                5,
+                err=True,
+            )
+            return 0
+        if not st["add"]:
+            self.out.say(
+                f"NOTE: incremental builds: {path}: CST cannot add the key safely: put incremental = false into [build] by hand",
+                5,
+                err=True,
+            )
+            return 0
+        if self._rewrite_failed(path, st["add"]):
+            return 1
+        self.out.say(f"written:   {path} (incremental = false, {why})")
         return 0
 
     def lines(
@@ -428,6 +604,7 @@ class ToolConfig:
                 self._cargo_line(st, shown, verb) if name == ConfigTool.CARGO else self._uv_line(st, shown, verb)
             )
         out += self.lean_lines(verb, settings, lean)
+        out += self.incremental_lines(verb, settings)
         out += self.sccache_lines(verb, settings, sccache)
         return out
 
@@ -482,9 +659,13 @@ class ToolConfig:
             settings = self.settings()
         except ConfigError as e:
             settings = None
-            off = [w for w, flag in (("lean debug info", lean), ("sccache", sccache)) if flag is None]
+            off = [
+                w
+                for w, flag in (("lean debug info", lean), ("incremental", None), ("sccache", sccache))
+                if flag is None
+            ]
             if off:
-                self.out.say(f"note: BAD SETTINGS ({e}): {' and '.join(off)} treated as off", 4, err=True)
+                self.out.say(f"note: BAD SETTINGS ({e}): {', '.join(off)} treated as off", 4, err=True)
         if action == ToolchainsAction.PLAN:
             lines = self.lines(ConfigView.PLAN, settings, lean, sccache)
             for st, shown, note in lines:
@@ -519,4 +700,5 @@ class ToolConfig:
                         continue
                     self.out.say(f"written:   {path}")
         rc = max(rc, self.lean_apply(settings, lean))
+        rc = max(rc, self.incremental_apply(settings))
         return max(rc, self.sccache_apply(settings, sccache))

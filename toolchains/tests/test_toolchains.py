@@ -320,9 +320,10 @@ class DefaultsTest(Scratch):
                 "PYTHON_UV_ENABLED": "yes",
                 "PYTHON_UV_INTERVAL": "1d",
                 "RUST_LEAN_DEBUGINFO": "no",
+                "RUST_INCREMENTAL": "auto",
                 "RUST_SCCACHE": "no",
                 "RUST_SCCACHE_CACHE_SIZE": "25G",
-                "RUST_SCCACHE_WORKSPACE": "yes",
+                "RUST_SCCACHE_WORKSPACE": "no",
             },
         )
 
@@ -376,7 +377,7 @@ class ConfigTest(Scratch):
         self.run_main("config", "apply")
         rc, again = self.run_main("config", "plan")
         self.assertEqual(rc, 0, again)
-        self.assertEqual(column(again), ["ok       ", "ok       ", "off      ", "off      "])
+        self.assertEqual(column(again), ["ok       ", "ok       ", "off      ", "off      ", "off      "])
         # Every word the column can hold (the others need a home this test does not build).
         self.assertEqual(
             {m.name: m.value for m in tcd_config.ConfigMark},
