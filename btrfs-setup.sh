@@ -162,12 +162,13 @@
 #                          btrfs:top-mount (keeps flushoncommit untouched).
 #                          `status` and `plan` work in a toolbox; `apply` and
 #                          `revert` need root on the host.
-#   cache [status|plan|attach|detach] [--user NAME] [--no-cache] [--no-scratchpad] [--allow-nonempty]
-#                          multi-user bind mounts from a dedicated NVMe cache drive
-#                          (/var/mnt/cache/<user> -> ~/.cache and
-#                          /var/mnt/scratchpad/<user> -> ~/Scratchpad). `status` and
-#                          `plan` run in a toolbox; `attach` and `detach` need
-#                          root on the host.
+#   cache [status|plan|attach|detach|provision|unprovision] [OPTIONS]
+#                          provision the dedicated NVMe cache drive (LUKS2 + Btrfs +
+#                          crypttab + fstab base mounts via /etc/cst/btrfs-cache.conf)
+#                          and manage per-user bind mounts (/var/mnt/cache/<user> ->
+#                          ~/.cache with optional --migrate, /var/mnt/scratchpad/<user> ->
+#                          ~/Scratchpad). `status`, `plan`, and `provision plan` work in a
+#                          toolbox; mutating commands need root on the host.
 #   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
 #                          per-device weekly scrub speed limit (SCRUB_LIMIT in
 #                          /etc/btrfs-setup/snapshots.conf + service drop-in).

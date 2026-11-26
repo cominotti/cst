@@ -15582,3 +15582,120 @@ echo E2E-OK
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_282_btrfs_cache_provision_crypttab_and_migrate_busy_cycle(self) -> None:
+        """Verify `render_crypttab_line` parses cleanly in real systemd-cryptsetup-generator with nofail,
+        and `cst btrfs cache plan/attach --migrate` blocks on busy processes by default, succeeds with
+        data copied + original moved to `.pre-cst-cache`, reloads systemd, and detaches cleanly."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-cache-282"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            set +e
+            {fstab_put_back(w)}
+            {file_put_back("/etc/crypttab", w, "crypttab")}
+            systemctl daemon-reload || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            gen=/usr/lib/systemd/system-generators/systemd-cryptsetup-generator
+            [[ -x $gen ]] || {{ echo "missing $gen" >&2; exit 1; }}
+            rm -rf {w}
+            mkdir -p {w}/genout {w}/genout_fail {w}/bin {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1/.cache/sub
+            {fstab_saved(w)}
+            {file_saved("/etc/crypttab", w, "crypttab")}
+
+            # 1. Verify render_crypttab_line generates systemd-cryptsetup@cache.service without blocking boot.
+            python3 -I -B - {w}/crypttab.test {w}/crypttab.fail <<'EOF'
+import sys
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.cache.domain.provision import CacheHardwareSpec, render_crypttab_line
+spec = CacheHardwareSpec(partuuid="12345678-1234-1234-1234-123456789abc", size_bytes=500107862016)
+line = render_crypttab_line(spec, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write(line + "\\n")
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    fh.write(line.replace("nofail,", "") + "\\n")
+EOF
+            SYSTEMD_CRYPTTAB={w}/crypttab.test "$gen" {w}/genout {w}/genout {w}/genout
+            SYSTEMD_CRYPTTAB={w}/crypttab.fail "$gen" {w}/genout_fail {w}/genout_fail {w}/genout_fail
+            [[ -f "{w}/genout/systemd-cryptsetup@cache.service" ]]
+            # Prove test can bite: omitting nofail creates cryptsetup.target.requires symlink; with nofail it does not.
+            [[ -L {w}/genout_fail/cryptsetup.target.requires/systemd-cryptsetup@cache.service ]]
+            if [[ -e {w}/genout/cryptsetup.target.requires/systemd-cryptsetup@cache.service ]]; then exit 1; fi
+            [[ -L {w}/genout/cryptsetup.target.wants/systemd-cryptsetup@cache.service ]]
+
+            # 2. Prepare test root with mounted bases and non-empty ~/.cache including dotfile.
+            cat >{w}/etc/passwd <<'EOF'
+root:x:0:0:root:/root:/bin/bash
+u1:x:1000:1000::/var/home/u1:/bin/bash
+EOF
+            echo "cache UUID=dev-u /etc/cryptsetup-keys.d/cache.key nofail,discard" >{w}/etc/crypttab
+            cat >{w}/etc/fstab <<'EOF'
+/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0
+/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress=zstd:1,nofail 0 0
+EOF
+            row() {{ printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$@"; }}
+            {{
+                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
+                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime,compress=zstd:1 uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime,compress=zstd:1 uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cat >{w}/bin/mnt-stub <<'STUB'
+{CACHE_MOUNT_STUB}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            echo "payload" >{w}/var/home/u1/.cache/sub/item.bin
+            echo "dot" >{w}/var/home/u1/.cache/.dotfile
+
+            # 3. Hold an open file inside ~/.cache -> plan --migrate & attach --migrate must block.
+            python3 -I -B -c 'import sys, time; fh=open(sys.argv[1]); open(sys.argv[2], "w").close(); time.sleep(30)' \
+                {w}/var/home/u1/.cache/sub/item.bin {w}/busy.ready </dev/null >/dev/null 2>&1 &
+            busy_pid=$!
+            cleanup_busy() {{ kill "$busy_pid" 2>/dev/null || true; wait "$busy_pid" 2>/dev/null || true; }}
+            trap cleanup_busy EXIT
+            for _ in $(seq 1 50); do [[ -f {w}/busy.ready ]] && break; sleep 0.1; done
+            [[ -f {w}/busy.ready ]]
+            plan_busy="$(/opt/cst-rw/cst btrfs cache plan --user u1 --migrate)"
+            grep -qF "BLOCKED:" <<<"$plan_busy"
+            grep -qF "python3 (pid $busy_pid)" <<<"$plan_busy"
+            rc=0; /opt/cst-rw/cst btrfs cache attach --user u1 --migrate >{w}/att_busy.out 2>&1 || rc=$?
+            [[ "$rc" -eq 1 ]]
+            grep -qF "python3 (pid $busy_pid)" {w}/att_busy.out
+            [[ ! -e {w}/var/home/u1/.cache.pre-cst-cache ]]
+            cleanup_busy
+            trap - EXIT
+
+            # 4. Now attach --migrate succeeds, preserves files + dotfile, moves old dir to backup, idempotent rerun + detach.
+            att_out="$(/opt/cst-rw/cst btrfs cache attach --user u1 --migrate)"
+            grep -qF "Migrated /var/home/u1/.cache -> /var/mnt/cache/u1" <<<"$att_out"
+            grep -qF "rm -rf /var/home/u1/.cache.pre-cst-cache" <<<"$att_out"
+            [[ -d {w}/var/home/u1/.cache.pre-cst-cache ]]
+            [[ -z "$(ls -A {w}/var/home/u1/.cache)" ]]
+            cmp -s {w}/var/mnt/cache/u1/sub/item.bin {w}/var/home/u1/.cache.pre-cst-cache/sub/item.bin
+            [[ "$(cat {w}/var/mnt/cache/u1/.dotfile)" == "dot" ]]
+            cp -a {w}/etc/fstab /etc/fstab
+            cp -a {w}/etc/crypttab /etc/crypttab
+            systemctl daemon-reload
+
+            att2_out="$(/opt/cst-rw/cst btrfs cache attach --user u1 --migrate)"
+            grep -qF "Already attached for u1; nothing to do." <<<"$att2_out"
+            /opt/cst-rw/cst btrfs cache detach --user u1 >/dev/null
+            if grep -qF "user=u1" {w}/etc/fstab; then exit 1; fi
+            echo E2E-282-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-282-OK", out)

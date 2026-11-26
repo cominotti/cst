@@ -3371,3 +3371,135 @@ assert d["samples"] >= 1, d["samples"]
             """,
         ).stdout
         self.assertIn("E2E-BULK-KEEP-OK", out)
+
+    def test_25_btrfs_cache_provision_and_migrate_full_cycle(self) -> None:
+        """Full Tier 2 provisioning + subvolume migration lifecycle on a real GPT loopback partition:
+        provision plan --device -> provision init -> apply refuses without --format -> apply --format --yes
+        (LUKS2 + Btrfs -m dup -d single + cache/scratchpad subvols + crypttab + fstab + mounts) ->
+        idempotent apply -> real btrfs subvol ~/.cache attach --migrate -> cst doctor clean ->
+        unprovision refused while user attached -> detach -> unprovision -> verify zero leftovers."""
+        w = "/var/tmp/e2e-25-cache"
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            f"""
+            set +e
+            umount /home/e2e25/.cache /home/e2e25/Scratchpad 2>/dev/null
+            umount /var/mnt/scratchpad /var/mnt/cache 2>/dev/null
+            cryptsetup close cache25 2>/dev/null
+            if [[ -f {w}/loop.dev ]]; then losetup -d "$(cat {w}/loop.dev)" 2>/dev/null; fi
+            if [[ -f {w}/partuuid ]]; then rm -f "/dev/disk/by-partuuid/$(cat {w}/partuuid)"; fi
+            if [[ -f {w}/created-part ]]; then rm -f "$(cat {w}/created-part)" 2>/dev/null || true; fi
+            btrfs subvolume delete /home/e2e25/.cache /home/e2e25/.cache.pre-cst-cache 2>/dev/null || true
+            userdel -rf e2e25 2>/dev/null
+            rmdir /var/mnt/scratchpad /var/mnt/cache 2>/dev/null || true
+            rm -f /etc/cst/btrfs-cache.conf /etc/cryptsetup-keys.d/cache25.key
+            if [[ -e {w}/fstab.bak ]]; then mv {w}/fstab.bak /etc/fstab; elif [[ -e {w}/no-fstab ]]; then rm -f /etc/fstab; fi
+            if [[ -e {w}/crypttab.bak ]]; then mv {w}/crypttab.bak /etc/crypttab; elif [[ -e {w}/no-crypttab ]]; then rm -f /etc/crypttab; fi
+            systemctl daemon-reload || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            f"""
+            set -euo pipefail
+            rm -rf {w}
+            mkdir -p {w}
+            if [[ -e /etc/fstab ]]; then cp -a /etc/fstab {w}/fstab.bak; else : >{w}/no-fstab; fi
+            if [[ -e /etc/crypttab ]]; then cp -a /etc/crypttab {w}/crypttab.bak; else : >{w}/no-crypttab; fi
+
+            # 1. Create sparse image with GPT partition and loopback device.
+            quiet() {{
+                local qout
+                if ! qout="$("$@" 2>&1)"; then
+                    echo "CMD FAILED: $*" >&2
+                    printf '%s\n' "$qout" >&2
+                    return 1
+                fi
+            }}
+            truncate -s 384M {w}/cache.img
+            printf 'label: gpt\\nsize=350M,type=0FC63DAF-8483-4772-8E79-3D69D8477DE4\\n' | sfdisk {w}/cache.img >/dev/null
+            loop="$(losetup --find --show --partscan {w}/cache.img)"
+            echo "$loop" >{w}/loop.dev
+            part="${{loop}}p1"
+            sys_dev="/sys/class/block/${{loop##*/}}p1/dev"
+            for _ in $(seq 1 20); do [[ -r "$sys_dev" ]] && break; sleep 0.1; done
+            [[ -r "$sys_dev" ]]
+            if [[ ! -b "$part" ]]; then
+                IFS=: read -r maj min <"$sys_dev"
+                mknod -m 0660 "$part" b "$maj" "$min"
+                echo "$part" >{w}/created-part
+            fi
+            [[ -b "$part" ]]
+            pu="$(sfdisk --part-uuid "$loop" 1 | tr '[:upper:]' '[:lower:]')"
+            echo "$pu" >{w}/partuuid
+            mkdir -p /dev/disk/by-partuuid
+            if [[ ! -e "/dev/disk/by-partuuid/$pu" ]]; then ln -sf "$part" "/dev/disk/by-partuuid/$pu"; fi
+
+            # 2. provision plan --device -> init -> plan -> refuse apply without --format.
+            p0="$(/opt/cst-rw/cst btrfs cache provision plan --device "$part" --mapper cache25)"
+            grep -qF "CACHE_PARTUUID=$pu" <<<"$p0"
+            [[ ! -e /etc/cst/btrfs-cache.conf ]]
+
+            quiet /opt/cst-rw/cst btrfs cache provision init --device "$part" --mapper cache25
+            [[ -f /etc/cst/btrfs-cache.conf ]]
+            rc=0; /opt/cst-rw/cst btrfs cache provision apply >{w}/nofmt.out 2>&1 || rc=$?
+            [[ "$rc" -eq 1 ]]
+            grep -qF -- "--format" {w}/nofmt.out
+
+            # 3. provision apply --format --yes -> verify LUKS2, Btrfs subvols, crypttab, fstab, mounts, idempotency.
+            quiet /opt/cst-rw/cst btrfs cache provision apply --format --yes
+            cryptsetup isLuks "$part"
+            [[ -b /dev/mapper/cache25 ]]
+            mountpoint -q /var/mnt/cache
+            mountpoint -q /var/mnt/scratchpad
+            if findmnt -rn -o OPTIONS --target /var/mnt/cache | grep -qw flushoncommit; then exit 1; fi
+            grep -qF "cache25 UUID=" /etc/crypttab
+            grep -qF "nofail" /etc/crypttab
+            grep -qF "/dev/mapper/cache25 /var/mnt/cache btrfs" /etc/fstab
+            grep -qF "nothing to do" <<<"$(/opt/cst-rw/cst btrfs cache provision apply)"
+
+            # 4. Create test user with a real btrfs subvolume ~/.cache (if /home supports btrfs) and migrate it.
+            useradd -m e2e25
+            mkdir -p /home/e2e25
+            rm -rf /home/e2e25/.cache
+            if [[ "$(stat -f -c %T /home/e2e25)" == "btrfs" ]]; then
+                btrfs subvolume create /home/e2e25/.cache >/dev/null
+            else
+                mkdir -p /home/e2e25/.cache
+            fi
+            chown e2e25:e2e25 /home/e2e25/.cache
+            echo "tier2-data" >/home/e2e25/.cache/payload.txt
+            chown e2e25:e2e25 /home/e2e25/.cache/payload.txt
+
+            mig_out="$(/opt/cst-rw/cst btrfs cache attach --user e2e25 --migrate)"
+            grep -qF "Migrated " <<<"$mig_out"
+            grep -qF ".cache.pre-cst-cache" <<<"$mig_out"
+            mountpoint -q /home/e2e25/.cache
+            mountpoint -q /home/e2e25/Scratchpad
+            [[ "$(cat /home/e2e25/.cache/payload.txt)" == "tier2-data" ]]
+
+            # 5. cst doctor reports no btrfs-cache warnings.
+            doc_out="$(/opt/cst-rw/cst doctor 2>&1 || true)"
+            if grep -E "WARN.*btrfs cache:" <<<"$doc_out"; then exit 1; fi
+            grep -qF "ok     btrfs cache: /etc/cst/btrfs-cache.conf" <<<"$doc_out"
+
+            # 6. unprovision refuses while attached, succeeds cleanly after detach, leaving zero leftovers.
+            rc_u=0; /opt/cst-rw/cst btrfs cache unprovision >{w}/unprov_busy.out 2>&1 || rc_u=$?
+            [[ "$rc_u" -eq 1 ]]
+            grep -qF "detach --user e2e25" {w}/unprov_busy.out
+
+            quiet /opt/cst-rw/cst btrfs cache detach --user e2e25
+            quiet /opt/cst-rw/cst btrfs cache unprovision
+            if mountpoint -q /var/mnt/cache || mountpoint -q /var/mnt/scratchpad; then exit 1; fi
+            [[ ! -e /dev/mapper/cache25 ]]
+            if grep -qF "cache25 " /etc/crypttab; then exit 1; fi
+            if grep -qF "provision=base" /etc/fstab; then exit 1; fi
+            [[ -f /etc/cst/btrfs-cache.conf ]]
+            [[ -f /etc/cryptsetup-keys.d/cache25.key ]]
+            echo E2E-25-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-25-OK", out)

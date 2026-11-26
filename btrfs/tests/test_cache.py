@@ -15,7 +15,7 @@ from typing import override
 import unittest
 import unittest.mock
 
-from btrfs.cache import adapters as cache_adapters
+from btrfs.cache.adapters import mounts as cache_adapters
 from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,

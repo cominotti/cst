@@ -12,7 +12,8 @@ import os
 from collections.abc import Mapping, Sequence
 
 from btrfs.cache import domain as cache_mount_domain
-from btrfs.cache.adapters import (
+from btrfs.cache.adapters.migrate import CacheMigrationAdapter
+from btrfs.cache.adapters.mounts import (
     CacheAccounts,
     CacheFolders,
     CacheHostView,
@@ -21,8 +22,10 @@ from btrfs.cache.adapters import (
     FstabFile,
     cache_runtime,
 )
-from btrfs.cache.application import CacheMounts
+from btrfs.cache.adapters.provision import CacheProvisionAdapter
+from btrfs.cache.application.mounts import CacheMounts
 from btrfs.cache.domain import CacheMountParsedArgs
+from btrfs.cache.domain.format import format_cache_mount_usage
 from cst_core.adapters.runtime import ManagedCliEnv, ManagedCliSpec, run_managed_cli, undo_python_start
 from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort
@@ -48,6 +51,8 @@ def build_cache_mounts(
         folders=CacheFolders(rt),
         host=CacheHostView(rt),
         accounts=CacheAccounts(rt),
+        provision=CacheProvisionAdapter(rt),
+        migration=CacheMigrationAdapter(rt),
         seam_root=rt.seam_root,
     )
 
@@ -65,11 +70,11 @@ def dispatch_cache_mount_cli_action(
 _CACHE_MOUNT_SPEC = ManagedCliSpec(
     default_prog="cst btrfs cache",
     parse=cache_mount_domain.parse_cache_mount_args,
-    format_usage=cache_mount_domain.format_cache_mount_usage,
+    format_usage=format_cache_mount_usage,
     is_help=cache_mount_domain.is_cache_mount_help,
     parse_error=cache_mount_domain.cache_mount_parse_error,
     write_action=cache_mount_domain.cache_mount_write_action,
-    elevation_reason="configures per-user cache and scratchpad directories, /etc/fstab bind mounts, and live mounts",
+    elevation_reason="configures the NVMe cache drive, per-user directories, /etc/fstab bind mounts, and live mounts",
     execute=dispatch_cache_mount_cli_action,
     is_err_line=cache_mount_domain.is_cache_mount_err,
 )

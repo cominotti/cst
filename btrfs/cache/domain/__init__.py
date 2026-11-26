@@ -4,14 +4,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import posixpath
 import re
 from typing import Final, TypedDict, TypeIs
 
-from btrfs.compress.domain import FSTAB_PATH, MountEntry
+from btrfs.compress.domain import MountEntry
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, list_of, parse_json
 from cst_core.domain.text import (
     HELP_WORDS,
@@ -42,7 +42,7 @@ CACHE_SEAM_ROOT_ENV: Final = "CST_BTRFS_CACHE_ROOT"
 
 FSTYPE_BTRFS: Final = "btrfs"
 OPT_FLUSHONCOMMIT: Final = "flushoncommit"
-_FSTAB_MIN_FIELDS: Final = 4
+FSTAB_MIN_FIELDS: Final = 4
 _FSTAB_TARGET_FIELDS: Final = 2
 _MOUNTS_MIN_FIELDS: Final = 4
 _USERNAME_RE: Final = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
@@ -84,6 +84,17 @@ class CacheMountAction(StrEnum):
     PLAN = "plan"
     ATTACH = "attach"
     DETACH = "detach"
+    PROVISION = "provision"
+    UNPROVISION = "unprovision"
+    HELP = "help"
+
+
+class ProvisionSubcommand(StrEnum):
+    """Supported subcommands of `cst btrfs cache provision`."""
+
+    PLAN = "plan"
+    INIT = "init"
+    APPLY = "apply"
     HELP = "help"
 
 
@@ -113,6 +124,13 @@ class CacheMountParsedArgs:
     include_cache: bool = True
     include_scratchpad: bool = True
     allow_nonempty: bool = False
+    migrate: bool = False
+    allow_busy: bool = False
+    provision_action: ProvisionSubcommand | None = None
+    device: str | None = None
+    mapper: str | None = None
+    do_format: bool = False
+    assume_yes: bool = False
     error: str | None = None
     code: int = 0
 
@@ -198,6 +216,27 @@ class BindingProbe:
 
 
 @dataclass(frozen=True, slots=True)
+class BusyProcess:
+    """A running process holding an open fd or cwd inside `~/.cache`."""
+
+    pid: int
+    comm: str
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationProbe:
+    """Read-only facts gathered before deciding `~/.cache --migrate`."""
+
+    backup_path: str
+    backup_exists: bool
+    source_nonempty: bool
+    target_is_subvol: bool
+    busy_procs: tuple[BusyProcess, ...] = ()
+    busy_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CacheMountSnapshot:
     """Complete read-only state collected for `status`, `plan`, `attach`, and `detach`."""
 
@@ -218,11 +257,12 @@ class CacheMountSnapshot:
     plan, only when attach would write no /etc/fstab (systemd_behind_fstab, with the binds attach would
     mount), and by status where the cache is set up (fstab_lines_unread, every managed line); False
     otherwise."""
+    migration: MigrationProbe | None = None
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
     """Return True when CLI invocation asks for help."""
-    return parsed.action == CacheMountAction.HELP
+    return parsed.action == CacheMountAction.HELP or parsed.provision_action == ProvisionSubcommand.HELP
 
 
 def cache_mount_parse_error(parsed: CacheMountParsedArgs) -> tuple[int, str] | None:
@@ -232,7 +272,14 @@ def cache_mount_parse_error(parsed: CacheMountParsedArgs) -> tuple[int, str] | N
 
 def cache_mount_write_action(parsed: CacheMountParsedArgs) -> str | None:
     """Return subcommand name when the operation mutates the host."""
-    return parsed.action.value if parsed.action in (CacheMountAction.ATTACH, CacheMountAction.DETACH) else None
+    if parsed.action in (CacheMountAction.ATTACH, CacheMountAction.DETACH, CacheMountAction.UNPROVISION):
+        return parsed.action.value
+    if parsed.action == CacheMountAction.PROVISION and parsed.provision_action in (
+        ProvisionSubcommand.INIT,
+        ProvisionSubcommand.APPLY,
+    ):
+        return f"provision {parsed.provision_action.value}"
+    return None
 
 
 def is_cache_mount_err(code: int, line: str) -> bool:
@@ -353,33 +400,134 @@ class _FlagState:
     include_cache: bool = True
     include_scratchpad: bool = True
     allow_nonempty: bool = False
+    migrate: bool = False
+    allow_busy: bool = False
+    device: str | None = None
+    mapper: str | None = None
+    do_format: bool = False
+    assume_yes: bool = False
 
 
-def _consume_user_flag(tok: str, next_tok: str | None, state: _FlagState) -> tuple[_FlagState, str | None, int]:
-    """--user=NAME or --user NAME, the name without the ASCII blanks around it (a no-break space stays,
-    and the name is then no valid user name)."""
-    if tok.startswith("--user="):
+_VALUE_FLAG_SPECS: Final[dict[str, tuple[str, str]]] = {
+    "--user": ("user", "username"),
+    "--device": ("device", "value"),
+    "--mapper": ("mapper", "value"),
+}
+_CACHE_BOOL_FLAGS: Final[dict[str, tuple[tuple[CacheMountAction, ...], str, bool]]] = {
+    "--no-cache": ((CacheMountAction.PLAN, CacheMountAction.ATTACH, CacheMountAction.DETACH), "include_cache", False),
+    "--no-scratchpad": (
+        (CacheMountAction.PLAN, CacheMountAction.ATTACH, CacheMountAction.DETACH),
+        "include_scratchpad",
+        False,
+    ),
+    "--allow-nonempty": ((CacheMountAction.PLAN, CacheMountAction.ATTACH), "allow_nonempty", True),
+    "--migrate": ((CacheMountAction.PLAN, CacheMountAction.ATTACH), "migrate", True),
+    "--allow-busy": ((CacheMountAction.PLAN, CacheMountAction.ATTACH), "allow_busy", True),
+}
+
+
+def _consume_value_flag(
+    flag: str, tok: str, next_tok: str | None, state: _FlagState
+) -> tuple[_FlagState, str | None, int]:
+    """Parse `--FLAG=VALUE` or `--FLAG VALUE`, keeping interior characters and trimming ASCII blanks."""
+    attr, noun = _VALUE_FLAG_SPECS[flag]
+    if tok.startswith(f"{flag}="):
         val = strip_ascii_blanks(tok.split("=", 1)[1])
-        if not val:
-            return state, "--user requires a non-empty username", 0
-        return replace(state, user=val), None, 1
+        return (
+            (state, f"{flag} requires a non-empty {noun}", 0) if not val else (replace(state, **{attr: val}), None, 1)
+        )
     if next_tok is None or not strip_ascii_blanks(next_tok):
-        return state, "--user requires a username", 0
-    return replace(state, user=strip_ascii_blanks(next_tok)), None, 2
+        return state, f"{flag} requires a {noun}", 0
+    return replace(state, **{attr: strip_ascii_blanks(next_tok)}), None, 2
 
 
 def _step_cache_mount_flag(
     action: CacheMountAction, tok: str, next_tok: str | None, state: _FlagState
 ) -> tuple[_FlagState, str | None, int]:
     if tok == "--user" or tok.startswith("--user="):
-        return _consume_user_flag(tok, next_tok, state)
-    if tok == "--no-cache" and action in (CacheMountAction.PLAN, CacheMountAction.ATTACH, CacheMountAction.DETACH):
-        return replace(state, include_cache=False), None, 1
-    if tok == "--no-scratchpad" and action in (CacheMountAction.PLAN, CacheMountAction.ATTACH, CacheMountAction.DETACH):
-        return replace(state, include_scratchpad=False), None, 1
-    if tok == "--allow-nonempty" and action in (CacheMountAction.PLAN, CacheMountAction.ATTACH):
-        return replace(state, allow_nonempty=True), None, 1
+        return _consume_value_flag("--user", tok, next_tok, state)
+    rule = _CACHE_BOOL_FLAGS.get(tok)
+    if rule is not None and action in rule[0]:
+        return replace(state, **{rule[1]: rule[2]}), None, 1
     return state, f"unknown or unsupported option {tok!r} for `{action.value}`", 0
+
+
+def _step_provision_flag(
+    sub: ProvisionSubcommand, tok: str, next_tok: str | None, state: _FlagState
+) -> tuple[_FlagState, str | None, int]:
+    for vflag in ("--device", "--mapper"):
+        if (tok == vflag or tok.startswith(f"{vflag}=")) and sub in (
+            ProvisionSubcommand.PLAN,
+            ProvisionSubcommand.INIT,
+        ):
+            return _consume_value_flag(vflag, tok, next_tok, state)
+    if tok == "--format" and sub in (ProvisionSubcommand.PLAN, ProvisionSubcommand.APPLY):
+        return replace(state, do_format=True), None, 1
+    if tok == "--yes" and sub == ProvisionSubcommand.APPLY:
+        return replace(state, assume_yes=True), None, 1
+    return state, f"unknown or unsupported option {tok!r} for `provision {sub.value}`", 0
+
+
+def _parse_provision_args(argv: Sequence[str]) -> CacheMountParsedArgs:
+    sub, rest, head_err = parse_subcommand_head(
+        argv, ProvisionSubcommand, default=ProvisionSubcommand.PLAN, help_action=ProvisionSubcommand.HELP
+    )
+    if head_err is not None:
+        return CacheMountParsedArgs(
+            action=CacheMountAction.PROVISION,
+            provision_action=ProvisionSubcommand.HELP,
+            error=head_err,
+            code=EXIT_USAGE,
+        )
+    if sub == ProvisionSubcommand.HELP or any(tok in HELP_WORDS for tok in rest):
+        return CacheMountParsedArgs(action=CacheMountAction.PROVISION, provision_action=ProvisionSubcommand.HELP)
+    state = _FlagState()
+    i = 0
+    while i < len(rest):
+        next_tok = rest[i + 1] if i + 1 < len(rest) else None
+        state, err, step = _step_provision_flag(sub, rest[i], next_tok, state)
+        if err is not None:
+            return CacheMountParsedArgs(
+                action=CacheMountAction.PROVISION, provision_action=sub, error=err, code=EXIT_USAGE
+            )
+        i += step
+    if sub == ProvisionSubcommand.INIT and state.device is None:
+        return CacheMountParsedArgs(
+            action=CacheMountAction.PROVISION,
+            provision_action=sub,
+            error="`provision init` requires --device PATH",
+            code=EXIT_USAGE,
+        )
+    if state.mapper is not None and "/" in state.mapper:
+        return CacheMountParsedArgs(
+            action=CacheMountAction.PROVISION,
+            provision_action=sub,
+            error=f"--mapper must be a plain mapper name, not a path: {state.mapper!r}",
+            code=EXIT_USAGE,
+        )
+    return CacheMountParsedArgs(
+        action=CacheMountAction.PROVISION,
+        provision_action=sub,
+        device=state.device,
+        mapper=state.mapper,
+        do_format=state.do_format,
+        assume_yes=state.assume_yes,
+    )
+
+
+def _mount_flag_error(action: CacheMountAction, state: _FlagState) -> str | None:
+    if not state.include_cache and not state.include_scratchpad:
+        return "cannot combine --no-cache and --no-scratchpad"
+    if state.migrate and state.allow_nonempty:
+        return "cannot combine --migrate and --allow-nonempty"
+    if state.migrate and not state.include_cache:
+        return "cannot combine --migrate and --no-cache"
+    if state.allow_busy and not state.migrate:
+        return "--allow-busy requires --migrate"
+    if state.user is not None and not is_valid_username(state.user):
+        return f"invalid username {state.user!r}"
+    del action
+    return None
 
 
 def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
@@ -394,8 +542,12 @@ def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
         )
     if head_err is not None:
         return CacheMountParsedArgs(action=CacheMountAction.HELP, error=head_err, code=EXIT_USAGE)
-    if any(tok in HELP_WORDS for tok in rest):
+    if action == CacheMountAction.HELP or (
+        action != CacheMountAction.PROVISION and any(tok in HELP_WORDS for tok in rest)
+    ):
         return CacheMountParsedArgs(action=CacheMountAction.HELP)
+    if action == CacheMountAction.PROVISION:
+        return _parse_provision_args(rest)
 
     state = _FlagState()
     i = 0
@@ -406,18 +558,16 @@ def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
             return CacheMountParsedArgs(action=action, error=err, code=EXIT_USAGE)
         i += step
 
-    if not state.include_cache and not state.include_scratchpad:
-        return CacheMountParsedArgs(
-            action=action, error="cannot combine --no-cache and --no-scratchpad", code=EXIT_USAGE
-        )
-    if state.user is not None and not is_valid_username(state.user):
-        return CacheMountParsedArgs(action=action, error=f"invalid username {state.user!r}", code=EXIT_USAGE)
+    if (flag_err := _mount_flag_error(action, state)) is not None:
+        return CacheMountParsedArgs(action=action, error=flag_err, code=EXIT_USAGE)
     return CacheMountParsedArgs(
         action=action,
         user=state.user,
         include_cache=state.include_cache,
         include_scratchpad=state.include_scratchpad,
         allow_nonempty=state.allow_nonempty,
+        migrate=state.migrate,
+        allow_busy=state.allow_busy,
     )
 
 
@@ -461,14 +611,23 @@ def render_bind_fstab_line(binding: CacheMountBinding) -> str:
     )
 
 
-def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
-    if is_mount_comment(raw) or CACHE_MOUNT_MARKER not in raw:
+def split_tagged_fstab_line(raw: str, marker: str) -> tuple[list[str], dict[str, str]] | None:
+    """Split a non-comment tagged fstab line into `(mount_fields, tag_map)`."""
+    if is_mount_comment(raw) or marker not in raw:
         return None
-    body, _, meta = raw.partition(CACHE_MOUNT_MARKER)
+    body, _, meta = raw.partition(marker)
     fields = mount_fields(body)
-    if len(fields) < _FSTAB_MIN_FIELDS:
+    if len(fields) < FSTAB_MIN_FIELDS:
         return None
     tags = {key: value for key, sep, value in (tok.partition("=") for tok in meta.split()) if sep}
+    return fields, tags
+
+
+def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
+    parsed = split_tagged_fstab_line(raw, CACHE_MOUNT_MARKER)
+    if parsed is None:
+        return None
+    fields, tags = parsed
     kind = enum_member(CacheMountKind, tags.get("kind", ""))
     user = tags.get("user", "")
     if kind is None or not user:
@@ -512,23 +671,32 @@ def parse_managed_fstab_entries(fstab_text: str) -> tuple[ManagedFstabEntry, ...
     return tuple(out)
 
 
+def upsert_marked_lines[K](text: str, wanted: Mapping[K, str], classify: Callable[[str], K | None]) -> str:
+    """Replace lines whose `classify(line)` key is in `wanted` in place (deduping extras) and append missing keys."""
+    placed: set[K] = set()
+    out_lines: list[str] = []
+    for raw in file_lines(text):
+        key = classify(raw)
+        if key is None or key not in wanted:
+            out_lines.append(raw)
+        elif key not in placed:
+            out_lines.append(wanted[key])
+            placed.add(key)
+    out_lines.extend(line for key, line in wanted.items() if key not in placed)
+    return "\n".join(out_lines) + "\n" if out_lines else ""
+
+
+def _managed_key(raw: str) -> tuple[str, CacheMountKind] | None:
+    managed = _parse_one_managed_line(raw)
+    return (managed.user, managed.kind) if managed is not None else None
+
+
 def plan_attach_fstab(fstab_text: str, bindings: Sequence[CacheMountBinding]) -> str:
     """Upsert managed bind lines for `bindings`, preserving all unrelated and other-user lines; a
     repeated managed line of a wanted (user, kind) goes (one line, one mount unit per target). Only a
     newline ends a line: every other line keeps its bytes, a carriage return or a form feed included."""
     wanted = {(b.user, b.kind): render_bind_fstab_line(b) for b in bindings}
-    placed: set[tuple[str, CacheMountKind]] = set()
-    out_lines: list[str] = []
-    for line in file_lines(fstab_text):
-        managed = _parse_one_managed_line(line)
-        key = (managed.user, managed.kind) if managed is not None else None
-        if key is None or key not in wanted:
-            out_lines.append(line)
-        elif key not in placed:
-            out_lines.append(wanted[key])
-            placed.add(key)
-    out_lines.extend(text for key, text in wanted.items() if key not in placed)
-    return "\n".join(out_lines) + "\n" if out_lines else ""
+    return upsert_marked_lines(fstab_text, wanted, _managed_key)
 
 
 def plan_detach_fstab(fstab_text: str, user: str, kinds: Collection[CacheMountKind]) -> str:
@@ -599,7 +767,12 @@ def _target_blockers(probe: BindingProbe, *, allow_nonempty: bool) -> list[str]:
     return next(([msg] for on, msg in blockers if on), [])
 
 
-def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool = False) -> list[str]:
+def validate_attach_snapshot(
+    snap: CacheMountSnapshot,
+    *,
+    allow_nonempty: bool = False,
+    allow_nonempty_kinds: Collection[CacheMountKind] = (),
+) -> list[str]:
     """Return blocking error reasons preventing safe `attach`, or empty list when safe."""
     err = snapshot_error(snap)
     if err is not None or snap.user is None:
@@ -613,148 +786,9 @@ def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool =
         if kind not in checked_bases:
             errors.extend(_base_blockers(snap.bases.get(kind), probe.binding.base, snap.home_uuid))
             checked_bases.add(kind)
-        errors.extend(_target_blockers(probe, allow_nonempty=allow_nonempty))
+        errors.extend(_target_blockers(probe, allow_nonempty=allow_nonempty or kind in allow_nonempty_kinds))
     return errors
 
 
 def has_mount_option(options: str, needle: str) -> bool:
     return needle in (tok for tok in (strip_mount_blanks(t) for t in options.split(",")) if tok)
-
-
-def format_cache_mount_usage(prog: str) -> str:
-    """Usage and help text for `cst btrfs cache`."""
-    return (
-        "Multi-user bind mounts from a dedicated NVMe cache drive (~/.cache and ~/Scratchpad).\n"
-        "\n"
-        "Commands:\n"
-        "  status [--user USER]                 read-only: show base mounts, user bindings, and managed fstab\n"
-        "                                       (works as your user and inside a toolbox; default command)\n"
-        "  plan [OPTIONS]                       dry run showing directories, fstab edits, and blockers\n"
-        "  attach [OPTIONS]                     (root, host only) create 0700 dirs, CACHEDIR.TAG, mount, then update fstab\n"
-        "  detach [OPTIONS]                     (root, host only) remove its fstab lines, then unmount its binds; keeps data\n"
-        "  help                                 show this help\n"
-        "\n"
-        "Options:\n"
-        "  --user NAME                          target user account (default: $SUDO_USER or current user)\n"
-        "  --no-cache                           skip ~/.cache binding (/var/mnt/cache/<user>)\n"
-        "  --no-scratchpad                      skip ~/Scratchpad binding (/var/mnt/scratchpad/<user>)\n"
-        "  --allow-nonempty                     (plan/attach) allow bind-mounting over non-empty target directory\n"
-        "\n"
-        f"Usage: {prog} <status|plan|attach|detach|help> [options]\n"
-    )
-
-
-def _binding_state_label(probe: BindingProbe) -> str:
-    if probe.mounted_from_source:
-        return "active (fstab + mounted)" if probe.in_fstab else "mounted (not in fstab)"
-    mount_states = (
-        (probe.source_unchecked, "mounted (source not checked: base not mounted)"),
-        (probe.bind_below, "mounted (other source on top of CST's bind!)"),
-    )
-    states = (
-        *mount_states,
-        (probe.mounted_other, "mounted (other source!)"),
-        (probe.fstab_unmanaged, "fstab line CST does not manage (blocked)"),
-        (probe.in_fstab, "in fstab (not mounted)"),
-        (probe.target_is_symlink, "symlink (blocked)"),
-        (probe.source_is_symlink, "source is a symlink (blocked)"),
-        (probe.target_not_dir, "target is not a folder (blocked)"),
-        (probe.target_nonempty, "unattached (target non-empty)"),
-    )
-    return next((label for on, label in states if on), "not attached")
-
-
-def cache_seam_lines(seam_root: str) -> list[str]:
-    """The line every command prints first under a test root (CACHE_SEAM_ROOT_ENV); none without one."""
-    return [f"test seam ({CACHE_SEAM_ROOT_ENV}): {seam_root}"] if seam_root else []
-
-
-def _base_status_line(base: BaseMountInfo) -> str:
-    if base.mounted:
-        flush_note = " [WARN: flushoncommit]" if has_mount_option(base.options, OPT_FLUSHONCOMMIT) else ""
-        return f"  {base.path:<18} mounted ({base.fstype}, uuid={base.uuid or 'unknown'}){flush_note}"
-    if base.in_fstab:
-        return f"  {base.path:<18} in fstab (not mounted)"
-    return f"  {base.path:<18} not provisioned"
-
-
-def _user_status_lines(snap: CacheMountSnapshot) -> list[str]:
-    if snap.user is None:
-        return [f"  target user        unavailable ({snap.user_error or 'unknown'})"]
-    lines = [f"  target user        {snap.user.name} (uid={snap.user.uid}, home={snap.user.home})"]
-    for probe in snap.bindings:
-        b = probe.binding
-        lines.append(f"  {b.kind.value:<18} {b.source} -> {b.target} [{_binding_state_label(probe)}]")
-    return lines
-
-
-def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") -> list[str]:
-    """Render lines for `cst btrfs cache status`."""
-    lines = [*cache_seam_lines(seam_root), "Dedicated cache drive mounts:"]
-    if snap.mounts_error is not None:
-        return [*lines, f"  cannot list mounts: {snap.mounts_error}"]
-    if snap.fstab_error is not None:
-        return [*lines, f"  {snap.fstab_error}"]
-    lines.extend(_base_status_line(snap.bases[kind]) for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD))
-    lines.extend(_user_status_lines(snap))
-    other_users = sorted({e.user for e in snap.all_managed if snap.user is None or e.user != snap.user.name})
-    if other_users:
-        lines.append(f"  other fstab users  {', '.join(other_users)}")
-    if snap.fstab_behind is True:
-        lines.append(
-            f"  systemd            has not loaded {FSTAB_PATH} as it is on disk (an edit, or an attach or detach "
-            "that stopped before its daemon-reload): run that attach or detach again, or systemctl daemon-reload"
-        )
-    elif snap.fstab_behind is None:
-        lines.append(f"  systemd            cannot say whether it has loaded {FSTAB_PATH} (systemctl gave no answer)")
-    return lines
-
-
-def _plan_binding_line(probe: BindingProbe) -> str:
-    b = probe.binding
-    actions: list[str] = []
-    if not probe.source_exists:
-        actions.append(f"mkdir 0700 {b.source}")
-    if b.kind == CacheMountKind.SCRATCHPAD:
-        actions.append("ensure CACHEDIR.TAG")
-    if not probe.in_fstab:
-        actions.append("add /etc/fstab entry")
-    if not probe.mounted_from_source:
-        actions.append("mount --bind")
-    summary = ", ".join(actions) if actions else "already attached"
-    return f"  {b.kind.value:<10} {b.source} -> {b.target}: {summary}"
-
-
-def format_cache_mount_plan(
-    snap: CacheMountSnapshot, prog: str, *, allow_nonempty: bool = False, seam_root: str = ""
-) -> list[str]:
-    """Render dry-run lines for `cst btrfs cache plan`."""
-    lines = cache_seam_lines(seam_root)
-    if snap.user is None:
-        return [*lines, f"BLOCKED: {snap.user_error or 'cannot resolve target user'}"]
-    lines.append(f"Target user: {snap.user.name} (uid={snap.user.uid}, home={snap.user.home})")
-    lines.extend(_plan_binding_line(probe) for probe in snap.bindings)
-    blockers = validate_attach_snapshot(snap, allow_nonempty=allow_nonempty)
-    if blockers:
-        lines.extend(f"BLOCKED: {msg}" for msg in blockers)
-        return lines
-    why = (
-        f"systemd has not loaded {FSTAB_PATH} as it is on disk"
-        if snap.fstab_behind is True
-        else f"systemctl cannot say whether systemd has loaded {FSTAB_PATH}"
-    )
-    if all(p.in_fstab and p.mounted_from_source for p in snap.bindings):
-        if snap.fstab_behind is False:
-            lines.append(f"Already attached for {snap.user.name}; nothing to do.")
-        else:
-            lines.append(f"Already attached for {snap.user.name}; {why}: attach runs systemctl daemon-reload.")
-        return lines
-    if snap.fstab_behind is not False:
-        # Only mounts to make (the lines are there): attach asks again after them and reloads.
-        lines.append(
-            f"{snap.user.name}'s lines are in {FSTAB_PATH}; {why}: attach runs systemctl daemon-reload after the mounts."
-        )
-    user_flag = f" --user {snap.user.name}"
-    extra = " --allow-nonempty" if allow_nonempty else ""
-    lines.append(f"Dry run, nothing changed. Run `{prog} attach{user_flag}{extra}` to apply.")
-    return lines

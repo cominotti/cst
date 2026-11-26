@@ -22,7 +22,7 @@ from typing import Protocol, override
 import unittest
 from unittest import mock
 
-from btrfs.cache.adapters import (
+from btrfs.cache.adapters.mounts import (
     CacheAccounts,
     CacheFolders,
     CacheHostView,
