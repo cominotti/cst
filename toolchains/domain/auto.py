@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 from enum import StrEnum
+import posixpath
 import re
 from typing import TYPE_CHECKING, Final
 
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 from cst_core.domain.units import ActiveState, render_timer as unit_timer, render_unit_file
-from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TIMER, UNIT_DIR_REL
+from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TIMER, UNIT_DIR_REL, tilde
 
 
 UNIT_HEADER = f"{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
@@ -99,8 +100,22 @@ class TimerFacts:
     next_elapse: str = ""
 
 
-def label(key: str) -> str:
-    return f"~/{key}" if "/" in key else f"~/{UNIT_DIR_REL}/{key}"
+class OlderUnitAction(StrEnum):
+    """What auto on and auto off do with a recorded copy of a unit file elsewhere than unit_dir."""
+
+    REMOVE = "remove"  # CST's (marker) or already gone: remove + forget
+    FOREIGN = "foreign"  # not written by CST: leave alone, drop record line
+    FORGET = "forget"  # same file as current by another path: only drop record line
+
+
+def label(key: str, unit_dir: str = "", home: str = "") -> str:
+    """User-facing label for a file or unit of auto on (~/{rel} when under home, else absolute)."""
+    if "/" in key:
+        return f"~/{key}"
+    if unit_dir:
+        path = posixpath.join(unit_dir, key)
+        return tilde(path, home) if home else path
+    return f"~/{UNIT_DIR_REL}/{key}"
 
 
 def own_session_env(env: Mapping[str, str], uid: int, owner: int | None, *, own_exists: bool) -> dict[str, str]:

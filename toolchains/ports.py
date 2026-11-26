@@ -11,11 +11,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from cst_core.ports import CommandResult
     from cst_core.domain.files import UnitFileState, WholeFileState
-    from toolchains.domain.auto import TimerFacts
+    from toolchains.domain.auto import OlderUnitAction, TimerFacts
     from toolchains.domain.build import BuildTreeResult, CargoCache, Folder, Workspaces
     from toolchains.domain.config import SettingsRewrite, WrapperValues
     from toolchains.domain.prune import RunRecord, SavedRun
@@ -196,6 +196,11 @@ class UserUnitsPort(Protocol):
         cannot be read."""
         ...
 
+    def unit_path(self) -> str | None:
+        """UnitPath of the user manager (show -p UnitPath --value), cached once per run; None
+        when it cannot be read."""
+        ...
+
 
 class HomeFilesPort(Protocol):
     """The files CST keeps in the user's home: what auto on installs (the program's copy,
@@ -207,6 +212,18 @@ class HomeFilesPort(Protocol):
     def auto_copies(self) -> dict[str, bytes]:
         """{path relative to the home: bytes} of the copies the timer runs; ConfigError
         when the defaults next to this program are missing."""
+        ...
+
+    def unit_dir(self) -> str:
+        """Absolute folder where user units are written and read for this run (user_unit_dir)."""
+        ...
+
+    def wants_link(self) -> str:
+        """Absolute path of the timers.target.wants link beside the timer in unit_dir."""
+        ...
+
+    def older_auto_units(self) -> list[tuple[str, OlderUnitAction, str | None]]:
+        """Recorded unit copies elsewhere than unit_dir: (path, action, wants_link_or_none)."""
         ...
 
     def auto_states(self) -> dict[str, UnitFileState]:
@@ -233,8 +250,12 @@ class HomeFilesPort(Protocol):
         """The user's install record says auto on finished."""
         ...
 
-    def forget_auto_files(self) -> None:
-        """The copies and units leave the user's install record (auto off removed them)."""
+    def forget_auto_files(self, extra: Sequence[str] = ()) -> None:
+        """The copies and the two units (plus any extra removed unit paths) leave home's install record."""
+        ...
+
+    def forget_unit_paths(self, paths: Sequence[str]) -> None:
+        """Drop recorded unit paths from home's install record (older copies replaced on upgrade)."""
         ...
 
     def turned_off(self) -> bool:

@@ -15261,3 +15261,86 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.TOOLCHAINS)
+    def test_278_toolchains_auto_units_follow_user_unit_path(self) -> None:
+        """cst toolchains auto on writes cst-toolchains-prune.{service,timer} under the user manager's
+        UnitPath (e2e278 with XDG_CONFIG_HOME for user@1278.service), loads/enables the timer there
+        (FragmentPath), removes a recorded older copy under ~/.config, is undone by auto off, and keeps
+        tester's usual paths unchanged."""
+        c = self.SYSTEMD_CONTAINER
+        if exec_bash(c, "getent passwd e2e278 || getent passwd 1278 || true").stdout.strip():
+            self.skipTest("the account e2e278 or the uid 1278 is taken")
+        if exec_bash(
+            c, "for f in /etc/systemd/system/user@1278.service.d; do [[ ! -e $f ]] || echo $f; done"
+        ).stdout.strip():
+            self.skipTest("user@1278.service.d already exists")
+        self.addCleanup(
+            exec_bash,
+            c,
+            """set +e
+            runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1
+            rm -f /home/tester/.config/cst/toolchains-auto.off
+            systemctl stop user@1278.service user-runtime-dir@1278.service 2>/dev/null
+            rm -rf /etc/systemd/system/user@1278.service.d
+            systemctl daemon-reload
+            userdel -rf e2e278 2>/dev/null""",
+            check=False,
+        )
+        r = exec_bash(
+            c,
+            r"""
+            set -Ee
+            trap 'echo "test_278 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            useradd -m -u 1278 e2e278
+            H=/home/e2e278
+            mkdir -p /etc/systemd/system/user@1278.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s/xdg278\n' "$H" >/etc/systemd/system/user@1278.service.d/zz-e2e278.conf
+            systemctl daemon-reload
+            systemctl start user@1278.service
+            as_278() {
+                runuser -u e2e278 -- env HOME="$H" USER=e2e278 LOGNAME=e2e278 \
+                    XDG_RUNTIME_DIR=/run/user/1278 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1278/bus "$@"
+            }
+            as_278 mkdir -p "$H/.cargo"
+            printf '[build]\nbuild-dir = "%s/.cache/cargo-build/{workspace-path-hash}"\n' "$H" |
+                as_278 tee "$H/.cargo/config.toml" >/dev/null
+            old_t="$H/.config/systemd/user/cst-toolchains-prune.timer"
+            old_s="$H/.config/systemd/user/cst-toolchains-prune.service"
+            new_t="$H/xdg278/systemd/user/cst-toolchains-prune.timer"
+            new_s="$H/xdg278/systemd/user/cst-toolchains-prune.service"
+            rec="$H/.local/state/cst/installed.json"
+            printf '# managed-by: toolchains-setup.sh (CST)\n[Timer]\nOnCalendar=hourly\n' |
+                as_278 python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old_t" 0644 --component toolchains:auto >/dev/null
+            printf '# managed-by: toolchains-setup.sh (CST)\n[Service]\nType=oneshot\n' |
+                as_278 python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old_s" 0644 --component toolchains:auto >/dev/null
+            [[ -f "$old_t" && -f "$old_s" ]]
+            out1="$(as_278 /opt/cst-rw/cst toolchains auto on 2>&1)"
+            [[ -f "$new_t" && -f "$new_s" ]]
+            [[ ! -e "$old_t" && ! -e "$old_s" ]]
+            if grep -qF "\"$old_t\"" "$rec"; then echo "old copy still in installed.json" >&2; cat "$rec" >&2; exit 1; fi
+            [[ "$(systemctl --user -M e2e278@ show -P FragmentPath cst-toolchains-prune.timer)" == "$new_t" ]]
+            systemctl --user -M e2e278@ is-enabled --quiet cst-toolchains-prune.timer
+            as_278 /opt/cst-rw/cst toolchains auto off >/dev/null
+            [[ ! -e "$new_t" && ! -e "$new_s" ]]
+            # Usual set-up (tester): units go to ~/.config/systemd/user.
+            as_tester() {
+                runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"
+            }
+            as_tester mkdir -p /home/tester/.cargo
+            if [[ ! -e /home/tester/.cargo/config.toml ]]; then
+                printf '[build]\nbuild-dir = "/home/tester/.cache/cargo-build/{workspace-path-hash}"\n' |
+                    as_tester tee /home/tester/.cargo/config.toml >/dev/null
+            fi
+            as_tester /opt/cst-rw/cst toolchains auto on >/dev/null
+            [[ -f /home/tester/.config/systemd/user/cst-toolchains-prune.timer ]]
+            as_tester /opt/cst-rw/cst toolchains auto off >/dev/null
+            [[ ! -e /home/tester/.config/systemd/user/cst-toolchains-prune.timer ]]
+            echo E2E-OK
+            """,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

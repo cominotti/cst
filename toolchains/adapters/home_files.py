@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from cst_core.ports import InstallRecordPort
     from toolchains.ports import RunOutputPort
 
 from cst_core.adapters.files import (
@@ -28,15 +29,17 @@ from cst_core.adapters.files import (
     unit_file_state_at,
     write_atomic,
 )
-from cst_core.adapters.install import program_installer
+from cst_core.adapters.install import JsonInstallRecord, program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
+from cst_core.application.user_units import RecordedUnitCopies
 from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import json_object, parse_json, parse_toml
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState
-from cst_core.domain.install import INSTALL_MANIFEST, GeneratedKind, Owner, expand_dest, manifest_by_src
+from cst_core.domain.install import INSTALL_MANIFEST, Component, GeneratedKind, Owner, expand_dest, manifest_by_src
+from cst_core.domain.units import user_unit_dir
 from toolchains.adapters.program import program_folder
-from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, render_timer
+from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, OlderUnitAction, render_timer
 from toolchains.domain.common import (
     CONF_REL,
     ConfigError,
@@ -88,9 +91,9 @@ def put_auto_copy(home: str, rel: str, data: bytes, installer: InstallService) -
     return installer.put(place, data, as_root=False)
 
 
-def put_auto_unit(home: str, name: str, text: str, installer: InstallService) -> bool:
-    """One of auto on's user units (generated text); True when written."""
-    path = os.path.join(home, UNIT_DIR_REL, name)
+def put_auto_unit(home: str, unit_dir: str, name: str, text: str, installer: InstallService) -> bool:
+    """One of auto on's user units (generated text) in unit_dir; True when written."""
+    path = os.path.join(unit_dir, name)
     place = Placement(
         path=path,
         dest=path,
@@ -104,10 +107,10 @@ def put_auto_unit(home: str, name: str, text: str, installer: InstallService) ->
     return installer.put(place, text.encode(), as_root=False)
 
 
-def forget_auto_files(home: str, installer: InstallService) -> None:
-    """auto off removed its files: the copies and the two units leave home's install record."""
+def forget_auto_files(home: str, unit_dir: str, installer: InstallService, extra: Sequence[str] = ()) -> None:
+    """auto off removed its files: the copies, current units, and extra copies leave home's install record."""
     copies = [expand_dest(e.dest, home) for e in INSTALL_MANIFEST if e.component == AUTO_COMPONENT]
-    forget_home_files(home, [*copies, *(os.path.join(home, UNIT_DIR_REL, n) for n in (SERVICE, TIMER))], installer)
+    forget_home_files(home, [*copies, *(os.path.join(unit_dir, n) for n in (SERVICE, TIMER)), *extra], installer)
 
 
 def put_wrapper(home: str, path: str, text: str, values: Mapping[str, str], installer: InstallService) -> bool:
@@ -302,21 +305,22 @@ def copies(entry_file: str) -> dict[str, bytes]:
     return {PROG_REL: install_payload("toolchains/cst-toolchains", entry_file), DEFAULTS_REL: defaults}
 
 
-def unit_states(home: str, entry_file: str) -> dict[str, UnitFileState]:
+def unit_states(home: str, entry_file: str, unit_dir: str | None = None) -> dict[str, UnitFileState]:
+    udir = os.path.join(home, UNIT_DIR_REL) if unit_dir is None else unit_dir
     out: dict[str, UnitFileState] = {
         rel: file_state(os.path.join(home, rel), text) for rel, text in copies(entry_file).items()
     }
     for name, render in AUTO_UNITS.items():
-        out[name] = timer_unit_state(os.path.join(home, UNIT_DIR_REL, name), render())
+        out[name] = timer_unit_state(os.path.join(udir, name), render())
     return out
 
 
-def stale_files(home: str) -> list[tuple[str, bool]]:
+def stale_files(home: str, unit_dir: str | None = None) -> list[tuple[str, bool]]:
     """[(path, ours)] of what `cst btrfs cargo-gc enable|disable` left
     (the first version of this cleanup)."""
+    udir = os.path.join(home, UNIT_DIR_REL) if unit_dir is None else unit_dir
     out: list[tuple[str, bool]] = []
-    for rel in [f"{UNIT_DIR_REL}/{u}" for u in OLD_UNITS] + list(OLD_FILES):
-        path = os.path.join(home, rel)
+    for path in [os.path.join(udir, u) for u in OLD_UNITS] + [os.path.join(home, rel) for rel in OLD_FILES]:
         st = file_state(path, None, OLD_MARKER)
         if st != OwnedState.MISSING:
             out.append((path, st == OwnedState.CHANGE))
@@ -365,9 +369,18 @@ class HomeFiles:
     """HomeFilesPort: the files CST keeps in HOME for the running program (ENTRY_FILE: its
     entry point; its copies and defaults are read next to it)."""
 
-    def __init__(self, home: str, entry_file: str) -> None:
+    def __init__(
+        self,
+        home: str,
+        entry_file: str,
+        *,
+        unit_path: Callable[[], str | None] = lambda: None,
+        records: InstallRecordPort | None = None,
+    ) -> None:
         self.home = home
         self.entry_file = entry_file
+        self._unit_path = unit_path
+        self._records = JsonInstallRecord() if records is None else records
 
     @functools.cached_property
     def installer(self) -> InstallService:
@@ -376,29 +389,64 @@ class HomeFiles:
         per command, made at its first write (status and the plans write nothing and read no .git)."""
         return program_installer(self.entry_file)
 
+    def unit_dir(self) -> str:
+        """Where the user manager reads its own units (user_unit_dir)."""
+        return user_unit_dir(self._unit_path(), self.home)
+
+    def wants_link(self) -> str:
+        """The enable link for TIMER under unit_dir."""
+        return os.path.join(self.unit_dir(), "timers.target.wants", TIMER)
+
+    def older_auto_units(self) -> list[tuple[str, OlderUnitAction, str | None]]:
+        """Recorded service/timer copies elsewhere than unit_dir when UnitPath names the folder."""
+        udir = self.unit_dir()
+        answer = self._unit_path()
+        out: list[tuple[str, OlderUnitAction, str | None]] = []
+        for name in (SERVICE, TIMER):
+            cur = os.path.join(udir, name)
+            for p in RecordedUnitCopies(self._records, self.home, Component.TOOLCHAINS_AUTO, name).older(cur, answer):
+                if os.path.lexists(p) and os.path.realpath(p) == os.path.realpath(cur):
+                    out.append((p, OlderUnitAction.FORGET, None))
+                elif not os.path.lexists(p) or file_state(p, None, MARKER) in (OwnedState.OK, OwnedState.CHANGE):
+                    link: str | None = None
+                    if name == TIMER:
+                        cand = os.path.join(os.path.dirname(p), "timers.target.wants", TIMER)
+                        if os.path.islink(cand) and (
+                            os.path.realpath(cand) == os.path.realpath(p) or not os.path.exists(cand)
+                        ):
+                            link = cand
+                    out.append((p, OlderUnitAction.REMOVE, link))
+                else:
+                    out.append((p, OlderUnitAction.FOREIGN, None))
+        return out
+
     def auto_copies(self) -> dict[str, bytes]:
         return copies(self.entry_file)
 
     def auto_states(self) -> dict[str, UnitFileState]:
-        return unit_states(self.home, self.entry_file)
+        return unit_states(self.home, self.entry_file, self.unit_dir())
 
     def timer_missing(self) -> bool:
-        return file_state(os.path.join(self.home, UNIT_DIR_REL, TIMER), render_timer()) == OwnedState.MISSING
+        return file_state(os.path.join(self.unit_dir(), TIMER), render_timer()) == OwnedState.MISSING
 
     def stale_files(self) -> list[tuple[str, bool]]:
-        return stale_files(self.home)
+        return stale_files(self.home, self.unit_dir())
 
     def put_auto_copy(self, rel: str, data: bytes) -> bool:
         return put_auto_copy(self.home, rel, data, self.installer)
 
     def put_auto_unit(self, name: str, text: str) -> bool:
-        return put_auto_unit(self.home, name, text, self.installer)
+        return put_auto_unit(self.home, self.unit_dir(), name, text, self.installer)
 
     def auto_done(self) -> None:
         record_done(self.home, AUTO_COMPONENT, self.installer)
 
-    def forget_auto_files(self) -> None:
-        forget_auto_files(self.home, self.installer)
+    def forget_auto_files(self, extra: Sequence[str] = ()) -> None:
+        forget_auto_files(self.home, self.unit_dir(), self.installer, extra)
+
+    def forget_unit_paths(self, paths: Sequence[str]) -> None:
+        if paths:
+            forget_home_files(self.home, paths, self.installer)
 
     def turned_off(self) -> bool:
         return turned_off(self.home)

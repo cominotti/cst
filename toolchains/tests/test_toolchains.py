@@ -86,7 +86,11 @@ esac
 # is-active answers like systemctl: "inactive" and exit 4 for a unit the
 # manager does not know (the default); SYSTEMCTL_ACTIVE=active: a timer
 # that still runs (exit 0); another state: exit 3.
-FAKE_ANSWERS = """case " $* " in *" is-active "*)
+FAKE_ANSWERS = """case " $* " in *" show -p UnitPath --value"*)
+    [ -n "${SYSTEMCTL_UNIT_PATH+x}" ] && { printf '%s\\n' "$SYSTEMCTL_UNIT_PATH"; exit "${SYSTEMCTL_UNIT_PATH_RC:-0}"; }
+    ;;
+esac
+case " $* " in *" is-active "*)
     case "${SYSTEMCTL_ACTIVE:-unknown}" in
         active) echo active; exit 0;;
         unknown) echo inactive; exit 4;;
@@ -1327,7 +1331,7 @@ class AutoTest(Scratch):
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
             rc, out = self.run_main("auto", "off")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.raw_calls(), [])
+        self.assertEqual([c for c in self.raw_calls() if " show -p UnitPath" not in c], [])
         self.assertNotIn("stopped:", out)
         self.assertTrue(self.exists(".config/systemd/user/cst-toolchains-prune.timer"))
 
@@ -1789,6 +1793,132 @@ class SessionEnvTest(unittest.TestCase):
             xdg_bus({"XDG_RUNTIME_DIR": "/tmp/x", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/0/bus"}, 1000),
             ("/tmp/x", "unix:path=/run/user/0/bus"),
         )
+
+
+class UnitPathAutoTest(Scratch):
+    """C16 (r30.2b): toolchains' user units follow the user manager's UnitPath."""
+
+    PINNED_SERVICE = (
+        "# managed-by: toolchains-setup.sh (CST): installed by `cst toolchains auto on` (or snapshots setup); not edited by hand.\n"
+        "# Prunes the toolchain caches enabled in ~/.config/cst/toolchains.conf\n"
+        "# (cargo's build folders in ~/.cache/cargo-build, ...). Why and how:\n"
+        "# toolchains/README.md in CST.\n"
+        "[Unit]\n"
+        "Description=CST: prune old toolchain caches (cst toolchains)\n"
+        "ConditionPathExists=%h/.local/lib/cst/cst-toolchains\n"
+        "ConditionPathExists=%h/.local/lib/cst/toolchains.conf\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/usr/bin/python3 -I %h/.local/lib/cst/cst-toolchains prune apply\n"
+        "SyslogIdentifier=cst-toolchains\n"
+        "Nice=19\n"
+        "IOSchedulingClass=idle\n"
+        "TimeoutStartSec=30min\n"
+        "NoNewPrivileges=yes\n"
+    )
+    PINNED_TIMER = (
+        "# managed-by: toolchains-setup.sh (CST): installed by `cst toolchains auto on` (or snapshots setup); not edited by hand.\n"
+        "[Unit]\n"
+        "Description=CST: prune old toolchain caches, hourly\n"
+        "\n"
+        "[Timer]\n"
+        "OnCalendar=hourly\n"
+        "RandomizedDelaySec=10min\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+    def _record_old_units(self, unit_dir: str) -> tuple[str, str, str]:
+        from cst_core.adapters.install import JsonInstallRecord
+        from cst_core.application.install import record_file
+        from cst_core.domain.install import Component, Owner
+        from cst_core.domain.record import InstallRecord, RecordedFile
+
+        old_svc = os.path.join(unit_dir, tcd_common.SERVICE)
+        old_tmr = os.path.join(unit_dir, tcd_common.TIMER)
+        link = os.path.join(unit_dir, "timers.target.wants", tcd_common.TIMER)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        with open(old_svc, "w") as f:
+            f.write(self.PINNED_SERVICE)
+        with open(old_tmr, "w") as f:
+            f.write(self.PINNED_TIMER)
+        os.symlink(old_tmr, link)
+        files = {
+            p: RecordedFile(None, Component.TOOLCHAINS_AUTO, "text", "0" * 64, 0o644, Owner.USER)
+            for p in (old_svc, old_tmr)
+        }
+        JsonInstallRecord().update(record_file(Owner.USER, self.home), lambda _r: InstallRecord(files, {}))
+        return old_svc, old_tmr, link
+
+    def test_usual_setup_pins_paths_and_bytes_to_main(self) -> None:
+        self.csts_cargo_config()
+        default_dir = os.path.join(self.home, ".config/systemd/user")
+        for extra_env in (
+            {"SYSTEMCTL_UNIT_PATH": f"{default_dir} /etc/systemd/user /usr/lib/systemd/user"},
+            {"SYSTEMCTL_UNIT_PATH": "", "SYSTEMCTL_UNIT_PATH_RC": "1"},
+        ):
+            with self.subTest(extra_env=extra_env), mock.patch.dict(os.environ, extra_env):
+                rc, out = self.run_main("auto", "on")
+                self.assertEqual(rc, 0, out)
+                with open(os.path.join(default_dir, tcd_common.SERVICE)) as f:
+                    self.assertEqual(f.read(), self.PINNED_SERVICE)
+                with open(os.path.join(default_dir, tcd_common.TIMER)) as f:
+                    self.assertEqual(f.read(), self.PINNED_TIMER)
+                rc_off, out_off = self.run_main("auto", "off")
+                self.assertEqual(rc_off, 0, out_off)
+
+    def test_xdg_unit_path_moves_units_upgrades_older_copies_and_off_cleans_up(self) -> None:
+        self.csts_cargo_config()
+        old_dir = os.path.join(self.home, ".config/systemd/user")
+        xdg_dir = os.path.join(self.home, "xdg/systemd/user")
+        old_svc, old_tmr, old_link = self._record_old_units(old_dir)
+        env = {"SYSTEMCTL_UNIT_PATH": f"{xdg_dir} /etc/systemd/user /usr/lib/systemd/user"}
+        with mock.patch.dict(os.environ, env):
+            rc, out = self.run_main("auto", "on")
+            self.assertEqual(rc, 0, out)
+            new_svc = os.path.join(xdg_dir, tcd_common.SERVICE)
+            new_tmr = os.path.join(xdg_dir, tcd_common.TIMER)
+            self.assertTrue(os.path.isfile(new_svc))
+            self.assertTrue(os.path.isfile(new_tmr))
+            self.assertFalse(os.path.lexists(old_svc))
+            self.assertFalse(os.path.lexists(old_tmr))
+            self.assertFalse(os.path.lexists(old_link))
+            self.assertIn(f"removed:   ~/.config/systemd/user/timers.target.wants/{tcd_common.TIMER}", out)
+            self.assertIn(f"removed:   ~/.config/systemd/user/{tcd_common.TIMER}", out)
+            self.assertIn(f"written:   ~/xdg/systemd/user/{tcd_common.SERVICE}", out)
+            with open(self.log) as f:
+                raw = f.read().splitlines()
+            self.assertEqual(sum(" show -p UnitPath" in c for c in raw), 1)
+            with open(os.path.join(self.home, ".local/state/cst/installed.json")) as f:
+                rec = json.load(f)
+            self.assertNotIn(old_svc, rec["files"])
+            self.assertNotIn(old_tmr, rec["files"])
+            self.assertIn(new_svc, rec["files"])
+            self.assertIn(new_tmr, rec["files"])
+            # auto off removes current units and any remaining recorded copy elsewhere.
+            rc_off, out_off = self.run_main("auto", "off")
+            self.assertEqual(rc_off, 0, out_off)
+            self.assertFalse(os.path.exists(new_svc))
+            self.assertFalse(os.path.exists(new_tmr))
+
+    def test_no_named_user_dir_keeps_recorded_copies_elsewhere(self) -> None:
+        self.csts_cargo_config()
+        other_dir = os.path.join(self.home, "other/systemd/user")
+        old_svc, old_tmr, old_link = self._record_old_units(other_dir)
+        for extra_env in (
+            {"SYSTEMCTL_UNIT_PATH": "/etc/systemd/user /usr/lib/systemd/user"},
+            {"SYSTEMCTL_UNIT_PATH": "", "SYSTEMCTL_UNIT_PATH_RC": "1"},
+        ):
+            with self.subTest(extra_env=extra_env), mock.patch.dict(os.environ, extra_env):
+                rc, out = self.run_main("auto", "on")
+                self.assertEqual(rc, 0, out)
+                self.assertTrue(os.path.isfile(old_svc))
+                self.assertTrue(os.path.isfile(old_tmr))
+                self.assertTrue(os.path.islink(old_link))
+                self.assertTrue(os.path.isfile(os.path.join(self.home, ".config/systemd/user", tcd_common.SERVICE)))
 
 
 if __name__ == "__main__":

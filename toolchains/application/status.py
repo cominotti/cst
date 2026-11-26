@@ -92,7 +92,8 @@ class ToolchainsStatus:
         for line in self.tools.sccache():
             say(f"  {line}")
         st = self.files.auto_states()
-        say("== files of auto on: " + ", ".join(f"{label(k)} {v}" for k, v in st.items()))
+        udir = self.files.unit_dir()
+        say("== files of auto on: " + ", ".join(f"{label(k, udir, home)} {v}" for k, v in st.items()))
         for path, ours in self.files.stale_files():
             say(
                 f"  stale: {tilde(path, home)} (of the earlier `cst btrfs cargo-gc`"

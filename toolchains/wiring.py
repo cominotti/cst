@@ -138,7 +138,18 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
     units = UserUnits(out, lambda: user_systemctl(systemctl_program())) if p.units is None else p.units(out)
     lock = ToolchainsLock(home, out)
-    return Session(home, now, prog, entry_file, limits, out, units, lock, HomeFiles(home, entry_file), machine)
+    return Session(
+        home,
+        now,
+        prog,
+        entry_file,
+        limits,
+        out,
+        units,
+        lock,
+        HomeFiles(home, entry_file, unit_path=units.unit_path),
+        machine,
+    )
 
 
 def settings(s: Session) -> Settings:

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from toolchains.ports import RunOutputPort
 
 from cst_core.adapters import SystemctlAdapter
+from cst_core.application.user_units import manager_unit_path
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import MINUTE
 from cst_core.ports import SystemctlHost, UnitName
@@ -77,6 +78,7 @@ class UserUnits:
     def __init__(self, out: RunOutputPort, manager: Callable[[], SystemdPort]) -> None:
         self.out = out
         self._manager = manager
+        self._unit_path_cached: tuple[bool, str | None] = (False, None)
 
     @property
     def manager(self) -> SystemdPort:
@@ -162,3 +164,9 @@ class UserUnits:
                 # systemd quotes a value with special characters ($'...'): not parsed here.
                 return None if val[:1] in ("$", "'", '"') else val
         return None
+
+    def unit_path(self) -> str | None:
+        """UnitPath of the user manager (show -p UnitPath --value), asked once per run."""
+        if not self._unit_path_cached[0]:
+            self._unit_path_cached = (True, manager_unit_path(self.manager))
+        return self._unit_path_cached[1]

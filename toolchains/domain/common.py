@@ -55,8 +55,6 @@ UNIT_DIR_REL = USER_UNIT_DIR_REL
 STATE_DIR_REL = ".local/state/cst"
 SERVICE = "cst-toolchains-prune.service"
 TIMER = "cst-toolchains-prune.timer"
-# The link `enable` makes for the timer's WantedBy=timers.target.
-WANTS_REL = f"{UNIT_DIR_REL}/timers.target.wants/{TIMER}"
 # What the first version (`cst btrfs cargo-gc`, never deployed) installed:
 # auto on and auto off remove it when its marker shows it is CST's.
 OLD_MARKER = "# managed-by: btrfs-setup.sh (CST)"

@@ -721,7 +721,7 @@ class TimerTest(Base):
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 1)
         self.assertIn("not written by CST", out)
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self.calls, [("show", "-p", "UnitPath", "--value")])
         rc, out = self.run_main("auto", "off")
         with open(self.unit(tcd_common.TIMER)) as f:
             self.assertIn("daily", f.read())  # left alone
@@ -732,7 +732,7 @@ class TimerTest(Base):
         rc, _out = self.run_main("auto", "on")
         self.assertEqual(rc, 1)
         self.assertFalse(os.path.exists(self.unit(tcd_common.TIMER)))
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self.calls, [("show", "-p", "UnitPath", "--value")])
 
 
 class _ScandirIter(Protocol):
@@ -1069,7 +1069,7 @@ class TurnedOffTest(Base):
         rc, out = self.run_main("auto", "on", "--unless-off")
         self.assertEqual(rc, 0, out)
         self.assertIn("left off", out)
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self.calls, [("show", "-p", "UnitPath", "--value")])
         self.assertFalse(os.path.exists(self.unit(tcd_common.TIMER)))
         rc, out = self.run_main("status", "--brief")
         self.assertIn("turned off by you", out)
