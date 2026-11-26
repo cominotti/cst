@@ -77,6 +77,7 @@ class _ProvisionTxn:
     opened_mapper: str | None = None
     mounted_bases: list[str] = field(default_factory=list)
     created_base_dirs: list[str] = field(default_factory=list)
+    btrfs_created: bool = False
     prev_crypttab: str | None = None
     crypttab_written: bool = False
     prev_fstab: str | None = None
@@ -488,6 +489,7 @@ def _step_btrfs_and_mounts(ctx: _ApplyContext, mapper_fstype: str) -> str | None
         err = prov.mkfs_btrfs(spec.mapper_path, BTRFS_CACHE_LABEL)
         if err is not None:
             return err
+        txn.btrfs_created = True
         lines.append(f"Formatted Btrfs (-L {BTRFS_CACHE_LABEL} -m dup -d single) on {spec.mapper_path}.")
     wanted_subvols = tuple(SUBVOL_FOR_KIND[k] for k in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD))
     created_subvols, sub_err = prov.ensure_subvolumes(spec.mapper_path, wanted_subvols)
@@ -600,6 +602,16 @@ def _provision_apply(
     cerr = _step_crypttab_and_fstab(ctx, luks_uuid)
     if cerr is not None:
         return _fail_txn(cerr, txn, prov, env, seam)
+
+    if txn.btrfs_created:
+        serr = prov.scrub_base(CACHE_BASE)
+        if serr is None:
+            lines.append(f"Completed initial scrub on {CACHE_BASE}.")
+        else:
+            lines.append(
+                f"WARNING: initial scrub on {CACHE_BASE} failed ({serr}); "
+                f"run 'sudo btrfs scrub start -B {CACHE_BASE}' manually."
+            )
 
     if len(lines) == len(seam):
         lines.append(f"Already provisioned ({CACHE_BASE}, {SCRATCHPAD_BASE}); nothing to do.")

@@ -158,6 +158,7 @@ class FakeProvisionPort:
         self.fail_on: str | None = None
         self.fail_crypttab_not_synced = False
         self.close_calls = 0
+        self.scrub_calls: list[str] = []
 
     def read_conf(self) -> tuple[str | None, str | None]:
         return self.conf_text, None
@@ -295,6 +296,12 @@ class FakeProvisionPort:
         self.mounts.pop(target, None)
         if self.world is not None:
             self.world.table.unbind(target)
+        return None
+
+    def scrub_base(self, target: str) -> str | None:
+        self.scrub_calls.append(target)
+        if self.fail_on == "scrub_base":
+            return f"btrfs scrub start -B {target} failed: injected"
         return None
 
     def confirm_format(self, prompt: str, *, assume_yes: bool) -> tuple[bool, str | None]:
@@ -588,6 +595,10 @@ class ProvisionApplicationRollbackTests(unittest.TestCase):
         self.assertEqual(rc_no_yes, 1)
         self.assertIn("--yes", "\n".join(err_no_yes))
 
+        rc_pf, out_pf = app.run(parse_cache_mount_args(["provision", "plan", "--format"]), "cst btrfs cache")
+        self.assertEqual(rc_pf, 0)
+        self.assertIn("run initial btrfs scrub on /var/mnt/cache", "\n".join(out_pf))
+
         rc_a, out_a = app.run(parse_cache_mount_args(["provision", "apply", "--format", "--yes"]), "cst btrfs cache")
         self.assertEqual(rc_a, 0, out_a)
         self.assertTrue(prov.luks_formatted and prov.mapper_open)
@@ -596,10 +607,13 @@ class ProvisionApplicationRollbackTests(unittest.TestCase):
         self.assertIn(SCRATCHPAD_BASE, prov.mounts)
         self.assertIn(SAMPLE_LUKS_UUID, prov.crypttab_text or "")
         self.assertIn(BTRFS_CACHE_LABEL, w.fstab or "")
+        self.assertEqual(prov.scrub_calls, [CACHE_BASE])
+        self.assertIn("Completed initial scrub on /var/mnt/cache.", "\n".join(out_a))
 
         rc_a2, out_a2 = app.run(parse_cache_mount_args(["provision", "apply"]), "cst btrfs cache")
         self.assertEqual(rc_a2, 0)
         self.assertIn("nothing to do", "\n".join(out_a2))
+        self.assertEqual(prov.scrub_calls, [CACHE_BASE])
 
         rc_u, out_u = app.run(parse_cache_mount_args(["unprovision"]), "cst btrfs cache")
         self.assertEqual(rc_u, 0, out_u)
@@ -646,6 +660,22 @@ class ProvisionApplicationRollbackTests(unittest.TestCase):
         self.assertEqual(prov.crypttab_text, "")
         self.assertEqual(prov.mounts, {})
         self.assertFalse(prov.mapper_open)
+        self.assertEqual(prov.scrub_calls, [])
+
+    def test_provision_apply_initial_scrub_failure_warns_without_rollback(self) -> None:
+        app, w, prov, _ = self._world()
+        self.assertEqual(
+            app.run(parse_cache_mount_args(["provision", "init", "--device", "/dev/nvme2n1p1"]), "p")[0], 0
+        )
+        prov.fail_on = "scrub_base"
+        rc, out = app.run(parse_cache_mount_args(["provision", "apply", "--format", "--yes"]), "p")
+        self.assertEqual(rc, 0, out)
+        joined = "\n".join(out)
+        self.assertIn("WARNING: initial scrub on /var/mnt/cache failed", joined)
+        self.assertIn("sudo btrfs scrub start -B /var/mnt/cache", joined)
+        self.assertIn(CACHE_BASE, prov.mounts)
+        self.assertIn(SCRATCHPAD_BASE, prov.mounts)
+        self.assertIn("provision=base", w.fstab or "")
 
     def test_migrate_busy_blocking_and_rollback(self) -> None:
         app, w, _prov, mig = self._world()
@@ -1005,3 +1035,16 @@ class ProvisionAndMigrationAdapterTests(unittest.TestCase):
             self.assertEqual(res[0], want, answer)
             if not want:
                 self.assertEqual(res[1], "aborted by user (confirmation declined)")
+
+    def test_provision_adapter_scrub_base_success_and_failure(self) -> None:
+        runner = FakeMountRunner("/")
+        rt = CacheMountRuntime(seam_root="", ctx=CacheTestCtx(), runner=runner, env_map={})
+        prov = CacheProvisionAdapter(rt)
+
+        with mock.patch.object(runner, "run", return_value=CommandResult(0, "", "")) as m_ok:
+            self.assertIsNone(prov.scrub_base(CACHE_BASE))
+        self.assertEqual(m_ok.call_args.args[0], ["btrfs", "scrub", "start", "-B", CACHE_BASE])
+
+        with mock.patch.object(runner, "run", return_value=CommandResult(1, "", "io error")):
+            err = prov.scrub_base(CACHE_BASE)
+        self.assertIn("btrfs scrub start -B /var/mnt/cache", err or "")

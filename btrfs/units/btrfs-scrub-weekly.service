@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST).
 [Unit]
-Description=Weekly btrfs scrub of the root filesystem
+Description=Weekly btrfs scrub of the root and cache filesystems
 After=local-fs.target
 # Scrub errors (exit 3) or a failed scrub still end in an alert.
 OnFailure=btrfs-health-check.service
@@ -10,6 +10,7 @@ OnFailure=btrfs-health-check.service
 Type=oneshot
 # -B: stay in foreground so systemd sees the result; scrub covers every device.
 ExecStart=/usr/sbin/btrfs scrub start -B /var
+ExecStart=/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/dev/null 2>&1; then exec /usr/sbin/btrfs scrub start -B /var/mnt/cache; fi'
 ExecStartPost=-/usr/local/sbin/btrfs-health-check
 Nice=19
 IOSchedulingClass=idle

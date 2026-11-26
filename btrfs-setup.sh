@@ -454,7 +454,9 @@ scrub_limit_dropin() {
 # reset runs after every run, also a failed or stopped one.
 [Service]
 ExecStartPre=/usr/sbin/btrfs scrub limit -a -l $1 /var
+ExecStartPre=/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/dev/null 2>&1; then exec /usr/sbin/btrfs scrub limit -a -l $1 /var/mnt/cache; fi'
 ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var
+ExecStopPost=-/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/dev/null 2>&1; then exec /usr/sbin/btrfs scrub limit -a -l 0 /var/mnt/cache; fi'
 EOF
 }
 

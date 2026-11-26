@@ -145,7 +145,9 @@ def render_scrub_dropin(limit: str, conf_path: str = SCRUB_CONF_PATH) -> str:
         "# reset runs after every run, also a failed or stopped one.\n"
         "[Service]\n"
         f"ExecStartPre=/usr/sbin/btrfs scrub limit -a -l {limit} /var\n"
+        f"ExecStartPre=/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/dev/null 2>&1; then exec /usr/sbin/btrfs scrub limit -a -l {limit} /var/mnt/cache; fi'\n"
         "ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var\n"
+        "ExecStopPost=-/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/dev/null 2>&1; then exec /usr/sbin/btrfs scrub limit -a -l 0 /var/mnt/cache; fi'\n"
     )
 
 

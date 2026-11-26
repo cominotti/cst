@@ -321,8 +321,9 @@ accident, the fingerprint no longer matches.
 **Why:** a disk can lose data silently. Without a scrub you notice only when you
 need that file, and by then the other copy may be bad too.
 
-**How:** `btrfs-scrub-weekly.timer` runs `btrfs scrub start -B /var` every
-Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
+**How:** `btrfs-scrub-weekly.timer` runs `btrfs scrub start -B /var` (and
+`btrfs scrub start -B /var/mnt/cache` when `/var/mnt/cache` is mounted as btrfs)
+every Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
 only works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`,
 so on this PC the scrub reads at the disks' full speed (see
 [cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)) unless you set a speed limit (below). If the PC was off, it runs after the
@@ -334,7 +335,9 @@ If the scrub fails, the health check also runs and alerts.
 as they go (here 4.5 GiB/s for 1.7 TiB in 6 minutes), which can stall builds
 running at the same time. btrfs has its own limit per device
 (`btrfs scrub limit`, sysfs `devinfo/<id>/scrub_speed_max`), which works with
-any IO scheduler. Set it in `/etc/btrfs-setup/snapshots.conf` (create the
+any IO scheduler, and `10-cst-limit.conf` applies and resets it on `/var`
+(and on `/var/mnt/cache` when mounted as btrfs). Set it in
+`/etc/btrfs-setup/snapshots.conf` (create the
 file if it is not there; other keys can stay out) and run `cst btrfs install`:
 
 ```
@@ -2010,8 +2013,11 @@ backup: nothing on the cache drive is in a snapshot or a backup.
        non-LUKS filesystem, wrong LUKS passphrase, foreign dm-crypt UUID, or other Btrfs
        label.
     3. Mounts `/var/mnt/cache` and `/var/mnt/scratchpad` (`noatime,discard=async,compress=zstd:1,commit=60,nofail`,
-       without `flushoncommit`), then upserts managed `/etc/crypttab` (`nofail,discard,no-read-workqueue,no-write-workqueue`)
-       and `/etc/fstab` base lines and runs `systemctl daemon-reload`.
+       without `flushoncommit`), upserts managed `/etc/crypttab` (`nofail,discard,no-read-workqueue,no-write-workqueue`)
+       and `/etc/fstab` base lines, runs `systemctl daemon-reload`, and when creating a fresh Btrfs
+       filesystem runs an immediate initial scrub on `/var/mnt/cache` so `btrfs-health-check` reports
+       healthy without waiting for Sunday's `btrfs-scrub-weekly.service` run (weekly scrub also covers
+       `/var/mnt/cache` once `cst btrfs install` is up to date).
     On any failure during `provision apply`, every step done in that run (mounted bases,
     `/etc/crypttab`, `/etc/fstab`, newly opened mapper, and keyfile if LUKS was not formatted
     yet) is rolled back cleanly so no dangling boot entries remain.

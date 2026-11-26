@@ -220,6 +220,10 @@ class CacheProvisionPort(Protocol):
         """Unmount base mountpoint `target`; returns None or error."""
         ...
 
+    def scrub_base(self, target: str) -> str | None:
+        """Run synchronous `btrfs scrub start -B` on `target`; returns None or error."""
+        ...
+
     def confirm_format(self, prompt: str, *, assume_yes: bool) -> tuple[bool, str | None]:
         """Confirm destructive `--format`; returns `(confirmed, refusal_reason)`."""
         ...
