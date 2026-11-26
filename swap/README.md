@@ -154,25 +154,25 @@ compressor later creates a second pool that lives until the old one drains).
 | `vm.swappiness` | 100 | Treat "swap a page out" and "drop file cache that must be read again" as equally costly. With zswap most swap-ins come from RAM, so swapping a cold page is usually cheaper than dropping cache. Not the 180 used when **all** swap lived in RAM: pages written on to the NVMe are really expensive to bring back. Lower to 60 if the disk read-back grows (section 6). |
 | `vm.page-cluster` | 0 | Read one page per swap fault. Read-ahead helps spinning disks only; on zswap and NVMe it just adds latency. |
 | `vm.watermark_boost_factor` | 0 | No extra reclaim bursts after memory fragmentation events. |
-| `vm.watermark_scale_factor` | 125 | Background reclaim (`kswapd`) wakes earlier (1.25 % of memory between the watermarks), so it works smoothly instead of in stalls. |
+| `vm.watermark_scale_factor` | 300 | Background reclaim (`kswapd`) wakes earlier (3 % of memory between the watermarks), keeping more headroom during allocation bursts instead of direct reclaim stalls. |
 | `vm.min_free_kbytes` | 262144 | Emergency free memory reserve (256 MiB) so sudden allocation bursts on large-RAM hosts do not fall into synchronous direct reclaim (`allocstall`). |
 
 Two more kernel reclaim knobs persist via `/etc/tmpfiles.d/cst-mm-responsiveness.conf` and apply live in `apply`:
 
 | Knob | Value | Why |
 |---|---|---|
-| `/sys/kernel/mm/transparent_hugepage/defrag` | `defer+madvise` | Avoids synchronous page-fault compaction pauses on `MADV_HUGEPAGE` callers (browsers, VMs, games, toolchains) while keeping `kcompactd` active in the background. |
+| `/sys/kernel/mm/transparent_hugepage/defrag` | `defer` | Avoids synchronous page-fault compaction pauses even on `MADV_HUGEPAGE` callers (browsers, VMs, games, toolchains) while keeping `kcompactd` active in the background (`defer+madvise` still stalls `MADV_HUGEPAGE` callers synchronously). |
 | `/sys/kernel/mm/lru_gen/min_ttl_ms` | 1000 | Sets a 1-second Multi-Gen LRU working-set protection floor so transient cache bursts cannot immediately evict newly faulted desktop pages. |
 
-The `cpu` module's memory experiments `wsf-300` (changes
-`vm.watermark_scale_factor` to 300) and `thp-defer` (changes THP `defrag` to
-`defer`) change those two knobs at runtime. While either is on, `plan` and
-`status` show its row as `exp` (not `DIFF`) with a note (one for each, when
-both are on), also inside a toolbox,
-and `apply` leaves that setting alone (it says `kept:`), so it does not end a
-measurement silently. After `cst cpu experiment off NAME` the old value is
-back; `apply` sets CST's default if it was something else (`minfree-256m` matches
-the `vm.min_free_kbytes = 262144` default already).
+The `cpu` module's memory experiments `wsf-300` (sets
+`vm.watermark_scale_factor` to 300), `thp-defer` (sets THP `defrag` to
+`defer`), and `minfree-256m` (sets `vm.min_free_kbytes` to 262144) now match
+CST's defaults. While `exp-wsf-300` or `exp-thp-defer` is active, `apply` still
+leaves that live setting alone (it says `kept:`) instead of ending a
+measurement silently, and `plan` and `status` show `exp` (not `DIFF`, also
+inside a toolbox) whenever the live value differs from CST's desired default.
+After `cst cpu experiment off NAME` the old value is back; `apply` sets CST's
+default if it was something else.
 
 ### 2.5 `MemoryLow=48G` for the VM
 

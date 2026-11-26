@@ -209,11 +209,11 @@ class PerfEvaluatorTest(unittest.TestCase):
             mem_total_bytes=64 * GIB,
             mem_available_bytes=40 * GIB,
             min_free_bytes=256 * MIB,
-            watermark_scale_factor=125,
+            watermark_scale_factor=300,
             allocstall_count=0,
             compact_stall_count=0,
             thp_enabled="madvise",
-            thp_defrag="defer+madvise",
+            thp_defrag="defer",
             lru_gen_enabled="0x0007",
             lru_gen_min_ttl_ms=1000,
             zswap_enabled=True,
@@ -306,6 +306,17 @@ class PerfEvaluatorTest(unittest.TestCase):
         unprot_rep = evaluate_perf_memory(unprotected)
         self.assertEqual([f.finding_id for f in unprot_rep.findings], ["memory-session-floor-unset"])
         self.assertIn("user-1000.slice", unprot_rep.findings[0].summary)
+
+        defer_madvise = evaluate_perf_memory(
+            MemoryProbeSnapshot(
+                thp_enabled="madvise",
+                thp_defrag="defer+madvise",
+            )
+        )
+        self.assertEqual([f.finding_id for f in defer_madvise.findings], ["memory-thp-defrag"])
+        self.assertEqual(defer_madvise.findings[0].fix_command, "cst swap apply")
+        self.assertIn("defer", defer_madvise.findings[0].recommendation)
+        self.assertNotIn("defer+madvise", defer_madvise.findings[0].recommendation)
 
     def test_deep_cstates_warn_only_where_cpu_power_caps_them_by_default(self) -> None:
         # cpu-power leaves the C-states on by default with any cpuidle driver but intel_idle (AMD's
@@ -775,13 +786,13 @@ class PerfScratchIntegrationTest(unittest.TestCase):
         self._write("proc/vmstat", "compact_stall 0\nallocstall_normal 0\nworkingset_refault_file 10\n")
         self._write("proc/pressure/memory", "some avg10=0.00 avg60=0.00 total=0\nfull avg10=0.00 avg60=0.00 total=0\n")
         self._write("proc/sys/vm/min_free_kbytes", "262144\n")
-        self._write("proc/sys/vm/watermark_scale_factor", "125\n")
+        self._write("proc/sys/vm/watermark_scale_factor", "300\n")
         self._write("proc/sys/vm/dirty_background_bytes", "536870912\n")
         self._write("proc/sys/vm/dirty_bytes", "2147483648\n")
         self._write("proc/cmdline", "quiet preempt=lazy\n")
         self._write("proc/interrupts", "           CPU0       CPU1\n  10:       100          0   amdgpu\n")
         self._write("sys/kernel/mm/transparent_hugepage/enabled", "always [madvise] never\n")
-        self._write("sys/kernel/mm/transparent_hugepage/defrag", "always defer [defer+madvise] madvise never\n")
+        self._write("sys/kernel/mm/transparent_hugepage/defrag", "always [defer] defer+madvise madvise never\n")
         self._write("sys/kernel/mm/lru_gen/enabled", "0x0007\n")
         self._write("sys/kernel/mm/lru_gen/min_ttl_ms", "1000\n")
         self._write("sys/module/zswap/parameters/enabled", "Y\n")

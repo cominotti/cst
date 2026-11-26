@@ -75,7 +75,7 @@ from perf.domain.models import (
     TOP_IRQ_DISPLAY_LIMIT,
 )
 
-_THP_DEFRAG_PAUSE_MODES: Final[frozenset[str]] = frozenset({"always", "madvise"})
+_THP_DEFRAG_PAUSE_MODES: Final[frozenset[str]] = frozenset({"always", "madvise", "defer+madvise"})
 _PREEMPT_GOOD_MODES: Final[frozenset[str]] = frozenset({"full", "lazy"})
 _LATENCY_IRQ_TOKENS: Final[tuple[str, ...]] = (
     "nvme",
@@ -137,7 +137,7 @@ _STALL_RULES: Final[tuple[_StallThreshold, ...]] = tuple(
             COMPACT_BOTTLENECK_PER_HOUR,
             "Synchronous compaction stalls",
             "Threads stalled defragmenting pages during hugepage or high-order allocations.",
-            "Set THP defrag=defer+madvise (avoid synchronous madvise compaction).",
+            "Set THP defrag=defer (avoid synchronous compaction on MADV_HUGEPAGE faults).",
         ),
     )
 )
@@ -207,7 +207,7 @@ def _eval_memory_mm_policy(col: AxisCollector, mem: MemoryProbeSnapshot) -> None
                 "memory-thp-defrag",
                 f"THP defrag is {mem.thp_defrag!r} (synchronous compaction on page faults)",
                 "Apps requesting MADV_HUGEPAGE stall waiting for direct compaction.",
-                ("Switch THP defrag to defer+madvise so kcompactd compacts in background.", _FIX_SWAP_APPLY),
+                ("Switch THP defrag to defer so kcompactd compacts in background.", _FIX_SWAP_APPLY),
             )
     if mem.lru_gen_enabled is not None:
         ttl_str = f"{mem.lru_gen_min_ttl_ms} ms" if mem.lru_gen_min_ttl_ms is not None else "?"

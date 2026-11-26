@@ -44,7 +44,7 @@ Commands:
       * zram off: vendor zram-generator.conf masked; zram0 swapped off now
         only when free RAM can take its contents
       * 99-swap-tuning.conf (swappiness=100, min_free_kbytes=256M) &
-        cst-mm-responsiveness.conf (THP defer+madvise, MGLRU min_ttl_ms=1000)
+        cst-mm-responsiveness.conf (THP defer, MGLRU min_ttl_ms=1000)
       * /etc/uresourced.conf (MemoryMin=1G, backup kept, uresourced restarted)
       * machine.slice MemoryLow=48G (drop-in 10-swap-memory-low.conf, next to
         cpu's 10-cpu-setup.conf; set-property still wins; old 50- name removed)

@@ -474,14 +474,14 @@ class StatusMathTest(unittest.TestCase):
         )
 
     def test_wsf_experiment_is_not_a_diff(self) -> None:
-        rows, text = self.settings_output("300", exp_on=True)
+        rows, text = self.settings_output("125", exp_on=True)
         self.assertEqual(rows, [["exp", "vm.watermark_scale_factor"]])
         self.assertIn("experiment off wsf-300", text)
         self.assertNotIn("  DIFF", text)  # apply's verification passes
-        rows, text = self.settings_output("300", exp_on=False)
+        rows, text = self.settings_output("125", exp_on=False)
         self.assertEqual(rows, [["DIFF", "vm.watermark_scale_factor"]])
         self.assertNotIn("exp:", text)
-        rows, _ = self.settings_output("125", exp_on=True)
+        rows, _ = self.settings_output("300", exp_on=True)
         self.assertEqual(rows, [["ok", "vm.watermark_scale_factor"]])
 
     def test_cpu_run_folder_in_a_toolbox(self) -> None:
@@ -699,14 +699,22 @@ class MarkerTest(unittest.TestCase):
             "vm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n",
         )
         self.assertEqual(self.file_state(src, old_four_key), "change")
-        old_five_key = self.path(
-            "s5",
+        old_five_key_125 = self.path(
+            "s5_old",
             "# Managed by apply-swap-config.sh — VM tunables\n"
             "vm.swappiness = 100\n\nvm.page-cluster = 0\n"
             "vm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n"
             "vm.min_free_kbytes = 262144\n",
         )
-        self.assertEqual(self.file_state(src, old_five_key), "adopt")
+        self.assertEqual(self.file_state(src, old_five_key_125), "change")
+        old_five_key_300 = self.path(
+            "s5",
+            "# Managed by apply-swap-config.sh — VM tunables\n"
+            "vm.swappiness = 100\n\nvm.page-cluster = 0\n"
+            "vm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 300\n"
+            "vm.min_free_kbytes = 262144\n",
+        )
+        self.assertEqual(self.file_state(src, old_five_key_300), "adopt")
 
 
 class SwapTempFileSystem(LocalFileSystemAdapter):
@@ -3917,12 +3925,14 @@ class Phase1MemoryTuningTest(_SwapScratch):
         rc = render_apply(svc1.apply_changes(), out=apply_out, err=apply_err)
         self.assertEqual(rc, 0, apply_err.getvalue())
         self.assertIn("== memory responsiveness", apply_out.getvalue())
-        self.assertIn("set:       THP defrag = defer+madvise (was madvise)", apply_out.getvalue())
+        self.assertIn("set:       THP defrag = defer (was madvise)", apply_out.getvalue())
         self.assertIn("set:       MGLRU min_ttl_ms = 1000 (was 0)", apply_out.getvalue())
         self.assertIn("restarted: uresourced.service", apply_out.getvalue())
         self.assertIn(("restart", "uresourced.service"), sd1.calls)
         with open(ures_dest + ".pre-swap-config.bak", encoding="utf-8") as fh:
             self.assertEqual(fh.read(), vendor_uresourced)
+        with open(os.path.join(self.env.proc_dir, "sys", "vm", "watermark_scale_factor"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read().strip(), "300")
         with open(os.path.join(self.env.proc_dir, "sys", "vm", "min_free_kbytes"), encoding="utf-8") as fh:
             self.assertEqual(fh.read().strip(), "262144")
 
@@ -3943,14 +3953,14 @@ class Phase1MemoryTuningTest(_SwapScratch):
         self.assertIn("  ok      MGLRU min_ttl_ms", status_out.getvalue())
 
     def test_thp_experiment_override_and_missing_kernel_knob(self) -> None:
-        self._populate_mm_nodes(defrag="always [defer] defer+madvise madvise never", min_ttl="1000")
+        self._populate_mm_nodes(defrag="always defer [defer+madvise] madvise never", min_ttl="1000")
         os.remove(os.path.join(self.env.sys_dir, "kernel", "mm", "lru_gen", "min_ttl_ms"))
         with open(os.path.join(self.env.cpu_run_dir, "exp-thp-defer"), "w", encoding="utf-8") as fh:
             fh.write("madvise\n")
         svc, sd = self._service_with()
         out, err = io.StringIO(), io.StringIO()
         self.assertEqual(render_apply(svc.apply_changes(), out=out, err=err), 0, err.getvalue())
-        self.assertIn("kept:      THP defrag = defer", out.getvalue())
+        self.assertIn("kept:      THP defrag = defer+madvise", out.getvalue())
         self.assertIn("skipped:   MGLRU min_ttl_ms", out.getvalue())
         self.assertNotIn(("restart", "uresourced.service"), sd.calls)
         st_out = io.StringIO()
@@ -3960,9 +3970,9 @@ class Phase1MemoryTuningTest(_SwapScratch):
 
     def test_both_experiments_on_get_a_note_each(self) -> None:
         # wsf-300 holds vm.watermark_scale_factor and thp-defer THP defrag at once: status names both.
-        self._populate_mm_nodes(defrag="always [defer] defer+madvise madvise never", min_ttl="1000")
+        self._populate_mm_nodes(defrag="always defer [defer+madvise] madvise never", min_ttl="1000")
         with open(os.path.join(self.env.proc_dir, "sys", "vm", "watermark_scale_factor"), "w", encoding="utf-8") as fh:
-            fh.write("300\n")
+            fh.write("125\n")
         for name, saved in (("wsf-300", "125\n"), ("thp-defer", "madvise\n")):
             with open(os.path.join(self.env.cpu_run_dir, f"exp-{name}"), "w", encoding="utf-8") as fh:
                 fh.write(saved)
@@ -4015,7 +4025,7 @@ class Phase1MemoryTuningTest(_SwapScratch):
 
     def _uresourced_case(self, live_min: str, *, mem_total_kib: int | None = None) -> str:
         """The mm nodes, MemTotal and user.slice's live memory.min: the path of that file."""
-        self._populate_mm_nodes(defrag="always defer [defer+madvise] madvise never", min_ttl="1000")
+        self._populate_mm_nodes(defrag="always [defer] defer+madvise madvise never", min_ttl="1000")
         if mem_total_kib is not None:
             with open(os.path.join(self.env.proc_dir, "meminfo"), "w", encoding="utf-8") as fh:
                 fh.write(f"MemTotal:       {mem_total_kib} kB\nMemAvailable:   {mem_total_kib // 2} kB\n")
