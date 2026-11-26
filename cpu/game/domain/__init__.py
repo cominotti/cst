@@ -236,7 +236,7 @@ def vm_io_weight(vm_weight: str) -> str:
     return "10"
 
 
-_RANGE_END_RE: Final = re.compile(r"[ \t]*\+?([0-9]+)[ \t]*")
+_RANGE_END_RE: Final = re.compile(r"[ \t]*\+?(\d+)[ \t]*", re.ASCII)
 
 
 def _range_end(text: str) -> int | None:

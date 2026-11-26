@@ -420,29 +420,22 @@ class SwapReports:
                 PlanItem("REFUSE", f"partition {spec.partuuid[:8]}...", f"{spec.device_path} not found: apply stops")
             )
 
+        runtime_items.append(self._swap0_item(spec, swaps_text, tier_change=tier_change))
+        return runtime_items
+
+    def _swap0_item(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> PlanItem:
+        """The plan/status row for the live swap0 device."""
         real_swap0 = self._swap0_device(spec)
         swap0_used = find_swap_used_kib(swaps_text, real_swap0)
-        if swap0_used is not None:
-            if tier_change:
-                if swap0_used == 0:
-                    runtime_items.append(
-                        PlanItem("restart", spec.name, "active and empty: apply re-activates it with the new options")
-                    )
-                else:
-                    runtime_items.append(
-                        PlanItem(
-                            "later",
-                            spec.name,
-                            f"active with {swap0_used // 1024} MiB in use: new options only after a reboot",
-                        )
-                    )
-            else:
-                runtime_items.append(PlanItem("ok", spec.name, f"active as swap ({real_swap0})"))
-        else:
-            runtime_items.append(
-                PlanItem("start", spec.name, "not active: apply opens it (dm-crypt + mkswap) and swaps on")
-            )
-        return runtime_items
+        if swap0_used is None:
+            return PlanItem("start", spec.name, "not active: apply opens it (dm-crypt + mkswap) and swaps on")
+        if not tier_change:
+            return PlanItem("ok", spec.name, f"active as swap ({real_swap0})")
+        if swap0_used == 0:
+            return PlanItem("restart", spec.name, "active and empty: apply re-activates it with the new options")
+        return PlanItem(
+            "later", spec.name, f"active with {swap0_used // 1024} MiB in use: new options only after a reboot"
+        )
 
     def build_config_report(self, verb: str) -> ConfigSectionReport:
         """Inspect managed config files and runtime swap/zram states."""

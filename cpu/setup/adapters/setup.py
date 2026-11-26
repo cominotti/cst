@@ -34,7 +34,7 @@ from perf.domain.evaluate import evaluate_perf_snapshot
 from perf.domain.models import PerfAxis
 from perf.presenter import render_perf_findings_block
 from cpu.game.adapters.host import holds, read_stripped
-from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
+from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, RUN_FOLDER_MODE, USER_SLICE, cpuset_in
 from cpu.power.adapters import read_cpu_topology
 from cpu.setup.adapters.experiments import ExperimentEnv, run_experiment
 from cpu.setup.adapters.user_dropins import OlderDropins, classify_older_dropins
@@ -111,10 +111,10 @@ def target_user(sudo_user: str, conf: str) -> str:
     return target_user_in(read_text(conf) or "")
 
 
-def _make_run_dir(path: str) -> None:
+def _make_run_dir(path: str, mode: int = RUN_FOLDER_MODE) -> None:
     """install -d -m 0755 PATH (the mode also for a folder already there)."""
-    ensure_dir(path, 0o755)
-    os.chmod(path, 0o755)
+    ensure_dir(path, mode)
+    os.chmod(path, mode)
 
 
 def _touch(path: str) -> None:

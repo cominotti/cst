@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from cst_core.application.install import record_file
 from cst_core.domain.install import Component, Owner
-from cst_core.domain.record import RecordFormatError, component_dests
+from cst_core.domain.record import component_dests
 from cst_core.domain.units import UNIT_PATH_PROP, named_user_unit_dir
 from cst_core.ports import InstallRecordPort, SystemdPort
 
@@ -35,7 +35,7 @@ class RecordedUnitCopies:
         not plain (a HOME with a "." in it)."""
         try:
             rec = self.records.read(record_file(Owner.USER, self.home))
-        except OSError, RecordFormatError, ValueError:
+        except OSError, ValueError:  # RecordFormatError is a ValueError
             return ()
         if rec is None:
             return ()
