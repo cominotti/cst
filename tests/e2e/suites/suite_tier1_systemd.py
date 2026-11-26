@@ -15179,3 +15179,85 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_277_cpu_setup_dropins_follow_user_unit_path(self) -> None:
+        """cst cpu install writes user.slice.d drop-ins under the user manager's UnitPath (e2e277 with
+        XDG_CONFIG_HOME for user@1277.service), upgrades a recorded copy under ~/.config, is idempotent on
+        a second run, keeps tester's usual path and sha256 unchanged, and uninstall removes them."""
+        c = self.SYSTEMD_CONTAINER
+        if exec_bash(c, "getent passwd e2e277 || getent passwd 1277 || true").stdout.strip():
+            self.skipTest("the account e2e277 or the uid 1277 is taken")
+        if exec_bash(
+            c, "for f in /etc/systemd/system/user@1277.service.d; do [[ ! -e $f ]] || echo $f; done"
+        ).stdout.strip():
+            self.skipTest("user@1277.service.d already exists")
+        self.addCleanup(
+            exec_bash,
+            c,
+            """set +e
+            /opt/cst-rw/cst cpu uninstall >/dev/null 2>&1
+            systemctl stop user@1277.service user-runtime-dir@1277.service 2>/dev/null
+            rm -rf /etc/systemd/system/user@1277.service.d
+            systemctl daemon-reload
+            userdel -rf e2e277 2>/dev/null
+            if [[ -e /tmp/e2e-277-conf.bak ]]; then
+                mv /tmp/e2e-277-conf.bak /etc/cpu-setup/cpu-setup.conf
+            else
+                rm -f /etc/cpu-setup/cpu-setup.conf
+            fi""",
+            check=False,
+        )
+        r = exec_bash(
+            c,
+            r"""
+            set -Ee
+            trap 'echo "test_277 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            if [[ -e /etc/cpu-setup/cpu-setup.conf ]]; then cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-277-conf.bak; fi
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            useradd -m -u 1277 e2e277
+            H=/home/e2e277
+            mkdir -p /etc/systemd/system/user@1277.service.d
+            printf '[Service]\nEnvironment=XDG_CONFIG_HOME=%s/xdg277\n' "$H" >/etc/systemd/system/user@1277.service.d/zz-e2e277.conf
+            systemctl daemon-reload
+            systemctl start user@1277.service
+            old="$H/.config/systemd/user/user.slice.d/10-cpu-setup.conf"
+            new="$H/xdg277/systemd/user/user.slice.d/10-cpu-setup.conf"
+            rec="$H/.local/state/cst/installed.json"
+            printf '# Managed by cpu-setup.sh (CST).\n[Slice]\nCPUWeight=30\n' |
+                runuser -u e2e277 -- python3 -I -B /opt/cst-rw/cst_core/installer.py text --home "$H" "$old" 0644 --component cpu:toolbox >/dev/null
+            [[ -f "$old" ]]
+            grep -qF "\"$old\"" "$rec"
+            as_user() { local u="$1" id="$2"; shift 2; SUDO_USER="$u" SUDO_UID="$id" SUDO_GID="$id" "$@"; }
+            as_user e2e277 1277 /opt/cst-rw/cst cpu install >/tmp/e2e-277-1.out 2>&1
+            [[ -f "$new" ]]
+            [[ ! -e "$old" ]]
+            if grep -qF "\"$old\"" "$rec"; then echo "old copy still in installed.json" >&2; exit 1; fi
+            grep -qF "\"$new\"" "$rec"
+            drops="$(systemctl --user -M e2e277@ show user.slice -p DropInPaths --value)"
+            grep -qF "$new" <<<"$drops"
+            as_user e2e277 1277 /opt/cst-rw/cst cpu install >/tmp/e2e-277-2.out 2>&1
+            if grep -qE '^(written:|removed:)' /tmp/e2e-277-2.out; then cat /tmp/e2e-277-2.out >&2; exit 1; fi
+            as_user e2e277 1277 /opt/cst-rw/cst cpu uninstall >/dev/null
+            [[ ! -e "$new" ]]
+            # Usual set-up (tester): exact default path and content match origin/main.
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            as_user tester 1000 /opt/cst-rw/cst cpu install >/dev/null
+            t_drop="/home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf"
+            [[ -f "$t_drop" ]]
+            ec="$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)"
+            if [[ -n "$ec" ]]; then
+                want_sha="$(printf '# Managed by cpu-setup.sh (CST): toolbox containers (inner user.slice of the\n# user manager, sibling of app.slice) on the E-cores, weighing like background.slice.\n[Slice]\nCPUWeight=30\nAllowedCPUs=%s\n' "$ec" | sha256sum | awk '{print $1}')"
+            else
+                want_sha="$(printf '# Managed by cpu-setup.sh (CST).\n[Slice]\nCPUWeight=30\n' | sha256sum | awk '{print $1}')"
+            fi
+            got_sha="$(sha256sum "$t_drop" | awk '{print $1}')"
+            if [[ "$got_sha" != "$want_sha" ]]; then echo "sha mismatch: $got_sha != $want_sha" >&2; cat "$t_drop" >&2; exit 1; fi
+            as_user tester 1000 /opt/cst-rw/cst cpu uninstall >/dev/null
+            [[ ! -e "$t_drop" ]]
+            echo E2E-OK
+            """,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

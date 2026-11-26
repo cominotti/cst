@@ -5,7 +5,6 @@ the user's install record. bluetooth's LDAC watcher, cpu-setup's drop-ins and to
 
 from collections.abc import Callable
 from dataclasses import dataclass
-import posixpath
 
 from cst_core.application.install import record_file
 from cst_core.domain.install import Component, Owner
@@ -41,7 +40,8 @@ class RecordedUnitCopies:
         if rec is None:
             return ()
         dests = component_dests(rec, self.component)
-        return tuple(d for d in dests if posixpath.basename(d) == self.name and d != current)
+        tail = "/" + self.name.lstrip("/")
+        return tuple(d for d in dests if d.endswith(tail) and d != current)
 
     def older(self, current: str, answer: str | None) -> tuple[str, ...]:
         """The recorded copies a write at current replaces. None when the user manager's UnitPath

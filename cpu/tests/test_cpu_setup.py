@@ -36,8 +36,13 @@ from cpu.setup.domain import (
 )
 from cpu.setup.wiring import Handed
 from cpu.tests.fakes import RecordingRunner
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import SYSTEM_PYTHON
+from cst_core.application.install import record_file
+from cst_core.domain.install import Component, Owner
+from cst_core.domain.record import InstallRecord, RecordedFile
+from cst_core.domain.units import user_unit_dir
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from tests.repo_files import REPO
 
@@ -533,10 +538,11 @@ class UserManagerArgvTest(CpuSetupCase):
 
 class InstallTest(CpuSetupCase):
     def test_install_writes_in_order_and_reloads_after_the_old_names_are_gone(self) -> None:
+        unit_dir = user_unit_dir(None, self.home)
         old = [
             os.path.join(self.paths.unit_dir, "machine.slice.d", OLD_DROPIN_NAME),
-            toolbox_dropin(self.home, OLD_DROPIN_NAME),
-            helper_dropin(self.home, OLD_DROPIN_NAME),
+            toolbox_dropin(unit_dir, OLD_DROPIN_NAME),
+            helper_dropin(unit_dir, OLD_DROPIN_NAME),
         ]
         for f in old:
             self.write(f, "")
@@ -558,8 +564,9 @@ class InstallTest(CpuSetupCase):
             "modinfo ntsync",
             f"{inst} text {self.paths.ntsync_modules_load} 0644 --component cpu:core",
             "modprobe ntsync",
-            f"{runuser} text {toolbox_dropin(self.home)} 0644 --component cpu:toolbox",
-            f"{runuser} text {helper_dropin(self.home)} 0644 --component cpu:toolbox",
+            "systemctl --user -M tester@ show -p UnitPath --value",
+            f"{runuser} text {toolbox_dropin(unit_dir)} 0644 --component cpu:toolbox",
+            f"{runuser} text {helper_dropin(unit_dir)} 0644 --component cpu:toolbox",
             f"{runuser} install --home {self.home} --component cpu:gamemode",
             "id -nG tester",
             "usermod -aG gamemode tester",
@@ -694,19 +701,21 @@ class InstallTest(CpuSetupCase):
         self.assertIn("GPU_PM_MODE='always'\n", conf_lines("tester"))
         self.assertIn("CPU_CSTATE_MAX_LATENCY_US='200'\n", conf_lines("tester"))
         self.assertIn("GAME_CSTATE_MAX_LATENCY_US='50'\n", conf_lines("tester"))
+        unit_dir = user_unit_dir(None, self.home)
         self.assertTrue(str(texts[self.paths.ntsync_modules_load]).endswith("\nntsync\n"))
-        self.assertTrue(str(texts[toolbox_dropin(self.home)]).endswith("[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"))
-        self.assertTrue(str(texts[helper_dropin(self.home)]).endswith("[Service]\nAllowedCPUs=8-23\n"))
+        self.assertTrue(str(texts[toolbox_dropin(unit_dir)]).endswith("[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"))
+        self.assertTrue(str(texts[helper_dropin(unit_dir)]).endswith("[Service]\nAllowedCPUs=8-23\n"))
         # Every installer call hands over the caller's LC_CTYPE, as cst-install.bash did.
         for argv, env in zip(self.runner.calls, self.runner.envs, strict=True):
             if SYSTEM_PYTHON in argv:
                 self.assertEqual(list(env or {}), ["CST_LC_CTYPE"], argv)
 
     def test_no_e_cores_no_hwp_and_an_own_gamemode_ini(self) -> None:
+        unit_dir = user_unit_dir(None, self.home)
         os.remove(self.paths.e_cores)
         os.remove(self.paths.hwp_boost)
         self.write(gamemode_ini(self.home), "[general]\n")
-        self.write(helper_dropin(self.home), "x")
+        self.write(helper_dropin(unit_dir), "x")
         self.write(self.paths.conf, "TARGET_USER='tester'\n")
         self.runner.answers = [
             ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
@@ -726,7 +735,7 @@ class InstallTest(CpuSetupCase):
         calls = self.runner.joined()
         runuser = f"runuser -u tester -- {' '.join(INSTALLER)}"
         # The helper's drop-in, which only E-cores need, goes with its install record line.
-        self.assertIn(f"{runuser} remove-text --home {self.home} {helper_dropin(self.home)}", calls)
+        self.assertIn(f"{runuser} remove-text --home {self.home} {helper_dropin(unit_dir)}", calls)
         self.assertNotIn("removed '", out)
         self.assertFalse(
             [c for c in calls if "cpu:gamemode" in c or "usermod" in c or f"text {self.paths.conf}" in c], calls
@@ -825,12 +834,13 @@ class SwapDropinsTest(CpuSetupCase):
 
 class UninstallTest(CpuSetupCase):
     def test_uninstall_removes_what_install_added_and_keeps_the_rest(self) -> None:
+        unit_dir = user_unit_dir(None, self.home)
         rt = self.paths.unit_runtime
         left = [f"{rt}/user.slice.d/zz-cst-game.conf", f"{rt}/user@1000.service.d/zz-cst-game.conf"]
         keep = f"{rt}/user-1000.slice.d/10-other.conf"
         old = [
             os.path.join(self.paths.unit_dir, "machine.slice.d", OLD_DROPIN_NAME),
-            toolbox_dropin(self.home, OLD_DROPIN_NAME),
+            toolbox_dropin(unit_dir, OLD_DROPIN_NAME),
         ]
         for f in [
             *left,
@@ -838,8 +848,8 @@ class UninstallTest(CpuSetupCase):
             keep,
             self.paths.hwp_tmpfiles,
             self.paths.ntsync_modules_load,
-            toolbox_dropin(self.home),
-            helper_dropin(self.home),
+            toolbox_dropin(unit_dir),
+            helper_dropin(unit_dir),
         ]:
             self.write(f, "")
         self.write(gamemode_ini(self.home), "; Managed by cpu-setup.sh (CST).\n")
@@ -855,9 +865,9 @@ class UninstallTest(CpuSetupCase):
         self.assertFalse(os.path.exists(os.path.join(self.paths.unit_dir, "machine.slice.d")))  # emptied: removed
         self.assertFalse(os.path.exists(self.paths.hwp_tmpfiles))
         self.assertEqual(self.read(self.paths.hwp_boost), "0\n")
-        self.assertFalse(os.path.exists(os.path.dirname(toolbox_dropin(self.home))))
+        self.assertFalse(os.path.exists(os.path.dirname(toolbox_dropin(unit_dir))))
         inst = " ".join(INSTALLER)
-        dropins = f"{toolbox_dropin(self.home)} {helper_dropin(self.home)}"
+        dropins = f"{toolbox_dropin(unit_dir)} {helper_dropin(unit_dir)}"
         self.assertEqual(
             self.runner.joined(),
             [
@@ -870,6 +880,7 @@ class UninstallTest(CpuSetupCase):
                 f"python3 -I -B {REPO}/cpu/cpu-irq revert",
                 f"{inst} remove --component cpu:core",
                 "udevadm control --reload-rules",
+                "systemctl --user -M tester@ show -p UnitPath --value",
                 # Through the installer, with their install record lines (the hwp file also when gone).
                 f"{inst} remove-text {self.paths.hwp_tmpfiles}",
                 f"{inst} remove-text {self.paths.ntsync_modules_load}",
@@ -895,7 +906,8 @@ class UninstallTest(CpuSetupCase):
     def test_an_installer_that_fails_on_the_user_drop_ins_does_not_stop_uninstall(self) -> None:
         # The user's install record was written by a newer CST (or their drop-in folder is not theirs):
         # the installer fails. The drop-ins go as before the record, and both managers are reloaded.
-        dropins = [toolbox_dropin(self.home), helper_dropin(self.home)]
+        unit_dir = user_unit_dir(None, self.home)
+        dropins = [toolbox_dropin(unit_dir), helper_dropin(unit_dir)]
         for f in dropins:
             self.write(f, "")
         self.runner.answers = [("remove-text --home", CommandResult(1, "", ""))]
@@ -1256,10 +1268,121 @@ class BaselineDropinTest(unittest.TestCase):
         # The old name sorted after them (upper case before lower case): the bug.
         self.assertEqual(max([*overrides, OLD_DROPIN_NAME], key=os.fsencode), OLD_DROPIN_NAME)
         # The user drop-ins get the same name.
-        self.assertEqual(toolbox_dropin("/home/u"), "/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf")
+        default_dir = user_unit_dir(None, "/home/u")
+        self.assertEqual(toolbox_dropin(default_dir), "/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf")
         self.assertEqual(
-            helper_dropin("/home/u"), "/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf"
+            helper_dropin(default_dir),
+            "/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf",
         )
+
+
+class UserDropinUnitPathTest(CpuSetupCase):
+    """C15 (r30.2a): user drop-ins follow systemctl --user show -p UnitPath --value."""
+
+    PINNED_TOOLBOX_TEXT = (
+        "# Managed by cpu-setup.sh (CST): toolbox containers (inner user.slice of the\n"
+        "# user manager, sibling of app.slice) on the E-cores, weighing like background.slice.\n"
+        "[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"
+    )
+    PINNED_HELPER_TEXT = (
+        "# Managed by cpu-setup.sh (CST): host commands of toolboxes and Flatpak apps\n"
+        "# (flatpak-spawn --host) on the E-cores, like the toolboxes themselves.\n"
+        "[Service]\nAllowedCPUs=8-23\n"
+    )
+
+    def _record_old_dropins(self, old_tb: str, old_helper: str) -> None:
+        files = {
+            path: RecordedFile(None, Component.CPU_TOOLBOX, "text", "0" * 64, 0o644, Owner.USER)
+            for path in (old_tb, old_helper)
+        }
+        rec = InstallRecord(files, {})
+        JsonInstallRecord().update(record_file(Owner.USER, self.home), lambda _r: rec)
+
+    def test_usual_setup_pins_paths_and_bytes_to_main(self) -> None:
+        for answer in (
+            CommandResult(0, f"{self.home}/.config/systemd/user /etc/systemd/user /usr/lib/systemd/user\n", ""),
+            CommandResult(1, "", "Failed to connect to bus"),
+        ):
+            with self.subTest(rc=answer.returncode):
+                self.runner.calls.clear()
+                self.runner.inputs.clear()
+                self.runner.answers = [
+                    ("systemctl --user -M tester@ show -p UnitPath --value", answer),
+                    ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+                ]
+                rc, _, err = self.command("install")
+                self.assertEqual((rc, err), (0, ""))
+                tb_want = f"{self.home}/.config/systemd/user/user.slice.d/10-cpu-setup.conf"
+                hp_want = f"{self.home}/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf"
+                self.assertEqual(self.runner.inputs[tb_want], self.PINNED_TOOLBOX_TEXT)
+                self.assertEqual(self.runner.inputs[hp_want], self.PINNED_HELPER_TEXT)
+
+    def test_xdg_unit_path_moves_dropins_once_and_upgrades_recorded_older_copies(self) -> None:
+        xdg_unit_dir = f"{self.home}/xdg/systemd/user"
+        old_tb = f"{self.home}/.config/systemd/user/user.slice.d/{DROPIN_NAME}"
+        old_helper = f"{self.home}/.config/systemd/user/flatpak-session-helper.service.d/{DROPIN_NAME}"
+        new_tb = toolbox_dropin(xdg_unit_dir)
+        new_helper = helper_dropin(xdg_unit_dir)
+        for p in (old_tb, old_helper):
+            self.write(p, "old\n")
+        self._record_old_dropins(old_tb, old_helper)
+        self.runner.on_call = remove_text_files
+        self.runner.answers = [
+            (
+                "systemctl --user -M tester@ show -p UnitPath --value",
+                CommandResult(0, f"{xdg_unit_dir} /etc/systemd/user /usr/lib/systemd/user\n", ""),
+            ),
+            ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+        ]
+        rc, _, err = self.command("install")
+        self.assertEqual((rc, err), (0, ""))
+        calls = self.runner.joined()
+        self.assertEqual(sum("show -p UnitPath --value" in c for c in calls), 1)
+        runuser = f"runuser -u tester -- {' '.join(INSTALLER)}"
+        rm_cmd = f"{runuser} remove-text --home {self.home} {old_tb} {old_helper}"
+        write_tb = f"{runuser} text {new_tb} 0644 --component cpu:toolbox"
+        write_hp = f"{runuser} text {new_helper} 0644 --component cpu:toolbox"
+        self.assertIn(rm_cmd, calls)
+        self.assertIn(write_tb, calls)
+        self.assertIn(write_hp, calls)
+        self.assertLess(calls.index(rm_cmd), calls.index(write_tb))
+        self.assertIn(new_tb, self.runner.inputs)
+        self.assertIn(new_helper, self.runner.inputs)
+        self.assertFalse(os.path.exists(old_tb))
+        self.assertFalse(os.path.exists(old_helper))
+        # Uninstall removes both the current XDG drop-ins and any recorded copies elsewhere.
+        self.write(new_tb, self.PINNED_TOOLBOX_TEXT)
+        self.write(new_helper, self.PINNED_HELPER_TEXT)
+        self.write(old_tb, "stale\n")
+        self.runner.calls.clear()
+        rc, _, err = self.command("uninstall")
+        self.assertEqual((rc, err), (0, ""))
+        uninstall_rm = f"{runuser} remove-text --home {self.home} {new_tb} {new_helper} {old_tb} {old_helper}"
+        self.assertIn(uninstall_rm, self.runner.joined())
+        self.assertFalse(os.path.exists(os.path.dirname(new_tb)))
+        self.assertFalse(os.path.exists(os.path.dirname(old_tb)))
+
+    def test_no_named_user_dir_keeps_recorded_copies_elsewhere(self) -> None:
+        old_tb = f"{self.home}/other/systemd/user/user.slice.d/{DROPIN_NAME}"
+        old_helper = f"{self.home}/other/systemd/user/flatpak-session-helper.service.d/{DROPIN_NAME}"
+        self.write(old_tb, "old\n")
+        self._record_old_dropins(old_tb, old_helper)
+        for answer in (
+            CommandResult(0, "/etc/systemd/user /usr/lib/systemd/user\n", ""),
+            CommandResult(1, "", "no bus"),
+        ):
+            with self.subTest(rc=answer.returncode):
+                self.runner.calls.clear()
+                self.runner.inputs.clear()
+                self.runner.answers = [
+                    ("systemctl --user -M tester@ show -p UnitPath --value", answer),
+                    ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+                ]
+                rc, _, err = self.command("install")
+                self.assertEqual((rc, err), (0, ""))
+                self.assertTrue(os.path.exists(old_tb))
+                self.assertFalse([c for c in self.runner.joined() if "remove-text" in c], self.runner.joined())
+                self.assertIn(f"{self.home}/.config/systemd/user/user.slice.d/{DROPIN_NAME}", self.runner.inputs)
 
 
 class NtsyncInstallTest(CpuSetupCase):

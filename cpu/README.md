@@ -255,8 +255,8 @@ Rules:
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
 | `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` | Turns on intel_pstate's HWP dynamic boost at every boot (6.3). |
 | `/etc/modules-load.d/cst-ntsync.conf` | Autoloads `ntsync` at boot (and via `modprobe ntsync` during `install`) when built as a kernel module, exposing `/dev/ntsync` for Wine/Proton. |
-| `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. |
-| `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23`. |
+| `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. Written under the folder `systemctl --user show -p UnitPath --value` names first (`~/.config/systemd/user` when unset or when the user manager does not answer); older recorded copies elsewhere are removed by `install` and `uninstall`. |
+| `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23` (same `UnitPath` folder and cleanup). |
 | `~/.config/gamemode.ini` | GameMode config (only if you do not have your own). |
 | `/etc/group`, `/etc/gshadow` | `gamemode` group copied in, your user added (6.4). |
 

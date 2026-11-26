@@ -616,6 +616,17 @@ class UserUnitCopiesTest(unittest.TestCase):
         records = _Records(rec)
         found = RecordedUnitCopies(records, self.HOME, Component.CPU_TOOLBOX, self.NAME).older(self.CURRENT, self.NAMED)
         self.assertEqual(found, (self.OLD,))
+        # A relative subpath (e.g. a drop-in under <unit>.d/) matches only that unit's drop-ins, not another
+        # unit's drop-in with the same filename.
+        dropin_rec = self._record(
+            ("/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf", Component.CPU_TOOLBOX),
+            ("/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf", Component.CPU_TOOLBOX),
+            ("/home/u/xdg/systemd/user/user.slice.d/10-cpu-setup.conf", Component.CPU_TOOLBOX),
+        )
+        dropin_found = RecordedUnitCopies(
+            _Records(dropin_rec), self.HOME, Component.CPU_TOOLBOX, "user.slice.d/10-cpu-setup.conf"
+        ).older("/home/u/xdg/systemd/user/user.slice.d/10-cpu-setup.conf", self.NAMED)
+        self.assertEqual(dropin_found, ("/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf",))
         self.assertEqual(records.paths, ["/home/u/.local/state/cst/installed.json"])
         # No answer, or an answer that names no folder of the user's own: every recorded copy is kept.
         for answer in (None, "/etc/systemd/user /usr/lib/systemd/user"):

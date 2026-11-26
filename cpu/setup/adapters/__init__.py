@@ -19,15 +19,17 @@ import pwd
 from typing import TextIO
 
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.adapters.terminal import stderr, stdout
+from cst_core.application.user_units import RecordedUnitCopies
 from cst_core.domain.errors import shell_exit_status
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
+from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, Component, select_entries
 from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.units import user_manager_head
+from cst_core.domain.units import UNIT_PATH_PROP, show_manager_value_argv, user_manager_head, user_unit_dir
 from cst_core.domain.values import ROOT_ACCOUNT
-from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, InstallRecordPort, OutputMode
 from perf.adapters import LinuxPerfProbe, PerfPaths
 from perf.domain.evaluate import evaluate_perf_snapshot
 from perf.domain.models import PerfAxis
@@ -138,6 +140,7 @@ class CpuSetup:
         home_of: Callable[[str], str] = passwd_home,
         has_group: Callable[[str], bool] = group_exists,
         me: Callable[[], str] = my_name,
+        records: InstallRecordPort | None = None,
         out: TextIO | None = None,
         err: TextIO | None = None,
     ) -> None:
@@ -151,6 +154,8 @@ class CpuSetup:
         self._home_of = home_of
         self._has_group = has_group
         self._me = me
+        self._records = JsonInstallRecord() if records is None else records
+        self._unit_paths: dict[str, str | None] = {}
         self._out = out
         self._err = err
 
@@ -262,11 +267,41 @@ class CpuSetup:
             with contextlib.suppress(OSError):
                 os.rmdir(p)
 
+    def _user_unit_path(self) -> str | None:
+        """The target user manager's UnitPath, asked once per run; None when it cannot be read."""
+        if not self.user:
+            return None
+        if self.user not in self._unit_paths:
+            self._o().flush()
+            self._e().flush()
+            res = self._runner.run(
+                show_manager_value_argv(user_manager_head(self.user), UNIT_PATH_PROP),
+                check=False,
+                timeout=20,
+                locale_c=True,
+                output=OutputMode.CAPTURE,
+            )
+            self._unit_paths[self.user] = res.stdout if res.returncode == 0 else None
+        return self._unit_paths[self.user]
+
+    def _user_unit_dir(self) -> str:
+        """Where the target user manager reads its own units from (user_unit_dir)."""
+        return user_unit_dir(self._user_unit_path(), self._home_of(self.user))
+
     def toolbox_dropin(self, name: str = DROPIN_NAME) -> str:
-        return toolbox_dropin(self._home_of(self.user), name)
+        return toolbox_dropin(self._user_unit_dir(), name)
 
     def helper_dropin(self, name: str = DROPIN_NAME) -> str:
-        return helper_dropin(self._home_of(self.user), name)
+        return helper_dropin(self._user_unit_dir(), name)
+
+    def _older_dropin_copies(self, current: str, rel_subpath: str) -> tuple[str, ...]:
+        """Recorded older copies of one cpu:toolbox drop-in elsewhere than current; none when kept."""
+        home = self._home_of(self.user)
+        if not home:
+            return ()
+        return RecordedUnitCopies(self._records, home, Component.CPU_TOOLBOX, rel_subpath).older(
+            current, self._user_unit_path()
+        )
 
     def remove_old_dropins(self) -> None:
         """The baseline drop-ins under their old name, from before the rename to 10-: they would still
@@ -336,13 +371,21 @@ class CpuSetup:
             self.warn(f"NOTE: {p.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped")
         self._install_ntsync()
         ecores = self.e_cores()
+        tb_path, helper_path = self.toolbox_dropin(), self.helper_dropin()
+        older = (
+            *self._older_dropin_copies(tb_path, f"user.slice.d/{DROPIN_NAME}"),
+            *self._older_dropin_copies(helper_path, f"flatpak-session-helper.service.d/{DROPIN_NAME}"),
+        )
+        if older:
+            self.remove_user_text(*older)
+            self.rmdir(*(dict.fromkeys(os.path.dirname(p) for p in older)))
         if ecores:
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
-            self.install_text(self.helper_dropin(), helper_dropin_text(ecores), user, TOOLBOX_COMPONENT)
+            self.install_text(tb_path, toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
+            self.install_text(helper_path, helper_dropin_text(ecores), user, TOOLBOX_COMPONENT)
         else:
             self.warn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped")
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(""), user, TOOLBOX_COMPONENT)
-            self.remove_user_text(self.helper_dropin())
+            self.install_text(tb_path, toolbox_dropin_text(""), user, TOOLBOX_COMPONENT)
+            self.remove_user_text(helper_path)
         self.remove_old_dropins()  # the daemon-reloads below then read without them
         link = os.path.join(self.root, "cst-link.bash")
         self.run(["bash", "-c", 'set -Eeuo pipefail; source "$1"; link_cst_command "$2"', "cpu-setup.sh", link, user])
@@ -458,8 +501,13 @@ class CpuSetup:
         self.rmdir(os.path.dirname(p.machine_dropin), os.path.dirname(p.delegate_dropin))
         if self.user:
             dropins = (self.toolbox_dropin(), self.helper_dropin())
+            older = (
+                *self._older_dropin_copies(dropins[0], f"user.slice.d/{DROPIN_NAME}"),
+                *self._older_dropin_copies(dropins[1], f"flatpak-session-helper.service.d/{DROPIN_NAME}"),
+            )
+            all_dropins = (*dropins, *older)
             try:
-                self.remove_user_text(*dropins)
+                self.remove_user_text(*all_dropins)
             except Halt:
                 # The installer failed (a record of a newer CST, a folder the user cannot write): the record
                 # stays as it is, the drop-ins go as before the record, and uninstall goes on to the reloads.
@@ -467,8 +515,8 @@ class CpuSetup:
                     f"WARNING: the install record of {self.user} was not changed (see above); "
                     "removing the drop-ins without it"
                 )
-                self.rm_v(*dropins)
-            self.rmdir(os.path.dirname(self.toolbox_dropin()), os.path.dirname(self.helper_dropin()))
+                self.rm_v(*all_dropins)
+            self.rmdir(*(dict.fromkeys(os.path.dirname(p) for p in all_dropins)))
             if holds(gamemode_ini(self._home_of(self.user)), MANAGED_MARK):
                 home = self.required_home(self.user, "cst-install.bash")
                 self.installer("remove", "--home", home, "--component", GAMEMODE_COMPONENT, as_user=self.user)

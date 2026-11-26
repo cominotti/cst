@@ -17,7 +17,7 @@ from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.install import Component
 from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
-from cst_core.domain.units import SYSTEM_UNIT_DIR, USER_UNIT_DIR_REL
+from cst_core.domain.units import SYSTEM_UNIT_DIR
 from cst_core.domain.values import CpuSet, DomainValidationError, Json, format_cpulist
 from cpu.game.domain import BUILDS_SLICE
 from cpu.irq.domain import IrqAction
@@ -162,14 +162,14 @@ class SetupPaths:
         return f"{self.run}/exp-{experiment}"
 
 
-def toolbox_dropin(home: str, name: str = DROPIN_NAME) -> str:
+def toolbox_dropin(unit_dir: str, name: str = DROPIN_NAME) -> str:
     """The toolboxes' drop-in (the inner user.slice of the user manager)."""
-    return f"{home}/{USER_UNIT_DIR_REL}/user.slice.d/{name}"
+    return f"{unit_dir}/user.slice.d/{name}"
 
 
-def helper_dropin(home: str, name: str = DROPIN_NAME) -> str:
+def helper_dropin(unit_dir: str, name: str = DROPIN_NAME) -> str:
     """The drop-in of flatpak-session-helper (what toolboxes run on the host)."""
-    return f"{home}/{USER_UNIT_DIR_REL}/flatpak-session-helper.service.d/{name}"
+    return f"{unit_dir}/flatpak-session-helper.service.d/{name}"
 
 
 def gamemode_ini(home: str) -> str:
