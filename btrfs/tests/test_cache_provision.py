@@ -922,3 +922,54 @@ class ProvisionAndMigrationAdapterTests(unittest.TestCase):
         self.assertEqual(os.listdir(msrc), [])
         mig.remove_empty_dir(src)
         self.assertFalse(os.path.exists(msrc))
+
+    def test_provision_adapter_ignores_parent_lsblk_pttype_on_partition(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-prov-pttype-")
+        self.addCleanup(shutil.rmtree, tmp)
+        runner = FakeMountRunner(tmp)
+        spec = _sample_spec()
+
+        def inspect_case(dev_type: str, lsblk_pttype: str | None, blkid_out: str) -> BlockDeviceFacts:
+            def run_fn(argv: Sequence[str], **_kwargs: object) -> CommandResult:
+                if argv[0] == "lsblk":
+                    payload = {
+                        "blockdevices": [
+                            {
+                                "name": "/dev/nvme2n1p1",
+                                "type": dev_type,
+                                "partuuid": SAMPLE_PARTUUID,
+                                "size": SAMPLE_SIZE,
+                                "model": "WD Black",
+                                "fstype": None,
+                                "pttype": lsblk_pttype,
+                                "uuid": None,
+                                "mountpoints": [],
+                            }
+                        ]
+                    }
+                    return CommandResult(0, json.dumps(payload), "")
+                if argv[0] == "blkid":
+                    return CommandResult(0 if blkid_out else 2, blkid_out, "")
+                return CommandResult(0, "", "")
+
+            with mock.patch.object(runner, "run", side_effect=run_fn):
+                rt = CacheMountRuntime(seam_root=tmp, ctx=CacheTestCtx(), runner=runner, env_map={})
+                facts, err = CacheProvisionAdapter(rt).inspect_device(spec.device_path)
+            self.assertIsNone(err)
+            assert facts is not None
+            return facts
+
+        blank_gpt_part = inspect_case("part", "gpt", f"PART_ENTRY_SCHEME=gpt\nPART_ENTRY_UUID={SAMPLE_PARTUUID}\n")
+        self.assertEqual((blank_gpt_part.pttype, blank_gpt_part.fstype), ("", ""))
+        self.assertEqual(validate_provision_apply(_probe(spec=spec, dev=blank_gpt_part), do_format=True), [])
+
+        nested_pt_part = inspect_case(
+            "part", "gpt", f"PART_ENTRY_SCHEME=gpt\nPTTYPE=dos\nPART_ENTRY_UUID={SAMPLE_PARTUUID}\n"
+        )
+        self.assertEqual(nested_pt_part.pttype, "dos")
+        self.assertIn(
+            "refusing to wipe", validate_provision_apply(_probe(spec=spec, dev=nested_pt_part), do_format=True)[0]
+        )
+
+        whole_disk = inspect_case("disk", "gpt", "")
+        self.assertEqual(whole_disk.pttype, "gpt")
