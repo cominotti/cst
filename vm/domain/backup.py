@@ -538,23 +538,23 @@ def nas_index(
     out.append(entry)
     if alive is not None:
         alive = {**alive, snap: snap}
-        kept: list[IndexEntry] = []
-        for e in out:
-            if (
-                e["vm"] == entry["vm"]
-                and e.get("mode") == BackupMode.NAS
-                and e.get("repository") == entry["repository"]
-            ):
-                now = _listed_as(entry_names(e), alive)
-                if now is None:
-                    continue
-                if now != e["snapshot"] or (now in unkept and now != snap and e.get("keep") is not None):
-                    kept.append(_as_listed(e, now, unkept))
-                    continue
-            kept.append(e)
-        out = kept
+        out = [kept for e in out if (kept := _sync_nas_entry(e, entry, alive, unkept)) is not None]
     out.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
     return out
+
+
+def _sync_nas_entry(
+    e: IndexEntry, entry: IndexEntry, alive: Mapping[str, str], unkept: AbstractSet[str]
+) -> IndexEntry | None:
+    """One index entry reconciled against restic's alive snapshots: dropped (None), updated, or kept."""
+    if e["vm"] != entry["vm"] or e.get("mode") != BackupMode.NAS or e.get("repository") != entry["repository"]:
+        return e
+    now = _listed_as(entry_names(e), alive)
+    if now is None:
+        return None
+    if now != e["snapshot"] or (now in unkept and now != entry["snapshot"] and e.get("keep") is not None):
+        return _as_listed(e, now, unkept)
+    return e
 
 
 def _as_listed(e: IndexEntry, now: str, unkept: AbstractSet[str]) -> IndexEntry:

@@ -192,6 +192,21 @@ def _ended(p: subprocess.Popen[bytes]) -> int:
         return p.wait()
 
 
+def _stream_backup_output(
+    p: subprocess.Popen[bytes], output: _Output, state: list[ResticSummary], out: ResticOutput
+) -> int:
+    """Drain restic backup --json lines into state[0] until EOF and return restic's exit status."""
+    shown = 0.0
+    while True:
+        while (line := output.line()) is not None:
+            state[0], shown = _backup_json_line(line, state[0], shown, out)
+            output.drop_line()
+        if output.ended:
+            break
+        output.fill()
+    return p.wait()
+
+
 class Restic:
     """restic through run (a command and its answer: the caller's runner, in the C locale) and,
     for a backup, a child of its own whose JSON lines are read as they come."""
@@ -224,8 +239,7 @@ class Restic:
         answered is called once restic has exited, when its summary names its snapshot: the caller
         holds the stops from there (restic is never waited for with the stops held); a stop it raises
         is carried as one that came after the snapshot."""
-        summary: ResticSummary = {}
-        shown = 0.0
+        state: list[ResticSummary] = [{}]
         output: _Output | None = None
         timer: threading.Timer | None = None
         # The stops wait while restic starts: a stop between fork and exec would raise Stop inside Popen,
@@ -262,19 +276,14 @@ class Restic:
             # always goes to the main thread, and never while it holds them (signals_held: _Output's reads).
             with signals_held():
                 timer.start()
-            while True:
-                while (line := output.line()) is not None:
-                    summary, shown = _backup_json_line(line, summary, shown, out)
-                    output.drop_line()
-                if output.ended:
-                    break
-                output.fill()
-            rc = p.wait()
+            rc = _stream_backup_output(p, output, state, out)
+            summary = state[0]
             if answered is not None and "snapshot_id" in summary:
                 answered()
         except Stop as e:
             # The stops are ignored from here on (on_signal): the reading of the last lines is not cut.
             rc = _ended(p)
+            summary = state[0]
             found = summary if "snapshot_id" in summary or output is None else output.summary_left()
             if "snapshot_id" in found:
                 raise StopAfterSnapshot(str(e), rc, found) from None
