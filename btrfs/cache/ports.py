@@ -216,6 +216,10 @@ class CacheProvisionPort(Protocol):
         """Mount `subvol=<kind>` at `target` with `BASE_MOUNT_OPTIONS`; returns None or error."""
         ...
 
+    def remount_base(self, target: str) -> str | None:
+        """Remount already-mounted base `target` with `OPT_COMPRESS_FORCE`; returns None or error."""
+        ...
+
     def umount_base(self, target: str) -> str | None:
         """Unmount base mountpoint `target`; returns None or error."""
         ...

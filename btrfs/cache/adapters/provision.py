@@ -13,7 +13,7 @@ import tempfile
 from typing import Final, TypedDict
 
 from btrfs.cache.adapters.mounts import MOUNT_TIMEOUT_S, CacheMountRuntime, from_toolbox, map_path
-from btrfs.cache.domain import CacheMountKind
+from btrfs.cache.domain import OPT_COMPRESS_FORCE, CacheMountKind
 from btrfs.cache.domain.provision import (
     BASE_DIR_MODE,
     BASE_MOUNT_OPTIONS,
@@ -471,6 +471,16 @@ class CacheProvisionAdapter:
             output=OutputMode.CAPTURE,
         )
         return None if res.returncode == 0 else res.failure(f"mount {mapper_path} {target}")
+
+    def remount_base(self, target: str) -> str | None:
+        mapped_target = map_path(target, self._rt, read_only=False)
+        res = self._rt.runner.run(
+            ["mount", "-o", f"remount,{OPT_COMPRESS_FORCE}", mapped_target],
+            timeout=MOUNT_TIMEOUT_S,
+            locale_c=True,
+            output=OutputMode.CAPTURE,
+        )
+        return None if res.returncode == 0 else res.failure(f"mount -o remount,{OPT_COMPRESS_FORCE} {target}")
 
     def umount_base(self, target: str) -> str | None:
         mapped_target = map_path(target, self._rt, read_only=False)

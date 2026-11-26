@@ -10,6 +10,7 @@ from btrfs.cache.domain import (
     BASE_FOR_KIND,
     CACHE_BASE,
     FSTYPE_BTRFS,
+    OPT_COMPRESS_FORCE,
     SCRATCHPAD_BASE,
     CacheMountKind,
     CacheMountParsedArgs,
@@ -33,6 +34,7 @@ from btrfs.cache.domain.provision import (
     ProvisionProbe,
     format_provision_device_plan,
     format_provision_plan,
+    needs_base_remount,
     parse_cache_conf,
     plan_provision_crypttab,
     plan_provision_fstab,
@@ -146,6 +148,7 @@ def _probe_bases(
             mounted_fstype=mnt.fstype if mnt is not None else "",
             mounted_uuid=mnt.uuid if mnt is not None else "",
             mounted_fsroot=mnt.fsroot if mnt is not None else "",
+            mounted_options=mnt.options if mnt is not None else "",
             fstab_source=fst.source if fst is not None else "",
             fstab_managed=fst is not None and path not in unmanaged,
             fstab_unmanaged=path in unmanaged,
@@ -579,6 +582,18 @@ def _step_crypttab_and_fstab(ctx: _ApplyContext, luks_uuid: str) -> str | None:
     return None
 
 
+def _step_remount_bases(ctx: _ApplyContext) -> str | None:
+    for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD):
+        if not needs_base_remount(ctx.probe.bases[kind]):
+            continue
+        path = BASE_FOR_KIND[kind]
+        rerr = ctx.prov.remount_base(path)
+        if rerr is not None:
+            return rerr
+        ctx.lines.append(f"Remounted {path} with {OPT_COMPRESS_FORCE}.")
+    return None
+
+
 def _provision_apply(
     parsed: CacheMountParsedArgs, prov: CacheProvisionPort, env: ProvisionEnv, seam: list[str]
 ) -> ExitAndLines:
@@ -602,6 +617,10 @@ def _provision_apply(
     cerr = _step_crypttab_and_fstab(ctx, luks_uuid)
     if cerr is not None:
         return _fail_txn(cerr, txn, prov, env, seam)
+
+    rerr = _step_remount_bases(ctx)
+    if rerr is not None:
+        return _fail_txn(rerr, txn, prov, env, seam)
 
     if txn.btrfs_created:
         serr = prov.scrub_base(CACHE_BASE)

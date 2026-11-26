@@ -15,7 +15,9 @@ from btrfs.cache.domain import (
     BASE_FOR_KIND,
     CACHE_BASE,
     FSTYPE_BTRFS,
+    OPT_COMPRESS_FORCE,
     OPT_FLUSHONCOMMIT,
+    PROVISION_BASE_MARKER,
     SCRATCHPAD_BASE,
     ManagedFstabEntry,
     has_mount_option,
@@ -23,9 +25,10 @@ from btrfs.cache.domain import (
     parse_all_mounts,
     parse_managed_fstab_entries,
     source_fsroot,
+    split_tagged_fstab_line,
 )
 from btrfs.compress.domain import MountEntry
-from cst_core.domain.text import split_ascii_blanks
+from cst_core.domain.text import file_lines, split_ascii_blanks, unescape_mount_field
 from cst_core.domain.units import SYSTEMD_WHITESPACE, systemd_lines
 
 
@@ -147,6 +150,39 @@ def _check_base_mount(
         )
 
 
+def _provisioned_base_targets(fstab_text: str) -> frozenset[str]:
+    targets: set[str] = set()
+    for raw in file_lines(fstab_text):
+        parsed = split_tagged_fstab_line(raw, PROVISION_BASE_MARKER)
+        if parsed is not None:
+            fields, _ = parsed
+            targets.add(unescape_mount_field(fields[1]))
+    return frozenset(targets)
+
+
+def _check_base_compress(
+    base: str,
+    live: MountEntry | None,
+    fst: MountEntry | None,
+    findings: list[CacheMountFinding],
+) -> None:
+    fstab_missing = fst is not None and not has_mount_option(fst.options, OPT_COMPRESS_FORCE)
+    live_missing = (
+        live is not None
+        and live.fstype == FSTYPE_BTRFS
+        and bool(live.options)
+        and not has_mount_option(live.options, OPT_COMPRESS_FORCE)
+    )
+    if fstab_missing or live_missing:
+        findings.append(
+            CacheMountFinding(
+                CacheMountFindingSeverity.WARN,
+                f"{base} is not using '{OPT_COMPRESS_FORCE}' (run provision apply to force zstd compression on the cache drive)",
+                fix="btrfs cache provision apply",
+            )
+        )
+
+
 def _is_cst_bind(live: MountEntry, base_live: MountEntry | None, user: str) -> bool:
     """live, the mount at a managed target, is CST's bind as far as the mount table tells: on the
     base's device and, when findmnt names its root (SOURCE[FSROOT]), at `<base root>/<user>`.
@@ -181,6 +217,7 @@ def assess_cache_mount_health(
     if not active_bases and not managed:
         return []
 
+    provisioned = _provisioned_base_targets(fstab_text or "")
     findings: list[CacheMountFinding] = []
     backing_sources: list[str] = []
     for base in active_bases:
@@ -189,6 +226,8 @@ def assess_cache_mount_health(
         if fst is not None:
             backing_sources.append(fst.source)
         _check_base_mount(base, live, fst, findings)
+        if base in provisioned:
+            _check_base_compress(base, live, fst, findings)
 
     findings.extend(
         CacheMountFinding(CacheMountFindingSeverity.WARN, issue)

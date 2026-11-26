@@ -25,6 +25,7 @@ from btrfs.cache.adapters.provision import CacheProvisionAdapter
 from btrfs.cache.application.mounts import CacheMounts
 from btrfs.cache.domain import (
     CACHE_BASE,
+    OPT_COMPRESS_FORCE,
     SCRATCHPAD_BASE,
     BusyProcess,
     CacheMountAction,
@@ -35,8 +36,10 @@ from btrfs.cache.domain import (
 )
 from btrfs.cache.domain.migrate import MIGRATE_BACKUP_SUFFIX, backup_path_for, cleanup_hint
 from btrfs.cache.domain.provision import (
+    BASE_MOUNT_OPTIONS,
     BTRFS_CACHE_LABEL,
     CRYPTTAB_PATH,
+    PROVISION_BASE_MARKER,
     SUBVOL_FOR_KIND,
     BlockDeviceFacts,
     CacheHardwareSpec,
@@ -159,6 +162,7 @@ class FakeProvisionPort:
         self.fail_crypttab_not_synced = False
         self.close_calls = 0
         self.scrub_calls: list[str] = []
+        self.remount_calls: list[str] = []
 
     def read_conf(self) -> tuple[str | None, str | None]:
         return self.conf_text, None
@@ -288,6 +292,15 @@ class FakeProvisionPort:
                 fsroot=f"/{SUBVOL_FOR_KIND[kind]}",
                 uuid=UUID_CACHE_DRIVE,
             )
+            self.world.table.set_options(target, f"rw,{BASE_MOUNT_OPTIONS}")
+        return None
+
+    def remount_base(self, target: str) -> str | None:
+        self.remount_calls.append(target)
+        if self.fail_on == f"remount:{target}":
+            return f"mount -o remount,{OPT_COMPRESS_FORCE} {target} failed: injected"
+        if self.world is not None:
+            self.world.table.set_options(target, f"rw,{BASE_MOUNT_OPTIONS}")
         return None
 
     def umount_base(self, target: str) -> str | None:
@@ -417,6 +430,7 @@ class ProvisionDomainTests(unittest.TestCase):
             "/var/mnt/cache/u /var/home/u/.cache none bind,nofail 0 0 # managed-by: btrfs-cache (CST) user=u kind=cache\n"
         )
         with_bases = plan_provision_fstab(user_fstab, spec)
+        self.assertIn(OPT_COMPRESS_FORCE, render_base_fstab_line(spec, CacheMountKind.CACHE))
         self.assertIn(render_base_fstab_line(spec, CacheMountKind.CACHE), with_bases)
         self.assertIn(render_base_fstab_line(spec, CacheMountKind.SCRATCHPAD), with_bases)
         self.assertEqual(plan_unprovision_fstab(with_bases), user_fstab)
@@ -763,6 +777,59 @@ class ProvisionApplicationRollbackTests(unittest.TestCase):
         self.assertIn("kept /var/home/tester/.cache mounted over", "\n".join(err))
         self.assertEqual(mig.cleared, [])
 
+    def test_provision_upgrade_from_compress_zstd_to_compress_force_remounts_and_rolls_back(self) -> None:
+        app, w, prov, _ = self._world()
+        self.assertEqual(
+            app.run(parse_cache_mount_args(["provision", "init", "--device", "/dev/nvme2n1p1"]), "p")[0], 0
+        )
+        self.assertEqual(app.run(parse_cache_mount_args(["provision", "apply", "--format", "--yes"]), "p")[0], 0)
+        prov.remount_calls.clear()
+
+        # Simulate an older provisioned host still using compress=zstd:1 in /etc/fstab and live mounts.
+        old_fstab = (
+            "UUID=root / btrfs defaults 0 0\n"
+            f"/dev/mapper/cache {CACHE_BASE} btrfs subvol=cache,noatime,discard=async,compress=zstd:1,commit=60,nofail 0 0 {PROVISION_BASE_MARKER} kind=cache\n"
+            f"/dev/mapper/cache {SCRATCHPAD_BASE} btrfs subvol=scratchpad,noatime,discard=async,compress=zstd:1,commit=60,nofail 0 0 {PROVISION_BASE_MARKER} kind=scratchpad\n"
+        )
+        w.put_fstab(old_fstab)
+        w.systemd.loaded = (old_fstab, None)
+        for target in (CACHE_BASE, SCRATCHPAD_BASE):
+            for m in w.table.mounts:
+                if m["target"] == target:
+                    m["options"] = "rw,noatime,discard=async,compress=zstd:1,commit=60"
+
+        rc_plan, out_plan = app.run(parse_cache_mount_args(["provision", "plan"]), "cst btrfs cache")
+        self.assertEqual(rc_plan, 0)
+        plan_txt = "\n".join(out_plan)
+        self.assertIn("upsert base mount lines in /etc/fstab and reload systemd", plan_txt)
+        self.assertIn(f"remount base subvolume(s) with {OPT_COMPRESS_FORCE}: {CACHE_BASE}, {SCRATCHPAD_BASE}", plan_txt)
+        self.assertEqual(w.fstab, old_fstab)
+
+        # Remount failure rolls back /etc/fstab and systemd reload cleanly.
+        prov.fail_on = f"remount:{CACHE_BASE}"
+        rc_fail, err_fail = app.run(parse_cache_mount_args(["provision", "apply"]), "cst btrfs cache")
+        self.assertEqual(rc_fail, 1)
+        self.assertIn("rolled back cleanly", "\n".join(err_fail))
+        self.assertEqual(w.fstab, old_fstab)
+        prov.fail_on = None
+        prov.remount_calls.clear()
+
+        # Successful upgrade updates /etc/fstab, reloads systemd, and remounts both bases live.
+        rc_ok, out_ok = app.run(parse_cache_mount_args(["provision", "apply"]), "cst btrfs cache")
+        self.assertEqual(rc_ok, 0, out_ok)
+        ok_txt = "\n".join(out_ok)
+        self.assertIn(f"Remounted {CACHE_BASE} with {OPT_COMPRESS_FORCE}.", ok_txt)
+        self.assertIn(f"Remounted {SCRATCHPAD_BASE} with {OPT_COMPRESS_FORCE}.", ok_txt)
+        self.assertEqual(prov.remount_calls, [CACHE_BASE, SCRATCHPAD_BASE])
+        self.assertEqual((w.fstab or "").count(OPT_COMPRESS_FORCE), 2)
+
+        # Second run is a no-op.
+        prov.remount_calls.clear()
+        rc_noop, out_noop = app.run(parse_cache_mount_args(["provision", "apply"]), "cst btrfs cache")
+        self.assertEqual(rc_noop, 0, out_noop)
+        self.assertIn("nothing to do", "\n".join(out_noop))
+        self.assertEqual(prov.remount_calls, [])
+
 
 class ProvisionAndMigrationAdapterTests(unittest.TestCase):
     def test_real_migration_adapter_busy_processes_and_copy(self) -> None:
@@ -1048,3 +1115,16 @@ class ProvisionAndMigrationAdapterTests(unittest.TestCase):
         with mock.patch.object(runner, "run", return_value=CommandResult(1, "", "io error")):
             err = prov.scrub_base(CACHE_BASE)
         self.assertIn("btrfs scrub start -B /var/mnt/cache", err or "")
+
+    def test_provision_adapter_remount_base_argv_and_failure(self) -> None:
+        runner = FakeMountRunner("/")
+        rt = CacheMountRuntime(seam_root="", ctx=CacheTestCtx(), runner=runner, env_map={})
+        prov = CacheProvisionAdapter(rt)
+
+        with mock.patch.object(runner, "run", return_value=CommandResult(0, "", "")) as m_ok:
+            self.assertIsNone(prov.remount_base(CACHE_BASE))
+        self.assertEqual(m_ok.call_args.args[0], ["mount", "-o", f"remount,{OPT_COMPRESS_FORCE}", CACHE_BASE])
+
+        with mock.patch.object(runner, "run", return_value=CommandResult(1, "", "busy")):
+            err = prov.remount_base(CACHE_BASE)
+        self.assertIn(f"mount -o remount,{OPT_COMPRESS_FORCE} {CACHE_BASE}", err or "")

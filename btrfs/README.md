@@ -2012,9 +2012,11 @@ backup: nothing on the cache drive is in a snapshot or a backup.
        `scratchpad`. Re-running resumes idempotently and refuses to wipe any existing
        non-LUKS filesystem, wrong LUKS passphrase, foreign dm-crypt UUID, or other Btrfs
        label.
-    3. Mounts `/var/mnt/cache` and `/var/mnt/scratchpad` (`noatime,discard=async,compress=zstd:1,commit=60,nofail`,
+    3. Mounts `/var/mnt/cache` and `/var/mnt/scratchpad` (`noatime,discard=async,compress-force=zstd:1,commit=60,nofail`,
        without `flushoncommit`), upserts managed `/etc/crypttab` (`nofail,discard,no-read-workqueue,no-write-workqueue`)
-       and `/etc/fstab` base lines, runs `systemctl daemon-reload`, and when creating a fresh Btrfs
+       and `/etc/fstab` base lines, runs `systemctl daemon-reload`, remounts any already-mounted base live
+       with `compress-force=zstd:1` if it lacked it (upgrade from an older CST provision without unmounting),
+       and when creating a fresh Btrfs
        filesystem runs an immediate initial scrub on `/var/mnt/cache` so `btrfs-health-check` reports
        healthy without waiting for Sunday's `btrfs-scrub-weekly.service` run (weekly scrub also covers
        `/var/mnt/cache` once `cst btrfs install` is up to date).
