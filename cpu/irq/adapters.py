@@ -152,7 +152,7 @@ def collect_irq_snapshot(
     )
 
 
-def _irq_placement(path: str, dest: str, record_path: str) -> Placement:
+def _irq_placement(path: str, dest: str, record_path: str, values: dict[str, str] | None = None) -> Placement:
     return Placement(
         path=path,
         dest=dest,
@@ -162,6 +162,7 @@ def _irq_placement(path: str, dest: str, record_path: str) -> Placement:
         kind=GeneratedKind.TEXT,
         owner=Owner.ROOT,
         mode=0o644,
+        values=values,
     )
 
 
@@ -190,11 +191,17 @@ def _sync_irq_files(svc: InstallService, paths: IrqPaths, snap: IrqSnapshot) -> 
     as_root = os.geteuid() == 0
     try:
         ensure_dir(os.path.dirname(paths.env_path), 0o755)
-        for path, dest, text, is_env in (
-            (paths.env_path, IRQ_ENV_PATH, render_irq_env(snap.banned_cpulist), True),
-            (paths.dropin_path, IRQ_DROPIN_PATH, render_irq_dropin(), False),
+        for path, dest, text, is_env, values in (
+            (
+                paths.env_path,
+                IRQ_ENV_PATH,
+                render_irq_env(snap.banned_cpulist),
+                True,
+                {"banned_cpulist": snap.banned_cpulist},
+            ),
+            (paths.dropin_path, IRQ_DROPIN_PATH, render_irq_dropin(), False, None),
         ):
-            place = _irq_placement(path, dest, paths.record_path)
+            place = _irq_placement(path, dest, paths.record_path, values)
             written = svc.put(place, text.encode("utf-8"), as_root=as_root)
             out.append((InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED).line(path))
             env_changed = env_changed or (is_env and written)

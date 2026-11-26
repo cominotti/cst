@@ -102,6 +102,10 @@ its own; through cst its help and hints say `cst MODULE ...`.
                          diagnosis across memory, cpu, io, and gpu.
                          Exit 1 if any ATTENTION/BOTTLENECK
                          (perf/cst-perf; as your user, also in a toolbox)
+  cst sync [plan|apply]  idempotent refresh of installed CST components from
+                         this checkout (`plan` = dry run; `apply` skips
+                         precautionary components unless `--include-risky` is
+                         passed; `sync/cst-sync`)
   cst status             the read-only status of every module; asks sudo
                          once when one of them needs root (inside a toolbox
                          those are skipped, with a note); ends with the

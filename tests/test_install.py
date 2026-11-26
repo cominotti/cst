@@ -37,6 +37,7 @@ from cst_core.application.install import InstallRefused, InstallRequest, Install
 from cst_core.domain.dispatch import step_down_argv
 from cst_core.domain import install as install_domain
 from cst_core.domain.install import (
+    COMPONENT_SYNC,
     COMPONENTS,
     INSTALL_MANIFEST,
     ArtifactKind,
@@ -44,6 +45,7 @@ from cst_core.domain.install import (
     InstallEntry,
     OnDisk,
     Owner,
+    SyncSafety,
     expand_dest,
     is_current,
     manifest_by_src,
@@ -1056,6 +1058,21 @@ class ComponentTableTest(unittest.TestCase):
     def test_every_member_has_one_command_row_and_no_row_is_extra(self) -> None:
         self.assertEqual(sorted(install_domain._COMMANDS), sorted(str(c) for c in Component))
         self.assertEqual(list(COMPONENTS), list(Component))
+
+    def test_every_member_has_valid_sync_spec(self) -> None:
+        self.assertEqual(sorted(install_domain._SYNC_SPECS), sorted(str(c) for c in Component))
+        self.assertEqual(list(COMPONENT_SYNC), list(Component))
+        by_argv: dict[tuple[str, ...], tuple[SyncSafety, bool]] = {}
+        for comp, spec in COMPONENT_SYNC.items():
+            with self.subTest(component=comp):
+                self.assertTrue(spec.argv)
+                self.assertEqual(spec.argv[0], comp.value.split(":", 1)[0])
+                if spec.safety == SyncSafety.RISKY:
+                    self.assertTrue(spec.reason.strip())
+                else:
+                    self.assertEqual(spec.reason, "")
+                prev = by_argv.setdefault(spec.argv, (spec.safety, spec.needs_root))
+                self.assertEqual(prev, (spec.safety, spec.needs_root))
 
 
 class ShellComponentWordsTest(unittest.TestCase):

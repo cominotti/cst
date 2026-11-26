@@ -453,6 +453,13 @@ class WrapperValues:
         return {"cache_size": self.size, "workspace": "yes" if self.workspace else "no"}
 
 
+def render_wrapper(raw_text: str, values: WrapperValues) -> str | None:
+    """Render `toolchains/rustc-wrapper` with VALUES, or None when placeholders are missing."""
+    text, n = SCCACHE_SIZE_LINE.subn(f"cache_size={values.size}", raw_text, count=1)
+    text, m = SCCACHE_WORKSPACE_LINE.subn(f"workspace={'yes' if values.workspace else 'no'}", text, count=1)
+    return text if n == m == 1 else None
+
+
 class SccacheState(TypedDict):
     path: str
     error: str

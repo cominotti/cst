@@ -152,10 +152,21 @@ class TmpfsManager:
             say(f"unchanged: {snap.target.mountpoint} (mounted tmpfs {gib(target_bytes)}, {snap.unit_name} enabled)")
             self.host.mark_installed()
             return 0
+        base_values = {
+            "user": snap.target.user,
+            "group": snap.target.group,
+            "uid": str(snap.target.uid),
+            "gid": str(snap.target.gid),
+            "home": snap.target.home,
+        }
         self.host.ensure_mountpoint(snap.target)
-        unit_changed = self.host.put_managed_file(snap.unit_path, render_tmpfs_mount_unit(snap.target, target_bytes))
+        unit_changed = self.host.put_managed_file(
+            snap.unit_path,
+            render_tmpfs_mount_unit(snap.target, target_bytes),
+            {**base_values, "size_bytes": str(target_bytes)},
+        )
         say(f"{'written:  ' if unit_changed else 'unchanged:'} {snap.unit_path}")
-        tf_changed = self.host.put_managed_file(snap.tmpfiles_path, render_tmpfs_tmpfiles(snap.target))
+        tf_changed = self.host.put_managed_file(snap.tmpfiles_path, render_tmpfs_tmpfiles(snap.target), base_values)
         say(f"{'written:  ' if tf_changed else 'unchanged:'} {snap.tmpfiles_path}")
         self.host.daemon_reload()
         self.host.apply_tmpfiles(snap.tmpfiles_path)

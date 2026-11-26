@@ -4860,6 +4860,140 @@ class InstallAreaTest(Scratch):
             f.write("# edited\n")
         self.assertEqual(len(self.warns()), 1)
 
+    def test_generated_files_and_rustc_wrapper_detect_outdated_without_legacy_false_positives(self) -> None:
+        from cpu.irq.domain import IRQ_DROPIN_PATH, IRQ_ENV_PATH, render_irq_dropin, render_irq_env
+        from cpu.setup.domain import (
+            SetupPaths as CpuSetupPaths,
+            helper_dropin_text,
+            ntsync_modules_load_text,
+            toolbox_dropin_text,
+        )
+        from cst_core.domain.install import ArtifactKind
+        from toolchains.domain.auto import render_service as render_auto_service, render_timer as render_auto_timer
+        from toolchains.domain.config import WrapperValues, render_wrapper
+        from toolchains.domain.tmpfs import TmpfsTargetUser, render_tmpfs_mount_unit, render_tmpfs_tmpfiles
+        from vm.domain import render_service as render_vm_service, render_timer as render_vm_timer
+
+        home = self.env["HOME"]
+        user_rec = self.root + home + "/.local/state/cst/installed.json"
+        with open(os.path.join(REPO, "toolchains/rustc-wrapper"), encoding="utf-8") as fh:
+            raw_wrapper = fh.read()
+        current_wrapper = (render_wrapper(raw_wrapper, WrapperValues(size="25G", workspace=False)) or "").encode(
+            "utf-8"
+        )
+
+        def put_text(
+            dest: str,
+            data: bytes,
+            component: str,
+            *,
+            user: bool = False,
+            values: dict[str, str] | None = None,
+        ) -> None:
+            rec = user_rec if user else self.record
+            src = "toolchains/rustc-wrapper" if component == "toolchains:sccache" else None
+            place = Placement(
+                path=self.root + dest,
+                dest=dest,
+                record=rec,
+                component=component,
+                src=src,
+                kind=ArtifactKind.SHELL if src else GeneratedKind.TEXT,
+                owner=Owner.USER if user else Owner.ROOT,
+                mode=0o755 if src else 0o644,
+                values=values,
+            )
+            self.svc.put(place, data, as_root=False)
+            self.svc.mark(rec, component)
+
+        for exe_path in ("/usr/local/sbin/cst-vm", f"{home}/.local/lib/cst/cst-toolchains"):
+            full_exe = self.root + exe_path
+            os.makedirs(os.path.dirname(full_exe), exist_ok=True)
+            with open(full_exe, "w", encoding="utf-8") as ef:
+                ef.write("#!/bin/sh\n")
+            os.chmod(full_exe, 0o755)
+
+        # Up-to-date parameterized & unparameterized generated files + rustc-wrapper -> all OK.
+        tmpfs_target = TmpfsTargetUser.from_home(user="tester", group="tester", uid=1000, gid=1000, real_home=home)
+        tmpfs_vals = {"user": "tester", "group": "tester", "uid": "1000", "gid": "1000", "home": home}
+        put_text(
+            f"{home}/.local/libexec/cst/rustc-wrapper",
+            current_wrapper,
+            "toolchains:sccache",
+            user=True,
+            values={"cache_size": "25G", "workspace": "no"},
+        )
+        put_text(
+            f"{home}/.config/systemd/user/cst-toolchains-prune.timer",
+            render_auto_timer().encode("utf-8"),
+            "toolchains:auto",
+            user=True,
+        )
+        put_text(
+            f"{home}/.config/systemd/user/cst-toolchains-prune.service",
+            render_auto_service().encode("utf-8"),
+            "toolchains:auto",
+            user=True,
+        )
+        put_text(
+            f"{home}/.config/systemd/user/user.slice.d/10-cpu-setup.conf",
+            toolbox_dropin_text().encode("utf-8"),
+            "cpu:toolbox",
+            user=True,
+        )
+        put_text(
+            f"{home}/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf",
+            helper_dropin_text().encode("utf-8"),
+            "cpu:toolbox",
+            user=True,
+        )
+        put_text(CpuSetupPaths().ntsync_modules_load, ntsync_modules_load_text().encode("utf-8"), "cpu:core")
+        put_text(IRQ_DROPIN_PATH, render_irq_dropin().encode("utf-8"), "cpu:irq")
+        put_text(IRQ_ENV_PATH, render_irq_env("0-3").encode("utf-8"), "cpu:irq", values={"banned_cpulist": "0-3"})
+        put_text("/etc/systemd/system/cst-vm-backup@.timer", render_vm_timer().encode("utf-8"), "vm:backup-timer")
+        put_text(
+            "/etc/systemd/system/cst-vm-backup@.service",
+            render_vm_service("/usr/local/sbin/cst-vm", "45min").encode("utf-8"),
+            "vm:backup-timer",
+            values={"program": "/usr/local/sbin/cst-vm", "stop_timeout": "45min"},
+        )
+        put_text(
+            "/etc/systemd/system/home-tester-.cache-cargo\\x2dbuild\\x2dtmpfs.mount",
+            render_tmpfs_mount_unit(tmpfs_target, 2 * 1024**3).encode("utf-8"),
+            "toolchains:tmpfs",
+            values={**tmpfs_vals, "size_bytes": str(2 * 1024**3)},
+        )
+        put_text(
+            "/etc/tmpfiles.d/cst-cargo-build-tmpfs-tester.conf",
+            render_tmpfs_tmpfiles(tmpfs_target).encode("utf-8"),
+            "toolchains:tmpfs",
+            values=tmpfs_vals,
+        )
+
+        res_ok = self.results()
+        self.assertEqual(self.warns(), [], res_ok)
+        self.assertEqual([r for r in res_ok if r.status == doc_domain.INFO], [], res_ok)
+
+        # Outdated wrapper & generated files are flagged as older; legacy record without values stays silent.
+        put_text(
+            f"{home}/.local/libexec/cst/rustc-wrapper",
+            b"#!/bin/sh\n# old wrapper\n",
+            "toolchains:sccache",
+            user=True,
+            values={"cache_size": "25G", "workspace": "no"},
+        )
+        put_text(
+            f"{home}/.config/systemd/user/cst-toolchains-prune.timer", b"[Timer]\n# old\n", "toolchains:auto", user=True
+        )
+        put_text(
+            IRQ_ENV_PATH, b"IRQBALANCE_BANNED_CPULIST=0\n", "cpu:irq", values=None
+        )  # legacy record: unknown params -> no false positive
+
+        infos = [r.message for r in self.results() if r.status == doc_domain.INFO]
+        self.assertIn("toolchains:sccache: 1 file(s) older than this checkout", "\n".join(infos))
+        self.assertIn("toolchains:auto: 1 file(s) older than this checkout", "\n".join(infos))
+        self.assertNotIn("cpu:irq", "\n".join(infos))
+
     def test_a_changed_mode_is_info(self) -> None:
         self.install("btrfs:docker-gc")
         self.mark("btrfs:docker-gc")
@@ -5694,7 +5828,16 @@ class CstIntegrationTest(Scratch):
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "doctor"))
-        for pkg in ("btrfs", "cst_core", "cpu", "perf", "swap", "vm"):  # doctor imports these packages
+        for pkg in (
+            "btrfs",
+            "cst_core",
+            "cpu",
+            "perf",
+            "swap",
+            "sync",
+            "toolchains",
+            "vm",
+        ):  # doctor imports these packages
             shutil.copytree(
                 os.path.join(REPO, pkg), os.path.join(self.repo, pkg), ignore=shutil.ignore_patterns("tests")
             )

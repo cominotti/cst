@@ -104,17 +104,22 @@ def _file_findings(
         problem = True
     if sha is not None and is_unit_file(dest):
         problem = _unit_findings(host, view, dest, f, home, out) or problem
-    if _older(files, f):
+    if _older(files, dest, f):
         out.older.setdefault(f.component, []).append(dest)
     elif not problem:
         out.fine += 1
 
 
-def _older(files: InstalledFilesPort, f: RecordedFile) -> bool:
-    """The record's bytes differ from what this checkout installs (a manifest file only; a template with
-    its recorded values; never a file its module renders itself, such as the sccache wrapper)."""
-    entry = manifest_by_src().get(f.src) if f.src is not None and f.src != "" else None
-    if entry is None or (f.values is not None and not entry.is_template):
+def _older(files: InstalledFilesPort, dest: str, f: RecordedFile) -> bool:
+    """The record's bytes differ from what this checkout installs (a manifest file with its recorded
+    values, `toolchains/rustc-wrapper`, or a generated file this checkout can render deterministically)."""
+    if f.src is None:
+        want = files.desired_generated_sha256(dest, f)
+        return want is not None and want != f.sha256
+    entry = manifest_by_src().get(f.src) if f.src != "" else None
+    if entry is None:
+        return False
+    if f.values is not None and not entry.is_template and entry.src != "toolchains/rustc-wrapper":
         return False
     want = files.desired_sha256(entry.src, f.values)
     return want is not None and want != f.sha256

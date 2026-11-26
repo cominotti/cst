@@ -10,7 +10,7 @@ import pwd
 import shutil
 import tempfile
 import unittest
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import override
 from unittest import mock
 
@@ -116,7 +116,8 @@ class _FakeTmpfsHost:
     def ensure_mountpoint(self, target: tcd_tmpfs.TmpfsTargetUser) -> None:
         self.dirs_ensured.append(target.mountpoint)
 
-    def put_managed_file(self, path: str, text: str) -> bool:
+    def put_managed_file(self, path: str, text: str, values: Mapping[str, str] | None = None) -> bool:
+        del values
         changed = self.files.get(path) != text
         self.files[path] = text
         return changed

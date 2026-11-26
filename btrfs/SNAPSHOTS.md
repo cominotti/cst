@@ -402,7 +402,10 @@ schedulers, see below).
 Snapshots taken before this change keep their cache folders until they
 expire (`~/Workspace`: 48 hours of hourly snapshots and 7 daily ones), so the
 space comes back gradually. After an update of the repository,
-`cst btrfs snapshots setup` (safe to run again) installs the new programs.
+`cst btrfs snapshots refresh` (or `cst sync apply`) installs the new snapshot
+and alert helpers and reloads systemd without re-running subvolume checks, `~/Bulk`,
+or Chrome flags (`cst btrfs snapshots setup` remains safe to run again when full setup
+checks are needed).
 
 ### Bulk: one folder for everything you can download again
 
@@ -1464,6 +1467,7 @@ Run them as described in [section 2](#where-and-how-to-run-it):
 | Command | What it does |
 |---------|--------------|
 | `snapshots setup [--yes]` | Plan, one confirmation, then everything ([section 2](#2-quick-start)). Safe to re-run. Also turns the hourly snapshots on again after `disable`. |
+| `snapshots refresh [plan\|apply]` | Safe helper/unit refresh: updates installed snapshot and alert programs and systemd units without touching subvolumes, `~/Bulk`, toolchain configs, or Chrome flags (`plan` = dry run). Refuses when snapshots are not set up yet. |
 | `snapshots` or `snapshots status` | Timer state, whether cache folders are dropped, number and dates of snapshots, snapshots left writable by an interrupted run, pause/emergency, last successful run, waiting conversions, state of each nested subvolume, NAS state. |
 | `snapshots list [--json]` | Every snapshot with its decision (`KEEP` / `DELETE`) and the reason, plus `IGNORED` and `UNKNOWN` entries ([section 15](#15-safety-rules-of-btrfs-snapshot-core)). Read-only. |
 | `snapshots caches [--json]` | The cache folders (`CACHEDIR.TAG`) the next snapshot of each source drops, with files and sizes ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)). Read-only; shown also when `SNAPSHOT_EXCLUDE_CACHES=no`. |

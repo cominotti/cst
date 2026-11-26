@@ -18,10 +18,11 @@ from cst_core.adapters.files import open_regular_bytes, open_regular_text
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template
-from cst_core.domain.record import InstallRecord
+from cst_core.domain.record import InstallRecord, RecordedFile
 from cst_core.domain.units import UNIT_PATH_PROP, show_manager_value_argv, user_unit_dir
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
+from sync.domain import desired_generated_bytes
 from vm import adapters as vm_adapters
 from vm.adapters import images as vm_images
 from vm.domain import ImageDir, ImageProbe, VmSettings
@@ -231,11 +232,25 @@ class InstalledFiles:
             return None
         try:
             data = entry_payload(self._repo, entry)
+            if entry.src == "toolchains/rustc-wrapper":
+                rendered = desired_generated_bytes(
+                    entry.dest,
+                    RecordedFile(entry.src, entry.component, entry.kind, "", entry.mode.bits, entry.owner, values),
+                    raw_src_text=data.decode("utf-8"),
+                )
+                return None if rendered is None else hashlib.sha256(rendered).hexdigest()
             if entry.is_template:
                 data = render_template(data.decode("utf-8"), values or {}).encode("utf-8")
         except OSError, ValueError, SyntaxError:  # ValueError covers DomainValidationError and UnicodeDecodeError
             return None
         return hashlib.sha256(data).hexdigest()
+
+    def desired_generated_sha256(self, dest: str, f: RecordedFile) -> str | None:
+        """sha256 of the generated file at dest rendered from this checkout, or None."""
+        if not self._repo:
+            return None
+        rendered = desired_generated_bytes(dest, f)
+        return None if rendered is None else hashlib.sha256(rendered).hexdigest()
 
 
 def host_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> CommandResult:

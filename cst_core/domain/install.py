@@ -80,6 +80,23 @@ class Component(StrEnum):
     VM_BACKUP_TIMER = "vm:backup-timer"
 
 
+class SyncSafety(StrEnum):
+    """Whether `cst sync` runs a component's refresh command by default or holds it back without --include-risky."""
+
+    SAFE = "safe"
+    RISKY = "risky"
+
+
+@dataclass(frozen=True, slots=True)
+class _ComponentSyncSpec:
+    """How `cst sync` refreshes one component (argv relative to `cst`, privilege, safety and caution reason)."""
+
+    safety: SyncSafety
+    argv: tuple[str, ...]
+    needs_root: bool
+    reason: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class InstallEntry:
     """One repository artifact installed onto a host or user account."""
@@ -221,10 +238,10 @@ vm/cst-vm                                           /usr/local/sbin/cst-vm      
 _COMMANDS: Final = {
     "btrfs:core": "cst btrfs install",
     # btrfs-notify and the login-time reader of the alerts it keeps: `cst btrfs install` always installs
-    # them; `snapshots setup` (which alerts through them too) installs them as well.
+    # them; `snapshots setup` / `snapshots refresh` (which alert through them too) install them as well.
     "btrfs:alerts": "cst btrfs install",
     "btrfs:below": "cst btrfs install",
-    "btrfs:snapshots": "cst btrfs snapshots setup",
+    "btrfs:snapshots": "cst btrfs snapshots refresh",
     "btrfs:top-mount": "cst btrfs snapshots setup",
     "btrfs:docker-gc": "cst btrfs docker-gc enable",
     "btrfs:degraded-boot": "cst btrfs degraded-boot install",
@@ -245,6 +262,55 @@ _COMMANDS: Final = {
 # One row of _COMMANDS per member (a member without one is a KeyError at import; tests/test_install.py
 # checks that no row names a word Component does not have).
 COMPONENTS: Final[Mapping[Component, str]] = {c: _COMMANDS[c] for c in Component}
+
+
+_SYNC_SPECS: Final[Mapping[Component, _ComponentSyncSpec]] = {
+    Component.BTRFS_ALERTS: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "install"), needs_root=True),
+    Component.BTRFS_CORE: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "install"), needs_root=True),
+    Component.BTRFS_BELOW: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "install"), needs_root=True),
+    Component.BTRFS_REPORT_LAUNCHER: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "install"), needs_root=True),
+    Component.BTRFS_SNAPSHOTS: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "snapshots", "refresh"), needs_root=True),
+    Component.BTRFS_DOCKER_GC: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "docker-gc", "enable"), needs_root=True),
+    Component.BTRFS_IOCOST: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "iocost", "apply"), needs_root=True),
+    Component.BTRFS_TOP_MOUNT: _ComponentSyncSpec(
+        SyncSafety.RISKY,
+        ("btrfs", "snapshots", "setup", "--yes"),
+        needs_root=True,
+        reason="runs full snapshots setup (subvolume conversion check, mount units, rpm-ostree restic)",
+    ),
+    Component.BTRFS_DEGRADED_BOOT: _ComponentSyncSpec(
+        SyncSafety.RISKY,
+        ("btrfs", "degraded-boot", "install"),
+        needs_root=True,
+        reason="modifies the boot initramfs overlay (rpm-ostree initramfs-etc)",
+    ),
+    Component.CPU_CORE: _ComponentSyncSpec(SyncSafety.SAFE, ("cpu", "install"), needs_root=True),
+    Component.CPU_GAMEMODE: _ComponentSyncSpec(SyncSafety.SAFE, ("cpu", "install"), needs_root=True),
+    Component.CPU_TOOLBOX: _ComponentSyncSpec(SyncSafety.SAFE, ("cpu", "install"), needs_root=True),
+    Component.CPU_DOCKER_SLICE: _ComponentSyncSpec(
+        SyncSafety.SAFE, ("cpu", "docker-slice", "install"), needs_root=True
+    ),
+    Component.CPU_IRQ: _ComponentSyncSpec(SyncSafety.SAFE, ("cpu", "irq", "apply"), needs_root=True),
+    Component.BLUETOOTH_LDAC: _ComponentSyncSpec(
+        SyncSafety.RISKY,
+        ("bluetooth", "apply", "--yes"),
+        needs_root=False,
+        reason="restarts bluetooth.service and wireplumber (briefly drops Bluetooth devices and audio)",
+    ),
+    Component.SWAP_CORE: _ComponentSyncSpec(
+        SyncSafety.RISKY,
+        ("swap", "apply"),
+        needs_root=True,
+        reason="edits /etc/crypttab and /etc/fstab, restarts uresourced, and may reactivate swap0",
+    ),
+    Component.TOOLCHAINS_AUTO: _ComponentSyncSpec(SyncSafety.SAFE, ("toolchains", "auto", "on"), needs_root=False),
+    Component.TOOLCHAINS_SCCACHE: _ComponentSyncSpec(
+        SyncSafety.SAFE, ("toolchains", "config", "apply"), needs_root=False
+    ),
+    Component.TOOLCHAINS_TMPFS: _ComponentSyncSpec(SyncSafety.SAFE, ("toolchains", "tmpfs", "apply"), needs_root=True),
+    Component.VM_BACKUP_TIMER: _ComponentSyncSpec(SyncSafety.SAFE, ("vm", "backup-timer", "on"), needs_root=True),
+}
+COMPONENT_SYNC: Final[Mapping[Component, _ComponentSyncSpec]] = {c: _SYNC_SPECS[c] for c in Component}
 
 
 # The components whose files are all generated text (cst_install_text DEST MODE OWNER COMPONENT), so
@@ -296,6 +362,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "fix-anaconda-webui-btrfs-compress.sh",
         "perf/cst-perf",
         "swap/cli.py",
+        "sync/cst-sync",
         "tests/mutation/cst-mutation",
         "tests/uv-dev",
     ]

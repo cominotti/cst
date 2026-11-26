@@ -15948,3 +15948,157 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-284-OK", out)
+
+    @e2e_tags(E2ETag.INSTALL, E2ETag.BTRFS, E2ETag.TOOLCHAINS, E2ETag.BLUETOOTH)
+    def test_285_cst_sync_and_btrfs_snapshots_refresh(self) -> None:
+        """Full systemd E2E for `cst btrfs snapshots refresh [plan|apply]` and `cst sync [plan|apply]`:
+        1) `snapshots refresh plan` changes nothing, `snapshots refresh` updates an outdated helper
+           and reloads systemd, second run prints only `unchanged:`;
+        2) `cst sync plan` classifies safe outdated components (`btrfs:docker-gc`, `btrfs:snapshots`,
+           `toolchains:auto`) under would sync and precautionary ones (`bluetooth:ldac`) under skipped;
+        3) `cst sync apply` updates only the safe components, leaves the precautionary file untouched
+           and prints `--include-risky`, and a second `cst sync apply` changes nothing;
+        4) `cst sync apply --include-risky` updates `bluetooth:ldac` cleanly too."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        urec = "/home/tester/.local/state/cst/installed.json"
+        sconf = "/etc/btrfs-setup/snapshots.conf"
+        dgc = "/etc/cst/docker-gc.conf"
+        mconf = "/etc/bluetooth/main.conf"
+        tauto_off = "/home/tester/.local/state/cst/toolchains-auto-off"
+        w = "/var/tmp/e2e-285-work"
+        exec_bash(
+            c,
+            f"""rm -rf {w}
+            mkdir -p {w}
+            {file_saved(rec, w, "rec")}
+            {file_saved(urec, w, "urec")}
+            {file_saved(sconf, w, "sconf")}
+            {file_saved(dgc, w, "dgc")}
+            {file_saved(mconf, w, "mconf")}
+            {file_saved(tauto_off, w, "tauto_off")}
+            """,
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            /opt/cst-rw/cst btrfs docker-gc disable --purge >/dev/null 2>&1 || true
+            systemctl disable --now btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-bulk-boot.service >/dev/null 2>&1 || true
+            systemctl --global disable cst-pending-alerts.service >/dev/null 2>&1 || true
+            if [[ -f {rec} ]]; then
+                /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py remove --component btrfs:snapshots >/dev/null 2>&1 || true
+                /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py remove --component btrfs:alerts >/dev/null 2>&1 || true
+            fi
+            runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1 || true
+            runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true
+            rm -f /home/tester/.config/cst/bluetooth.conf
+            {file_put_back(dgc, w, "dgc")}
+            {file_put_back(mconf, w, "mconf")}
+            {file_put_back(tauto_off, w, "tauto_off")}
+            {file_put_back(rec, w, "rec")}
+            {file_put_back(urec, w, "urec")}
+            {file_put_back(sconf, w, "sconf")}
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            rm -rf {w} /var/lib/cst-alerts
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+
+            # Setup minimal prerequisites for btrfs:snapshots, btrfs:docker-gc, toolchains:auto, and bluetooth:ldac.
+            as_tester() {{
+                runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"
+            }}
+            mkdir -p /etc/btrfs-setup /etc/bluetooth
+            as_tester mkdir -p /home/tester/.config/cst
+            printf 'SNAP_TARGET="home"\n' >"/etc/btrfs-setup/snapshots.conf"
+            printf '[General]\n# Name = BlueZ\n' >/etc/bluetooth/main.conf
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_QUALITY=auto\nLDAC_RATE=48000\nLE_AUDIO=off\n' |
+                as_tester tee /home/tester/.config/cst/bluetooth.conf >/dev/null
+
+            # Seed installed state via real installers (`bluetooth apply` exits 1 in this unprivileged
+            # container because org.bluez has no HCI adapter at live verify(), after writing all files).
+            "$cst" btrfs docker-gc enable >/dev/null
+            "$cst" btrfs snapshots refresh >/dev/null
+            as_tester "$cst" toolchains auto on >/dev/null
+            as_tester "$cst" bluetooth apply --yes --no-restart >/dev/null 2>&1 || true
+            test -f /home/tester/.local/lib/cst/bt-ldac-watch
+
+            # Plant older bytes + matching older hashes in installed.json so doctor & sync detect outdated copies
+            # (not manual edits).
+            /usr/bin/python3 -I -B - "{rec}" "{urec}" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+
+def degrade(record_path: str, file_path: str, marker: bytes) -> None:
+    p = Path(file_path)
+    p.write_bytes(marker)
+    sha = hashlib.sha256(marker).hexdigest()
+    rp = Path(record_path)
+    doc = json.loads(rp.read_text(encoding="utf-8"))
+    doc["files"][file_path]["sha256"] = sha
+    rp.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+degrade(sys.argv[1], "/usr/local/sbin/docker-gc", b"#!/usr/bin/python3\n# old gc\n")
+degrade(sys.argv[1], "/usr/local/sbin/btrfs-snapshot", b"#!/bin/sh\n# old snap\n")
+degrade(sys.argv[2], "/home/tester/.config/systemd/user/cst-toolchains-prune.timer", b"# managed-by: toolchains-setup.sh (CST)\n[Timer]\nOnCalendar=weekly\n")
+degrade(sys.argv[2], "/home/tester/.local/lib/cst/bt-ldac-watch", b"#!/usr/bin/python3\n# managed-by: bluetooth-setup.sh (CST)\n# old bt\n")
+PY
+            # Also verify `cst btrfs snapshots refresh plan` changes nothing before testing sync.
+            rplan=$("$cst" btrfs snapshots refresh plan)
+            grep -q 'would write: /usr/local/sbin/btrfs-snapshot' <<<"$rplan"
+            grep -q 'Dry run: nothing is changed.' <<<"$rplan"
+            grep -q '# old snap' /usr/local/sbin/btrfs-snapshot
+
+            # Run `cst sync plan` as root (with SUDO_USER=tester so user record is inspected too).
+            splan=$(SUDO_USER=tester "$cst" sync plan)
+            grep -q 'cst btrfs docker-gc enable' <<<"$splan"
+            grep -q 'cst btrfs snapshots refresh' <<<"$splan"
+            grep -q 'cst toolchains auto on' <<<"$splan"
+            grep -q 'skip   cst bluetooth apply' <<<"$splan"
+            grep -q 'Dry run: nothing is changed.' <<<"$splan"
+
+            # Safe-only apply refreshes safe root+user components while preserving the precautionary bt file.
+            sapply=$(SUDO_USER=tester "$cst" sync apply)
+            grep -q '3 updated, 0 failed, 1 skipped (risky)' <<<"$sapply"
+            grep -q -- '--include-risky' <<<"$sapply"
+            if grep -q '# old gc' /usr/local/sbin/docker-gc; then echo "docker-gc not updated" >&2; exit 1; fi
+            if grep -q '# old snap' /usr/local/sbin/btrfs-snapshot; then echo "snapshot not updated" >&2; exit 1; fi
+            grep -q 'OnCalendar=hourly' /home/tester/.config/systemd/user/cst-toolchains-prune.timer
+            grep -q '# old bt' /home/tester/.local/lib/cst/bt-ldac-watch
+
+            # Second snapshots refresh is a clean no-op.
+            r2=$("$cst" btrfs snapshots refresh)
+            if grep -q 'written:' <<<"$r2"; then echo "unexpected write on 2nd refresh" >&2; exit 1; fi
+            grep -q 'unchanged:' <<<"$r2"
+
+            # Second safe sync apply is an idempotent no-op for safe components.
+            sapply2=$(SUDO_USER=tester "$cst" sync apply)
+            grep -q '0 updated, 0 failed, 1 skipped (risky)' <<<"$sapply2"
+
+            # Manual edit on disk (record hash unchanged) is skipped unless --overwrite-modified.
+            printf '[Timer]\n# manual edit\n' >>/home/tester/.config/systemd/user/cst-toolchains-prune.timer
+            smod=$(SUDO_USER=tester "$cst" sync apply)
+            grep -q '0 updated, 0 failed, 1 skipped (risky), 1 skipped (modified)' <<<"$smod"
+            grep -q '# manual edit' /home/tester/.config/systemd/user/cst-toolchains-prune.timer
+            sover=$(SUDO_USER=tester "$cst" sync apply --overwrite-modified)
+            grep -q '1 updated, 0 failed, 1 skipped (risky), 0 skipped (modified)' <<<"$sover"
+            if grep -q '# manual edit' /home/tester/.config/systemd/user/cst-toolchains-prune.timer; then echo "manual edit not overwritten" >&2; exit 1; fi
+
+            # Opt-in --include-risky dispatches `cst bluetooth apply --yes` (which overwrites bt-ldac-watch,
+            # though live verify() exits 1 in this container without an HCI adapter).
+            SUDO_USER=tester "$cst" sync apply --include-risky >/dev/null 2>&1 || true
+            if grep -q '# old bt' /home/tester/.local/lib/cst/bt-ldac-watch; then echo "bt not updated" >&2; exit 1; fi
+            sfinal=$(SUDO_USER=tester "$cst" sync plan)
+            grep -q '0 command(s) to sync, 0 skipped (risky), 0 skipped (modified)' <<<"$sfinal"
+            echo E2E-285-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-285-OK", out)

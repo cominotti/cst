@@ -37,6 +37,10 @@
 #                          once when one of them needs root (inside a toolbox
 #                          those are skipped, with a note); ends with the
 #                          short form of cst doctor
+#   cst sync [plan|apply]  idempotent refresh of installed CST components from
+#                          this checkout (`plan` = dry run; `apply` skips
+#                          precautionary ones unless `--include-risky`;
+#                          sync/cst-sync)
 #   cst help               this overview; `cst MODULE help` lists the
 #                          commands of one module
 #

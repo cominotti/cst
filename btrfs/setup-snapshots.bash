@@ -286,6 +286,37 @@ snap_install_runtime() {
     cst_mark btrfs:snapshots
 }
 
+# snap_refresh [plan|apply]: update installed snapshot and alert helpers/units
+# without re-running subvolume conversion, bulk migration, cargo/uv config, or
+# Chrome flags (or preview with `plan`). Refuses when snapshots are not set up
+# (ignoring unrelated files such as scrub-limit-only snapshots.conf).
+snap_is_configured() {
+    [[ -e "${SNAP_RUNTIME}" || -f "${SNAP_PLAN}" ]] && return 0
+    [[ -f "${SNAP_CONF}" ]] &&
+        grep -qE '^(HOME_DIR|HOME_SUBVOL|SNAP_TARGET|NAS_HOST|NAS_PATH|NAS_ENABLED)=' "${SNAP_CONF}"
+}
+
+snap_refresh() {
+    local sub="${1:-apply}"
+    (( $# <= 1 )) || { echo "Usage: ${PROG} snapshots refresh [plan|apply]" >&2; exit 2; }
+    snap_is_configured || {
+        echo "Not set up: ${PROG} snapshots setup" >&2
+        exit 1
+    }
+    case "${sub}" in
+        plan)
+            cst_installer plan --component btrfs:alerts
+            cst_installer plan --component btrfs:snapshots
+            echo "Dry run: nothing is changed."
+            ;;
+        apply) snap_install_runtime ;;
+        *)
+            echo "Usage: ${PROG} snapshots refresh [plan|apply]" >&2
+            exit 2
+            ;;
+    esac
+}
+
 # State of one SNAP_EXCLUDE entry: done | mounted | todo | create | aside | absent | -.
 snap_entry_state() {   # strategy path
     local strategy="$1" path="$2"
@@ -1000,6 +1031,7 @@ snapshots_cmd() {
     [[ $# -gt 0 ]] && shift
     case "${action}" in
         setup) snap_setup "$@" ;;
+        refresh) snap_refresh "$@" ;;
         status) snap_status ;;
         list|caches)
             [[ -x "${SNAP_RUNTIME}" ]] || { echo "Not set up: ${PROG} snapshots setup" >&2; exit 1; }
@@ -1013,6 +1045,6 @@ snapshots_cmd() {
                 status|apply|off) snap_chrome "${1:-status}" ;;
                 *) echo "snapshots chrome-cache: status|apply|off" >&2; exit 2 ;;
             esac ;;
-        *) echo "snapshots: setup|status|list [--json]|caches [--json]|prune [--confirm]|clean-targets|disable|nas|chrome-cache" >&2; exit 2 ;;
+        *) echo "snapshots: setup|refresh [plan|apply]|status|list [--json]|caches [--json]|prune [--confirm]|clean-targets|disable|nas|chrome-cache" >&2; exit 2 ;;
     esac
 }

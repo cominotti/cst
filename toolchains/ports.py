@@ -344,7 +344,7 @@ class TmpfsHostPort(Protocol):
         """Create cache parent (if absent) and 0700 mountpoint owned by TARGET."""
         ...
 
-    def put_managed_file(self, path: str, text: str) -> bool:
+    def put_managed_file(self, path: str, text: str, values: Mapping[str, str] | None = None) -> bool:
         """Write root-owned generated file via installer and record it under toolchains:tmpfs."""
         ...
 
