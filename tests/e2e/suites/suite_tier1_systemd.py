@@ -1067,7 +1067,7 @@ else:
     p = wiring.nas_backup(cfg)
     repo = p.settings.nas_repo()
     if step == "retry":
-        nas.retention_after_torn(cfg, p, vm, repo)
+        nas.retention_after_torn(cfg, p, vm, repo, nas._nas_numbers(cfg, p.settings))
     elif step == "index_step":  # nas_run's index step for the indexed snapshot argv[3]: its entry again, with the listing
         entry = {"vm": vm, "mode": "nas", "snapshot": sys.argv[3], "repository": repo["repo"], "host": repo["host"],
                  "epoch": 1795000000, "timestamp": "20261124T000000Z", "consistency": "shut-off", "keep": None,
@@ -1075,16 +1075,19 @@ else:
         print(f"index: {nas._index_nas_backup(p, vm, repo, entry)}")
     elif step == "after_read":  # nas_run's steps after a shut-off run's good read of snapshot argv[3], merged back
         from vm.domain import DomainParts
-        from vm.domain.backup import NasRun, Stop, nas_index_entry
+        from vm.domain.backup import NasRead, NasRun, Stop, nas_index_entry
         p.signals.catch_stops()
+        snap_id = sys.argv[3]
         run = NasRun(
             vm=vm, live=False, quiesce=False, xml_text="<domain/>",
             parts=DomainParts(uuid="e2e", disks=[], nvram="", tpm=False, skipped=[], problems=[]),
+            numbers=nas._nas_numbers(cfg, p.settings),
             notes=[], sources=[], epoch=1795000000.0, stamp="20261124T000000Z", specs={}, others=[],
             agent="none", versions={}, deployment=None,
+            read=[NasRead(consistency="shut-off", snap=snap_id, summary={})],
         )
         try:
-            nas._nas_after_read(cfg, p, run, repo, nas_index_entry(run, repo, sys.argv[3], "shut-off", None))
+            nas._nas_after_read(cfg, p, run, repo, nas_index_entry(run, repo, snap_id, "shut-off", None))
         except Stop as e:
             print(f"stop: {e}")
         else:

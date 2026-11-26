@@ -113,10 +113,18 @@ echo "E2E-NOCOW /run mount options: $(findmnt -no OPTIONS /run)"
 fake=/usr/local/libexec/e2e-nocow-other
 other=   # the pid of a stand-in dockerd in another mount namespace (part 2)
 user=    # the pid of a stand-in dockerd that does not run as root (part 2)
+dirty_daemon_json=
+saved_json=
+made_docker=
 cleanup() {
     [[ -z "$other" ]] || kill "$other" 2>/dev/null || true
     [[ -z "$user" ]] || kill "$user" 2>/dev/null || true
     systemctl stop e2e-nocow-boot.target docker.service e2e-dind.service 2>/dev/null || true
+    if [[ -n "$dirty_daemon_json" ]]; then
+        if [[ -n "$saved_json" && -e "$saved_json" ]]; then mv -f "$saved_json" /etc/docker/daemon.json; else rm -f /etc/docker/daemon.json; fi
+        [[ -z "$made_docker" ]] || rmdir /etc/docker 2>/dev/null || true
+        dirty_daemon_json=
+    fi
     rm -rf "$stub" "$dropin" "$target" "$wrap" "$fake" "$seen"
     rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4" "$vols/e2e-cow5" "$vols/e2e-cow6"
     while mountpoint -q "$attempts"; do umount "$attempts" || break; done   # part 7's read-only count
@@ -446,18 +454,22 @@ saved_json=""
 if [ -e /etc/docker/daemon.json ]; then saved_json=/var/tmp/e2e-nocow-daemon.json; cp -p /etc/docker/daemon.json "$saved_json"; fi
 made_docker=""
 [ -d /etc/docker ] || { mkdir -p /etc/docker; made_docker=1; }
+dirty_daemon_json=1
 printf '{' >/etc/docker/daemon.json
 rc=0; out="$("$helper" mark 2>&1)" || rc=$?
 printf '%s\n' "$out" | sed 's/^/E2E-NOCOW part 7b: /'
 [[ "$rc" == 2 ]]
 grep -qF "$vols, the default volumes folder (/etc/docker/daemon.json: not JSON: which volumes folder Docker uses is unknown), has +C already: if Docker uses it, no boot asks again" <<<"$out"
-grep -qF "/etc/docker/daemon.json: mark sets no +C on the volumes folder" <<<"$out"
+grep -qF "/etc/docker/daemon.json: not JSON: mark sets no +C on the volumes folder" <<<"$out"
 if grep -qF "the next boot tries again" <<<"$out"; then echo "mark says the next boot tries" >&2; exit 1; fi
 test ! -e "$flag"
 grep -qF '"outcome": "not-scheduled"' "$outcome"
 grep -qF 'which volumes folder Docker uses is unknown' "$outcome"
 if [ -n "$saved_json" ]; then mv -f "$saved_json" /etc/docker/daemon.json; else rm -f /etc/docker/daemon.json; fi
 [ -z "$made_docker" ] || rmdir /etc/docker
+dirty_daemon_json=""
+saved_json=""
+made_docker=""
 echo "E2E-NOCOW part 7b: mark with daemon.json not JSON and a count it cannot reset records no boot asks"
 umount "$attempts"
 rc=0; "$helper" mark || rc=$?
