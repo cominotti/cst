@@ -359,7 +359,7 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
             WARN,
             f"user manager: {unit} is a slice of its own next to app.slice, where the game runs "
             f"({cpu_time(cpu_seconds(host, d))} since it was created). Outside games it runs at the default "
-            "weight on every CPU, without the toolboxes' limits; the game profile"
+            "weight, without the toolboxes' limits; the game profile"
             f"{alone or ' only makes it idle while a game runs'}. Name it user-{name}.slice so it "
             f"nests under the toolboxes' user.slice, or start it with --slice=user-{name}.slice",
         )
@@ -368,7 +368,7 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(
             INFO,
             f"user manager: {len(jobs)} systemd-run job(s) run straight in app.slice, next to the "
-            f"game, at the default weight on every CPU: "
+            "game, at the default weight: "
             f"{name_list([f'{u} ({cpu_time(s)})' for u, s in jobs])}. The game profile"
             f"{alone or ' makes them idle while a game runs'}; for builds, start them with "
             "--slice=user-<name>.slice to get the toolboxes' limits always",

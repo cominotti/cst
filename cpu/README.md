@@ -26,12 +26,13 @@ described in [../btrfs/README.md](../btrfs/README.md).
 
 > **In short: what this does to your system**
 >
-> - **Permanent** (until `uninstall`): lower CPU priority for the VM and the
->   toolboxes, toolboxes on the E-cores only, connected display GPUs kept awake
->   (`GPU_PM_MODE='always'` across monitor hotplug via udev + `cst-cpu-power.service`),
->   deep CPU C-states capped at `200 µs` (`CPU_CSTATE_MAX_LATENCY_US`),
->   `ntsync` autoloaded for Wine/Proton, a GameMode hook, and a watchdog
->   timer. The files are listed in section 6.1.
+> - **Permanent** (until `uninstall`): lower CPU and I/O priority for the VM,
+>   toolboxes and their host commands across all CPUs (5×–25× below desktop apps
+>   and GNOME Shell under EEVDF, `uresourced` and `blk-iocost`), connected
+>   display GPUs kept awake (`GPU_PM_MODE='always'` across monitor hotplug via
+>   udev + `cst-cpu-power.service`), deep CPU C-states capped at `200 µs`
+>   (`CPU_CSTATE_MAX_LATENCY_US`), `ntsync` autoloaded for Wine/Proton, a
+>   GameMode hook, and a watchdog timer. The files are listed in section 6.1.
 > - **Only while a game runs** (and cleared by a reboot): the VM and Docker
 >   move to CPUs 12-23 with a very low priority, toolboxes and the other
 >   boxes of your session that sit next to the game (GNOME's file indexer,
@@ -172,7 +173,7 @@ Then, by hand:
    ```
 3. Check with `cst cpu status`. You should see
    `cpuset delegated: yes`, `group: member`, `ini: managed`, and
-   `effective (cgroup): toolboxes [8-23]` (sample output in section 6.5).
+   `effective (cgroup): toolboxes [0-23]` (sample output in section 6.5).
 4. Optional. Each one is a separate decision:
    - **Pin the VM to CPUs 12-23 for good** (section 8):
      `vm-pin plan` (preview only), then `vm-pin apply` (asks y/N), then shut
@@ -255,8 +256,8 @@ Rules:
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
 | `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` | Turns on intel_pstate's HWP dynamic boost at every boot (6.3). |
 | `/etc/modules-load.d/cst-ntsync.conf` | Autoloads `ntsync` at boot (and via `modprobe ntsync` during `install`) when built as a kernel module, exposing `/dev/ntsync` for Wine/Proton. |
-| `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. Written under the folder `systemctl --user show -p UnitPath --value` names first (`~/.config/systemd/user` when unset or when the user manager does not answer); older recorded copies elsewhere are removed by `install` and `uninstall`. |
-| `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23` (same `UnitPath` folder and cleanup). |
+| `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=20`, `IOWeight=20` across all CPUs. Written under the folder `systemctl --user show -p UnitPath --value` names first (`~/.config/systemd/user` when unset or when the user manager does not answer); older recorded copies elsewhere are removed by `install` and `uninstall`. |
+| `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes and Flatpak apps: `CPUWeight=20`, `IOWeight=20` across all CPUs (same `UnitPath` folder and cleanup). |
 | `~/.config/gamemode.ini` | GameMode config (only if you do not have your own). |
 | `/etc/group`, `/etc/gshadow` | `gamemode` group copied in, your user added (6.4). |
 
@@ -277,10 +278,10 @@ instances; `uninstall` deletes both names. The `user@.service` drop-in keeps
 its name `50-cpu-setup-cpuset.conf`: it sets `Delegate=`, which the game
 profile never changes.
 
-The E-core list (`8-23`) is read from `/sys/devices/cpu_atom/cpus`, not from
-the settings file. If that file is missing, the script prints
-`NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped`
-and only sets the weight.
+Both user drop-ins are always installed, even on hosts without hybrid E-cores:
+baseline priority uses weights on all CPUs, while the initial `BUILD_CPUS` /
+`P_CORES` split in `cpu-setup.conf` comes from sysfs topology at first install
+(sections 6.2 and 6.3).
 
 The units, drop-ins, polkit rule, settings file, `builds.slice` and
 `gamemode.ini` start with a comment that contains `Managed by cpu-setup.sh`.
@@ -432,19 +433,20 @@ You may edit the values. Rules:
 
 | Box | Setting | Why |
 |-----|---------|-----|
-| `machine.slice` (VM) | `CPUWeight=50`, `IOWeight=50` | The VM never ties with the desktop for CPU (default 100). `IOWeight` prepares the cgroup for I/O arbitration, though it has no effect on this host yet (see below). |
-| toolboxes (inner `user.slice`) | `CPUWeight=30`, `AllowedCPUs=8-23` | GNOME gives its own background tasks (`background.slice`) weight 30 too, so toolboxes get the same low priority as other background work. Builds stay off the P-cores. |
-| `flatpak-session-helper.service` | `AllowedCPUs=8-23` | Commands that toolboxes start on the host with `flatpak-spawn --host` run here, outside the toolbox's box. Without this, they would escape to the P-cores. |
-| `builds.slice` (only after `docker-slice install`) | `CPUWeight=20`, `IOWeight=20`, `AllowedCPUs=8-23` | Docker builds and tests stay low and on the E-cores (`IOWeight=20` is likewise dormant without `bfq` or `iocost`). |
+| `machine.slice` (VM) | `CPUWeight=50`, `IOWeight=50` | The VM never ties with the desktop for CPU (default 100). `IOWeight` arbitrates NVMe traffic once `blk-iocost` is enabled (see below). |
+| toolboxes (inner `user.slice`) | `CPUWeight=20`, `IOWeight=20` | Compiles and coding agents can use all CPUs (P-cores + E-cores) when idle, at 5× below `app.slice` (100), 15×–25× below active desktop apps under `uresourced` (300–500), and 25× below GNOME Shell (`session.slice` `CPUWeight=500`, `IOWeight=500`, `MemoryMin=1G`), so interactive desktop and shell preempt builds. |
+| `flatpak-session-helper.service` | `CPUWeight=20`, `IOWeight=20` | Commands that toolboxes start on the host with `flatpak-spawn --host` run inside `app.slice`. Giving this unit the same weight prevents host build commands from competing at weight 100 with interactive desktop apps and terminals. |
+| `builds.slice` (only after `docker-slice install`) | `CPUWeight=20`, `IOWeight=20` | Docker builds and tests can use all CPUs at baseline while yielding CPU and I/O to desktop apps and GNOME Shell. |
 | CPU frequency (intel_pstate) | `hwp_dynamic_boost=1` | When a task wakes up after waiting for the disk (a build doing many fsyncs, a game loading files), the CPU raises its frequency at once instead of ramping up. Costs a little power during those moments. `install` sets it now and a tmpfiles.d file keeps it after reboots; `uninstall` removes the file and sets it back to `0`. Skipped (with a NOTE) on CPUs without intel_pstate in HWP mode. |
 | Connected GPUs (`cst cpu power`, udev `65-cst-gpu-pm.rules`) | `power/control=on` (when `GPU_PM_MODE='always'`) | Prevents PCIe runtime PM sleep/wakeup stalls on any GPU currently driving a connected monitor, while leaving unplugged GPUs (`auto`) free to sleep and handling monitor hotplug automatically via PCI slot tracking in `/run/cpu-setup/gpu-pm-managed`. |
 | Deep CPU C-states (`cst-cpu-power.service`) | `cpuidle/state*/disable=1` for `latency >= 200 µs` | Keeps `C3_ACPI` (`1048 µs` wakeup latency) off while keeping shallow `C1`/`C2` states available; `cpu-power` records modified states in `/run/cpu-setup/cstate-disabled` so `revert` / `uninstall` only re-enables states CST disabled. |
 
-**Note on `IOWeight` (`machine.slice` and `builds.slice`):** cgroup I/O weights
-(`io.weight`) are only enforced when the block device uses the **BFQ** I/O
-scheduler or when the kernel's **`blk-iocost`** controller is enabled. To
-enable `blk-iocost` (`enable=1 ctrl=auto`) on SSDs without an upstream `hwdb`
-entry so `IOWeight` arbitrates NVMe traffic, run `cst btrfs iocost apply`
+**Note on `IOWeight` (`machine.slice`, toolboxes, `flatpak-session-helper.service` and `builds.slice`):**
+cgroup I/O weights (`io.weight`) are only enforced when the block device uses
+the **BFQ** I/O scheduler or when the kernel's **`blk-iocost`** controller is
+enabled. To enable `blk-iocost` (`enable=1 ctrl=auto`) on SSDs without an
+upstream `hwdb` entry so `IOWeight=20` keeps heavy cargo/Docker I/O from
+stalling interactive shells and desktop apps, run `cst btrfs iocost apply`
 ([../btrfs/README.md](../btrfs/README.md#92-iocost-enable-kernel-blk-iocost-qos-for-slice-ioweight)).
 When keeping **`irqbalance`** active, run `cst cpu irq apply` to ban `BUILD_CPUS`
 (intersected with online CPUs, keeping `>= 2` unbanned IRQ handler CPUs) via
@@ -464,30 +466,34 @@ It stays pending after a failed restart, and when there is no
 at the next boot): `apply` then says
 `pending:   cpu:irq (irqbalance.service is not there yet: run apply again once it is)`.
 
-**Why the E-core limit helps builds too:** programs like Claude Code, shells,
-cargo, go, gradle and maven look at the CPUs they are *allowed* to use to
-decide how many parallel jobs to start. Inside a toolbox they see 16 CPUs
-(8-23), so they start fewer jobs. Fewer parallel jobs means less fighting for
-CPU and memory. Builds are a little slower, but the desktop stays responsive.
-No per-tool configuration is needed.
+**Parallelism in toolboxes (`cargo`, `go`, etc.):** without a baseline
+`AllowedCPUs`, tools inside a toolbox see all 24 CPUs (8 P-cores + 16 E-cores)
+instead of 16 E-cores. Linux's EEVDF scheduler plus `uresourced` (`session.slice`
+weight 500 and `MemoryMin=1G`, `app.slice` active boost 300–500) and
+`blk-iocost` keep the desktop and interactive terminals responsive when builds
+saturate all cores.
 
 **Delegation and the user manager restart:** your user manager may not set
-`AllowedCPUs` on its boxes unless the system *delegates* the cpuset controller
-to it (delegation = the system lets your session manage that feature itself).
-`install` adds `Delegate=cpuset`. This only takes effect when your **user
-manager starts again**: reboot, or log out and in if lingering is off (see
-section 4, step 1).
+`AllowedCPUs` on its boxes while a game runs unless the system *delegates* the
+cpuset controller to it (delegation = the system lets your session manage that
+feature itself). `install` adds `Delegate=cpuset` (`50-cpu-setup-cpuset.conf`),
+which offers `cpuset` to the user manager (`cgroup.controllers`) without
+activating it in `cgroup.subtree_control` until the game profile applies
+`AllowedCPUs`. This delegation takes effect when your **user manager starts
+again**: reboot, or log out and in if lingering is off (see section 4, step 1).
 
 Until then:
 
-- the toolbox **weight 30 already works** (install reloads your user manager);
-- only the **E-core limit waits**: `status` shows
-  `cpuset delegated: no (next login)`.
+- the toolbox **weight 20 (CPU and I/O) already works** (install reloads your
+  user manager);
+- only the game profile's **cpuset isolation of toolboxes and host commands
+  waits** (until the next login, `game on` falls back to `CPUWeight=idle` for
+  them): `status` shows `cpuset delegated: no (next login)`.
 
 **Side effect:** other Flatpak apps that have the `org.freedesktop.Flatpak`
 permission also start host commands through `flatpak-session-helper`. On this
 machine that is OBS, Remmina, RustConn, Resources and TestCenter. Their host
-commands also run on the E-cores.
+commands also get `CPUWeight=20` and `IOWeight=20`.
 
 ### 6.4 GameMode
 
@@ -554,10 +560,10 @@ kernel 7.2.9-200.fc44.x86_64, scheduler EEVDF, preempt lazy
 == game profile
   game profile: off
     machine.slice   cpus=         weight=50   io=50
-    builds.slice    cpus=8-23     weight=20   io=20
-    toolboxes       weight=30
+    builds.slice    cpus=         weight=20   io=20
+    toolboxes       weight=20
     app.slice       zswap writeback=yes
-    toolboxes       cpus effective=8-23
+    toolboxes       cpus effective=0-23
     EPP cpu0 balance_performance, cpu12 balance_performance
   watchdog timer: active
 
@@ -565,11 +571,11 @@ kernel 7.2.9-200.fc44.x86_64, scheduler EEVDF, preempt lazy
   group: member; ini: managed; gamemoded: inactive
 
 == baseline weights
-  machine.slice 50, toolboxes 30, app.slice 100, background.slice 30
+  machine.slice 50, toolboxes 20 (io 20), flatpak-session-helper 20 (io 20), app.slice 100, background.slice 30
 
-== E-cores for toolboxes and host commands
-  cpuset delegated: yes; toolboxes AllowedCPUs=8-23; flatpak-spawn --host AllowedCPUs=8-23
-  effective (cgroup): toolboxes [8-23]
+== cpuset for toolboxes and host commands
+  cpuset delegated: yes; toolboxes AllowedCPUs=; flatpak-spawn --host AllowedCPUs=
+  effective (cgroup): toolboxes [0-23]
 
 == VM
   ...
@@ -580,7 +586,7 @@ kernel 7.2.9-200.fc44.x86_64, scheduler EEVDF, preempt lazy
 
 Lines to look at:
 
-- `cpuset delegated: yes` and `toolboxes [8-23]`: the E-core limit works.
+- `cpuset delegated: yes` and `toolboxes [0-23]`: toolboxes use all CPUs at baseline and `cpuset` is delegated so the game profile can move them to `12-23` during games.
 - `group: member` means "listed in `/etc/group`". It does not prove that your
   running session already has the group.
 - `gamemoded` may show `inactive` when no game runs; it starts on demand.
@@ -680,8 +686,8 @@ name that is not UTF-8, one more of each at every watchdog run.)
 
 To keep a job out of this, give it a slice under one of the boxes CST
 already handles. `systemd-run --user --slice=user-NAME.slice` nests under the
-toolboxes' `user.slice` (weight 30 and the E-cores always, idle during
-games, as the toolboxes). `--slice=app-NAME.slice` nests under `app.slice`,
+toolboxes' `user.slice` (CPU and I/O weight 20 on all CPUs at baseline, idle
+and 12-23 during games, as the toolboxes). `--slice=app-NAME.slice` nests under `app.slice`,
 next to the game, and is left alone. `cst doctor` warns about top-level
 slices it does not know ([../doctor/README.md](../doctor/README.md)).
 
@@ -1314,9 +1320,9 @@ cst cpu docker-slice uninstall
 
 `install`:
 
-- writes `/etc/systemd/system/builds.slice` (`CPUWeight=20`, `IOWeight=20`,
-  `AllowedCPUs=8-23`) and starts it. It is a top-level slice, next to the
-  system `user.slice`, so its weight really competes with the desktop;
+- writes `/etc/systemd/system/builds.slice` (`CPUWeight=20`, `IOWeight=20`)
+  and starts it. It is a top-level slice, next to the system `user.slice`, so
+  its weight really competes with the desktop;
 - then adds `"cgroup-parent": "builds.slice"` to `/etc/docker/daemon.json`.
   Other keys stay. The file is rewritten as JSON with 2-space indentation.
 - If `cgroup-parent` already has another value, it stops with
@@ -1361,26 +1367,26 @@ does not read that file, so they work together with `docker-slice`.
 
 | Workload | Where it runs | Baseline | During games |
 |----------|---------------|----------|--------------|
-| Toolboxes (podman, rootless) and everything inside | inner `user.slice` | weight 30, E-cores* | idle, 12-23* |
-| Host commands from toolboxes (`flatpak-spawn --host`) | `app.slice/flatpak-session-helper.service` | E-cores*, normal weight | 12-23*, normal weight |
+| Toolboxes (podman, rootless) and everything inside | inner `user.slice` | weight 20, io 20†, all CPUs | idle, 12-23* |
+| Host commands from toolboxes (`flatpak-spawn --host`) | `app.slice/flatpak-session-helper.service` | weight 20, io 20†, all CPUs | 12-23*, weight 20, io 20† |
 | Windows VM | `machine.slice` | weight 50, io 50† (+ 12-23 with `vm-pin`) | weight 10, io 10†, 12-23 |
-| Docker with `docker-slice` | `builds.slice` | weight 20, io 20†, E-cores | idle, io 20†, 12-23 |
+| Docker with `docker-slice` | `builds.slice` | weight 20, io 20†, all CPUs | idle, io 20†, 12-23 |
 | Docker without `docker-slice` | `system.slice/docker-*.scope` | not covered | 12-23 only |
 | `systemd-run --user` jobs without `--slice` | `app.slice/run-*.scope`, `app.slice/run-*.service` | not covered | idle, 12-23* |
 | `systemd-run --user --slice=X.slice` (X without a dash), and GNOME's `background.slice` | top-level `X.slice` of the user manager | not covered (`background.slice`: GNOME's weight 30) | idle, 12-23* |
 | `systemd-run --user --slice=user-NAME.slice` | under the inner `user.slice` | as the toolboxes | as the toolboxes |
 | Rust compiles through CST's sccache wrapper ([toolchains/README.md](../toolchains/README.md)) | the shared server's scope: `user.slice/cst-sccache-<toolbox>.scope` from a toolbox, `sccache.slice/cst-sccache-host.scope` on the host, wherever the build was started | toolbox: as the toolboxes; host: not covered | toolbox: as the toolboxes; host: `idle, 12-23*` (top-level slice demoted by the game profile) |
 
-\* the CPU limits need the cpuset delegation (6.3), so they work only after
+\* the game profile's CPU limits (`12-23`) need the cpuset delegation (6.3), so they work only after
 the user manager restart.
 
-† `IOWeight` (`io`) only takes effect with `bfq` or `iocost`; on this host
-(`none`, `iocost` off) it is recorded on the cgroup as a no-op (see 6.3).
+† `IOWeight` (`io`) takes effect with `bfq` or `blk-iocost` (`cst btrfs iocost apply`, see 6.3).
 
 Note on host commands from toolboxes: they live in `app.slice`, next to the
-game. Only their CPU list is limited, not their weight. Without delegation
-they are not limited at all. The same is true for `watch -- CMD` started from
-a toolbox (section 11).
+game. Giving `flatpak-session-helper.service` `CPUWeight=20` and `IOWeight=20`
+keeps them from competing at weight 100 against desktop apps and terminals
+outside games; during games, delegation lets the game profile move them to
+`12-23`. The same is true for `watch -- CMD` started from a toolbox (section 11).
 
 **Not covered:**
 
@@ -1802,20 +1808,22 @@ the toolboxes' box. The `info` line about `systemd-run` jobs straight in
 **`lock busy` in the journal.** Another `on`/`off`/`tick` ran for more than 60 s.
 Run `game state`, then `game off` if needed.
 
-**Toolboxes still use the P-cores**, or `status` still shows
+**Toolboxes still use all CPUs during a game**, or `status` still shows
 `cpuset delegated: no (next login)` after you logged out and in. Check
 lingering: `loginctl show-user $USER -p Linger`. With `Linger=yes` your user
 manager keeps running after logout: reboot. Then check
-`effective (cgroup): toolboxes [8-23]`.
+`effective (cgroup): toolboxes [0-23]` (and `12-23` while a game runs).
 
 **I cannot restart my user manager right now.** What already works: the
-baseline weights (VM 50, toolboxes 30) and the whole game profile, except the
-toolbox CPU limit. Only the E-core limit for toolboxes and their host commands
-waits for the restart. Not verified: whether GameMode's split-lock switch
-already works before the restart (it depends on the `gamemode` group).
+baseline weights (VM 50, toolboxes and host commands 20) and the whole game
+profile, except the toolbox CPU limit during games. Only moving toolboxes
+and their host commands to `12-23` during games waits for the restart. Not
+verified: whether GameMode's split-lock switch already works before the
+restart (it depends on the `gamemode` group).
 
-**A build in a toolbox became slower.** Expected: it now has 16 E-cores, and
-during games 12 CPUs at the idle class.
+**A build in a toolbox runs alongside my game.** Expected: during games it
+moves to 12 E-cores at the `idle` class; outside games it uses all CPUs at
+CPU and I/O weight 20.
 
 **The VM is slow during games.** Expected: weight 10 on CPUs 12-23. It goes
 back to normal when the profile switches off.
@@ -1921,7 +1929,7 @@ this is harmless.
 | `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer`, `units/cst-cpu-power.service` | `/etc/systemd/system/` |
 | `units/machine.slice.d-10-cpu-setup.conf` | `machine.slice.d/10-cpu-setup.conf` |
 | `units/user@.service.d-50-cpu-setup-cpuset.conf` | `user@.service.d/50-cpu-setup-cpuset.conf` |
-| `units/builds.slice.in` | `/etc/systemd/system/builds.slice` (by `docker-slice install`; `@ALLOWED@` becomes `AllowedCPUs=` with the E-cores, or nothing when there are none) |
+| `units/builds.slice` | `/etc/systemd/system/builds.slice` (by `docker-slice install`: `CPUWeight=20`, `IOWeight=20`, no `AllowedCPUs`) |
 
 ---
 

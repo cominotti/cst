@@ -2228,6 +2228,30 @@ class GameProfileEscapesTest(GameProfileCase):
         self.assertIn(f"{USR} set-property --runtime run-u7.service CPUWeight=idle AllowedCPUs=12-23", sets)
         self.assertIn(f"{USR} set-property --runtime user.slice AllowedCPUs=12-23", sets)
 
+    def test_with_cpuset_in_controllers_only_on_sets_and_off_clears_allowed_cpus(self) -> None:
+        # When no baseline AllowedCPUs exists, systemd --user leaves cpuset out of subtree_control until a
+        # unit asks for AllowedCPUs; Delegate=cpuset puts cpuset in cgroup.controllers. Both 'on' and 'off'
+        # must treat it as delegated and restore unrestricted CPUs on 'off'.
+        self.tree(delegated=False)
+        self.write(os.path.join(self.ucg, "cgroup.controllers"), "cpuset cpu memory pids\n")
+        _, actions = self.run_profile("on")
+        sets = self.sets(actions)
+        self.assertIn(f"{USR} set-property --runtime user.slice AllowedCPUs=12-23", sets)
+        self.assertIn(f"{USR} set-property --runtime flatpak-session-helper.service AllowedCPUs=12-23", sets)
+        self.assertIn(f"{USR} set-property --runtime lushtext.slice CPUWeight=idle AllowedCPUs=12-23", sets)
+        self.assertTrue(os.path.exists(self.ctrl("usr", "user.slice", "AllowedCPUs")))
+        self.assertTrue(os.path.exists(self.ctrl("usr", "flatpak-session-helper.service", "AllowedCPUs")))
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(self.ctrl("usr", "user.slice", "AllowedCPUs")))
+        self.assertFalse(os.path.exists(self.ctrl("usr", "flatpak-session-helper.service", "AllowedCPUs")))
+
+    def test_state_reads_parent_cpuset_effective_when_subtree_control_lacks_cpuset(self) -> None:
+        self.tree(delegated=False)
+        self.write(os.path.join(self.ucg, "cpuset.cpus.effective"), "0-23\n")
+        self.set_now("usr", "user.slice", ControlGroup="/" + os.path.relpath(self.cg("user.slice"), self.paths.cgroot))
+        out, _ = self.run_profile("state")
+        self.assertIn("  toolboxes       cpus effective=0-23\n", out)
+
     def test_with_cpuset_delegated_a_manager_that_ignores_it_gets_the_cgroup_file(self) -> None:
         self.tree(delegated=True)
         cpus = self.cg("user.slice")

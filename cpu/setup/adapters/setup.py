@@ -255,10 +255,6 @@ class CpuSetup:
         return home
 
     # ---- small steps ------------------------------------------------------------------------------
-    def e_cores(self) -> str:
-        """The E-cores (/sys/devices/cpu_atom/cpus), "" on a machine without."""
-        return read_stripped(self.paths.e_cores) or ""
-
     def rm_v(self, *paths: str) -> None:
         """rm -fv PATH...: 'removed' for each that was there."""
         for p in paths:
@@ -350,8 +346,12 @@ class CpuSetup:
         return f"{self.paths.cgroot}/user.slice/user-{uids[0]}.slice/user@{uids[1]}.service"
 
     def cpuset_delegated(self) -> bool:
-        """cpuset in use by the user manager (next login after install)."""
-        return cpuset_in(read_text(os.path.join(self.user_cg(), "cgroup.subtree_control")) or "")
+        """cpuset delegated to the user manager (active in subtree_control or offered in cgroup.controllers)."""
+        ucg = self.user_cg()
+        return any(
+            cpuset_in(read_text(os.path.join(ucg, name)) or "")
+            for name in ("cgroup.subtree_control", "cgroup.controllers")
+        )
 
     def check_syntax(self, path: str) -> bool:
         """A program parses (python's ast, or bash -n)."""
@@ -363,7 +363,7 @@ class CpuSetup:
 
     # ---- install -----------------------------------------------------------------------------------
     def install(self) -> int:
-        """The game profile, baseline weights, the toolboxes on the E-cores, GameMode, cpu-watch, the cst link."""
+        """The game profile, baseline weights (VM, toolboxes, host commands), GameMode, cpu-watch, the cst link."""
         p, user = self.paths, self.user
         if not user or user == ROOT_ACCOUNT:
             raise Halt(1, "install: run through sudo from your user account (needs SUDO_USER)")
@@ -386,16 +386,10 @@ class CpuSetup:
         else:
             self.warn(f"NOTE: {p.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped")
         self._install_ntsync()
-        ecores = self.e_cores()
         tb_path, helper_path = self.toolbox_dropin(), self.helper_dropin()
         self._clean_older_dropins(tb_path, helper_path)
-        if ecores:
-            self.install_text(tb_path, toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
-            self.install_text(helper_path, helper_dropin_text(ecores), user, TOOLBOX_COMPONENT)
-        else:
-            self.warn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped")
-            self.install_text(tb_path, toolbox_dropin_text(""), user, TOOLBOX_COMPONENT)
-            self.remove_user_text(helper_path)
+        self.install_text(tb_path, toolbox_dropin_text(), user, TOOLBOX_COMPONENT)
+        self.install_text(helper_path, helper_dropin_text(), user, TOOLBOX_COMPONENT)
         self.remove_old_dropins()  # the daemon-reloads below then read without them
         link = os.path.join(self.root, "cst-link.bash")
         self.run(["bash", "-c", 'set -Eeuo pipefail; source "$1"; link_cst_command "$2"', "cpu-setup.sh", link, user])
@@ -539,9 +533,7 @@ class CpuSetup:
         """docker-slice install|status|uninstall: Docker containers born in builds.slice."""
         match first_arg(args, DockerSliceAction.STATUS):
             case DockerSliceAction.INSTALL:
-                ecores = self.e_cores()
-                allowed = f"AllowedCPUs={ecores}" if ecores else ""
-                self.installer("install", "--set", f"ALLOWED={allowed}", "--component", DOCKER_SLICE_COMPONENT)
+                self.installer("install", "--component", DOCKER_SLICE_COMPONENT)
                 self.run(["systemctl", "daemon-reload"])
                 self.run(["systemctl", "start", BUILDS_SLICE])
                 self.installer("mark", "--component", DOCKER_SLICE_COMPONENT, ComponentState.DONE)
@@ -618,17 +610,8 @@ class CpuSetup:
     # ---- experiments --------------------------------------------------------------------------------
     def experiment(self, args: Sequence[str]) -> int:
         """experiment list|on NAME|off NAME: runtime-only memory knobs."""
-        return run_experiment(
-            ExperimentEnv(
-                self.paths,
-                self.prog,
-                self.say,
-                self.warn,
-                self._echo_to,
-                _make_run_dir,
-            ),
-            args,
-        )
+        env = ExperimentEnv(self.paths, self.prog, self.say, self.warn, self._echo_to, _make_run_dir)
+        return run_experiment(env, args)
 
     # ---- game, vm-pin -----------------------------------------------------------------------------
     def game(self, args: Sequence[str]) -> int:
@@ -685,6 +668,9 @@ class CpuSetup:
         self.section("diagnosis")
         self.write(buf.getvalue())
 
+    def _usys_prop(self, prop: str, unit: str) -> CommandResult:
+        return self.usys("show", "-P", prop, unit, capture=True)
+
     def status(self) -> int:
         """The whole picture; nothing in it stops the rest."""
         p, user = self.paths, self.user
@@ -712,16 +698,20 @@ class CpuSetup:
         self.say(f"  ntsync: {nt_state} ({nt_kept})")
         self.section("baseline weights")
         machine = self.run(["systemctl", "show", "-P", "CPUWeight", "machine.slice"], check=False, capture=True)
-        weights = [
-            self.usys("show", "-P", "CPUWeight", u, capture=True).stdout.rstrip("\n")
-            for u in (USER_SLICE, APP_SLICE, "background.slice")
+        w = [
+            self._usys_prop("CPUWeight", u).stdout.rstrip("\n")
+            for u in (USER_SLICE, "flatpak-session-helper.service", APP_SLICE, "background.slice")
+        ]
+        ios = [
+            self._usys_prop("IOWeight", u).stdout.rstrip("\n") for u in (USER_SLICE, "flatpak-session-helper.service")
         ]
         self.say(
-            f"  machine.slice {machine.stdout.rstrip('\n')}, toolboxes {weights[0]}, app.slice {weights[1]}, background.slice {weights[2]}"
+            f"  machine.slice {machine.stdout.rstrip('\n')}, toolboxes {w[0]} (io {ios[0]}), "
+            f"flatpak-session-helper {w[1]} (io {ios[1]}), app.slice {w[2]}, background.slice {w[3]}"
         )
-        self.section("E-cores for toolboxes and host commands")
+        self.section("cpuset for toolboxes and host commands")
         if user:
-            self._ecores_status()
+            self._cpuset_status()
         self.section("VM")
         vm = self.run(self._checkout_program("vm-pin", "status"), check=False, merge=True)
         self.write(indented(first_four_and_last(vm.stdout)))
@@ -749,7 +739,7 @@ class CpuSetup:
         self.write(indented(last_lines(self.run(report, check=False, quiet=True, capture=True).stdout, 5)))
         return 0
 
-    def _ecores_status(self) -> None:
+    def _cpuset_status(self) -> None:
         delegated = "yes" if self.cpuset_delegated() else "no (next login)"
         toolboxes = self.usys("show", "-P", "AllowedCPUs", USER_SLICE, capture=True).stdout.rstrip("\n")
         helper = self.usys("show", "-P", "AllowedCPUs", "flatpak-session-helper.service", capture=True).stdout.rstrip(
@@ -758,7 +748,12 @@ class CpuSetup:
         self.say(
             f"  cpuset delegated: {delegated}; toolboxes AllowedCPUs={toolboxes}; flatpak-spawn --host AllowedCPUs={helper}"
         )
-        effective = read_stripped(os.path.join(self.user_cg(), USER_SLICE, "cpuset.cpus.effective")) or ""
+        ucg = self.user_cg()
+        effective = (
+            read_stripped(os.path.join(ucg, USER_SLICE, "cpuset.cpus.effective"))
+            or read_stripped(os.path.join(ucg, "cpuset.cpus.effective"))
+            or ""
+        )
         self.say(f"  effective (cgroup): toolboxes [{effective}]")
 
     # ---- dispatch -------------------------------------------------------------------------------------

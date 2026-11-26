@@ -4776,11 +4776,11 @@ class InstallAreaTest(Scratch):
         self.assertIn("cst btrfs docker-gc enable installs them again", older[0].message)
 
     def test_a_template_is_compared_with_its_recorded_values(self) -> None:
-        self.install("cpu:docker-slice", ALLOWED="AllowedCPUs=8-23")
-        self.mark("cpu:docker-slice")
+        self.install("btrfs:top-mount", UUID="1111-2222", OPTIONS="subvolid=5")
+        self.mark("btrfs:top-mount")
         self.assertEqual([r.status for r in self.results()], [doc_domain.OK])
-        with open(os.path.join(self.root, "etc/systemd/system/builds.slice"), "a") as f:
-            f.write("CPUWeight=99\n")
+        with open(os.path.join(self.root, "etc/systemd/system/var-mnt-btrfs\\x2dtop.mount"), "a") as f:
+            f.write("# edited\n")
         self.assertEqual(len(self.warns()), 1)
 
     def test_a_changed_mode_is_info(self) -> None:

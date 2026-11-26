@@ -570,7 +570,7 @@ class InstallerCliTest(unittest.TestCase):
         # The installer replaces docker-gc by component, by module, by owner or by name: each time
         # the settings file is missing, it is first written from the installed copy.
         conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
-        sets = ["--set", "UUID=u", "--set", "OPTIONS=o", "--set", "USER=u", "--set", "ALLOWED=a"]
+        sets = ["--set", "UUID=u", "--set", "OPTIONS=o", "--set", "USER=u"]
         for sel in (
             ["--component", "btrfs:docker-gc"],
             ["--module", "btrfs", "--set", "UUID=u", "--set", "OPTIONS=o"],
@@ -652,17 +652,14 @@ class InstallerCliTest(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, r.stderr)
         self.assertEqual(self.files(), {})
 
-    def test_builds_slice_is_the_file_with_or_without_the_e_cores_line(self) -> None:
-        # Byte for byte what docker-slice install wrote before builds.slice became a template:
-        # `cat cpu/units/builds.slice` plus "AllowedCPUs=<E-cores>" when there are E-cores.
-        old = Path(REPO, "cpu/units/builds.slice.in").read_text().replace("@ALLOWED@\n", "")
-        for value, want in (("", old), ("AllowedCPUs=16-23", old + "AllowedCPUs=16-23\n")):
-            with self.subTest(value=value):
-                r = self.cli(
-                    "install", "--root", self.stage, "--component", "cpu:docker-slice", "--set", f"ALLOWED={value}"
-                )
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertEqual(Path(self.stage, "etc/systemd/system/builds.slice").read_text(), want)
+    def test_builds_slice_installs_with_low_weights_and_no_allowed_cpus(self) -> None:
+        want = Path(REPO, "cpu/units/builds.slice").read_text()
+        self.assertIn("CPUWeight=20\n", want)
+        self.assertIn("IOWeight=20\n", want)
+        self.assertNotIn("AllowedCPUs=", want)
+        r = self.cli("install", "--root", self.stage, "--component", "cpu:docker-slice")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Path(self.stage, "etc/systemd/system/builds.slice").read_text(), want)
 
     def test_upgrade_from_a_plain_script_install(self) -> None:
         dest = Path(self.stage, "usr/local/sbin/btrfs-stall-monitord")

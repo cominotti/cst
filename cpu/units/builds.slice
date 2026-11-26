@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 # Managed by cpu-setup.sh (CST). Root-level slice for Docker containers
 # (daemon.json "cgroup-parent": "builds.slice"): a sibling of user.slice, so
-# its weight really competes with the desktop and the game.
+# its weight really competes with the desktop and the game. Uses all CPUs at
+# low CPU and I/O weight outside games; the game profile moves it to BUILD_CPUS
+# with CPUWeight=idle while a game runs.
 [Unit]
 Description=Builds and test containers (low priority)
 Before=slices.target
@@ -9,4 +11,3 @@ Before=slices.target
 [Slice]
 CPUWeight=20
 IOWeight=20
-@ALLOWED@

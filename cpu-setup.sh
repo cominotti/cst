@@ -25,18 +25,20 @@
 #         65-cst-gpu-pm.rules): keeps power/control=on on connected display GPUs
 #         across hotplug (GPU_PM_MODE='always') and caps baseline deep C-states
 #         (CPU_CSTATE_MAX_LATENCY_US='200')
-#       * baseline weights: VM (machine.slice) 50, toolboxes 30 (like
-#         background.slice), so they never tie with the desktop
-#       * toolboxes and their host commands (flatpak-spawn --host) always on
-#         the E-cores (cgroup AllowedCPUs; cpuset delegated to the user manager,
-#         next login): Claude Code, shells, cargo/go/gradle/maven size their
-#         parallelism from that set, no per-toolchain config needed. Side
-#         effect: host commands of Flatpak apps with org.freedesktop.Flatpak
-#         access (here OBS, Remmina, RustConn, Resources, TestCenter) also
-#         run on the E-cores. Not covered outside games: `systemd-run --user`
-#         jobs (app.slice, or a slice of their own unless it is named
+#       * baseline weights (active always, outside games as well): VM
+#         (machine.slice) CPUWeight=50 IOWeight=50; toolboxes (inner
+#         user.slice) and their host commands (flatpak-session-helper.service)
+#         CPUWeight=20 IOWeight=20 across all CPUs (P-cores + E-cores), so
+#         builds run at full speed when idle while EEVDF, uresourced
+#         (session.slice 500, app.slice 100-300) and blk-iocost keep desktop
+#         apps and interactive shells responsive. Side effect: host commands
+#         of Flatpak apps with org.freedesktop.Flatpak access (here OBS,
+#         Remmina, RustConn, Resources, TestCenter) share flatpak-session-helper's
+#         weights. Not covered outside games: `systemd-run --user` jobs
+#         (app.slice, or a slice of their own unless it is named
 #         user-NAME.slice) and Docker without docker-slice (dockerd is a
-#         system service)
+#         system service). Delegate=cpuset on user@.service lets the game
+#         profile move toolboxes and host commands to BUILD_CPUS during games
 #       * HWP dynamic boost (/sys/.../hwp_dynamic_boost=1) and /etc/modules-load.d/cst-ntsync.conf
 #         (loads ntsync at boot and via modprobe for Wine/Proton NT sync)
 #       * GameMode: ~/.config/gamemode.ini (only triggers the profile and
@@ -56,8 +58,8 @@
 #                          (diff first; apply asks; effective at the VM's
 #                          next start, which is left to you)
 #   docker-slice install|status|uninstall   (root) Docker containers born in
-#                          builds.slice (weight 20, E-cores only; idle + 12-23
-#                          during games):
+#                          builds.slice (CPUWeight=20, IOWeight=20 on all CPUs
+#                          at baseline; idle + 12-23 during games):
 #                          daemon.json "cgroup-parent"; restarting dockerd (stops
 #                          containers) is left to you
 #   experiment list|on NAME|off NAME   (root) runtime-only memory A/B knobs

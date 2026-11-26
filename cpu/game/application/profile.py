@@ -284,8 +284,13 @@ class GameProfileSteps:
         return f"{self.paths.cgroot}/user.slice/user-{uid}.slice/user@{uid}.service"
 
     def cpuset_delegated(self) -> bool:
-        """cpuset in use by the user manager (cpu-setup install, next login)."""
-        return cpuset_in(self.ports.kernel.read_text(os.path.join(self.user_cg(), "cgroup.subtree_control")) or "")
+        """cpuset delegated to the user manager (active in subtree_control, or offered in cgroup.controllers
+        when no baseline AllowedCPUs activates it outside games)."""
+        ucg = self.user_cg()
+        return any(
+            cpuset_in(self.ports.kernel.read_text(os.path.join(ucg, name)) or "")
+            for name in ("cgroup.subtree_control", "cgroup.controllers")
+        )
 
     def escaped_cgroups(self) -> list[str]:
         """The cgroup folders of the user manager's boxes that no other rule covers: its top-level

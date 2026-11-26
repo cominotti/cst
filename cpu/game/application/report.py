@@ -8,6 +8,7 @@ profile's paths, settings, ports and the steps it shares with on, off and tick. 
 from __future__ import annotations
 
 from collections.abc import Sequence
+import posixpath
 from typing import TYPE_CHECKING
 
 from cpu.game.application.leftovers import read_kept
@@ -67,7 +68,15 @@ def _user_manager_lines(profile: GameProfileSteps, state_recs: Sequence[Record] 
     profile.say(f"  toolboxes       weight={profile.prop('usr', USER_SLICE, 'CPUWeight')}")
     profile.say(f"  app.slice       zswap writeback={profile.prop('usr', APP_SLICE, 'MemoryZSwapWriteback')}")
     cg = profile.ask("usr", "show", "-P", "ControlGroup", USER_SLICE).stdout.rstrip("\n")
-    effective = profile.ports.kernel.read_stripped(f"{profile.paths.cgroot}{cg}/cpuset.cpus.effective") or ""
+    effective = (
+        profile.ports.kernel.read_stripped(f"{profile.paths.cgroot}{cg}/cpuset.cpus.effective")
+        or (
+            profile.ports.kernel.read_stripped(f"{profile.paths.cgroot}{posixpath.dirname(cg)}/cpuset.cpus.effective")
+            if cg
+            else None
+        )
+        or ""
+    )
     profile.say(f"  toolboxes       cpus effective={effective}")
     if state_recs is not None:
         profile.say(f"  other boxes     idle: {escapes_in_state(state_recs)}")
