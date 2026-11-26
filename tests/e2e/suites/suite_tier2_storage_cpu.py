@@ -3389,6 +3389,7 @@ assert d["samples"] >= 1, d["samples"]
             cryptsetup close cache25 2>/dev/null
             if [[ -f {w}/loop.dev ]]; then losetup -d "$(cat {w}/loop.dev)" 2>/dev/null; fi
             if [[ -f {w}/partuuid ]]; then rm -f "/dev/disk/by-partuuid/$(cat {w}/partuuid)"; fi
+            if [[ -f {w}/created-part ]]; then rm -f "$(cat {w}/created-part)" 2>/dev/null || true; fi
             btrfs subvolume delete /home/e2e25/.cache /home/e2e25/.cache.pre-cst-cache 2>/dev/null || true
             userdel -rf e2e25 2>/dev/null
             rmdir /var/mnt/scratchpad /var/mnt/cache 2>/dev/null || true
@@ -3410,12 +3411,27 @@ assert d["samples"] >= 1, d["samples"]
             if [[ -e /etc/crypttab ]]; then cp -a /etc/crypttab {w}/crypttab.bak; else : >{w}/no-crypttab; fi
 
             # 1. Create sparse image with GPT partition and loopback device.
+            quiet() {{
+                local qout
+                if ! qout="$("$@" 2>&1)"; then
+                    echo "CMD FAILED: $*" >&2
+                    printf '%s\n' "$qout" >&2
+                    return 1
+                fi
+            }}
             truncate -s 384M {w}/cache.img
             printf 'label: gpt\\nsize=350M,type=0FC63DAF-8483-4772-8E79-3D69D8477DE4\\n' | sfdisk {w}/cache.img >/dev/null
             loop="$(losetup --find --show --partscan {w}/cache.img)"
             echo "$loop" >{w}/loop.dev
             part="${{loop}}p1"
-            for _ in $(seq 1 20); do [[ -b "$part" ]] && break; sleep 0.1; done
+            sys_dev="/sys/class/block/${{loop##*/}}p1/dev"
+            for _ in $(seq 1 20); do [[ -r "$sys_dev" ]] && break; sleep 0.1; done
+            [[ -r "$sys_dev" ]]
+            if [[ ! -b "$part" ]]; then
+                IFS=: read -r maj min <"$sys_dev"
+                mknod -m 0660 "$part" b "$maj" "$min"
+                echo "$part" >{w}/created-part
+            fi
             [[ -b "$part" ]]
             pu="$(sfdisk --part-uuid "$loop" 1 | tr '[:upper:]' '[:lower:]')"
             echo "$pu" >{w}/partuuid
@@ -3427,14 +3443,14 @@ assert d["samples"] >= 1, d["samples"]
             grep -qF "CACHE_PARTUUID=$pu" <<<"$p0"
             [[ ! -e /etc/cst/btrfs-cache.conf ]]
 
-            /opt/cst-rw/cst btrfs cache provision init --device "$part" --mapper cache25 >/dev/null
+            quiet /opt/cst-rw/cst btrfs cache provision init --device "$part" --mapper cache25
             [[ -f /etc/cst/btrfs-cache.conf ]]
             rc=0; /opt/cst-rw/cst btrfs cache provision apply >{w}/nofmt.out 2>&1 || rc=$?
             [[ "$rc" -eq 1 ]]
             grep -qF -- "--format" {w}/nofmt.out
 
             # 3. provision apply --format --yes -> verify LUKS2, Btrfs subvols, crypttab, fstab, mounts, idempotency.
-            /opt/cst-rw/cst btrfs cache provision apply --format --yes >/dev/null
+            quiet /opt/cst-rw/cst btrfs cache provision apply --format --yes
             cryptsetup isLuks "$part"
             [[ -b /dev/mapper/cache25 ]]
             mountpoint -q /var/mnt/cache
@@ -3475,8 +3491,8 @@ assert d["samples"] >= 1, d["samples"]
             [[ "$rc_u" -eq 1 ]]
             grep -qF "detach --user e2e25" {w}/unprov_busy.out
 
-            /opt/cst-rw/cst btrfs cache detach --user e2e25 >/dev/null
-            /opt/cst-rw/cst btrfs cache unprovision >/dev/null
+            quiet /opt/cst-rw/cst btrfs cache detach --user e2e25
+            quiet /opt/cst-rw/cst btrfs cache unprovision
             if mountpoint -q /var/mnt/cache || mountpoint -q /var/mnt/scratchpad; then exit 1; fi
             [[ ! -e /dev/mapper/cache25 ]]
             if grep -qF "cache25 " /etc/crypttab; then exit 1; fi
