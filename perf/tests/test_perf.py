@@ -124,6 +124,8 @@ class PerfParserTest(unittest.TestCase):
         self.assertIsNone(parse_bracket_choice("   "))
         self.assertAlmostEqual(parse_uptime_seconds("7200.5 14000.0\n") or 0.0, 7200.5)
         self.assertIsNone(parse_uptime_seconds("bad"))
+        self.assertEqual(parse_preempt_mode("none voluntary full (lazy)\n", None), "lazy")
+        self.assertEqual(parse_preempt_mode("none (voluntary) full lazy\n", None), "voluntary")
         self.assertEqual(parse_preempt_mode("none voluntary full [lazy]\n", None), "lazy")
         self.assertEqual(parse_preempt_mode(None, "quiet preempt=full root=/dev/null"), "full")
         self.assertEqual(

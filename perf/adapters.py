@@ -22,7 +22,7 @@ from perf.domain.models import (
 _PROC_DIR: Final = "/proc"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PerfPaths:
     """Resolved root and override paths readable from the current host/container view."""
 
