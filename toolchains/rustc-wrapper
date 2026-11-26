@@ -11,7 +11,8 @@
 # compiled again. Edits here are overwritten by the next config apply.
 #
 # Straight to the compiler (no sccache), always:
-#   - sccache is not on PATH (this toolbox lacks it): never a failed build;
+#   - sccache is not on PATH or in $CARGO_HOME/bin ($HOME/.cargo/bin): never a
+#     failed build;
 #   - the compiler is not named rustc (kani-compiler, clippy-driver as
 #     RUSTC_WORKSPACE_WRAPPER, anything else);
 #   - CST_SCCACHE=0 (for one build: CST_SCCACHE=0 cargo build);
@@ -78,7 +79,7 @@
 # in every compile.
 
 cache_size=25G # cst: RUST_SCCACHE_CACHE_SIZE (config apply writes the setting here)
-workspace=yes # cst: RUST_SCCACHE_WORKSPACE (config apply writes the setting here)
+workspace=no # cst: RUST_SCCACHE_WORKSPACE (config apply writes the setting here)
 
 case "${1##*/}" in
     rustc) ;;
@@ -97,7 +98,14 @@ for a in "$@"; do
     esac
 done
 [ "$workspace" = no ] && [ "$local_crate" = yes ] && exec "$@"
-command -v sccache >/dev/null 2>&1 || exec "$@"
+sccache_bin=
+if command -v sccache >/dev/null 2>&1; then
+    sccache_bin=sccache
+elif [ -n "${HOME:-}" ]; then
+    cand="${CARGO_HOME:-${HOME}/.cargo}/bin/sccache"
+    [ -f "$cand" ] && [ -x "$cand" ] && sccache_bin="$cand"
+fi
+[ -n "$sccache_bin" ] || exec "$@"
 
 [ -n "${HOME:-}" ] || exec "$@"
 export SCCACHE_DIR="${SCCACHE_DIR:-${HOME}/.cache/sccache}"
@@ -216,7 +224,7 @@ if [ "$own_address" = yes ]; then
                     rm -f "$SCCACHE_SERVER_UDS"
                     systemd-run --user --scope --quiet --collect --unit="$scope" --slice="$slice" \
                         --description="CST: the shared sccache server ($env_id)" \
-                        sccache --start-server 9>&-
+                        "$sccache_bin" --start-server 9>&-
                     if server_missing; then
                         printf '%s\n' "$now" >"$failed"
                     elif [ -s "$failed" ]; then
@@ -227,4 +235,4 @@ if [ "$own_address" = yes ]; then
         fi
     fi
 fi
-exec sccache "$@"
+exec "$sccache_bin" "$@"

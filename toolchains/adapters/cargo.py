@@ -6,12 +6,14 @@ which build folders the workspaces under ~/Workspace still claim.
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 import os
 import re
 import shutil
 import stat
 import subprocess
 import time
+import tomllib
 from typing import TYPE_CHECKING, Final, TypedDict, TypeIs
 
 if TYPE_CHECKING:
@@ -19,7 +21,7 @@ if TYPE_CHECKING:
 
     from toolchains.domain.prune import Limits
 
-from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.shapes import json_object, parse_json, parse_toml
 from cst_core.domain.values import Json
 from toolchains.domain.build import (
     CACHE_TAG,
@@ -31,6 +33,7 @@ from toolchains.domain.build import (
     CargoProc,
     CargoQuery,
     ENUM_BUDGET,
+    HAKARI_MIN_MEMBERS,
     Incomplete,
     NOT_A_MEMBER,
     PIN_NAMES,
@@ -464,6 +467,7 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
             ws.pins += pins
             ws.tool_files += tools
             ws.manifests += len(manifests)
+            ws.manifest_paths += manifests
             if with_cargo:
                 _ask_manifests(search, ws, manifests)
         if ws.failures:
@@ -474,3 +478,106 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
         ws.incomplete = str(e)
     ws.seconds = time.monotonic() - start
     return ws
+
+
+def _canonical_worktrees(worktrees: Sequence[str], home: str) -> list[str]:
+    """One representative worktree per git repository (preferring main checkouts under HOME)."""
+    ordered = sorted(
+        worktrees,
+        key=lambda w: (0 if w == home or w.startswith(home + "/") else 1, w.count("/"), len(w), w),
+    )
+    seen_repos: set[str] = set()
+    kept: list[str] = []
+    for wt in ordered:
+        key = git_common_dir(wt) or os.path.realpath(wt)
+        if key not in seen_repos:
+            seen_repos.add(key)
+            kept.append(wt)
+    return kept
+
+
+def _step_glob(dirs: Sequence[str], seg: str) -> list[str]:
+    """Advance DIRS one path segment matching SEG without following symlinks."""
+    out: list[str] = []
+    for d in dirs:
+        if seg == "**":
+            out.append(d)
+            for root_dir, subdirs, _files in os.walk(d, followlinks=False):
+                subdirs[:] = sorted(s for s in subdirs if not s.startswith(".") and s not in SCAN_SKIP)
+                if root_dir.removeprefix(d).count("/") >= CRATE_DEPTH:
+                    subdirs.clear()
+                    continue
+                out.extend(os.path.join(root_dir, s) for s in subdirs)
+            continue
+        entries = _dir_listing_or_none(d) or ()
+        for e in sorted(entries, key=lambda x: x.name):
+            try:
+                if e.is_dir(follow_symlinks=False) and fnmatch.fnmatchcase(e.name, seg):
+                    out.append(e.path)
+            except OSError:
+                continue
+    return out
+
+
+def _expand_member_globs(root: str, patterns: Sequence[object]) -> set[str]:
+    """Real paths of subdirectories under ROOT matching PATTERNS that contain Cargo.toml."""
+    matched: set[str] = set()
+    real_root = os.path.realpath(root)
+    for raw in patterns:
+        if not isinstance(raw, str) or not raw or raw.startswith("/"):
+            continue
+        parts = [p for p in raw.strip("/").split("/") if p and p != "."]
+        if any(p == ".." for p in parts):
+            continue
+        cur = [root]
+        for seg in parts:
+            cur = _step_glob(cur, seg)
+            if not cur:
+                break
+        for cand in cur:
+            if os.path.isfile(os.path.join(cand, CARGO_MANIFEST)):
+                real = os.path.realpath(cand)
+                if real == real_root or real.startswith(real_root + "/"):
+                    matched.add(real)
+    return matched
+
+
+def _workspace_member_count(manifest: str) -> int | None:
+    """Member count of a root Cargo.toml without hakari config, or None when not applicable."""
+    root = os.path.dirname(manifest)
+    if any(os.path.exists(os.path.join(root, rel)) for rel in (".config/hakari.toml", "hakari.toml")):
+        return None
+    try:
+        with open(manifest, "rb") as f:
+            data = parse_toml(f.read())
+    except OSError, tomllib.TOMLDecodeError:
+        return None
+    ws_table = data.get("workspace") if json_object(data) else None
+    members = ws_table.get("members") if json_object(ws_table) else None
+    if not isinstance(members, list):
+        return None
+    exclude = ws_table.get("exclude") if json_object(ws_table) else None
+    found = _expand_member_globs(root, members)
+    if isinstance(exclude, list):
+        found -= _expand_member_globs(root, exclude)
+    return len(found) if len(found) >= HAKARI_MIN_MEMBERS else None
+
+
+def hakari_candidates(ws: Workspaces, home: str) -> list[tuple[str, int]]:
+    """[(workspace_root, member_count)] for large workspaces lacking .config/hakari.toml."""
+    kept = set(_canonical_worktrees(ws.worktrees, home))
+    all_wts = sorted(ws.worktrees, key=len, reverse=True)
+    seen_roots: set[str] = set()
+    out: list[tuple[str, int]] = []
+    for m in sorted(ws.manifest_paths):
+        owner = next((wt for wt in all_wts if m == f"{wt}/{CARGO_MANIFEST}" or m.startswith(f"{wt}/")), None)
+        if owner is not None and owner not in kept:
+            continue
+        root = os.path.realpath(os.path.dirname(m))
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        count = _workspace_member_count(m)
+        if count is not None:
+            out.append((os.path.dirname(m), count))
+    return sorted(out, key=lambda item: (-item[1], item[0]))

@@ -178,8 +178,24 @@ def parse_sccache_size(text: str) -> str:
     return f"{-(-n // SIZE_UNITS['k'])}K"
 
 
+class RustIncremental(StrEnum):
+    """Policy for [build] incremental in ~/.cargo/config.toml (RUST_INCREMENTAL)."""
+
+    AUTO = "auto"
+    OFF = "off"
+
+
+def parse_rust_incremental(text: str) -> RustIncremental:
+    """'auto' or 'off' (any case, ASCII blanks around dropped); ConfigError otherwise."""
+    val = enum_member(RustIncremental, strip_ascii_blanks(text).lower())
+    if val is None:
+        raise ConfigError(f"'{text}' is not auto or off")
+    return val
+
+
 # Settings that belong to no prune target: {KEY: parser}.
 OPTIONS: dict[str, Callable[[str], bool | str]] = {
+    "RUST_INCREMENTAL": parse_rust_incremental,
     "RUST_LEAN_DEBUGINFO": parse_bool,
     "RUST_SCCACHE": parse_bool,
     "RUST_SCCACHE_CACHE_SIZE": parse_sccache_size,

@@ -51,7 +51,8 @@
 # ~/.config/cst/toolchains.conf (yours, wins), e.g. RUST_BUILD_MAX_IDLE=48h,
 # RUST_BUILD_MAX_TOTAL=150G, RUST_BUILD_MIN_KEEP=2h, RUST_BUILD_ORPHANS=yes,
 # RUST_BUILD_INCREMENTAL_IDLE=6h, PYTHON_UV_ENABLED=yes, RUST_LEAN_DEBUGINFO=no,
-# RUST_SCCACHE=no, RUST_SCCACHE_CACHE_SIZE=25G.
+# RUST_INCREMENTAL=auto, RUST_SCCACHE=no, RUST_SCCACHE_CACHE_SIZE=25G,
+# RUST_SCCACHE_WORKSPACE=no.
 # Started as root through sudo (also by `cst status`), it runs again as the
 # user who called sudo. Inside a toolbox the program runs itself on the host.
 

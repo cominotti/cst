@@ -86,6 +86,11 @@ class ToolchainsStatus:
         say("== rust toolchains (a report: CST never removes one)")
         for line in self.tools.rust_toolchains():
             say(f"  {line}")
+        hakari = self.tools.hakari_advisory()
+        if hakari:
+            say("== workspace feature unification (advisory: CST never edits your repos)")
+            for line in hakari:
+                say(f"  {line}")
         say(f"== toolchain settings ({self.prog} config)")
         for st, shown, note in self.config.lines(ConfigView.STATUS, settings):
             say(f"  {st:<8} {shown:<24} {note}")

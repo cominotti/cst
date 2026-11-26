@@ -27,6 +27,7 @@ from toolchains.domain.common import (
     parse_off_or_duration,
     parse_size,
     span,
+    tilde,
 )
 
 
@@ -276,6 +277,8 @@ TOOL_FILE_TOP = (".gitlab-ci.yml",)
 TOOL_FILE_MAX = MIB  # bytes read of one file
 TOOL_FILES_MAX = 100000  # files read in all; more: the report counts as incomplete
 # A folder with this file is a cache (cargo's target/ and registry, ...): not searched.
+# Threshold of workspace members for suggesting cargo-hakari in `status` (advisory only).
+HAKARI_MIN_MEMBERS: Final = 8
 CACHE_TAG = "CACHEDIR.TAG"
 NOT_A_MEMBER = "believes it's in a workspace when it's not"
 
@@ -292,6 +295,7 @@ class Workspaces:
         self.repos: int = 0
         self.worktrees: list[str] = []
         self.manifests: int = 0
+        self.manifest_paths: list[str] = []
         self.asked: int = 0
         self.claimed: dict[str, list[str]] = {}
         self.pins: list[str] = []  # rust-toolchain(.toml) files
@@ -425,3 +429,17 @@ def toolchain_pattern(name: str) -> re.Pattern[bytes]:
     `toolchain: 1.98.0`; not `nightly` inside `nightly-2026-06-01`, not
     `1.98.0` inside `1.98.0.1`."""
     return re.compile(rb"(?<![\w.+-])\+?" + re.escape(name.encode()) + rb"(?![\w.]|-\d)")
+
+
+def hakari_advisory_lines(candidates: Sequence[tuple[str, int]], *, has_hakari: bool, home: str) -> list[str]:
+    """Read-only advisory lines for large workspaces without .config/hakari.toml."""
+    if not candidates:
+        return []
+    out = [f"{tilde(root, home)} ({count} crates; no .config/hakari.toml)" for root, count in candidates]
+    hint = (
+        "cargo hakari init && cargo hakari generate"
+        if has_hakari
+        else "cargo binstall --no-confirm cargo-hakari (then: cargo hakari init && cargo hakari generate)"
+    )
+    out.append(f"tip: run `{hint}` in a repo above to unify feature flags and avoid redundant rebuilds")
+    return out

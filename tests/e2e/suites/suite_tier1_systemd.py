@@ -1246,7 +1246,7 @@ build() {
     local n=$1 jobs=${2:-8}
     systemd-run --user --wait --pipe --quiet --collect --unit="e2e-scc-launch-$n" \
         -E PATH="$w/bin:$PATH" -E SCCACHE_E2E_STATE="$st" -E CST_SCCACHE_CONTAINERENV="$w/containerenv" \
-        -E CARGO_INCREMENTAL=0 -E CARGO_TARGET_DIR="$w/t$n" -E CARGO_BUILD_BUILD_DIR="$w/b$n" \
+        -E CST_SCCACHE_WORKSPACE=1 -E CARGO_INCREMENTAL=0 -E CARGO_TARGET_DIR="$w/t$n" -E CARGO_BUILD_BUILD_DIR="$w/b$n" \
         -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus --working-directory="$w/crate" \
         systemd-run --user --scope --quiet --collect --unit="e2e-scc-cap-$n.scope" -p MemoryMax=1G \
         cargo build --offline -j"$jobs" </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
@@ -2970,52 +2970,57 @@ echo E2E-OK
             all="app gitdep pathdep vendep "
             deps="gitdep vendep "
 
-            # Default (RUST_SCCACHE_WORKSPACE=yes): every crate goes through sccache.
+            # Default (RUST_SCCACHE_WORKSPACE=no): local crates skip sccache; only dependencies go through.
             "$cst" toolchains config apply --sccache >/dev/null
-            grep -q '^workspace=yes # cst: RUST_SCCACHE_WORKSPACE' "$wrapper"
-            grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
-            expect default "$all" cargo build
-            # sccache always runs with TMPDIR=/tmp, whatever the caller's: a server
-            # it starts keeps that TMPDIR, and a caller's private one may be deleted.
-            mkdir -p "$w/caller-tmp"
-            expect tmpdir "$all" TMPDIR="$w/caller-tmp" cargo build
-            got=$(LC_ALL=C sort -u "$w/log-tmpdir.tmpdir" | tr '\n' ' ')
-            [ "$got" = "/tmp " ] || { echo "e2e: sccache ran with TMPDIR '$got', expected '/tmp '" >&2; exit 1; }
-            # For one build: only the git and vendored dependencies.
-            expect env0 "$deps" CST_SCCACHE_WORKSPACE=0 cargo build
-
-            # The setting: plan shows the wrapper outdated and changes nothing.
-            printf 'RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=no\n' >"$conf"
-            cp "$wrapper" "$w/wrapper.before"
-            plan=$("$cst" toolchains config plan)
-            grep -q 'sccache wrapper (outdated; cache size 25G; local crates straight to rustc)' <<<"$plan"
-            cmp -s "$wrapper" "$w/wrapper.before"
-            "$cst" toolchains config apply >/dev/null
             grep -q '^workspace=no # cst: RUST_SCCACHE_WORKSPACE' "$wrapper"
-            st=$("$cst" toolchains status)
-            grep -q 'sccache wrapper up to date (cache size 25G; local crates straight to rustc)' <<<"$st"
-            # A second apply changes nothing.
-            cp "$wrapper" "$w/wrapper.applied"
-            again=$("$cst" toolchains config apply)
-            grep -q "kept:      $wrapper (sccache wrapper)" <<<"$again"
-            cmp -s "$wrapper" "$w/wrapper.applied"
-
-            expect setting-no "$deps" cargo build
+            grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
+            expect default "$deps" cargo build
             expect release "$deps" env -u CARGO_INCREMENTAL cargo build --release
             # -vv: cargo passes --cap-lints warn instead of allow; dependencies still go through.
             expect vv "$deps" cargo build -vv
             grep -q -- '--cap-lints warn' "$w/cargo-vv.out"
             if grep -q -- '--cap-lints allow' "$w/cargo-vv.out"; then exit 1; fi
-            # The one-build override wins over the written no.
+            # sccache always runs with TMPDIR=/tmp, whatever the caller's.
+            mkdir -p "$w/caller-tmp"
+            expect tmpdir "$deps" TMPDIR="$w/caller-tmp" cargo build
+            got=$(LC_ALL=C sort -u "$w/log-tmpdir.tmpdir" | tr '\n' ' ')
+            [ "$got" = "/tmp " ] || { echo "e2e: sccache ran with TMPDIR '$got', expected '/tmp '" >&2; exit 1; }
+            # For one build: opt local crates back in.
             expect env1 "$all" CST_SCCACHE_WORKSPACE=1 cargo build
 
-            # Upgrade: the previous version's wrapper had no workspace line.
+            # Fallback lookup finds ~/.cargo/bin/sccache even when sccache is off PATH.
+            mkdir -p /home/tester/.cargo/bin
+            cp "$w/bin/sccache" /home/tester/.cargo/bin/sccache
+            expect cargobin "$deps" PATH=/usr/bin:/bin cargo build
+            rm -f /home/tester/.cargo/bin/sccache
+
+            # Explicit RUST_SCCACHE_WORKSPACE=yes opts local crates in via config.
+            printf 'RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=yes\n' >"$conf"
+            cp "$wrapper" "$w/wrapper.before"
+            plan=$("$cst" toolchains config plan)
+            grep -q 'sccache wrapper (outdated; cache size 25G)' <<<"$plan"
+            cmp -s "$wrapper" "$w/wrapper.before"
+            "$cst" toolchains config apply >/dev/null
+            grep -q '^workspace=yes # cst: RUST_SCCACHE_WORKSPACE' "$wrapper"
+            st=$("$cst" toolchains status)
+            grep -q 'sccache wrapper up to date (cache size 25G)' <<<"$st"
+            # A second apply changes nothing.
+            cp "$wrapper" "$w/wrapper.applied"
+            again=$("$cst" toolchains config apply)
+            grep -q "kept:      $wrapper (sccache wrapper)" <<<"$again"
+            cmp -s "$wrapper" "$w/wrapper.applied"
+            expect setting-yes "$all" cargo build
+            # The one-build override wins over the written yes.
+            expect env0 "$deps" CST_SCCACHE_WORKSPACE=0 cargo build
+
+            # Upgrade back to default no after removing local override and simulating old wrapper without line.
+            printf 'RUST_SCCACHE=yes\n' >"$conf"
             sed -i '/^workspace=.*# cst: RUST_SCCACHE_WORKSPACE/d' "$wrapper"
             if grep -q '^workspace=' "$wrapper"; then exit 1; fi
             plan=$("$cst" toolchains config plan)
             grep -q 'sccache wrapper (outdated; cache size 25G; local crates straight to rustc)' <<<"$plan"
             "$cst" toolchains config apply >/dev/null
-            cmp -s "$wrapper" "$w/wrapper.applied"
+            grep -q '^workspace=no # cst: RUST_SCCACHE_WORKSPACE' "$wrapper"
 
             # Undo: --no-sccache removes CST's rustc-wrapper line; cargo runs rustc directly.
             rm -f "$conf"
@@ -15709,3 +15714,129 @@ STUB
             """,
         ).stdout
         self.assertIn("E2E-282-OK", out)
+
+    @e2e_tags(E2ETag.TOOLCHAINS, E2ETag.DOCTOR)
+    def test_283_toolchains_rust_wear_config_and_doctor(self) -> None:
+        """Full cycle for Phase 2 toolchains wear optimizations in the real systemd container:
+        1) plan changes nothing; 2) upgrading existing [profile.dev] inserts split-debuginfo = "unpacked";
+        3) RUST_INCREMENTAL=off apply + idempotent 2nd apply + undo back to auto; 4) fail-open sccache
+        auto-install (cargo-binstall -> cargo install --locked fallback -> missing cargo -> cst doctor
+        WARN/ok); 5) read-only cargo-hakari advisory in `cst toolchains status`."""
+        self._undo_sccache_after()
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            rm -rf /home/tester/work/e2e-283 /home/tester/Workspace/e2e-big \
+                /home/tester/.config/cst/toolchains.conf /home/tester/.cargo/bin/sccache
+            printf '[build]\\nbuild-dir = "/home/tester/.cache/cargo-build/{workspace-path-hash}"\\n' \
+                >/home/tester/.cargo/config.toml
+            """,
+            check=False,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+            w=/home/tester/work/e2e-283
+            conf=/home/tester/.config/cst/toolchains.conf
+            cfg=/home/tester/.cargo/config.toml
+            rm -rf "$w" "$conf" /home/tester/.cargo/bin/sccache /home/tester/Workspace/e2e-big
+            mkdir -p "$w/bin" /home/tester/.config/cst /home/tester/.cargo/bin /home/tester/Workspace/e2e-big
+
+            # 1. Pre-existing CST lean config without split-debuginfo -> plan shows missing key, changes nothing.
+            cat >"$cfg" <<'EOF'
+[build]
+build-dir = "/home/tester/.cache/cargo-build/{workspace-path-hash}"
+
+# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+EOF
+            printf 'RUST_LEAN_DEBUGINFO=yes\nRUST_INCREMENTAL=off\n' >"$conf"
+            cp "$cfg" "$w/cfg.before"
+            plan=$("$cst" toolchains config plan)
+            grep -q 'split-debuginfo = "unpacked"' <<<"$plan"
+            grep -q '\[build\] incremental = false' <<<"$plan"
+            cmp -s "$cfg" "$w/cfg.before"
+
+            # 2. Apply updates [profile.dev] safely, writes incremental = false, and 2nd apply is idempotent.
+            "$cst" toolchains config apply >/dev/null
+            [ "$(grep -c '^\[profile\.dev\]$' "$cfg")" -eq 1 ]
+            grep -q '^split-debuginfo = "unpacked"$' "$cfg"
+            grep -q '^incremental = false$' "$cfg"
+            cp "$cfg" "$w/cfg.applied"
+            again=$("$cst" toolchains config apply)
+            grep -q 'lean debug info already set' <<<"$again"
+            grep -q 'incremental = false already set' <<<"$again"
+            cmp -s "$cfg" "$w/cfg.applied"
+
+            # Undo RUST_INCREMENTAL back to auto cleanly removes CST's line.
+            printf 'RUST_LEAN_DEBUGINFO=yes\nRUST_INCREMENTAL=auto\n' >"$conf"
+            "$cst" toolchains config apply >/dev/null
+            if grep -q 'incremental =' "$cfg"; then exit 1; fi
+
+            # 3. Fail-open sccache installation + cst doctor warning/ok check.
+            rm -f /home/tester/.cargo/bin/sccache
+            cat >"$w/bin/cargo-binstall" <<'EOF'
+#!/bin/sh
+mkdir -p /home/tester/.cargo/bin
+printf '#!/bin/sh\nexit 0\n' >/home/tester/.cargo/bin/sccache
+chmod 755 /home/tester/.cargo/bin/sccache
+EOF
+            chmod 755 "$w/bin/cargo-binstall"
+            inst1=$(PATH="$w/bin:/usr/bin:/bin" "$cst" toolchains config apply --sccache)
+            grep -q 'installed: sccache' <<<"$inst1"
+            test -x /home/tester/.cargo/bin/sccache
+            doc_ok=$(CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true)
+            grep -qF 'ok     sccache binary: /home/tester/.cargo/bin/sccache' <<<"$doc_ok"
+
+            # Remove binary and make cargo-binstall fail; fake cargo in clean PATH builds into /tmp target dir.
+            rm -f /home/tester/.cargo/bin/sccache
+            printf '#!/bin/sh\nexit 1\n' >"$w/bin/cargo-binstall"
+            cat >"$w/bin/cargo" <<'EOF'
+#!/bin/sh
+echo "target=$CARGO_TARGET_DIR" >"/home/tester/work/e2e-283/cargo.env"
+mkdir -p /home/tester/.cargo/bin
+printf '#!/bin/sh\nexit 0\n' >/home/tester/.cargo/bin/sccache
+chmod 755 /home/tester/.cargo/bin/sccache
+EOF
+            chmod 755 "$w/bin/cargo"
+            inst2=$(PATH="$w/bin:/usr/bin:/bin" "$cst" toolchains config apply --sccache)
+            grep -q 'via cargo install --locked' <<<"$inst2"
+            grep -q '^target=/tmp/cst-sccache-build-' "$w/cargo.env"
+
+            # Offline and missing-cargo fail-open (rc 0), and cst doctor warns while sccache is absent.
+            rm -f "$w/bin/cargo-binstall" "$w/bin/cargo" /home/tester/.cargo/bin/sccache
+            offline=$(CARGO_NET_OFFLINE=true PATH="$w/bin:/usr/bin:/bin" "$cst" toolchains config apply --sccache 2>&1)
+            grep -q 'NOTE: sccache: could not install sccache (CARGO_NET_OFFLINE is set)' <<<"$offline"
+            mkdir -p "$w/nocargo"
+            for tool in sh bash env python3 dirname readlink id; do
+                ln -sf "$(command -v "$tool")" "$w/nocargo/$tool"
+            done
+            fail_open=$(PATH="$w/nocargo" "$cst" toolchains config apply --sccache 2>&1)
+            grep -q 'NOTE: sccache: could not install sccache (cargo not found on PATH or ~/.cargo/bin)' <<<"$fail_open"
+            doc_warn=$(CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true)
+            grep -qF 'WARN   sccache binary: missing' <<<"$doc_warn"
+
+            # 4. Read-only cargo-hakari advisory on an 8-member workspace under ~/Workspace.
+            git -C /home/tester/Workspace/e2e-big init -q
+            printf '[workspace]\nmembers = ["crates/*"]\n' >/home/tester/Workspace/e2e-big/Cargo.toml
+            for i in $(seq 1 8); do
+                mkdir -p "/home/tester/Workspace/e2e-big/crates/c$i/src"
+                printf '[package]\nname = "c%s"\nversion = "0.1.0"\n' "$i" \
+                    >"/home/tester/Workspace/e2e-big/crates/c$i/Cargo.toml"
+                : >"/home/tester/Workspace/e2e-big/crates/c$i/src/lib.rs"
+            done
+            st=$("$cst" toolchains status)
+            grep -qF '~/Workspace/e2e-big (8 crates; no .config/hakari.toml)' <<<"$st"
+            test ! -e /home/tester/Workspace/e2e-big/.config/hakari.toml
+            echo E2E-283-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-283-OK", out)

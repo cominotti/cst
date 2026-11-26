@@ -31,6 +31,7 @@ from toolchains.adapters.program import (
     real_user_is_root,
 )
 from toolchains.adapters.rustup import InstalledTools
+from toolchains.adapters.sccache import SccacheInstaller
 from toolchains.adapters.units import UserUnits, user_systemctl
 from toolchains.adapters.uv import UvTool
 from toolchains.application.auto import AutoTimer
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
         BuildTreePort,
         HomeFilesPort,
         RunOutputPort,
+        SccacheInstallerPort,
         UserUnitsPort,
         UvPort,
     )
@@ -74,6 +76,7 @@ class Session:
     lock: ToolchainsLock
     files: HomeFilesPort
     machine: TargetPorts
+    sccache_installer: SccacheInstallerPort
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,6 +88,7 @@ class Parts:
     procs: Callable[[], list[CargoProc]] | None = None
     tree: BuildTreePort | None = None
     uv: UvPort | None = None
+    sccache_installer: SccacheInstallerPort | None = None
     journal: bool | None = None
 
 
@@ -138,6 +142,7 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
     units = UserUnits(out, lambda: user_systemctl(systemctl_program())) if p.units is None else p.units(out)
     lock = ToolchainsLock(home, out)
+    sccache_installer = p.sccache_installer if p.sccache_installer is not None else SccacheInstaller(home)
     return Session(
         home,
         now,
@@ -149,6 +154,7 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
         lock,
         HomeFiles(home, entry_file, unit_path=units.unit_path),
         machine,
+        sccache_installer,
     )
 
 
@@ -184,7 +190,7 @@ def auto_timer(s: Session) -> AutoTimer:
 
 def tool_config(s: Session) -> ToolConfig:
     """config plan and apply over the session's adapters."""
-    return ToolConfig(s.home, s.prog, s.files, s.out, lambda: settings(s))
+    return ToolConfig(s.home, s.prog, s.files, s.out, lambda: settings(s), s.sccache_installer)
 
 
 def toolchains_status(s: Session) -> ToolchainsStatus:

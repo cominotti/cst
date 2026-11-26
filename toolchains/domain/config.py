@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, TypedDict, override
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-from cst_core.domain.install import manifest_by_src
+from cst_core.domain.contracts import CARGO_CONFIG_REL, SCCACHE_WRAPPER_REL
 from cst_core.domain.shapes import json_object, object_of, parse_json, parse_toml
 from cst_core.domain.text import cgroup_v2_path
 from toolchains.domain.build import HASH_VAR, ROOT_REL
@@ -74,7 +74,7 @@ class ConfigTool(StrEnum):
 
 # Exactly what `cst btrfs snapshots setup` always wrote (same lines, same
 # comments, same rules): a setting already there is never changed.
-CARGO_CFG_REL = ".cargo/config.toml"
+CARGO_CFG_REL = CARGO_CONFIG_REL
 UV_CFG_REL = ".config/uv/uv.toml"
 WS = r"[^\S\n]"  # a blank that is not a line break (grep's [[:space:]] within a line)
 CARGO_HAS_BUILD_DIR = re.compile(rf"^{WS}*build-dir{WS}*=|^{WS}*build\.build-dir", re.MULTILINE)
@@ -103,17 +103,14 @@ UV_TEXT = (
 # each workspace afterwards compiles everything again.
 LEAN_HEAD = (
     "\n# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes: smaller dev builds.\n"
-    "# Your own crates keep line tables (backtraces show file:line); dependencies get no\n"
-    "# debug info. These lines take precedence over [profile.dev] in each project's Cargo.toml.\n"
+    "# Your own crates keep line tables (backtraces show file:line) with unpacked debuginfo;\n"
+    "# dependencies get no debug info. These lines take precedence over [profile.dev] in each project's Cargo.toml.\n"
 )
-LEAN_KEYS = (
-    ("profile.dev", ("profile", "dev"), "line-tables-only", '[profile.dev]\ndebug = "line-tables-only"\n'),
-    (
-        'profile.dev.package."*"',
-        ("profile", "dev", "package", "*"),
-        False,
-        '[profile.dev.package."*"]\ndebug = false\n',
-    ),
+LEAN_SHORT_HEAD = "# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes"
+LEAN_KEYS: tuple[tuple[str, tuple[str, ...], str, object, str], ...] = (
+    ("profile.dev", ("profile", "dev"), "debug", "line-tables-only", 'debug = "line-tables-only"'),
+    ("profile.dev", ("profile", "dev"), "split-debuginfo", "unpacked", 'split-debuginfo = "unpacked"'),
+    ('profile.dev.package."*"', ("profile", "dev", "package", "*"), "debug", False, "debug = false"),
 )
 LEAN_REBUILD = (
     "turning it on makes the next dev build of every workspace compile everything once "
@@ -121,12 +118,19 @@ LEAN_REBUILD = (
 )
 
 
+class SccacheInstallMethod(StrEnum):
+    """How CST tries to install a missing sccache binary (in preference order)."""
+
+    BINSTALL = "cargo-binstall"
+    CARGO = "cargo"
+
+
 class LeanState(TypedDict):
     path: str
     add: list[tuple[str, str]]
     have: list[str]
     conflicts: list[str]
-    append: str
+    rewrite: str
     error: str
 
 
@@ -159,11 +163,15 @@ def same_debug(value: object, want: object) -> bool:
     return value == want
 
 
+def same_lean_value(key: str, value: object, want: object) -> bool:
+    """Compare one TOML setting value for lean debug info (debug accepts 0/'none' for False)."""
+    return same_debug(value, want) if key == "debug" else value == want
+
+
 def lean_state(path: str, text: str | None) -> LeanState:
-    """{path, add: [(label, block)], have: [label], conflicts: [text],
-    append: text or '' (when appending is safe), error: ''} of cargo's config PATH
-    with TEXT (None: it cannot be read)."""
-    st: LeanState = {"path": path, "add": [], "have": [], "conflicts": [], "append": "", "error": ""}
+    """{path, add: [(label, display_line)], have: [display_line], conflicts: [text],
+    rewrite: new file text or '' (when rewriting safely is not possible), error: ''}."""
+    st: LeanState = {"path": path, "add": [], "have": [], "conflicts": [], "rewrite": "", "error": ""}
     if text is None:
         st["error"] = CANNOT_READ
         return st
@@ -172,39 +180,66 @@ def lean_state(path: str, text: str | None) -> LeanState:
     except tomllib.TOMLDecodeError as e:
         st["error"] = f"is not valid TOML ({e})"
         return st
-    for label_, tpath, want, block in LEAN_KEYS:
+    missing: list[tuple[str, tuple[str, ...], str, object, str]] = []
+    for label_, tpath, key, want, keyline in LEAN_KEYS:
         table = dig(data, tpath)
-        if isinstance(table, dict) and "debug" in table:
-            if same_debug(table["debug"], want):
-                st["have"].append(label_)
+        item = f"[{label_}] {keyline}"
+        if isinstance(table, dict) and key in table:
+            if same_lean_value(key, table[key], want):
+                st["have"].append(item)
             else:
-                st["conflicts"].append(f"[{label_}] debug = {json.dumps(table['debug'])} is yours: left as it is")
+                st["conflicts"].append(f"[{label_}] {key} = {json.dumps(table[key])} is yours: left as it is")
         else:
-            st["add"].append((label_, block))
-    if st["add"]:
-        st["append"] = _lean_append(text, data, st["add"])
+            st["add"].append((label_, item))
+            missing.append((label_, tpath, key, want, keyline))
+    if missing:
+        st["rewrite"] = _lean_rewrite(text, data, missing)
     return st
 
 
-def _lean_append(text: str, data: object, add: Sequence[tuple[str, str]]) -> str:
-    """The text to append to TEXT (DATA: it parsed) for the blocks of ADD, or ''
-    when appending them is not safe."""
-    extra = LEAN_HEAD + "\n".join(b for _, b in add)
-    new = text + ("" if not text or text.endswith("\n") else "\n") + extra
-    # Appended tables must not clash with the file's (TOML forbids a
-    # table twice): parse the result and compare.
+def _append_table_blocks(text: str, head: str, blocks: Sequence[str]) -> str:
+    """TEXT with new TOML [table] BLOCKS appended cleanly after HEAD."""
+    sep = "" if not text or text.endswith("\n") else "\n"
+    return text + sep + head + "\n".join(blocks)
+
+
+def _header_has_cst_comment(text: str, pos: int) -> bool:
+    """True when one of the comment lines right above POS already carries LEAN_SHORT_HEAD."""
+    above = text[:pos].splitlines()[-4:]
+    return any(ln.startswith(LEAN_SHORT_HEAD) for ln in above)
+
+
+def _lean_rewrite(text: str, data: object, missing: Sequence[tuple[str, tuple[str, ...], str, object, str]]) -> str:
+    """Whole new TEXT with all MISSING lean settings applied, or '' if not safe."""
+    expect = plain(object_of(parse_json(json.dumps(data))))
+    by_table: dict[str, list[tuple[str, object, str]]] = {}
     try:
-        nd = parse_toml(new)
-    except tomllib.TOMLDecodeError:
-        nd = None
-    expect = parse_json(json.dumps(data))
-    for label_, tpath, want, _ in LEAN_KEYS:
-        if any(label_ == a for a, _ in add):
-            d = expect
+        for label_, tpath, key, want, keyline in missing:
+            d: object = expect
             for k in tpath:
                 d = _table(d, k)
-            _set_item(d, "debug", want)
-    return extra if nd is not None and parse_json(json.dumps(nd)) == expect else ""
+            _set_item(d, key, want)
+            by_table.setdefault(label_, []).append((key, want, keyline))
+    except AttributeError, TypeError:
+        return ""
+    cands = [text]
+    append_blocks: list[str] = []
+    for label_, items in by_table.items():
+        header_re = PROFILE_DEV_HEADER if label_ == "profile.dev" else PROFILE_DEV_PKG_HEADER
+        matches = list(header_re.finditer(text))
+        if len(matches) > 1:
+            return ""
+        lines = "\n".join(kl for _, _, kl in items)
+        if len(matches) == 1:
+            snippet = lines if _header_has_cst_comment(text, matches[0].start()) else f"{LEAN_SHORT_HEAD}\n{lines}"
+            cands = [n for c in cands for h in list(header_re.finditer(c))[:1] for n in _after_header(c, h, snippet)]
+            if not cands:
+                return ""
+        else:
+            append_blocks.append(f"[{label_}]\n{lines}\n")
+    if append_blocks:
+        cands = [_append_table_blocks(c, LEAN_HEAD, append_blocks) for c in cands]
+    return next((c for c in cands if parses_as(c, expect)), "")
 
 
 # The opt-in sccache item. Off unless RUST_SCCACHE=yes (or config apply
@@ -214,7 +249,7 @@ def _lean_append(text: str, data: object, add: Sequence[tuple[str, str]]) -> str
 # --no-sccache removes CST's line again: a wrapper left behind is riskier
 # than a debug setting. RUST_SCCACHE=no alone never removes it.
 WRAPPER_NAME = "rustc-wrapper"
-WRAPPER_REL = manifest_by_src()["toolchains/rustc-wrapper"].dest.removeprefix("~/")
+WRAPPER_REL = SCCACHE_WRAPPER_REL
 SCCACHE_DIR_REL = ".cache/sccache"
 
 
@@ -226,6 +261,9 @@ SCCACHE_DEFAULT_SIZE = "25G"
 SCCACHE_HEAD = (
     "# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes: rustc goes through sccache (~/.cache/sccache)."
 )
+INCREMENTAL_HEAD = (
+    "# Added by toolchains-setup.sh (CST) for RUST_INCREMENTAL=off: disable incremental compilation to cut disk writes."
+)
 SCCACHE_SIZE_LINE = re.compile(r"(?m)^cache_size=\S*(?= # cst: RUST_SCCACHE_CACHE_SIZE)")
 SCCACHE_WORKSPACE_LINE = re.compile(r"(?m)^workspace=\S*(?= # cst: RUST_SCCACHE_WORKSPACE)")
 SCCACHE_REBUILD = (
@@ -233,6 +271,11 @@ SCCACHE_REBUILD = (
     "(a new worktree, cargo update, a new toolchain)"
 )
 BUILD_HEADER = re.compile(rf"^{WS}*\[{WS}*build{WS}*\]{WS}*(?:#.*)?$", re.MULTILINE)
+PROFILE_DEV_HEADER = re.compile(rf"^{WS}*\[{WS}*profile\.dev{WS}*\]{WS}*(?:#.*)?$", re.MULTILINE)
+PROFILE_DEV_PKG_HEADER = re.compile(
+    rf"^{WS}*\[{WS}*profile\.dev\.package\.{WS}*(?:\"\*\"|'\*'){WS}*\]{WS}*(?:#.*)?$",
+    re.MULTILINE,
+)
 KEY_LINE = re.compile(rf"^{WS}*[A-Za-z0-9_.\"'-]+{WS}*=", re.MULTILINE)
 ANY_HEADER = re.compile(rf"^{WS}*\[", re.MULTILINE)
 SCCACHE_STATS = re.compile(
@@ -314,7 +357,7 @@ class WrapperValues:
     """The settings `config apply` writes into the installed wrapper."""
 
     size: str = SCCACHE_DEFAULT_SIZE
-    workspace: bool = True  # local crates through sccache too
+    workspace: bool = False  # local crates straight to rustc by default
 
     @override
     def __str__(self) -> str:
@@ -334,57 +377,115 @@ class SccacheState(TypedDict):
     remove: str
 
 
+class IncrementalState(TypedDict):
+    path: str
+    error: str
+    value: object
+    ours: bool
+    add: str
+    remove: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _BuildKeySpec:
+    """One boolean/string setting managed inside cargo's [build] table."""
+
+    key: str
+    val: str | bool
+    head: str
+    toml_literal: str
+
+    @property
+    def keyline(self) -> str:
+        return f"{self.key} = {self.toml_literal}"
+
+    def line_pattern(self) -> re.Pattern[str]:
+        return re.compile(rf"{WS}*{re.escape(self.key)}{WS}*={WS}*{re.escape(self.toml_literal)}{WS}*(?:#.*)?\n?\Z")
+
+
+def _has_preceding_head(text: str, line_pat: re.Pattern[str], head: str) -> bool:
+    """True when LINE_PAT matches one line in TEXT immediately preceded by HEAD
+    (directly or after CST's appended [build] header)."""
+    lines = text.splitlines(keepends=True)
+    idx = [i for i, ln in enumerate(lines) if line_pat.match(ln)]
+    if len(idx) != 1 or idx[0] == 0:
+        return False
+    i = idx[0]
+    if lines[i - 1].startswith(head[:48]):
+        return True
+    return i > 1 and bool(BUILD_HEADER.match(lines[i - 1].rstrip("\r\n"))) and lines[i - 2].startswith(head[:48])
+
+
 def sccache_state(path: str, text: str | None, want: str) -> SccacheState:
     """{path, error, value (build.rustc-wrapper now, or None), ours, add,
     remove}: add / remove are the whole new file text, '' when CST cannot
-    make that change safely (each candidate is parsed again and must equal
-    the file with only that one key added or removed). PATH: cargo's config, TEXT its
-    text (None: it cannot be read), WANT the wrapper's path."""
-    st: SccacheState = {"path": path, "error": "", "value": None, "ours": False, "add": "", "remove": ""}
+    make that change safely."""
+    spec = _BuildKeySpec("rustc-wrapper", want, SCCACHE_HEAD, json.dumps(want))
+    st = _build_key_state(path, text, spec)
+    return {
+        "path": st["path"],
+        "error": st["error"],
+        "value": st["value"],
+        "ours": st["ours"],
+        "add": st["add"],
+        "remove": st["remove"],
+    }
+
+
+def incremental_state(path: str, text: str | None) -> IncrementalState:
+    """{path, error, value (build.incremental now, or None), ours, add,
+    remove} for RUST_INCREMENTAL=off/auto."""
+    spec = _BuildKeySpec("incremental", val=False, head=INCREMENTAL_HEAD, toml_literal="false")
+    return _build_key_state(path, text, spec, require_head_for_ours=True)
+
+
+def _build_key_state(
+    path: str, text: str | None, spec: _BuildKeySpec, *, require_head_for_ours: bool = False
+) -> IncrementalState:
+    st: IncrementalState = {"path": path, "error": "", "value": None, "ours": False, "add": "", "remove": ""}
     if text is None:
         st["error"] = CANNOT_READ
         return st
     try:
         parsed = parse_toml(text)
-        data = plain(parsed if json_object(parsed) else {})  # tomllib gives a table
+        data = plain(parsed if json_object(parsed) else {})
     except tomllib.TOMLDecodeError as e:
         st["error"] = f"is not valid TOML ({e})"
         return st
     build = data.get("build")
     if build is not None and not isinstance(build, dict):
-        return st  # build = 1: no add, no remove
-    value = (build or {}).get("rustc-wrapper")
-    st["value"], st["ours"] = value, value == want
+        return st
+    value = (build or {}).get(spec.key)
+    st["value"] = value
+    line_pat = spec.line_pattern()
+    is_ours = value == spec.val and (not require_head_for_ours or _has_preceding_head(text, line_pat, spec.head))
+    st["ours"] = is_ours
     if value is None:
-        st["add"] = _wrapper_added(text, data, want)
-    elif st["ours"]:
-        st["remove"] = _wrapper_removed(text, data, want)
+        st["add"] = _build_key_added(text, data, spec)
+    elif is_ours:
+        st["remove"] = _build_key_removed(text, data, spec, line_pat)
     return st
 
 
-def _wrapper_added(text: str, data: object, want: str) -> str:
-    """TEXT (DATA: it parsed, with no rustc-wrapper) with build.rustc-wrapper =
-    WANT added, or '' when no place for the key gives the file with only that
-    key added."""
-    keyline = f"rustc-wrapper = {json.dumps(want)}"
+def _build_key_added(text: str, data: object, spec: _BuildKeySpec) -> str:
+    """TEXT (DATA: parsed, with key absent) with [build] KEY = VAL added safely, or ''."""
     expect = plain(object_of(data))
     table = expect.setdefault("build", {})
-    if isinstance(table, dict):  # always: build is a table or absent here
-        table["rustc-wrapper"] = want
+    if isinstance(table, dict):
+        table[spec.key] = spec.val
     headers = list(BUILD_HEADER.finditer(text))
+    snippet = f"{spec.head}\n{spec.keyline}"
     cands: list[str] = []
     if len(headers) == 1:
-        cands = _after_build_header(text, headers[0], keyline)
+        cands = _after_header(text, headers[0], snippet)
     elif not headers:
         sep = "" if not text or text.endswith("\n") else "\n"
-        cands.append(text + sep + ("\n" if text else "") + SCCACHE_HEAD + "\n[build]\n" + keyline + "\n")
+        cands.append(text + sep + ("\n" if text else "") + f"{spec.head}\n[build]\n{spec.keyline}\n")
     return next((c for c in cands if parses_as(c, expect)), "")
 
 
-def _after_build_header(text: str, h: re.Match[str], keyline: str) -> list[str]:
-    """TEXT with KEYLINE (and CST's comment) put into the [build] table whose
-    header is H: after the table's last key (the build-dir line CST writes),
-    else right after the header."""
+def _after_header(text: str, h: re.Match[str], snippet: str) -> list[str]:
+    """TEXT with SNIPPET inserted into the TOML section whose header is H."""
     nxt = ANY_HEADER.search(text, h.end())
     section_end = nxt.start() if nxt else len(text)
     keys = list(KEY_LINE.finditer(text, h.end(), section_end))
@@ -393,15 +494,12 @@ def _after_build_header(text: str, h: re.Match[str], keyline: str) -> list[str]:
     for spot in spots:
         pos = len(text) if spot < 0 else spot
         rest = text[pos:]
-        cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest or "\n"))
+        cands.append(text[:pos] + "\n" + snippet + (rest or "\n"))
     return cands
 
 
-def _csts_build_block(lines: Sequence[str], i: int) -> set[int]:
-    """The other lines of CST's own appended block around the key at LINES[i]
-    (a [build] header whose own section holds only this key; [build.x]
-    subtables may follow): its header, its comment and the blank line before
-    them; none when the key is not in such a block."""
+def _csts_build_block(lines: Sequence[str], i: int, head: str) -> set[int]:
+    """The other lines of CST's own appended [build] block around LINES[i], or empty."""
     after: list[str] = []
     for ln in lines[i + 1 :]:
         if ANY_HEADER.match(ln):
@@ -410,7 +508,7 @@ def _csts_build_block(lines: Sequence[str], i: int) -> set[int]:
     if not (
         i > 1
         and BUILD_HEADER.match(lines[i - 1].rstrip("\r\n"))
-        and lines[i - 2].startswith(SCCACHE_HEAD[:48])
+        and lines[i - 2].startswith(head[:48])
         and not any(KEY_LINE.match(ln) for ln in after)
     ):
         return set()
@@ -420,24 +518,21 @@ def _csts_build_block(lines: Sequence[str], i: int) -> set[int]:
     return drop
 
 
-def _wrapper_removed(text: str, data: object, want: str) -> str:
-    """TEXT (DATA: it parsed) without CST's rustc-wrapper = WANT line (and its
-    comment, and the [build] block CST appended for it), or '' when that is not
-    one line or the result is not the file with only that key removed."""
+def _build_key_removed(text: str, data: object, spec: _BuildKeySpec, pat: re.Pattern[str]) -> str:
+    """TEXT without CST's key line (and its comment/empty [build] block), or ''."""
     lines = text.splitlines(keepends=True)
-    pat = re.compile(rf"{WS}*rustc-wrapper{WS}*={WS}*{re.escape(json.dumps(want))}{WS}*(?:#.*)?\n?\Z")
     idx = [i for i, ln in enumerate(lines) if pat.match(ln)]
     if len(idx) != 1:
         return ""
     i = idx[0]
     drop = {i}
-    if i > 0 and lines[i - 1].startswith(SCCACHE_HEAD[:48]):
+    if i > 0 and lines[i - 1].startswith(spec.head[:48]):
         drop.add(i - 1)
-    drop |= _csts_build_block(lines, i)
+    drop |= _csts_build_block(lines, i, spec.head)
     new = "".join(ln for n, ln in enumerate(lines) if n not in drop)
     expect = plain(object_of(data))
     table = expect["build"]
-    if isinstance(table, dict):  # always: the line CST wrote is in [build]
-        del table["rustc-wrapper"]
+    if isinstance(table, dict):
+        del table[spec.key]
     alt = {k: v for k, v in expect.items() if not (k == "build" and v == {})}
     return new if parses_as(new, expect) or parses_as(new, alt) else ""

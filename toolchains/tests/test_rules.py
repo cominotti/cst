@@ -885,6 +885,7 @@ class LeanDebugInfoTest(RulesBase):
         self.assertIn("# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes", text)
         data = tomllib.loads(text)
         self.assertEqual(data["profile"]["dev"]["debug"], "line-tables-only")
+        self.assertEqual(data["profile"]["dev"]["split-debuginfo"], "unpacked")
         self.assertIs(data["profile"]["dev"]["package"]["*"]["debug"], False)
         self.assertEqual(tc_build_tree.resolve_root(self.home, "cst toolchains"), self.root)  # build-dir still read
         _rc, out = self.run_main("config", "apply")
@@ -899,28 +900,71 @@ class LeanDebugInfoTest(RulesBase):
         rc, out = self.run_main("config", "apply", "--lean-debuginfo")
         self.assertEqual(rc, 0, out)
         self.assertIn("compiles everything once", out)
-        self.assertEqual(tomllib.loads(self.cfg())["profile"]["dev"]["debug"], "line-tables-only")
+        data = tomllib.loads(self.cfg())
+        self.assertEqual(data["profile"]["dev"]["debug"], "line-tables-only")
+        self.assertEqual(data["profile"]["dev"]["split-debuginfo"], "unpacked")
 
     def test_users_key_is_never_overwritten(self) -> None:
         with open(os.path.join(self.home, ".cargo/config.toml"), "a") as f:
-            f.write("\n[profile.dev]\ndebug = true\n")
+            f.write('\n[profile.dev]\ndebug = true\nsplit-debuginfo = "packed"\n')
         rc, out = self.run_main("config", "apply", "--lean-debuginfo")
         self.assertEqual(rc, 0, out)
         self.assertIn("[profile.dev] debug = true is yours: left as it is", out)
+        self.assertIn('[profile.dev] split-debuginfo = "packed" is yours: left as it is', out)
         data = tomllib.loads(self.cfg())
         self.assertIs(data["profile"]["dev"]["debug"], True)
+        self.assertEqual(data["profile"]["dev"]["split-debuginfo"], "packed")
         self.assertIs(data["profile"]["dev"]["package"]["*"]["debug"], False)  # the other key: added
 
-    def test_existing_table_needs_a_hand(self) -> None:
+    def test_upgrade_from_previous_cst_inserts_split_debuginfo(self) -> None:
         with open(os.path.join(self.home, ".cargo/config.toml"), "a") as f:
-            f.write('\n[profile.dev]\nopt-level = 1\n\n[profile.dev.package."*"]\nopt-level = 2\n')
+            f.write(
+                "\n# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes\n"
+                '[profile.dev]\ndebug = "line-tables-only"\n\n[profile.dev.package."*"]\ndebug = false\n'
+            )
         before = self.cfg()
         _rc, out = self.run_main("config", "plan", "--lean-debuginfo")
-        self.assertIn("BY HAND", out)
+        self.assertIn('[profile.dev] split-debuginfo = "unpacked"', out)
+        self.assertNotIn("package", out.split("split-debuginfo", 1)[1].splitlines()[0])
+        self.assertEqual(self.cfg(), before)
         rc, out = self.run_main("config", "apply", "--lean-debuginfo")
         self.assertEqual(rc, 0, out)
-        self.assertIn("add by hand", out)
-        self.assertEqual(self.cfg(), before)
+        after = self.cfg()
+        self.assertEqual(after.count("[profile.dev]"), 1)
+        data = tomllib.loads(after)
+        self.assertEqual(data["profile"]["dev"]["debug"], "line-tables-only")
+        self.assertEqual(data["profile"]["dev"]["split-debuginfo"], "unpacked")
+        self.assertTrue(data["profile"]["dev"]["package"]["*"]["debug"] is False)
+        _rc, out = self.run_main("config", "apply", "--lean-debuginfo")
+        self.assertIn("lean debug info already set", out)
+        self.assertEqual(self.cfg(), after)
+
+    def test_existing_table_inserts_missing_keys_cleanly(self) -> None:
+        with open(os.path.join(self.home, ".cargo/config.toml"), "a") as f:
+            f.write('\n[profile.dev]\nopt-level = 1\n\n[profile.dev.package."*"]\nopt-level = 2\n')
+        rc, out = self.run_main("config", "apply", "--lean-debuginfo")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("written:", out)
+        data = tomllib.loads(self.cfg())
+        self.assertEqual(data["profile"]["dev"]["opt-level"], 1)
+        self.assertEqual(data["profile"]["dev"]["debug"], "line-tables-only")
+        self.assertEqual(data["profile"]["dev"]["split-debuginfo"], "unpacked")
+        self.assertEqual(data["profile"]["dev"]["package"]["*"]["opt-level"], 2)
+        self.assertTrue(data["profile"]["dev"]["package"]["*"]["debug"] is False)
+
+    def test_dotted_profile_tables_need_a_hand(self) -> None:
+        for bad_cfg in ("profile = 1\n\n", "[profile]\ndev = { opt-level = 1 }\n\n"):
+            with self.subTest(bad_cfg=bad_cfg):
+                self.write_cargo_config(
+                    f'{bad_cfg}[build]\nbuild-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n'
+                )
+                before = self.cfg()
+                _rc, out = self.run_main("config", "plan", "--lean-debuginfo")
+                self.assertIn("BY HAND", out)
+                rc, out = self.run_main("config", "apply", "--lean-debuginfo")
+                self.assertEqual(rc, 0, out)
+                self.assertIn("add by hand", out)
+                self.assertEqual(self.cfg(), before)
 
     def test_parse_args(self) -> None:
         p = tcd_common.parse_args
@@ -997,6 +1041,7 @@ class SccacheConfigTest(RulesBase):
         self.assertFalse(os.path.lexists(self.wrapper))
 
     def test_flag_inserts_into_the_existing_build_table(self) -> None:
+        self.exe(os.path.join(self.home, ".cargo/bin/sccache"), "#!/bin/sh\nexit 0\n")
         self.write_cargo_config(
             "# mine\n[build]\n"
             f'build-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n\n'
@@ -1250,7 +1295,9 @@ class SccacheConfigTest(RulesBase):
             return f.read()
 
     def test_workspace_setting_is_written_into_the_wrapper(self) -> None:
-        self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=no\n")
+        # Default (RUST_SCCACHE_WORKSPACE=no): local crates skip sccache.
+        self.exe(os.path.join(self.home, ".cargo/bin/sccache"), "#!/bin/sh\nexit 0\n")
+        self.write_conf_raw("RUST_SCCACHE=yes\n")
         _rc, out = self.run_main("config", "plan")
         self.assertIn("sccache wrapper (missing; cache size 25G; local crates straight to rustc)", out)
         self.assertFalse(os.path.lexists(self.wrapper))  # plan changes nothing
@@ -1271,7 +1318,7 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(rc, 0, out)
         self.assertIn(f"kept:      {self.wrapper} (sccache wrapper)", out)
         self.assertEqual((self.wrapper_file(), self.cfg()), (text, cfg))
-        # Back to yes: plan shows the wrapper outdated and changes nothing; apply rewrites it.
+        # Opt back in with RUST_SCCACHE_WORKSPACE=yes: plan shows outdated; apply rewrites it.
         self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=yes\n")
         _rc, out = self.run_main("config", "plan")
         self.assertIn("sccache wrapper (outdated; cache size 25G)", out)
@@ -1297,12 +1344,12 @@ class SccacheConfigTest(RulesBase):
         self.assertFalse(os.path.lexists(self.wrapper))  # bad settings: sccache treated as off
 
     def test_upgrade_from_a_wrapper_without_the_workspace_setting(self) -> None:
-        # Settings written before the key existed: the default (yes) applies.
+        # Settings written before the key existed: the default (no) applies.
         self.write_conf_raw("RUST_SCCACHE=yes\n")
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
         new = self.wrapper_file()
-        self.assertIn("\nworkspace=yes # cst: RUST_SCCACHE_WORKSPACE", new)
+        self.assertIn("\nworkspace=no # cst: RUST_SCCACHE_WORKSPACE", new)
         # The wrapper the previous version installed had no workspace line.
         old, n = re.subn(r"(?m)^workspace=.*# cst: RUST_SCCACHE_WORKSPACE .*\n", "", new)
         self.assertEqual(n, 1)
@@ -1310,15 +1357,17 @@ class SccacheConfigTest(RulesBase):
             f.write(old)
         cfg = self.cfg()
         _rc, out = self.run_main("config", "plan")
-        self.assertIn("sccache wrapper (outdated; cache size 25G)", out)
+        self.assertIn("sccache wrapper (outdated; cache size 25G; local crates straight to rustc)", out)
         self.assertEqual(self.wrapper_file(), old)  # plan changes nothing
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
-        self.assertIn(f"written:   {self.wrapper} (sccache wrapper, cache size 25G)", out)
+        self.assertIn(
+            f"written:   {self.wrapper} (sccache wrapper, cache size 25G; local crates straight to rustc)", out
+        )
         self.assertEqual(self.wrapper_file(), new)
         self.assertEqual(self.cfg(), cfg)
         _rc, out = self.run_main("status")
-        self.assertIn("sccache wrapper up to date (cache size 25G)", out)
+        self.assertIn("sccache wrapper up to date (cache size 25G; local crates straight to rustc)", out)
 
     def test_sizes(self) -> None:
         p = tcd_common.parse_sccache_size
@@ -1340,7 +1389,7 @@ class SccacheConfigTest(RulesBase):
         _rc, out = self.run_main("config", "apply", "--sccache")
         self.assertIn("BAD SETTINGS", out)
         self.assertIn("RUST_SCCACHE_CACHE_SIZE", out)
-        self.assertIn("(sccache wrapper, cache size 25G)", out)
+        self.assertIn("(sccache wrapper, cache size 25G; local crates straight to rustc)", out)
         self.assertNotIn("40G", self.wrapper_file())
         self.assertIn("BAD SETTINGS", self.run_main("status")[1])
 
@@ -1703,9 +1752,9 @@ class RustcWrapperTest(unittest.TestCase):
         in, as `config apply` writes it."""
         with open(WRAPPER) as f:
             text, n = re.subn(
-                r"(?m)^workspace=yes(?= # cst: RUST_SCCACHE_WORKSPACE )", f"workspace={workspace}", f.read()
+                r"(?m)^workspace=(?:yes|no)(?= # cst: RUST_SCCACHE_WORKSPACE )", f"workspace={workspace}", f.read()
             )
-        self.assertEqual(n, 1, "the wrapper has no workspace=yes line for config apply")
+        self.assertEqual(n, 1, "the wrapper has no workspace line for config apply")
         self.script = os.path.join(self.tmp, "rustc-wrapper")
         with open(self.script, "w") as f:
             f.write(text)
@@ -1763,18 +1812,30 @@ class RustcWrapperTest(unittest.TestCase):
         return os.path.join(self.tools, "rustc")
 
     def test_rustc_goes_through_sccache_with_defaults(self) -> None:
-        calls = self.run_wrapper(self.rustc(), "--crate-name", "x", "src/lib.rs")
+        # Dependencies (--cap-lints) go through sccache with default workspace=no; local crates run directly.
+        calls = self.run_wrapper(self.rustc(), "--crate-name", "x", "--cap-lints", "allow", "src/lib.rs")
         self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"])
         c = calls[0]
-        self.assertEqual(c["args"], f"{self.rustc()} --crate-name x src/lib.rs")
+        self.assertEqual(c["args"], f"{self.rustc()} --crate-name x --cap-lints allow src/lib.rs")
         self.assertEqual(c["uds"], os.path.join(self.run_dir, "cst-sccache-host.sock"))
         self.assertEqual(c["dir"], os.path.join(self.home, ".cache/sccache"))
         self.assertEqual(c["size"], "25G")
         self.assertEqual(c["io"], "1")
         self.assertEqual(c["allow"], "unset")
+        # Local crate without --cap-lints runs rustc directly by default unless CST_SCCACHE_WORKSPACE=1.
+        self.assertEqual(
+            [x["who"] for x in self.run_wrapper(self.rustc(), "--crate-name", "x", "src/lib.rs")], ["rustc"]
+        )
+        self.assertEqual(
+            [
+                x["who"]
+                for x in self.run_wrapper(self.rustc(), "--crate-name", "x", "src/lib.rs", CST_SCCACHE_WORKSPACE="1")
+            ],
+            ["sccache", "rustc"],
+        )
 
     def test_bare_rustc_name_counts(self) -> None:
-        calls = self.run_wrapper("rustc", "-vV", PATH=f"{self.bin}:{self.tools}:{self.sys}")
+        calls = self.run_wrapper("rustc", "--cap-lints", "allow", "-vV", PATH=f"{self.bin}:{self.tools}:{self.sys}")
         self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"])
 
     def test_other_compilers_pass_straight_through(self) -> None:
@@ -1787,9 +1848,17 @@ class RustcWrapperTest(unittest.TestCase):
         calls = self.run_wrapper(self.rustc(), "a", CST_SCCACHE="0")
         self.assertEqual([c["who"] for c in calls], ["rustc"])
         os.unlink(self.sccache)
-        calls = self.run_wrapper(self.rustc(), "a")
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "a")
         self.assertEqual([c["who"] for c in calls], ["rustc"])
         self.assertEqual(calls[0]["uds"], "")
+
+    def test_cargo_bin_fallback_without_path_entry(self) -> None:
+        os.unlink(self.sccache)
+        cargo_bin = os.path.join(self.home, ".cargo", "bin", "sccache")
+        os.makedirs(os.path.dirname(cargo_bin), exist_ok=True)
+        self.fake(cargo_bin, f'echo "sccache_fallback|dir=$SCCACHE_DIR" >>"{self.log}"\nexec "$@"')
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "a")
+        self.assertEqual([c["who"] for c in calls], ["sccache_fallback", "rustc"])
 
     def test_incremental(self) -> None:
         # An incremental compile: sccache cannot cache it, straight to rustc.
@@ -1798,27 +1867,29 @@ class RustcWrapperTest(unittest.TestCase):
             self.assertEqual([c["who"] for c in calls], ["rustc"], args)
         # CARGO_INCREMENTAL=1: allowed, and dropped for sccache (up to 0.19 it refuses otherwise).
         for var in ("CARGO_INCREMENTAL", "CARGO_BUILD_INCREMENTAL"):
-            calls = self.run_wrapper(self.rustc(), "--crate-name", "dep", **{var: "1"})
+            calls = self.run_wrapper(self.rustc(), "--crate-name", "dep", "--cap-lints", "allow", **{var: "1"})
             self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], var)
             self.assertEqual(calls[0]["allow"], "1")
             self.assertEqual(calls[0]["inc"], "unset")
             self.assertEqual(calls[0]["binc"], "unset")
-        calls = self.run_wrapper(self.rustc(), "x", CARGO_INCREMENTAL="0")
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "x", CARGO_INCREMENTAL="0")
         self.assertEqual(calls[0]["allow"], "unset")
         self.assertEqual(calls[0]["inc"], "0")
 
     def test_server_per_environment(self) -> None:
         with open(self.containerenv, "w") as f:
             f.write('engine="podman-6.1.3"\nname="hypatia-f45"\nid="abc"\n')
-        calls = self.run_wrapper(self.rustc(), "x")
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "x")
         self.assertEqual(calls[0]["uds"], os.path.join(self.run_dir, "cst-sccache-hypatia-f45.sock"))
         with open(self.containerenv, "w") as f:
             f.write('name="we ird/../x"\n')
-        calls = self.run_wrapper(self.rustc(), "x")
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "x")
         self.assertEqual(calls[0]["uds"], os.path.join(self.run_dir, "cst-sccache-container.sock"))
         # Yours win: an address already set is kept (a port too).
         calls = self.run_wrapper(
             self.rustc(),
+            "--cap-lints",
+            "allow",
             "x",
             SCCACHE_SERVER_UDS="/x.sock",
             SCCACHE_DIR="/c",
@@ -1828,11 +1899,11 @@ class RustcWrapperTest(unittest.TestCase):
         self.assertEqual(
             (calls[0]["uds"], calls[0]["dir"], calls[0]["size"], calls[0]["io"]), ("/x.sock", "/c", "1G", "0")
         )
-        calls = self.run_wrapper(self.rustc(), "x", SCCACHE_SERVER_PORT="4300")
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "x", SCCACHE_SERVER_PORT="4300")
         self.assertEqual(calls[0]["uds"], "")
 
     def test_no_runtime_dir_falls_back_under_the_cache(self) -> None:
-        calls = self.run_wrapper(self.rustc(), "x", XDG_RUNTIME_DIR=None)
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "x", XDG_RUNTIME_DIR=None)
         run = os.path.join(self.home, ".cache/sccache/run")
         self.assertEqual(calls[0]["uds"], os.path.join(run, "cst-sccache-host.sock"))
         self.assertEqual(stat_mode(os.stat(run)), 0o700)
@@ -1848,9 +1919,11 @@ class RustcWrapperTest(unittest.TestCase):
             self.assertEqual([c["tmp"] for c in calls], ["/tmp", "/tmp"], caller)
         # The defaults that only fill in what is unset still do (TMPDIR is the one
         # exception), and a server address of your own does not change it.
-        calls = self.run_wrapper(self.rustc(), "x", TMPDIR=private, SCCACHE_DIR="/c", SCCACHE_SERVER_UDS="/x.sock")
+        calls = self.run_wrapper(
+            self.rustc(), "--cap-lints", "allow", "x", TMPDIR=private, SCCACHE_DIR="/c", SCCACHE_SERVER_UDS="/x.sock"
+        )
         self.assertEqual((calls[0]["tmp"], calls[0]["dir"], calls[0]["uds"]), ("/tmp", "/c", "/x.sock"))
-        calls = self.run_wrapper(self.rustc(), "x", TMPDIR=private, SCCACHE_SERVER_PORT="4300")
+        calls = self.run_wrapper(self.rustc(), "--cap-lints", "allow", "x", TMPDIR=private, SCCACHE_SERVER_PORT="4300")
         self.assertEqual((calls[0]["who"], calls[0]["tmp"]), ("sccache", "/tmp"))
 
     def test_direct_compiles_keep_the_callers_tmpdir(self) -> None:
@@ -2015,6 +2088,7 @@ class RustcWrapperTest(unittest.TestCase):
         )
         with open(self.containerenv, "w") as f:
             f.write('name="hypatia-f45"\n')
+        self.written("yes")
 
     def set_uptime(self, seconds: str) -> None:
         with open(self.uptime, "w") as f:
@@ -2419,10 +2493,10 @@ class ConfigStateEdgeTest(unittest.TestCase):
 
     def test_lean_state_of_an_unreadable_or_invalid_file(self) -> None:
         st = tcd_config.lean_state("/h/c.toml", None)
-        self.assertEqual((st["error"], st["add"], st["append"]), ("cannot be read", [], ""))
+        self.assertEqual((st["error"], st["add"], st["rewrite"]), ("cannot be read", [], ""))
         st = tcd_config.lean_state("/h/c.toml", "[build\n")
         self.assertTrue(st["error"].startswith("is not valid TOML ("), st["error"])
-        self.assertEqual((st["add"], st["append"]), ([], ""))
+        self.assertEqual((st["add"], st["rewrite"]), ([], ""))
 
     def test_sccache_state_of_an_unreadable_invalid_or_odd_file(self) -> None:
         empty = {"value": None, "ours": False, "add": "", "remove": ""}
@@ -2515,3 +2589,240 @@ class ManagerPathOnceTest(RulesBase):
             rc = timer.on()
         self.assertEqual(rc, 0, out.getvalue())
         self.assertEqual(manager_path.call_count, 1)
+
+
+class SccacheInstallerTest(RulesBase):
+    """Fail-open sccache installation during `config apply`, and plan/status reporting."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        fake_cargo = os.path.join(self.home, ".cargo", "bin", "cargo")
+        if os.path.lexists(fake_cargo):
+            os.unlink(fake_cargo)
+
+    @override
+    def parts(self) -> tc_wiring.Parts:
+        return dataclasses.replace(super().parts(), sccache_installer=tc_sccache.SccacheInstaller(self.home))
+
+    def cfg_text(self) -> str:
+        with open(os.path.join(self.home, ".cargo/config.toml")) as f:
+            return f.read()
+
+    def test_prefers_cargo_binstall_and_falls_back_to_cargo_install(self) -> None:
+        os.environ["PATH"] = self.bin
+        binstall = os.path.join(self.bin, "cargo-binstall")
+        cargo = os.path.join(self.bin, "cargo")
+        record = os.path.join(self.tmp, "installer.log")
+        target = os.path.join(self.home, ".cargo", "bin", "sccache")
+        self.exe(
+            binstall,
+            "#!/usr/bin/python3 -IB\nimport os, sys\n"
+            f"with open({record!r}, 'a') as f: f.write('binstall:' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            f"os.makedirs({os.path.dirname(target)!r}, exist_ok=True)\n"
+            f"with open({target!r}, 'w') as f: f.write('#!/bin/sh\\nexit 0\\n')\n"
+            f"os.chmod({target!r}, 0o755)\n",
+        )
+        self.exe(
+            cargo,
+            f"#!/usr/bin/python3 -IB\nimport sys\nwith open({record!r}, 'a') as f: f.write('cargo:' + ' '.join(sys.argv[1:]) + '\\n')\n",
+        )
+
+        _rc, plan = self.run_main("config", "plan", "--sccache")
+        self.assertIn("sccache binary missing: apply tries cargo-binstall --no-confirm sccache", plan)
+        self.assertFalse(os.path.exists(record))
+
+        with mock.patch.dict(os.environ, {"RUSTC_WRAPPER": "/bad/wrapper", "CARGO_BUILD_RUSTC_WRAPPER": "/bad/w2"}):
+            rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("installed: sccache", out)
+        self.assertIn("cargo-binstall", out)
+        with open(record) as f:
+            self.assertEqual(f.read().strip(), "binstall:--no-confirm sccache")
+        self.assertTrue(os.access(target, os.X_OK))
+
+        # Remove sccache and make cargo-binstall fail: falls back to cargo install --locked with /tmp target dir.
+        os.unlink(target)
+        os.unlink(record)
+        self.exe(
+            binstall,
+            "#!/usr/bin/python3 -IB\nimport sys\n"
+            f"with open({record!r}, 'a') as f: f.write('binstall:' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "sys.stderr.write('binstall failed\\n'); sys.exit(1)\n",
+        )
+        self.exe(
+            cargo,
+            "#!/usr/bin/python3 -IB\nimport os, sys\n"
+            f"with open({record!r}, 'a') as f:\n"
+            "    f.write('cargo:' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "    f.write(f\"target={os.environ.get('CARGO_TARGET_DIR')} "
+            "wrapper={os.environ.get('RUSTC_WRAPPER', 'unset')} "
+            "bwrap={os.environ.get('CARGO_BUILD_RUSTC_WRAPPER', 'unset')}\\n\")\n"
+            f"os.makedirs({os.path.dirname(target)!r}, exist_ok=True)\n"
+            f"with open({target!r}, 'w') as f: f.write('#!/bin/sh\\nexit 0\\n')\n"
+            f"os.chmod({target!r}, 0o755)\n",
+        )
+        with mock.patch.dict(os.environ, {"RUSTC_WRAPPER": "/bad/wrapper", "CARGO_BUILD_RUSTC_WRAPPER": "/bad/w2"}):
+            rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("via cargo install --locked", out)
+        with open(record) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(lines[0], "binstall:--no-confirm sccache")
+        self.assertEqual(lines[1], "cargo:install sccache --locked")
+        self.assertIn("target=/tmp/cst-sccache-build-", lines[2])
+        self.assertIn("wrapper=unset bwrap=unset", lines[2])
+
+    def test_fails_open_when_cargo_missing_or_offline(self) -> None:
+        os.environ["PATH"] = self.bin
+        _rc, plan = self.run_main("config", "plan", "--sccache")
+        self.assertIn("sccache binary missing and cargo not found", plan)
+
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("NOTE: sccache: could not install sccache (cargo not found on PATH or ~/.cargo/bin)", out)
+        self.assertIn("rustc-wrapper =", self.cfg_text())
+
+        # Offline refuses to install but still keeps config apply rc=0.
+        self.exe(os.path.join(self.bin, "cargo"), "#!/usr/bin/python3 -IB\nimport sys; sys.exit(99)\n")
+        with mock.patch.dict(os.environ, {"CARGO_NET_OFFLINE": "true"}):
+            rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("CARGO_NET_OFFLINE is set", out)
+
+
+class RustIncrementalTest(RulesBase):
+    """RUST_INCREMENTAL=auto|off setting and safe round-trip in ~/.cargo/config.toml."""
+
+    def cfg(self) -> str:
+        with open(os.path.join(self.home, ".cargo/config.toml")) as f:
+            return f.read()
+
+    def test_auto_default_off_apply_and_round_trip(self) -> None:
+        before = self.cfg()
+        rc, out = self.run_main("config", "plan")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("incremental builds: cargo default (RUST_INCREMENTAL=auto;", out)
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.cfg(), before)
+
+        # Invalid value stops with BAD SETTINGS.
+        self.write_conf_raw("RUST_INCREMENTAL=maybe\n")
+        _rc, st_out = self.run_main("status")
+        self.assertIn(
+            "BAD SETTINGS: ~/.config/cst/toolchains.conf: RUST_INCREMENTAL: 'maybe' is not auto or off", st_out
+        )
+
+        # Turn off globally.
+        self.write_conf_raw("RUST_INCREMENTAL=off\n")
+        _rc, plan = self.run_main("config", "plan")
+        self.assertIn("[build] incremental = false", plan)
+        self.assertEqual(self.cfg(), before)
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        applied = self.cfg()
+        self.assertIn("# Added by toolchains-setup.sh (CST) for RUST_INCREMENTAL=off", applied)
+        self.assertTrue(tomllib.loads(applied)["build"]["incremental"] is False)
+        # Idempotent 2nd apply.
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("incremental = false already set", out)
+        self.assertEqual(self.cfg(), applied)
+
+        # Back to auto: plan shows remove; apply restores exact original config.
+        self.write_conf_raw("RUST_INCREMENTAL=auto\n")
+        _rc, plan = self.run_main("config", "plan")
+        self.assertIn("remove", plan)
+        self.assertIn("CST's [build] incremental = false line", plan)
+        self.assertEqual(self.cfg(), applied)
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("removed:", out)
+        self.assertEqual(self.cfg(), before)
+
+    def test_user_incremental_setting_never_overwritten_or_removed(self) -> None:
+        with open(os.path.join(self.home, ".cargo/config.toml"), "a") as f:
+            f.write("incremental = true\n")
+        before = self.cfg()
+        self.write_conf_raw("RUST_INCREMENTAL=off\n")
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("incremental = true is yours: left as it is", out)
+        self.assertEqual(self.cfg(), before)
+
+        # Hand-written incremental = false (without CST comment) is left alone on auto.
+        self.write_cargo_config("[build]\nincremental = false\n")
+        before_false = self.cfg()
+        self.write_conf_raw("RUST_INCREMENTAL=auto\n")
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.cfg(), before_false)
+
+    def test_appended_build_table_round_trip(self) -> None:
+        original = "[net]\noffline = true\n"
+        self.write_cargo_config(original)
+        self.write_conf_raw("RUST_INCREMENTAL=off\n")
+        s_off = self.session()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(tc_wiring.tool_config(s_off).incremental_apply(tc_wiring.settings(s_off)), 0)
+        self.assertIn("# Added by toolchains-setup.sh (CST) for RUST_INCREMENTAL=off", self.cfg())
+        self.assertTrue(tomllib.loads(self.cfg())["build"]["incremental"] is False)
+
+        # Switching back to auto cleanly removes CST's whole appended [build] block.
+        self.write_conf_raw("RUST_INCREMENTAL=auto\n")
+        s_auto = self.session()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(tc_wiring.tool_config(s_auto).incremental_apply(tc_wiring.settings(s_auto)), 0)
+        self.assertEqual(self.cfg(), original)
+
+
+class HakariAdvisoryTest(RulesBase):
+    """Read-only cargo-hakari advisory in `status` for large workspaces."""
+
+    def _make_workspace(self, rel: str, members: int, *, hakari: bool = False) -> str:
+        ws_dir = self.repo(rel)
+        for i in range(members):
+            crate = os.path.join(ws_dir, "crates", f"c{i}")
+            os.makedirs(os.path.join(crate, "src"), exist_ok=True)
+            with open(os.path.join(crate, "Cargo.toml"), "w") as f:
+                f.write(f'[package]\nname = "c{i}"\nversion = "0.1.0"\n')
+            with open(os.path.join(crate, "src/lib.rs"), "w") as f:
+                f.write("")
+        manifest = os.path.join(ws_dir, "Cargo.toml")
+        with open(manifest, "w") as f:
+            f.write('[workspace]\nmembers = ["crates/*"]\n')
+        if hakari:
+            os.makedirs(os.path.join(ws_dir, ".config"), exist_ok=True)
+            with open(os.path.join(ws_dir, ".config/hakari.toml"), "w") as f:
+                f.write("")
+        return ws_dir
+
+    def test_reports_large_workspace_without_hakari_once_across_worktrees(self) -> None:
+        big = self._make_workspace("big-repo", 8)
+        self._make_workspace("already-unified", 10, hakari=True)
+        self._make_workspace("small-repo", 4)
+        # Add a linked worktree of big-repo: must be deduplicated cleanly.
+        wt = os.path.join(self.tmp, "big-wt")
+        git = shutil.which("git")
+        assert git is not None
+        r = subprocess.run([git, "-C", big, "add", "-A"], check=False, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run([git, "-C", big, "commit", "-q", "-m", "init"], check=False, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(
+            [git, "-C", big, "worktree", "add", "-q", "-b", "wt1", wt], check=False, capture_output=True, text=True
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        with open(os.path.join(big, "Cargo.toml")) as f:
+            before_manifest = f.read()
+        rc, out = self.run_main("status")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("== workspace feature unification (advisory: CST never edits your repos)", out)
+        self.assertIn("~/Workspace/big-repo (8 crates; no .config/hakari.toml)", out)
+        self.assertEqual(out.count("big-repo"), 1)
+        self.assertNotIn("already-unified", out)
+        self.assertNotIn("small-repo", out)
+        with open(os.path.join(big, "Cargo.toml")) as f:
+            self.assertEqual(f.read(), before_manifest)
