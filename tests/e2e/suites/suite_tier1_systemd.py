@@ -14692,7 +14692,8 @@ echo E2E-OK
         /etc/fstab was (the real one moved aside). The test's own trap puts each back before swap_cleanup
         runs. Each time plan exits 0 and its row of that path is "?" with apply's reason ("a folder is in
         its place: apply refuses before it writes anything", "<folder> is not a folder: ...", "cannot be
-        read, even as root: ..."), and apply then exits 1 with the matching "...: nothing was changed"
+        read, even as root: ...", or for /etc/fstab "not a regular file ...: apply refuses; put a regular file
+        there"), and apply then exits 1 with the matching "...: nothing was changed"
         line, every file, link, mode and owner under /etc and the scratch tree, and the install record,
         as before (no .pre-swap-config.bak, no sysctl run). The pair (plan's row, apply's refusal) per
         case is the point: before 02409d4d plan said "mask", "remove" and "write" for the first three.
@@ -14774,7 +14775,8 @@ put_back
 if [[ -e /etc/fstab ]]; then mv /etc/fstab "$W/fstab.real"; fi
 mkdir /etc/fstab
 made=fstab
-pair "a folder in place of /etc/fstab" "fstab: /dev/mapper/swap0 line" "cannot be read, even as root: $REFUSES" \
+pair "a folder in place of /etc/fstab" "fstab: /dev/mapper/swap0 line" \
+    "not a regular file (a FIFO, a device, a folder, or a link to one): apply refuses; put a regular file there" \
     "/etc/fstab: cannot be read: nothing was changed"
 put_back
 
