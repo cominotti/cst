@@ -24,6 +24,7 @@ from toolchains.domain.build import (
     Workspaces,
     after_total,
     decide,
+    effective_rust_policy,
     merge_users,
     unknown_text,
     users_text,
@@ -68,9 +69,19 @@ class RustBuild(BaseTarget[RustPolicy]):
     """rust:build: cargo's build folders under the root build-dir names."""
 
     SPEC = RUST_BUILD
+    user_keys: frozenset[str] = frozenset()
 
     def location(self) -> str:
-        return os.path.join(self.home, ROOT_REL)
+        try:
+            root = self.machine.tree.root()
+        except Refused:
+            root = None
+        return root if root is not None else os.path.join(self.home, ROOT_REL)
+
+    def _effective_policy(self, root: str | None) -> tuple[RustPolicy, int | None]:
+        cap = self.machine.tree.tmpfs_capacity(root) if root is not None else None
+        pol, _ = effective_rust_policy(self.required_policy(), self.user_keys, tmpfs_bytes=cap)
+        return pol, cap
 
     def check(self) -> None:
         self.machine.tree.root()
@@ -119,16 +130,24 @@ class RustBuild(BaseTarget[RustPolicy]):
         return out
 
     def plan(self) -> None:
-        home, now, pol = self.home, self.now, self.required_policy()
+        home, now = self.home, self.now
+        self.required_policy()
         root, folders, trash, others = self.gather()
         if root is None:
-            self.machine.out.say(f"  ~/{ROOT_REL} does not exist yet: nothing to do")
+            self.machine.out.say(f"  {tilde(self.location(), home)} does not exist yet: nothing to do")
             return
+        pol, tmpfs_cap = self._effective_policy(root)
         self.machine.out.say(f"  root: {tilde(root, home)}/XX/YYYYYYYYYYYYYY (cargo build-dir)")
-        self.machine.out.say(
-            f"  total: {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
-            "(sizes as du shows them: before btrfs compression; on disk usually less, twice with RAID1)"
-        )
+        if tmpfs_cap is not None:
+            self.machine.out.say(f"  tmpfs: cap {gib(tmpfs_cap)}; effective RAM policy: {pol.text()}")
+            self.machine.out.say(
+                f"  total: {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) (in RAM on tmpfs)"
+            )
+        else:
+            self.machine.out.say(
+                f"  total: {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
+                "(sizes as du shows them: before btrfs compression; on disk usually less, twice with RAID1)"
+            )
         claimed, ws = self.workspaces(root)
         for line in self.workspace_lines(ws, claimed, folders):
             self.machine.out.say(f"  {line}")
@@ -165,7 +184,8 @@ class RustBuild(BaseTarget[RustPolicy]):
             self.machine.out.say(f"  note: {unknown_text(unknown)}; apply deletes nothing while it runs")
 
     def apply(self) -> int:
-        now, pol = self.now, self.required_policy()
+        now = self.now
+        self.required_policy()
         root, folders, trash, others = self.gather()
         if root is None:
             self.tsay(f"~/{ROOT_REL} does not exist yet: nothing to do")
@@ -184,8 +204,10 @@ class RustBuild(BaseTarget[RustPolicy]):
                 },
             )
             return 0
+        pol, tmpfs_cap = self._effective_policy(root)
         before = sum(f.size for f in folders)
-        self.tsay(f"{len(folders)} folder(s), {gib(before)}; policy {pol.text()}")
+        scope = f" (tmpfs cap {gib(tmpfs_cap)})" if tmpfs_cap is not None else ""
+        self.tsay(f"{len(folders)} folder(s), {gib(before)}; policy {pol.text()}{scope}")
         for name, why in others:
             self.tsay(f"left alone: {name} ({why})", 5)
         claimed, ws = self.workspaces(root)
@@ -399,14 +421,14 @@ class RustBuild(BaseTarget[RustPolicy]):
         except Refused as e:
             return [f"not pruned: {e}"]
         if root is None:
-            return [f"size:     ~/{ROOT_REL} does not exist yet"]
+            return [f"size:     {tilde(self.location(), self.home)} does not exist yet"]
         folders, trash, others = self.machine.tree.scan(root, self.now)
-        out = [
-            (
-                f"size:     {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
-                "(as du shows it: before btrfs compression)"
-            )
-        ]
+        cap = self.machine.tree.tmpfs_capacity(root)
+        unit_note = f"(of {gib(cap)} tmpfs)" if cap is not None else "(as du shows it: before btrfs compression)"
+        out = [f"size:     {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) {unit_note}"]
+        if cap is not None and self.policy is not None:
+            pol, _ = effective_rust_policy(self.policy, self.user_keys, tmpfs_bytes=cap)
+            out.append(f"tmpfs:    effective RAM policy: {pol.text()}")
         if folders:
             old = min(folders, key=lambda f: f.activity)
             new = max(folders, key=lambda f: f.activity)

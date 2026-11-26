@@ -14,13 +14,22 @@ from typing import TYPE_CHECKING
 
 from cst_core.domain.files import OwnedState
 from cst_core.ports import WriteFailed
-from toolchains.domain.build import HASH_VAR, ROOT_REL
-from toolchains.domain.common import CONF_REL, ConfigError, NAME, RustIncremental, ToolchainsAction, tilde
+from toolchains.domain.build import HASH_VAR, ROOT_REL, TMPFS_ROOT_REL, expected_template, expected_tmpfs_template
+from toolchains.domain.common import (
+    CONF_REL,
+    ConfigError,
+    NAME,
+    RustBuildTmpfs,
+    RustIncremental,
+    ToolchainsAction,
+    tilde,
+)
 from toolchains.domain.config import (
     CANNOT_READ,
     CARGO_CFG_REL,
     CARGO_HAS_BUILD,
     CARGO_HAS_BUILD_DIR,
+    BuildDirState,
     ConfigLine,
     ConfigMark,
     ConfigTool,
@@ -39,6 +48,7 @@ from toolchains.domain.config import (
     WRAPPER_NAME,
     WRAPPER_REL,
     WrapperValues,
+    build_dir_state,
     cargo_text,
     incremental_state,
     lean_state,
@@ -77,6 +87,24 @@ def incremental_wanted(settings: Settings | None) -> tuple[bool, str]:
         return False, "bad settings"
     off = settings.options["RUST_INCREMENTAL"] == RustIncremental.OFF
     return off, "RUST_INCREMENTAL=off" if off else "RUST_INCREMENTAL=auto"
+
+
+def build_dir_target(
+    home: str, prog: str, settings: Settings | None, *, tmpfs_mounted: bool
+) -> tuple[str, bool, str | None]:
+    """(desired build-dir template, using_tmpfs, refusal_or_None) from RUST_BUILD_TMPFS."""
+    mode = settings.options["RUST_BUILD_TMPFS"] if settings else RustBuildTmpfs.AUTO
+    if mode == RustBuildTmpfs.NO:
+        return expected_template(home), False, None
+    if mode == RustBuildTmpfs.YES and not tmpfs_mounted:
+        return (
+            expected_tmpfs_template(home),
+            True,
+            f"RUST_BUILD_TMPFS=yes requires ~/{TMPFS_ROOT_REL} to be mounted as tmpfs (run: {prog} tmpfs apply)",
+        )
+    if mode == RustBuildTmpfs.YES or tmpfs_mounted:
+        return expected_tmpfs_template(home), True, None
+    return expected_template(home), False, None
 
 
 def wrapper_values(settings: Settings | None) -> WrapperValues:
@@ -587,6 +615,61 @@ class ToolConfig:
         self.out.say(f"written:   {path} (incremental = false, {why})")
         return 0
 
+    def _cargo_build_dir(self, settings: Settings | None) -> tuple[BuildDirState, str, bool, str | None]:
+        mounted = self.files.tmpfs_mounted()
+        want, using_tmpfs, refusal = build_dir_target(self.home, self.prog, settings, tmpfs_mounted=mounted)
+        path = os.path.join(self.home, CARGO_CFG_REL)
+        st = build_dir_state(path, self.files.read_settings(path), home=self.home, want_template=want)
+        return st, want, using_tmpfs, refusal
+
+    def _cargo_line_from_state(
+        self, bd: BuildDirState, verb: ConfigView, *, using_tmpfs: bool, want: str, refusal: str | None
+    ) -> ConfigLine:
+        shown = tilde(bd["path"], self.home)
+        rel = TMPFS_ROOT_REL if using_tmpfs else ROOT_REL
+        out: ConfigLine | None = None
+        if bd["error"]:
+            msg = CANNOT_READ if bd["error"] == CANNOT_READ else f"build-dir: the file {bd['error']}"
+            out = (ConfigMark.UNKNOWN, shown, msg)
+        elif refusal is not None and (bd["value"] is None or bd["ours"]):
+            out = (ConfigMark.UNKNOWN, shown, refusal)
+        elif bd["matches_want"]:
+            out = (ConfigMark.OK, shown, "build-dir = CST's line (rust:build prunes that folder)")
+        elif bd["ours"]:
+            fix = "" if verb == ConfigView.PLAN else f" (switch: {self.prog} config apply)"
+            out = (
+                (ConfigMark.WRITE, shown, f'[build] build-dir -> "~/{rel}/{HASH_VAR}"{fix}')
+                if bd["rewrite"]
+                else (
+                    ConfigMark.BY_HAND,
+                    shown,
+                    f'cannot switch build-dir safely here: set build-dir = "{want}" in [build] yourself',
+                )
+            )
+        elif bd["value"] is not None:
+            out = (
+                ConfigMark.KEEP,
+                shown,
+                "build-dir set to your own value: left as it is (rust:build then prunes nothing)",
+            )
+        elif bd["by_hand"]:
+            out = (ConfigMark.BY_HAND, shown, f'has a [build] table: add build-dir = "{want}" there yourself')
+        else:
+            fix = "" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"
+            out = (ConfigMark.WRITE, shown, f'[build] build-dir = "~/{rel}/{HASH_VAR}"{fix}')
+        return out
+
+    def _uv_state(self) -> tuple[str, ToolSettingState]:
+        path = os.path.join(self.home, UV_CFG_REL)
+        text = self.files.read_settings(path)
+        if text is None:
+            return path, ToolSettingState.UNREADABLE
+        if UV_HAS_LINK_MODE.search(text):
+            return path, ToolSettingState.SET
+        if UV_HAS_TABLE.search(text):
+            return path, ToolSettingState.BY_HAND
+        return path, ToolSettingState.WRITE
+
     def lines(
         self,
         verb: ConfigView,
@@ -596,44 +679,74 @@ class ToolConfig:
     ) -> list[ConfigLine]:
         """The plan or status lines of the settings (lean, sccache: the explicit
         flags)."""
-        home = self.home
-        out: list[ConfigLine] = []
-        for name, path, st, _ in self.items():
-            shown = tilde(path, home)
-            out.append(
-                self._cargo_line(st, shown, verb) if name == ConfigTool.CARGO else self._uv_line(st, shown, verb)
-            )
+        bd, want, using_tmpfs, refusal = self._cargo_build_dir(settings)
+        uv_path, uv_st = self._uv_state()
+        out: list[ConfigLine] = [
+            self._cargo_line_from_state(bd, verb, using_tmpfs=using_tmpfs, want=want, refusal=refusal),
+            self._uv_line(uv_st, tilde(uv_path, self.home), verb),
+        ]
         out += self.lean_lines(verb, settings, lean)
         out += self.incremental_lines(verb, settings)
         out += self.sccache_lines(verb, settings, sccache)
         return out
 
-    def _cargo_line(self, st: ToolSettingState, shown: str, verb: ConfigView) -> ConfigLine:
-        """The line of cargo's build-dir in its config SHOWN, in state ST."""
-        match st:
-            case ToolSettingState.SET:
-                if self.files.build_dir_is_csts():
-                    return (ConfigMark.OK, shown, "build-dir = CST's line (rust:build prunes that folder)")
-                return (
-                    ConfigMark.KEEP,
-                    shown,
-                    "build-dir set to your own value: left as it is (rust:build then prunes nothing)",
-                )
-            case ToolSettingState.BY_HAND:
-                return (
-                    ConfigMark.BY_HAND,
-                    shown,
-                    f'has a [build] table: add build-dir = "{self.home}/{ROOT_REL}/{HASH_VAR}" there yourself',
-                )
-            case ToolSettingState.WRITE:
-                return (
-                    ConfigMark.WRITE,
-                    shown,
-                    f'[build] build-dir = "~/{ROOT_REL}/{HASH_VAR}"'
-                    + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
-                )
-            case _:
-                return (ConfigMark.UNKNOWN, shown, CANNOT_READ)
+    def _cargo_apply(self, bd: BuildDirState, *, want: str, using_tmpfs: bool, refusal: str | None) -> int:
+        path = bd["path"]
+        rc = 0
+        if bd["error"]:
+            msg = (
+                f"{NAME}: cannot read {path}: left as it is"
+                if bd["error"] == CANNOT_READ
+                else f"{NAME}: {path} {bd['error']}: left as it is"
+            )
+            self.out.say(msg, 3, err=True)
+            rc = 1
+        elif refusal is not None and (bd["value"] is None or bd["ours"]):
+            self.out.say(f"{NAME}: {refusal}", 3, err=True)
+            rc = 1
+        elif bd["matches_want"] or (bd["value"] is not None and not bd["ours"]):
+            self.out.say(f"kept:      {path} (build-dir already set)")
+        elif bd["ours"]:
+            rc = self._cargo_switch(path, bd["rewrite"], want=want, using_tmpfs=using_tmpfs)
+        elif bd["by_hand"]:
+            self.out.say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
+            self.out.say(f'      build-dir = "{want}"', 5, err=True)
+        else:
+            err = self.files.append(path, cargo_text(self.home, tmpfs=using_tmpfs))
+            if err:
+                self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+                rc = 1
+            else:
+                self.out.say(f"written:   {path}")
+        return rc
+
+    def _cargo_switch(self, path: str, rewrite: str, *, want: str, using_tmpfs: bool) -> int:
+        if not rewrite:
+            self.out.say(f"NOTE: {path} cannot switch build-dir safely: set there by hand:", 5, err=True)
+            self.out.say(f'      build-dir = "{want}"', 5, err=True)
+            return 0
+        if self._rewrite_failed(path, rewrite):
+            return 1
+        rel = TMPFS_ROOT_REL if using_tmpfs else ROOT_REL
+        self.out.say(f"written:   {path} (build-dir -> ~/{rel}/{HASH_VAR})")
+        return 0
+
+    def _uv_apply(self, path: str, st: ToolSettingState) -> int:
+        if st == ToolSettingState.UNREADABLE:
+            self.out.say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
+            return 1
+        if st == ToolSettingState.SET:
+            self.out.say(f"kept:      {path} (link-mode already set)")
+            return 0
+        if st == ToolSettingState.BY_HAND:
+            self.out.say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
+            return 0
+        err = self.files.append(path, UV_TEXT)
+        if err:
+            self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+            return 1
+        self.out.say(f"written:   {path}")
+        return 0
 
     def _uv_line(self, st: ToolSettingState, shown: str, verb: ConfigView) -> ConfigLine:
         """The line of uv's link-mode in its config SHOWN, in state ST."""
@@ -653,7 +766,6 @@ class ToolConfig:
                 return (ConfigMark.UNKNOWN, shown, CANNOT_READ)
 
     def run(self, action: ToolchainsAction, lean: bool | None = None, sccache: bool | None = None) -> int:
-        home = self.home
         settings: Settings | None
         try:
             settings = self.settings()
@@ -675,30 +787,10 @@ class ToolConfig:
                 flags += {True: " --sccache", False: " --no-sccache"}.get(sccache, "")
                 self.out.say(f"Apply with: {self.prog} config apply" + flags)
             return 0
-        rc = 0
-        for name, path, st, text in self.items():
-            match name, st:
-                case _, ToolSettingState.UNREADABLE:
-                    self.out.say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
-                    rc = 1
-                case ConfigTool.CARGO, ToolSettingState.SET:
-                    self.out.say(f"kept:      {path} (build-dir already set)")
-                case ConfigTool.CARGO, ToolSettingState.BY_HAND:
-                    self.out.say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
-                    self.out.say(f'      build-dir = "{home}/{ROOT_REL}/{HASH_VAR}"', 5, err=True)
-                case ConfigTool.UV, ToolSettingState.SET:
-                    self.out.say(f"kept:      {path} (link-mode already set)")
-                case ConfigTool.UV, ToolSettingState.BY_HAND:
-                    self.out.say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
-                case _:
-                    err = self.files.append(path, text)
-                    if err:
-                        # For example a ~/.cargo owned by root after a `sudo cargo`:
-                        # report it and go on with the other setting.
-                        self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
-                        rc = 1
-                        continue
-                    self.out.say(f"written:   {path}")
+        bd, want, using_tmpfs, refusal = self._cargo_build_dir(settings)
+        rc = self._cargo_apply(bd, want=want, using_tmpfs=using_tmpfs, refusal=refusal)
+        uv_path, uv_st = self._uv_state()
+        rc = max(rc, self._uv_apply(uv_path, uv_st))
         rc = max(rc, self.lean_apply(settings, lean))
         rc = max(rc, self.incremental_apply(settings))
         return max(rc, self.sccache_apply(settings, sccache))

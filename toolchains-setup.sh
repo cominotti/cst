@@ -10,7 +10,7 @@
 # prune`). The program is toolchains/cst-toolchains; the rationale is in
 # toolchains/README.md.
 #
-# Commands (all as your user; never type sudo):
+# Commands (as your user, except `tmpfs apply|revert` which use sudo for the system mount unit):
 #   status [--brief]       read-only: per target what and where (through the
 #                          ~/Bulk links), size, policy, last prune; the hourly
 #                          timer; the installed rustup toolchains and which
@@ -45,14 +45,20 @@
 #                          Opt-in (RUST_SCCACHE=yes or --sccache): rustc through
 #                          sccache via ~/.local/libexec/cst/rustc-wrapper as
 #                          [build] rustc-wrapper; --no-sccache removes CST's line
+#   tmpfs status|plan|apply|revert [--size SIZE] [--user USER]
+#                          opt-in dedicated RAM tmpfs for cargo build-dir at
+#                          ~/.cache/cargo-build-tmpfs (isolated from /tmp,
+#                          adaptive min(16 GiB, 20% RAM) cap). `apply` and
+#                          `revert` install/remove a systemd .mount unit and
+#                          tmpfiles.d rule as root (automatic sudo on host)
 #   help
 #
 # Settings: toolchains/toolchains.conf in CST (the defaults), then
-# ~/.config/cst/toolchains.conf (yours, wins), e.g. RUST_BUILD_MAX_IDLE=48h,
-# RUST_BUILD_MAX_TOTAL=150G, RUST_BUILD_MIN_KEEP=2h, RUST_BUILD_ORPHANS=yes,
-# RUST_BUILD_INCREMENTAL_IDLE=6h, PYTHON_UV_ENABLED=yes, RUST_LEAN_DEBUGINFO=no,
-# RUST_INCREMENTAL=auto, RUST_SCCACHE=no, RUST_SCCACHE_CACHE_SIZE=25G,
-# RUST_SCCACHE_WORKSPACE=no.
+# ~/.config/cst/toolchains.conf (yours, wins), e.g. RUST_BUILD_TMPFS=auto,
+# RUST_BUILD_MAX_IDLE=48h, RUST_BUILD_MAX_TOTAL=150G, RUST_BUILD_MIN_KEEP=2h,
+# RUST_BUILD_ORPHANS=yes, RUST_BUILD_INCREMENTAL_IDLE=6h, PYTHON_UV_ENABLED=yes,
+# RUST_LEAN_DEBUGINFO=no, RUST_INCREMENTAL=auto, RUST_SCCACHE=no,
+# RUST_SCCACHE_CACHE_SIZE=25G, RUST_SCCACHE_WORKSPACE=no.
 # Started as root through sudo (also by `cst status`), it runs again as the
 # user who called sudo. Inside a toolbox the program runs itself on the host.
 

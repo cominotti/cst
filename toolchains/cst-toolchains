@@ -27,8 +27,12 @@ Commands:
                                  opt-in lean debug info (RUST_LEAN_DEBUGINFO)
                                  and the opt-in sccache (RUST_SCCACHE; only
                                  --no-sccache removes it again)
+  tmpfs status|plan|apply|revert [--size SIZE] [--user USER]
+                                 opt-in dedicated RAM tmpfs mount for cargo's
+                                 build-dir (~/.cache/cargo-build-tmpfs, isolated
+                                 from /tmp); apply/revert need root on the host
   help
-Every command takes --home DIR (default: your home).
+Every command except `tmpfs` takes --home DIR (default: your home).
 
 TARGET is LANG:CACHE (rust:build) or LANG (all targets of that language).
 Without TARGET, prune runs every target enabled in the settings. A target
@@ -46,6 +50,9 @@ Settings: KEY=value lines; the defaults are in toolchains.conf next to this
 program (toolchains/toolchains.conf in CST), yours in
 ~/.config/cst/toolchains.conf win. Keys are <LANG>_<CACHE>_<SETTING>:
   RUST_BUILD_ENABLED=yes     the timer and a bare `prune` run it (yes or no)
+  RUST_BUILD_TMPFS=auto      auto (default): use ~/.cache/cargo-build-tmpfs when
+                             mounted, else ~/.cache/cargo-build; yes: require
+                             tmpfs; no: always use ~/.cache/cargo-build
   RUST_BUILD_MAX_IDLE=48h    delete a folder whose newest activity is older
   RUST_BUILD_MAX_TOTAL=150G  then, while the total is above this, delete the
                              least recently active folders first (0 or off: no cap)

@@ -15,9 +15,10 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, override
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping, Sequence, Set as AbstractSet
 
-from cst_core.domain.values import MIB, MINUTE
+from cst_core.domain.contracts import CARGO_BUILD_DIR_REL, CARGO_BUILD_TMPFS_REL
+from cst_core.domain.values import GIB, HOUR, MIB, MINUTE
 from toolchains.domain.common import (
     ConfigError,
     ago,
@@ -32,9 +33,16 @@ from toolchains.domain.common import (
 
 
 HASH_VAR = "{workspace-path-hash}"
-ROOT_REL = ".cache/cargo-build"
+ROOT_REL = CARGO_BUILD_DIR_REL
+TMPFS_ROOT_REL = CARGO_BUILD_TMPFS_REL
 MIN_KEEP_FLOOR = 15 * 60
 FUTURE_SLACK = 300
+TMPFS_DEFAULT_MAX_TOTAL: Final = 12 * GIB
+TMPFS_DEFAULT_MAX_IDLE: Final = 4 * HOUR
+TMPFS_DEFAULT_INCREMENTAL_IDLE: Final = 1 * HOUR
+TMPFS_DEFAULT_MIN_KEEP: Final = 30 * MINUTE
+TMPFS_CAP_SHARE_PERCENT: Final = 75
+_PERCENT_DIVISOR: Final = 100
 HASH_TOP = re.compile(r"[0-9a-f]{2}\Z")
 HASH_LEAF = re.compile(r"[0-9a-f]{14}\Z")
 LOCK_NAMES = (".cargo-build-lock", ".cargo-lock")
@@ -48,6 +56,16 @@ RUST_TOOLS = re.compile(r"(cargo|rustc|rustdoc|clippy-driver|rust-analyzer|build
 
 def expected_template(home: str) -> str:
     return f"{home}/{ROOT_REL}/{HASH_VAR}"
+
+
+def expected_tmpfs_template(home: str) -> str:
+    """Cargo build-dir template pointing at CST's dedicated tmpfs mount."""
+    return f"{home}/{TMPFS_ROOT_REL}/{HASH_VAR}"
+
+
+def expected_templates(home: str) -> tuple[str, str]:
+    """Both build-dir templates CST recognizes (NVMe default and dedicated tmpfs)."""
+    return (expected_template(home), expected_tmpfs_template(home))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -93,6 +111,34 @@ class RustPolicy:
             f"MAX_IDLE {span(self.max_idle)}, MAX_TOTAL {cap}, MIN_KEEP {span(self.min_keep)}, "
             f"ORPHANS {orph}, INCREMENTAL_IDLE {inc}"
         )
+
+
+def effective_rust_policy(
+    pol: RustPolicy, user_keys: AbstractSet[str], *, tmpfs_bytes: int | None
+) -> tuple[RustPolicy, bool]:
+    """Adjust un-overridden policy knobs for RAM-backed tmpfs builds when mounted on tmpfs."""
+    if tmpfs_bytes is None:
+        return pol, False
+    share_cap = (tmpfs_bytes * TMPFS_CAP_SHARE_PERCENT // _PERCENT_DIVISOR // MIB) * MIB
+    auto_cap = min(TMPFS_DEFAULT_MAX_TOTAL, share_cap) if share_cap > 0 else TMPFS_DEFAULT_MAX_TOTAL
+    min_keep = pol.min_keep if "RUST_BUILD_MIN_KEEP" in user_keys else TMPFS_DEFAULT_MIN_KEEP
+    max_total = pol.max_total if "RUST_BUILD_MAX_TOTAL" in user_keys else auto_cap
+    max_idle = pol.max_idle if "RUST_BUILD_MAX_IDLE" in user_keys else max(TMPFS_DEFAULT_MAX_IDLE, min_keep)
+    inc_idle = (
+        pol.incremental_idle
+        if "RUST_BUILD_INCREMENTAL_IDLE" in user_keys
+        else max(TMPFS_DEFAULT_INCREMENTAL_IDLE, min_keep)
+    )
+    return (
+        RustPolicy(
+            max_idle=max_idle,
+            max_total=max_total,
+            min_keep=min_keep,
+            orphans=pol.orphans,
+            incremental_idle=inc_idle,
+        ),
+        True,
+    )
 
 
 class IncrementalDir:

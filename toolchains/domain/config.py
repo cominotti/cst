@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 from cst_core.domain.contracts import CARGO_CONFIG_REL, SCCACHE_WRAPPER_REL
 from cst_core.domain.shapes import json_object, object_of, parse_json, parse_toml
 from cst_core.domain.text import cgroup_v2_path
-from toolchains.domain.build import HASH_VAR, ROOT_REL
+from toolchains.domain.build import HASH_VAR, ROOT_REL, expected_templates, expected_tmpfs_template
 from toolchains.domain.common import parses_as, plain
 
 
@@ -83,12 +83,97 @@ UV_HAS_LINK_MODE = re.compile(rf"^{WS}*link-mode{WS}*=", re.MULTILINE)
 UV_HAS_TABLE = re.compile(rf"^{WS}*\[", re.MULTILINE)
 
 
-def cargo_text(home: str) -> str:
+def cargo_text(home: str, *, tmpfs: bool = False) -> str:
+    """[build] build-dir snippet appended to ~/.cargo/config.toml (NVMe default or dedicated tmpfs)."""
+    if tmpfs:
+        return (
+            "\n# Added by toolchains-setup.sh (CST): intermediate build artifacts live in\n"
+            "# ~/.cache/cargo-build-tmpfs (dedicated RAM tmpfs; cuts SSD wear).\n"
+            f'[build]\nbuild-dir = "{expected_tmpfs_template(home)}"\n'
+        )
     return (
         "\n# Added by btrfs-setup.sh (CST): intermediate build artifacts live in\n"
         "# ~/.cache (a subvolume excluded from /home snapshots); final ones stay in target/.\n"
         f'[build]\nbuild-dir = "{home}/{ROOT_REL}/{HASH_VAR}"\n'
     )
+
+
+class BuildDirState(TypedDict):
+    """Inspection of [build] build-dir in ~/.cargo/config.toml."""
+
+    path: str
+    error: str
+    value: object
+    ours: bool
+    matches_want: bool
+    by_hand: bool
+    rewrite: str
+
+
+def build_dir_switch_rewrite(text: str, current_template: str, target_template: str) -> str:
+    """Rewrite CST's build-dir line from CURRENT_TEMPLATE to TARGET_TEMPLATE safely, or ''."""
+    try:
+        parsed = parse_toml(text)
+    except tomllib.TOMLDecodeError:
+        return ""
+    if not json_object(parsed):
+        return ""
+    build = parsed.get("build")
+    if not isinstance(build, dict) or build.get("build-dir") != current_template:
+        return ""
+    expect = plain(parsed)
+    expect_build = expect["build"]
+    if not isinstance(expect_build, dict):
+        return ""
+    expect_build["build-dir"] = target_template
+    for old_lit, new_lit in (
+        (json.dumps(current_template), json.dumps(target_template)),
+        (f"'{current_template}'", f"'{target_template}'"),
+    ):
+        pat = re.compile(
+            rf"^({WS}*(?:build\.)?build-dir{WS}*={WS}*){re.escape(old_lit)}({WS}*(?:#.*)?)$",
+            re.MULTILINE,
+        )
+        matches = list(pat.finditer(text))
+        if len(matches) == 1:
+            candidate = pat.sub(lambda m, rep=new_lit: f"{m.group(1)}{rep}{m.group(2)}", text, count=1)
+            if parses_as(candidate, expect):
+                return candidate
+    return ""
+
+
+def build_dir_state(path: str, text: str | None, *, home: str, want_template: str) -> BuildDirState:
+    """Inspect [build] build-dir in PATH against CST's templates and WANT_TEMPLATE."""
+    st: BuildDirState = {
+        "path": path,
+        "error": "",
+        "value": None,
+        "ours": False,
+        "matches_want": False,
+        "by_hand": False,
+        "rewrite": "",
+    }
+    if text is None:
+        st["error"] = CANNOT_READ
+        return st
+    try:
+        parsed = parse_toml(text)
+    except tomllib.TOMLDecodeError as e:
+        st["error"] = f"is not valid TOML ({e})"
+        return st
+    build = parsed.get("build") if json_object(parsed) else None
+    val = build.get("build-dir") if isinstance(build, dict) else None
+    st["value"] = val
+    ours_templates = set(expected_templates(home))
+    if isinstance(val, str) and val in ours_templates:
+        st["ours"] = True
+        st["matches_want"] = val == want_template
+        if val != want_template:
+            st["rewrite"] = build_dir_switch_rewrite(text, val, want_template)
+        return st
+    if val is None and CARGO_HAS_BUILD.search(text):
+        st["by_hand"] = True
+    return st
 
 
 UV_TEXT = (

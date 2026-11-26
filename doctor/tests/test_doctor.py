@@ -6212,6 +6212,85 @@ class ToolchainsCheckTest(Scratch):
         self.assertEqual(len(ok_lines), 1, ok_lines)
         self.assertIn(f"ok     sccache binary: {self.tmp}/.cargo/bin/sccache", ok_lines[0])
 
+    def _root_file(self, rel: str, content: str) -> str:
+        full = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return full
+
+    def test_tmpfs_build_dir_coherence_checks(self) -> None:
+        mp = os.path.join(self.tmp, ".cache/cargo-build-tmpfs")
+        unit_rel = "etc/systemd/system/test-cargo-build.mount"
+        unit_body = (
+            "# SPDX-License-Identifier: MPL-2.0\n"
+            "# managed-by: toolchains-setup.sh (CST) [toolchains:tmpfs]\n"
+            "[Unit]\nDescription=Cargo build-dir tmpfs\n"
+            f"[Mount]\nWhat=tmpfs\nWhere={mp}\nType=tmpfs\nOptions=mode=0700,uid=1000,gid=1000,size=8G,nosuid,nodev,noatime\n"
+        )
+        # 1. cargo config points to tmpfs when not mounted -> WARN with fix.
+        self._home_file(".cargo/config.toml", f'[build]\nbuild-dir = "{mp}/{{workspace-path-hash}}"\n')
+        r_unmounted = self.run_tool()
+        self.assertEqual(r_unmounted.returncode, 1, r_unmounted.stdout + r_unmounted.stderr)
+        lines = area_lines(r_unmounted.stdout, "toolchains")
+        self.assertIn("WARN   cargo build-dir tmpfs:", lines[0])
+        self.assertIn("toolchains tmpfs apply", lines[1])
+
+        # 2. Unit present + mounted + tmpfiles present + config matches -> OK.
+        user = pwd.getpwuid(os.getuid()).pw_name
+        self._root_file(unit_rel, unit_body)
+        self._root_file(f"etc/tmpfiles.d/cst-cargo-build-tmpfs-{user}.conf", f"d {mp} 0700 {user} {user} -\n")
+        self._root_file(
+            "proc/mounts",
+            f"tmpfs {mp} tmpfs rw,nosuid,nodev,noatime,size=8388608k,mode=700,uid=1000,gid=1000 0 0\n",
+        )
+        r_ok = self.run_tool()
+        self.assertEqual(r_ok.returncode, 0, r_ok.stdout + r_ok.stderr)
+        ok_lines = area_lines(r_ok.stdout, "toolchains")
+        self.assertEqual(len(ok_lines), 1, ok_lines)
+        self.assertIn(f"ok     cargo build-dir tmpfs: mounted at {mp}", ok_lines[0])
+
+        # 3. Mounted while build-dir still points to NVMe -> INFO unless RUST_BUILD_TMPFS=no.
+        self._home_file(
+            ".cargo/config.toml", f'[build]\nbuild-dir = "{self.tmp}/.cache/cargo-build/{{workspace-path-hash}}"\n'
+        )
+        r_info = self.run_tool()
+        self.assertEqual(r_info.returncode, 0, r_info.stdout + r_info.stderr)
+        info_lines = area_lines(r_info.stdout, "toolchains")
+        self.assertTrue(any("info   cargo build-dir tmpfs: mounted, while" in ln for ln in info_lines), info_lines)
+
+        self._home_file(".config/cst/toolchains.conf", "RUST_BUILD_TMPFS=no\n")
+        r_suppressed = self.run_tool()
+        self.assertEqual(r_suppressed.returncode, 0)
+        self.assertFalse(
+            any("still points to" in ln for ln in area_lines(r_suppressed.stdout, "toolchains")),
+            r_suppressed.stdout,
+        )
+
+        # 4. Missing tmpfiles rule while mounted -> WARN.
+        os.unlink(os.path.join(self.root, f"etc/tmpfiles.d/cst-cargo-build-tmpfs-{user}.conf"))
+        r_no_tf = self.run_tool()
+        self.assertEqual(r_no_tf.returncode, 1)
+        self.assertIn("WARN   cargo build-dir tmpfs: missing", "\n".join(area_lines(r_no_tf.stdout, "toolchains")))
+
+        # 5. Unit present without active mount -> WARN.
+        self._root_file("proc/mounts", "")
+        r_no_mount = self.run_tool()
+        self.assertEqual(r_no_mount.returncode, 1)
+        self.assertIn("is installed, but", "\n".join(area_lines(r_no_mount.stdout, "toolchains")))
+
+        # 6. findmnt fallback works even when /proc/mounts is absent.
+        os.unlink(os.path.join(self.root, "proc/mounts"))
+        self._root_file(f"etc/tmpfiles.d/cst-cargo-build-tmpfs-{user}.conf", f"d {mp} 0700 {user} {user} -\n")
+        self._home_file(".cargo/config.toml", f'[build]\nbuild-dir = "{mp}/{{workspace-path-hash}}"\n')
+        with open(self.env["FIX_FINDMNT_ALL"], "w", encoding="utf-8") as fh:
+            fh.write(f"tmpfs {mp} tmpfs rw,nosuid,nodev,noatime,size=4194304k,mode=700,uid=1000,gid=1000\n")
+        r_findmnt = self.run_tool()
+        self.assertEqual(r_findmnt.returncode, 0, r_findmnt.stdout + r_findmnt.stderr)
+        self.assertIn(
+            f"ok     cargo build-dir tmpfs: mounted at {mp}", "\n".join(area_lines(r_findmnt.stdout, "toolchains"))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

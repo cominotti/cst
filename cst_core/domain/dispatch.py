@@ -218,7 +218,17 @@ ROUTING: Final[Mapping[str, ModuleRouting]] = {
     ),
     "toolchains": ModuleRouting(
         program="toolchains/cst-toolchains",
-        commands={"status": _AS_USER, "prune": _AS_USER, "auto": _AS_USER, "config": _AS_USER},
+        commands={
+            "status": _AS_USER,
+            "prune": _AS_USER,
+            "auto": _AS_USER,
+            "config": _AS_USER,
+            "tmpfs": _CommandRoutes(
+                subcommands={"status": _READ, "plan": _READ, "apply": _ROOT, "revert": _ROOT},
+                usage="Usage: {prog} tmpfs status|plan|apply|revert [--size SIZE] [--user USER]",
+            ),
+        },
+        container_override="CST_TOOLCHAINS_CONTAINER",
         user_reason="toolchain caches and settings belong to your user",
         user_unset=("XDG_CONFIG_HOME",),
     ),

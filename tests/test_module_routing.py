@@ -364,6 +364,73 @@ class ToolchainsRoutingTest(_Copy):
             (proc.returncode, proc.stdout, proc.stderr),
             (2, "", "Unknown command: nope\n" + help_text(self.script, "cst toolchains")),
         )
+        for bad in (("tmpfs",), ("tmpfs", "bogus")):
+            with self.subTest(bad=bad):
+                proc = self.run_script(*bad, env=self.env(CST_PROG="cst toolchains", CST_TOOLCHAINS_CONTAINER="0"))
+                self.assertEqual(
+                    (proc.returncode, proc.stdout, proc.stderr),
+                    (2, "", "Usage: cst toolchains tmpfs status|plan|apply|revert [--size SIZE] [--user USER]\n"),
+                )
+
+    def test_tmpfs_routing_across_host_and_container(self) -> None:
+        self.fake("flatpak-spawn")
+        self.fake("sudo")
+        for args in (("tmpfs", "status"), ("tmpfs", "plan", "--size", "4G")):
+            with self.subTest(host_read=args):
+                env = self.env(CST_PROG="cst toolchains", CST_TOOLCHAINS_CONTAINER="0")
+                proc = self.run_script(*args, env=env)
+                self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+                self.assert_ran(
+                    self.only(proc.stdout),
+                    "python3",
+                    ["-I", "-B", self.tool, *args],
+                    self.started_env(env, CST_PROG="cst toolchains"),
+                )
+            with self.subTest(container_read=args):
+                env = self.env(CST_PROG="cst toolchains", CST_TOOLCHAINS_CONTAINER="1")
+                proc = self.run_script(*args, env=env)
+                self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+                self.assert_ran(
+                    self.only(proc.stdout),
+                    "flatpak-spawn",
+                    ["--host", "--env=CST_PROG=cst toolchains", "python3", "-I", "-B", self.tool, *args],
+                    self.started_env(env),
+                )
+        for args in (("tmpfs", "apply", "--size", "4G"), ("tmpfs", "revert")):
+            with self.subTest(host_sudo=args):
+                env = self.env(CST_PROG="cst toolchains", CST_TOOLCHAINS_CONTAINER="0")
+                proc = self.run_script(*args, env=env)
+                self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+                self.assert_ran(
+                    self.only(proc.stdout),
+                    "sudo",
+                    ["--", "env", "CST_PROG=cst toolchains", self.script, *args],
+                    self.started_env(env),
+                )
+            with self.subTest(container_refuse=args):
+                proc = self.run_script(*args, env=self.env(CST_PROG="cst toolchains", CST_TOOLCHAINS_CONTAINER="1"))
+                words = " ".join(args)
+                self.assertEqual(
+                    (proc.returncode, proc.stdout, proc.stderr),
+                    (
+                        1,
+                        "",
+                        (
+                            f"'cst toolchains {words}' must run on the host, not inside a toolbox/container.\n"
+                            f"In a host terminal: cst toolchains {words}\n"
+                        ),
+                    ),
+                )
+        if userns_root():
+            env = self.env(CST_PROG="cst toolchains", CST_TOOLCHAINS_CONTAINER="0")
+            proc = self.run_script("tmpfs", "apply", "--user", "alice", env=env, root=True)
+            self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+            self.assert_ran(
+                self.only(proc.stdout),
+                "python3",
+                ["-I", "-B", self.tool, "tmpfs", "apply", "--user", "alice"],
+                self.started_env(env, CST_PROG="cst toolchains"),
+            )
 
     def test_as_a_user_the_program_runs_with_its_arguments(self) -> None:
         for args in (("status", "--brief"), ("prune", "bogus"), ("auto", "on"), ("config", "apply", "--home", "/x")):
