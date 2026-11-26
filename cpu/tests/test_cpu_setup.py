@@ -704,8 +704,8 @@ class InstallTest(CpuSetupCase):
         self.assertIn("GAME_CSTATE_MAX_LATENCY_US='50'\n", conf_lines("tester"))
         unit_dir = user_unit_dir(None, self.home)
         self.assertTrue(str(texts[self.paths.ntsync_modules_load]).endswith("\nntsync\n"))
-        self.assertTrue(str(texts[toolbox_dropin(unit_dir)]).endswith("[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"))
-        self.assertTrue(str(texts[helper_dropin(unit_dir)]).endswith("[Service]\nAllowedCPUs=8-23\n"))
+        self.assertTrue(str(texts[toolbox_dropin(unit_dir)]).endswith("[Slice]\nCPUWeight=20\nIOWeight=20\n"))
+        self.assertTrue(str(texts[helper_dropin(unit_dir)]).endswith("[Service]\nCPUWeight=20\nIOWeight=20\n"))
         # Every installer call hands over the caller's LC_CTYPE, as cst-install.bash did.
         for argv, env in zip(self.runner.calls, self.runner.envs, strict=True):
             if SYSTEM_PYTHON in argv:
@@ -716,7 +716,6 @@ class InstallTest(CpuSetupCase):
         os.remove(self.paths.e_cores)
         os.remove(self.paths.hwp_boost)
         self.write(gamemode_ini(self.home), "[general]\n")
-        self.write(helper_dropin(unit_dir), "x")
         self.write(self.paths.conf, "TARGET_USER='tester'\n")
         self.runner.answers = [
             ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
@@ -724,7 +723,7 @@ class InstallTest(CpuSetupCase):
         ]
         rc, out, err = self.command("install")
         self.assertEqual(rc, 0, err)
-        self.assertIn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped", err)
+        self.assertNotIn("no E-cores found", err)
         self.assertIn(
             f"NOTE: {self.paths.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped", err
         )
@@ -735,8 +734,9 @@ class InstallTest(CpuSetupCase):
         )
         calls = self.runner.joined()
         runuser = f"runuser -u tester -- {' '.join(INSTALLER)}"
-        # The helper's drop-in, which only E-cores need, goes with its install record line.
-        self.assertIn(f"{runuser} remove-text --home {self.home} {helper_dropin(unit_dir)}", calls)
+        # Without E-cores, both baseline weight drop-ins are still installed.
+        self.assertIn(f"{runuser} text {toolbox_dropin(unit_dir)} 0644 --component cpu:toolbox", calls)
+        self.assertIn(f"{runuser} text {helper_dropin(unit_dir)} 0644 --component cpu:toolbox", calls)
         self.assertNotIn("removed '", out)
         self.assertFalse(
             [c for c in calls if "cpu:gamemode" in c or "usermod" in c or f"text {self.paths.conf}" in c], calls
@@ -958,7 +958,7 @@ class DockerSliceTest(CpuSetupCase):
         self.assertEqual(
             self.runner.joined()[:4],
             [
-                f"{inst} install --set ALLOWED=AllowedCPUs=8-23 --component cpu:docker-slice",
+                f"{inst} install --component cpu:docker-slice",
                 "systemctl daemon-reload",
                 "systemctl start builds.slice",
                 f"{inst} mark --component cpu:docker-slice done",
@@ -1005,7 +1005,7 @@ class DockerSliceTest(CpuSetupCase):
         self.runner.calls.clear()
         os.remove(dj)
         self.command("docker-slice", "install")
-        self.assertIn("--set ALLOWED= --component cpu:docker-slice", self.runner.joined()[0])
+        self.assertEqual(self.runner.joined()[0], f"{' '.join(INSTALLER)} install --component cpu:docker-slice")
 
 
 class StagedInstaller:
@@ -1022,8 +1022,8 @@ class StagedInstaller:
 
 
 class DockerSliceTemplateTest(CpuSetupCase):
-    """`docker-slice install` writes cpu:docker-slice (builds.slice, a template) through the real
-    installer: the file, plus AllowedCPUs= only when there are E-cores."""
+    """`docker-slice install` writes cpu:docker-slice (builds.slice) through the real installer:
+    low CPU and I/O weights, no AllowedCPUs, with or without E-cores."""
 
     def install(self, ecores: str | None) -> str:
         stage = os.path.join(self.tmp, "stage")
@@ -1038,11 +1038,13 @@ class DockerSliceTemplateTest(CpuSetupCase):
             return f.read()
 
     def test_with_and_without_e_cores(self) -> None:
-        with open(os.path.join(REPO, "cpu", "units", "builds.slice.in")) as f:
-            plain = f.read().replace("@ALLOWED@\n", "")
-        self.assertEqual(self.install("16-23"), plain + "AllowedCPUs=16-23\n")
-        self.assertEqual(self.install(None), plain)
-        self.assertNotIn("@", plain.split("[Slice]")[1])
+        with open(os.path.join(REPO, "cpu", "units", "builds.slice")) as f:
+            want = f.read()
+        self.assertEqual(self.install("16-23"), want)
+        self.assertEqual(self.install(None), want)
+        self.assertIn("CPUWeight=20\n", want)
+        self.assertIn("IOWeight=20\n", want)
+        self.assertNotIn("AllowedCPUs=", want)
 
 
 class ExperimentTest(CpuSetupCase):
@@ -1168,7 +1170,7 @@ class StatusTest(CpuSetupCase):
         self.write(gamemode_ini(self.home), "; Managed by cpu-setup.sh (CST).\n")
         ucg = f"{self.paths.cgroot}/user.slice/user-1000.slice/user@1000.service"
         self.write(f"{ucg}/cgroup.subtree_control", "cpuset cpu\n")
-        self.write(f"{ucg}/user.slice/cpuset.cpus.effective", "8-23\n")
+        self.write(f"{ucg}/user.slice/cpuset.cpus.effective", "0-23\n")
         vm = "".join(f"vm {i}\n" for i in range(1, 7))
         self.runner.answers = [
             ("game-profile state", CommandResult(0, "game profile: off\n  x\n", "")),
@@ -1177,8 +1179,11 @@ class StatusTest(CpuSetupCase):
             ("id -u tester", CommandResult(0, "1000\n", "")),
             ("is-active gamemoded.service", CommandResult(0, "active\n", "")),
             ("show -P CPUWeight machine.slice", CommandResult(0, "50\n", "")),
-            ("show -P CPUWeight user.slice", CommandResult(0, "30\n", "")),
-            ("show -P AllowedCPUs user.slice", CommandResult(0, "8-23\n", "")),
+            ("show -P CPUWeight user.slice", CommandResult(0, "20\n", "")),
+            ("show -P IOWeight user.slice", CommandResult(0, "20\n", "")),
+            ("show -P CPUWeight flatpak-session-helper.service", CommandResult(0, "20\n", "")),
+            ("show -P IOWeight flatpak-session-helper.service", CommandResult(0, "20\n", "")),
+            ("show -P AllowedCPUs user.slice", CommandResult(0, "\n", "")),
             ("vm-pin status", CommandResult(0, vm, "")),
             ("is-active builds.slice", CommandResult(3, "inactive\n", "")),
             ("cpu-power status", CommandResult(0, "settings: GPU_PM_MODE=always\n", "")),
@@ -1197,10 +1202,11 @@ class StatusTest(CpuSetupCase):
             "\n== GameMode\n  group: member; ini: managed; gamemoded: active\n"
             f"  HWP dynamic boost: 0 (kept at boot by {self.paths.hwp_tmpfiles})\n"
             "  ntsync: inactive (not managed)\n"
-            "\n== baseline weights\n  machine.slice 50, toolboxes 30, app.slice , background.slice \n"
-            "\n== E-cores for toolboxes and host commands\n"
-            "  cpuset delegated: yes; toolboxes AllowedCPUs=8-23; flatpak-spawn --host AllowedCPUs=\n"
-            "  effective (cgroup): toolboxes [8-23]\n"
+            "\n== baseline weights\n"
+            "  machine.slice 50, toolboxes 20 (io 20), flatpak-session-helper 20 (io 20), app.slice , background.slice \n"
+            "\n== cpuset for toolboxes and host commands\n"
+            "  cpuset delegated: yes; toolboxes AllowedCPUs=; flatpak-spawn --host AllowedCPUs=\n"
+            "  effective (cgroup): toolboxes [0-23]\n"
             "\n== VM\n  vm 1\n  vm 2\n  vm 3\n  vm 4\n  vm 6\n"
             "\n== Docker\n  builds.slice: inactive; daemon.json cgroup-parent: -; containers in it: 0\n"
             "\n== memory experiments\n"
@@ -1220,7 +1226,7 @@ class StatusTest(CpuSetupCase):
         rc, out, _ = self.command("status", user="")
         self.assertEqual(rc, 1)
         self.assertIn("\n== GameMode\n  HWP dynamic boost: 0 (not managed)\n  ntsync: inactive (not managed)\n", out)
-        self.assertIn("\n== E-cores for toolboxes and host commands\n\n== VM\n", out)
+        self.assertIn("\n== cpuset for toolboxes and host commands\n\n== VM\n", out)
         self.assertTrue(out.endswith("\n== GPU runtime PM and CPU C-states\n\n== irqbalance\n\n== last measurements\n"))
         self.assertFalse([c for c in self.runner.joined() if c.startswith("runuser")])
 
@@ -1238,11 +1244,17 @@ class StatusTest(CpuSetupCase):
                 self.assertEqual(target_user("", conf), want)
                 self.assertEqual(target_user("root", conf), want)
 
-    def test_no_e_cores_reads_as_none(self) -> None:
-        s, _, _ = self.setup_for()
-        self.assertEqual(s.e_cores(), "8-23")
-        os.remove(self.paths.e_cores)
-        self.assertEqual(s.e_cores(), "")
+    def test_cpuset_delegated_checks_controllers_and_status_falls_back_to_parent_effective(self) -> None:
+        ucg = f"{self.paths.cgroot}/user.slice/user-1000.slice/user@1000.service"
+        self.write(f"{ucg}/cgroup.subtree_control", "cpu io memory pids\n")
+        self.write(f"{ucg}/cgroup.controllers", "cpuset cpu io memory pids\n")
+        self.write(f"{ucg}/cpuset.cpus.effective", "0-23\n")
+        self.runner.answers = [("id -u tester", CommandResult(0, "1000\n", ""))]
+        s, out, _ = self.setup_for()
+        self.assertTrue(s.cpuset_delegated())
+        s._cpuset_status()
+        self.assertIn("  cpuset delegated: yes;", out.getvalue())
+        self.assertIn("  effective (cgroup): toolboxes [0-23]\n", out.getvalue())
 
 
 class BaselineDropinTest(unittest.TestCase):
@@ -1282,13 +1294,15 @@ class UserDropinUnitPathTest(CpuSetupCase):
 
     PINNED_TOOLBOX_TEXT = (
         "# Managed by cpu-setup.sh (CST): toolbox containers (inner user.slice of the\n"
-        "# user manager, sibling of app.slice) on the E-cores, weighing like background.slice.\n"
-        "[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"
+        "# user manager, sibling of app.slice) use all CPUs at low CPU and I/O weight\n"
+        "# so builds stay fast when idle while the desktop and shell preempt them.\n"
+        "[Slice]\nCPUWeight=20\nIOWeight=20\n"
     )
     PINNED_HELPER_TEXT = (
         "# Managed by cpu-setup.sh (CST): host commands of toolboxes and Flatpak apps\n"
-        "# (flatpak-spawn --host) on the E-cores, like the toolboxes themselves.\n"
-        "[Service]\nAllowedCPUs=8-23\n"
+        "# (flatpak-spawn --host) use all CPUs at low CPU and I/O weight, like the\n"
+        "# toolboxes themselves.\n"
+        "[Service]\nCPUWeight=20\nIOWeight=20\n"
     )
 
     def _record_old_dropins(self, old_tb: str, old_helper: str) -> None:

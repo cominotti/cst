@@ -56,12 +56,10 @@ TEMPLATE_VALUES: Final[dict[str, str]] = {
     "UUID": "00000000-0000-0000-0000-000000000000",
     "OPTIONS": "subvolid=5",
     "USER": "tester",
-    "ALLOWED": "AllowedCPUs=0",
 }
 
-# What the generated drop-ins are rendered with: cpu-setup's E-cores, a SCRUB_LIMIT, the game
+# What the generated drop-ins are rendered with: a SCRUB_LIMIT, the game
 # profile's GAME_MEMORY_LOW (cpu-setup.conf's default) and a user's uid for its memory chain.
-E_CORES: Final = "8-23"
 SCRUB_LIMIT: Final = "500M"
 GAME_MEMORY_LOW: Final = "16G"
 GAME_UID: Final = 1000
@@ -179,12 +177,10 @@ def generated_dropins() -> list[UnitText]:
     chain = (f"user-{GAME_UID}.slice", f"user@{GAME_UID}.service")  # a slice and a service of its memory chain
     return [
         scrub_dropin(),
-        UnitText(
-            cpu_domain.DROPIN_NAME, cpu_domain.toolbox_dropin_text(E_CORES), "user", "cpu/cpu-setup", "user.slice"
-        ),
+        UnitText(cpu_domain.DROPIN_NAME, cpu_domain.toolbox_dropin_text(), "user", "cpu/cpu-setup", "user.slice"),
         UnitText(
             cpu_domain.DROPIN_NAME,
-            cpu_domain.helper_dropin_text(E_CORES),
+            cpu_domain.helper_dropin_text(),
             "user",
             "cpu/cpu-setup",
             "flatpak-session-helper.service",

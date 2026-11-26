@@ -291,23 +291,30 @@ def ntsync_modules_load_text() -> str:
     )
 
 
-def toolbox_dropin_text(e_cores: str) -> str:
-    """The toolboxes' drop-in: on the E-cores (when there are), weighing like background.slice."""
-    if not e_cores:
-        return "# Managed by cpu-setup.sh (CST).\n[Slice]\nCPUWeight=30\n"
+# Baseline CPU and I/O weights for build workloads (toolboxes, flatpak-spawn --host, Docker builds.slice):
+# 5x below app.slice (100) and 25x below GNOME's session.slice (500 under uresourced), so builds can use
+# all CPUs (P-cores + E-cores) outside games while interactive desktop and shell stay responsive.
+BUILD_CPU_WEIGHT: Final = 20
+BUILD_IO_WEIGHT: Final = 20
+
+
+def toolbox_dropin_text() -> str:
+    """The toolboxes' drop-in: all CPUs at low CPU and I/O weight (5x below app.slice, 25x below session.slice)."""
     return (
         "# Managed by cpu-setup.sh (CST): toolbox containers (inner user.slice of the\n"
-        "# user manager, sibling of app.slice) on the E-cores, weighing like background.slice.\n"
-        f"[Slice]\nCPUWeight=30\nAllowedCPUs={e_cores}\n"
+        "# user manager, sibling of app.slice) use all CPUs at low CPU and I/O weight\n"
+        "# so builds stay fast when idle while the desktop and shell preempt them.\n"
+        f"[Slice]\nCPUWeight={BUILD_CPU_WEIGHT}\nIOWeight={BUILD_IO_WEIGHT}\n"
     )
 
 
-def helper_dropin_text(e_cores: str) -> str:
-    """flatpak-session-helper's drop-in: the toolboxes' host commands on the E-cores too."""
+def helper_dropin_text() -> str:
+    """flatpak-session-helper's drop-in: toolboxes' host commands at the same low CPU and I/O weight."""
     return (
         "# Managed by cpu-setup.sh (CST): host commands of toolboxes and Flatpak apps\n"
-        "# (flatpak-spawn --host) on the E-cores, like the toolboxes themselves.\n"
-        f"[Service]\nAllowedCPUs={e_cores}\n"
+        "# (flatpak-spawn --host) use all CPUs at low CPU and I/O weight, like the\n"
+        "# toolboxes themselves.\n"
+        f"[Service]\nCPUWeight={BUILD_CPU_WEIGHT}\nIOWeight={BUILD_IO_WEIGHT}\n"
     )
 
 
@@ -316,8 +323,8 @@ def install_done_lines(prog: str) -> list[str]:
     return [
         "",
         "Done. Still to do by you:",
-        "  - log out and in once (gamemode group; cpuset delegation, which makes the",
-        "    toolboxes' E-core restriction effective);",
+        "  - log out and in once (gamemode group; cpuset delegation, which lets the",
+        "    game profile move toolboxes and host commands off the game's CPUs);",
         "  - Steam > game > Properties > Launch options: gamemoderun %command%",
         f"  - optional, confirmed separately: {prog} vm-pin plan   and   {prog} docker-slice install",
         f"  - measure: {prog} watch -l baseline --game dota2 --seconds 300   (while a build runs)",

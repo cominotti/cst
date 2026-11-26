@@ -3138,10 +3138,7 @@ echo E2E-OK
         stage = "/var/tmp/e2e-dist"
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = (
-            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
-            "--set ALLOWED=AllowedCPUs=0"
-        )
+        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
         out = exec_bash(
             self.SYSTEMD_CONTAINER,
             f"""
@@ -3301,7 +3298,6 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "btrfs:core": "--set UUID=00000000-0000-0000-0000-000000000000",
         "btrfs:top-mount": "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5",
         "cpu:core": "--set USER=tester",
-        "cpu:docker-slice": "--set ALLOWED=AllowedCPUs=0",
     }
     # Components whose units run a program of another one (btrfs-stall-alert.service runs btrfs-notify):
     # installed first, as btrfs-setup.sh install does, and removed after.
@@ -3823,10 +3819,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         not_in_image = "/usr/sbin/btrfs /usr/bin/below"
         self.addCleanup(exec_bash, c, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = (
-            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
-            "--set ALLOWED=AllowedCPUs=0"
-        )
+        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
         exec_bash(
             c,
             f"""
@@ -5609,10 +5602,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         stage = "/var/tmp/e2e-gc-manifest"
         self.addCleanup(exec_bash, c, f"rm -rf {stage} /var/tmp/e2e-gc-dry-*", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = (
-            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
-            "--set ALLOWED=AllowedCPUs=0"
-        )
+        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
         out = exec_bash(
             c,
             f"""
@@ -5705,10 +5695,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         stage = "/var/tmp/e2e-gc-hole"
         self.addCleanup(exec_bash, c, f"rm -rf {stage} /var/tmp/e2e-gc-hole-*", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = (
-            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
-            "--set ALLOWED=AllowedCPUs=0"
-        )
+        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
         out = exec_bash(
             c,
             f"""
@@ -7526,23 +7513,28 @@ PY
             power_run1="$(systemctl show -P InvocationID cst-cpu-power.service)"
             written=$(sed -n 's/^written:   //p' /tmp/e2e-84-new.txt | sort | tr '
 ' ' ')
-            # The game profile becomes a zipapp; cpu-watch, cpu-irq, cpu-power, and cpu-vm-pin + new unit/udev rule.
-            [[ "$written" == "/etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
+            # The game profile becomes a zipapp; cpu-watch, cpu-irq, cpu-power, cpu-vm-pin, new unit/udev rule,
+            # and both user drop-ins upgraded to baseline CPUWeight=20 IOWeight=20 without AllowedCPUs.
+            [[ "$written" == "/etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
                 || {{ echo "written over the previous version's install: $written" >&2; cat /tmp/e2e-84-new.txt >&2; exit 1; }}
             grep -q '^game profile: off' <<<"$(/usr/bin/python3 -I /usr/local/sbin/cpu-game-profile state)"  # no pipe: grep -q would cut it
             grep -q 'unchanged: /etc/systemd/system/cpu-game.service' /tmp/e2e-84-new.txt
-            grep -q 'unchanged: /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf' /tmp/e2e-84-new.txt
             systemctl is-active cpu-game-watchdog.timer
             grep -q 'cpu-game-profile' /var/lib/cst/installed.json
-            # The toolboxes' drop-ins (unchanged above: adopted) are in tester's install record under
-            # cpu:toolbox, done; the hwp file is in root's only where the container has the boost knob.
+            # Both user drop-ins are recorded under cpu:toolbox, done, without AllowedCPUs; the hwp file is in
+            # root's only where the container has the boost knob.
             U=/home/tester/.local/state/cst/installed.json
             hwp=/etc/tmpfiles.d/cpu-setup-hwp-boost.conf
             toolbox_lines() {{ runuser -u tester -- /usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} "$U" cpu:toolbox; }}
             want=/home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf
             helper=/home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf
-            [[ ! -e "$helper" ]] || want="$helper $want"
-            [[ "$(toolbox_lines)" == "$want done" ]] || {{ echo "tester's record: $(toolbox_lines)" >&2; exit 1; }}
+            [[ -f "$helper" && -f "$want" ]]
+            if grep -q 'AllowedCPUs=' "$want" "$helper"; then echo "unexpected AllowedCPUs" >&2; exit 1; fi
+            grep -q '^CPUWeight=20$' "$want"
+            grep -q '^IOWeight=20$' "$want"
+            grep -q '^CPUWeight=20$' "$helper"
+            grep -q '^IOWeight=20$' "$helper"
+            [[ "$(toolbox_lines)" == "$helper $want done" ]] || {{ echo "tester's record: $(toolbox_lines)" >&2; exit 1; }}
             if [[ -e "$hwp" ]]; then
                 grep -qF "\"$hwp\"" /var/lib/cst/installed.json
             elif grep -qF "\"$hwp\"" /var/lib/cst/installed.json; then
@@ -15299,27 +15291,138 @@ echo E2E-OK
             if grep -qE '^(written:|removed:)' /tmp/e2e-277-2.out; then cat /tmp/e2e-277-2.out >&2; exit 1; fi
             as_user e2e277 1277 /opt/cst-rw/cst cpu uninstall >/dev/null
             [[ ! -e "$new" ]]
-            # Usual set-up (tester): exact default path and content match origin/main.
+            # Usual set-up (tester): exact default paths and baseline content (no AllowedCPUs).
             rm -f /etc/cpu-setup/cpu-setup.conf
             as_user tester 1000 /opt/cst-rw/cst cpu install >/dev/null
             t_drop="/home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf"
-            [[ -f "$t_drop" ]]
-            ec="$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)"
-            if [[ -n "$ec" ]]; then
-                want_sha="$(printf '# Managed by cpu-setup.sh (CST): toolbox containers (inner user.slice of the\n# user manager, sibling of app.slice) on the E-cores, weighing like background.slice.\n[Slice]\nCPUWeight=30\nAllowedCPUs=%s\n' "$ec" | sha256sum | awk '{print $1}')"
-            else
-                want_sha="$(printf '# Managed by cpu-setup.sh (CST).\n[Slice]\nCPUWeight=30\n' | sha256sum | awk '{print $1}')"
-            fi
-            got_sha="$(sha256sum "$t_drop" | awk '{print $1}')"
-            if [[ "$got_sha" != "$want_sha" ]]; then echo "sha mismatch: $got_sha != $want_sha" >&2; cat "$t_drop" >&2; exit 1; fi
+            h_drop="/home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf"
+            [[ -f "$t_drop" && -f "$h_drop" ]]
+            want_t_sha="$(python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cpu.setup.domain import toolbox_dropin_text; print(toolbox_dropin_text(), end="")' | sha256sum | awk '{print $1}')"
+            want_h_sha="$(python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cpu.setup.domain import helper_dropin_text; print(helper_dropin_text(), end="")' | sha256sum | awk '{print $1}')"
+            got_t_sha="$(sha256sum "$t_drop" | awk '{print $1}')"
+            got_h_sha="$(sha256sum "$h_drop" | awk '{print $1}')"
+            if [[ "$got_t_sha" != "$want_t_sha" ]]; then echo "toolbox sha mismatch: $got_t_sha != $want_t_sha" >&2; cat "$t_drop" >&2; exit 1; fi
+            if [[ "$got_h_sha" != "$want_h_sha" ]]; then echo "helper sha mismatch: $got_h_sha != $want_h_sha" >&2; cat "$h_drop" >&2; exit 1; fi
             as_user tester 1000 /opt/cst-rw/cst cpu uninstall >/dev/null
-            [[ ! -e "$t_drop" ]]
+            [[ ! -e "$t_drop" && ! -e "$h_drop" ]]
             echo E2E-OK
             """,
             check=False,
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.CPU)
+    def test_281_cpu_baseline_all_cpus_weights_and_game_profile_cycle(self) -> None:
+        """Upgrades old AllowedCPUs drop-ins/builds.slice to baseline CPUWeight=20 IOWeight=20 across all CPUs,
+        keeps Delegate=cpuset active in cgroup.controllers without baseline AllowedCPUs, isolates toolboxes,
+        flatpak-session-helper and builds.slice during cpu-game-profile on, and restores all CPUs and
+        baseline weights on off, then uninstalls cleanly."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            """
+            python3 -I -B /opt/cst-rw/cpu/game-profile off >/dev/null 2>&1 || true
+            SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu docker-slice uninstall >/dev/null 2>&1 || true
+            SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu uninstall >/dev/null 2>&1 || true
+            rm -f /etc/cpu-setup/cpu-setup.conf /etc/docker/daemon.json
+            rm -f /run/user/1000/systemd/user/flatpak-session-helper.service
+            if [[ -e /tmp/e2e-281-conf.bak ]]; then mv /tmp/e2e-281-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            if [[ -e /tmp/e2e-281-daemon.bak ]]; then mv /tmp/e2e-281-daemon.bak /etc/docker/daemon.json; fi
+            systemctl daemon-reload || true
+            systemctl restart user@1000.service || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -Ee
+            trap 'echo "test_281 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-281-conf.bak
+            [[ ! -e /etc/docker/daemon.json ]] || cp -a /etc/docker/daemon.json /tmp/e2e-281-daemon.bak
+            rm -f /etc/cpu-setup/cpu-setup.conf /etc/docker/daemon.json
+
+            # Ensure flatpak-session-helper.service exists for the user manager in the test container.
+            if ! systemctl --user -M tester@ cat flatpak-session-helper.service >/dev/null 2>&1; then
+                install -d -m 0755 /run/user/1000/systemd/user
+                printf '[Unit]\nDescription=e2e flatpak-session-helper stand-in\n[Service]\nExecStart=/usr/bin/sleep infinity\n' \
+                    >/run/user/1000/systemd/user/flatpak-session-helper.service
+            fi
+
+            # 1. Seed legacy baseline drop-ins and builds.slice with AllowedCPUs and old weights.
+            uconf=/home/tester/.config/systemd/user
+            runuser -u tester -- install -d "$uconf/user.slice.d" "$uconf/flatpak-session-helper.service.d"
+            printf '# Managed by cpu-setup.sh (CST).\n[Slice]\nCPUWeight=30\nAllowedCPUs=0\n' \
+                >"$uconf/user.slice.d/10-cpu-setup.conf"
+            printf '# Managed by cpu-setup.sh (CST).\n[Service]\nAllowedCPUs=0\n' \
+                >"$uconf/flatpak-session-helper.service.d/10-cpu-setup.conf"
+            chown -R tester:tester "$uconf"
+            printf '[Unit]\nDescription=old\n[Slice]\nCPUWeight=20\nIOWeight=20\nAllowedCPUs=0\n' \
+                >/etc/systemd/system/builds.slice
+
+            as_root() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 "$@"; }
+            gp() { /usr/bin/python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+
+            # 2. Upgrade/apply and restart user@1000.service so Delegate=cpuset takes effect cleanly.
+            as_root /opt/cst-rw/cst cpu install >/tmp/e2e-281-1.out
+            as_root /opt/cst-rw/cst cpu docker-slice install >/tmp/e2e-281-d1.out
+            systemctl restart user@1000.service
+            systemctl --user -M tester@ start flatpak-session-helper.service || true
+
+            # 3. Verify baseline properties merged by real systemd: CPUWeight=20, IOWeight=20, AllowedCPUs unset.
+            for pair in "user.slice" "flatpak-session-helper.service"; do
+                [[ "$(systemctl --user -M tester@ show -P CPUWeight "$pair")" == "20" ]]
+                [[ "$(systemctl --user -M tester@ show -P IOWeight "$pair")" == "20" ]]
+                [[ -z "$(systemctl --user -M tester@ show -P AllowedCPUs "$pair")" ]]
+            done
+            [[ "$(systemctl show -P CPUWeight builds.slice)" == "20" ]]
+            [[ "$(systemctl show -P IOWeight builds.slice)" == "20" ]]
+            [[ -z "$(systemctl show -P AllowedCPUs builds.slice)" ]]
+
+            ucg=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+            grep -qw cpuset "$ucg/cgroup.controllers" || { echo "controllers: $(cat "$ucg/cgroup.controllers")" >&2; exit 1; }
+            st="$(as_root /opt/cst-rw/cst cpu status)"
+            grep -qF "cpuset delegated: yes;" <<<"$st" || { echo "status:" >&2; echo "$st" >&2; exit 1; }
+            grep -qE "effective \(cgroup\): toolboxes \[[0-9,-]+\]" <<<"$st" || { echo "status:" >&2; echo "$st" >&2; exit 1; }
+
+            # 4. Idempotency: second installs write nothing.
+            as_root /opt/cst-rw/cst cpu install >/tmp/e2e-281-2.out
+            if grep -q '^written:' /tmp/e2e-281-2.out; then cat /tmp/e2e-281-2.out >&2; exit 1; fi
+            as_root /opt/cst-rw/cst cpu docker-slice install >/tmp/e2e-281-d2.out
+            if grep -q '^written:' /tmp/e2e-281-d2.out; then cat /tmp/e2e-281-d2.out >&2; exit 1; fi
+
+            # 5. Game mode isolates CPUs/weights and off restores baseline weights and unrestricted CPUs.
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp on >/tmp/e2e-281-on.out
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "idle" ]]
+            [[ "$(systemctl --user -M tester@ show -P AllowedCPUs user.slice)" == "0" ]]
+            [[ "$(systemctl --user -M tester@ show -P AllowedCPUs flatpak-session-helper.service)" == "0" ]]
+            [[ "$(systemctl show -P CPUWeight builds.slice)" == "idle" ]]
+            [[ "$(systemctl show -P AllowedCPUs builds.slice)" == "0" ]]
+
+            gp off >/tmp/e2e-281-off.out
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "20" ]]
+            [[ "$(systemctl --user -M tester@ show -P IOWeight user.slice)" == "20" ]]
+            [[ -z "$(systemctl --user -M tester@ show -P AllowedCPUs user.slice)" ]]
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight flatpak-session-helper.service)" == "20" ]]
+            [[ "$(systemctl --user -M tester@ show -P IOWeight flatpak-session-helper.service)" == "20" ]]
+            [[ -z "$(systemctl --user -M tester@ show -P AllowedCPUs flatpak-session-helper.service)" ]]
+            [[ "$(systemctl show -P CPUWeight builds.slice)" == "20" ]]
+            [[ "$(systemctl show -P IOWeight builds.slice)" == "20" ]]
+            [[ -z "$(systemctl show -P AllowedCPUs builds.slice)" ]]
+
+            # 6. Uninstall cleanly removes unit and drop-ins.
+            as_root /opt/cst-rw/cst cpu docker-slice uninstall >/dev/null
+            as_root /opt/cst-rw/cst cpu uninstall >/dev/null
+            [[ ! -e /etc/systemd/system/builds.slice ]]
+            [[ ! -e "$uconf/user.slice.d/10-cpu-setup.conf" ]]
+            [[ ! -e "$uconf/flatpak-session-helper.service.d/10-cpu-setup.conf" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.TOOLCHAINS)
     def test_278_toolchains_auto_units_follow_user_unit_path(self) -> None:
