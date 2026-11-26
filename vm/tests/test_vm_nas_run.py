@@ -42,9 +42,9 @@ from vm.tests.test_vm_nas import (
 )
 
 DISK = "/img/a.qcow2"
-OVERLAY = f"{DISK}{vm_domain.OVERLAY_MARK}{STAMP}"
 REPO: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
 NUMBERS = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
+_STOPPED = "stopped by signal SIGTERM"
 
 type VirshHook = Callable[[Sequence[str]], tuple[int, str, str] | None]
 
@@ -129,7 +129,7 @@ class _StopInRetention(FakeNasRestic):
     def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
         answer = super().run(env, args, timeout)
         if "--keep-weekly" in args:
-            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+            raise vm_domain_backup.Stop(_STOPPED)
         return answer
 
 
@@ -140,7 +140,7 @@ class _StopAtReadLine(FakeNasOut):
     def say(self, text: str, *, flush: bool = False) -> None:
         super().say(text, flush=flush)
         if text.startswith("  restic snapshot ") and " read, " in text:
-            raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+            raise vm_domain_backup.Stop(_STOPPED)
 
 
 def _write_failed() -> str:
@@ -529,7 +529,7 @@ class NasUnmergedIndexedTest(unittest.TestCase):
                 answered: Callable[[], None] | None = None,
             ) -> tuple[int, vm_domain_backup.ResticSummary]:
                 del env, args, timeout, out, answered
-                raise vm_domain_backup.StopAfterSnapshot("stopped by signal SIGTERM", 0, {"snapshot_id": SNAP_ID})
+                raise vm_domain_backup.StopAfterSnapshot(_STOPPED, 0, {"snapshot_id": SNAP_ID})
 
         events: list[str] = []
         run = _Run(
