@@ -16558,6 +16558,68 @@ EOF
             absent() {{ ! grep -qF -- "$1" "$2"; }}
 
             cp {w}/etc/fstab {w}/fstab.before
+            # Unprivileged user (tester) with findmnt returning null UUIDs must resolve via /dev/disk/by-uuid
+            mkdir -p {w}/dev/disk/by-uuid {w}/dev/mapper
+            : >{w}/dev/dm-0
+            : >{w}/dev/dm-3
+            ln -s ../dm-3 {w}/dev/mapper/cache
+            ln -s ../../dm-0 {w}/dev/disk/by-uuid/uuid-root-1111
+            ln -s ../../dm-3 {w}/dev/disk/by-uuid/uuid-cache-2222
+            {{
+                row /dev/dm-0 /var btrfs rw,noatime "" /var
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime,compress-force=zstd:1 "" /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime,compress-force=zstd:1 "" /scratchpad
+            }} >{w}/mounts.nouuid
+            cp {w}/mounts {w}/mounts.saved
+            cp {w}/mounts.nouuid {w}/mounts
+            chmod 755 {w} {w}/bin {w}/etc
+            chmod 644 {w}/mounts {w}/etc/fstab
+            runuser -u tester -- env HOME=/home/tester CST_BTRFS_CACHE_ROOT="{w}" PATH="{w}/bin:$PATH" \
+                $cst btrfs cache system plan >{w}/plan.tester.out
+            if grep -qF "BLOCKED:" {w}/plan.tester.out; then exit 1; fi
+            grep -qF "below" {w}/plan.tester.out
+            # Also verify unprivileged `provision plan` handles 0600 crypttab, 0700 keydir, and sysfs fallbacks
+            mkdir -p {w}/etc/cst {w}/etc/cryptsetup-keys.d {w}/dev/disk/by-partuuid \
+                {w}/sys/class/block/nvme2n1p1/holders {w}/sys/class/block/dm-3/dm \
+                {w}/sys/fs/btrfs/uuid-cache-2222
+            : >{w}/dev/nvme2n1p1
+            ln -s ../../nvme2n1p1 {w}/dev/disk/by-partuuid/d72cc792-ec12-498e-9678-b87838cb18b7
+            ln -s /dev/null {w}/sys/class/block/nvme2n1p1/holders/dm-3
+            printf 'MAJOR=259\\nPARTUUID=d72cc792-ec12-498e-9678-b87838cb18b7\\n' >{w}/sys/class/block/nvme2n1p1/uevent
+            printf 'cache\\n' >{w}/sys/class/block/dm-3/dm/name
+            printf 'CRYPT-LUKS2-590f47437bcb40bb9a18b5b28b470c8d-cache\\n' >{w}/sys/class/block/dm-3/dm/uuid
+            printf 'cache\\n' >{w}/sys/fs/btrfs/uuid-cache-2222/label
+            cat >{w}/etc/cst/btrfs-cache.conf <<'CONF'
+CACHE_MAPPER_NAME=cache
+CACHE_PARTUUID=d72cc792-ec12-498e-9678-b87838cb18b7
+CACHE_SIZE_BYTES=536870912000
+CONF
+            touch {w}/etc/cryptsetup-keys.d/cache.key
+            chmod 700 {w}/etc/cryptsetup-keys.d
+            chmod 600 {w}/etc/crypttab
+            cp {w}/etc/fstab {w}/fstab.sys.saved
+            cat >{w}/etc/fstab <<'EOF'
+UUID=uuid-root-1111 /var btrfs rw,noatime 0 0
+/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,discard=async,compress-force=zstd:1,commit=60,nofail 0 0 # managed-by: btrfs-cache (CST) provision=base kind=cache
+/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,discard=async,compress-force=zstd:1,commit=60,nofail 0 0 # managed-by: btrfs-cache (CST) provision=base kind=scratchpad
+EOF
+            chmod 644 {w}/etc/fstab
+            cat >{w}/bin/lsblk <<'LSBLK'
+#!/bin/bash
+printf '{{"blockdevices":[{{"name":"/dev/nvme2n1p1","type":"part","partuuid":null,"size":536870912000,"fstype":null,"uuid":null,"mountpoints":[]}}]}}\n'
+LSBLK
+            for cmd in blkid dmsetup cryptsetup; do
+                printf '#!/bin/bash\\nexit 1\\n' >{w}/bin/$cmd
+                chmod +x {w}/bin/$cmd
+            done
+            chmod +x {w}/bin/lsblk
+            runuser -u tester -- env HOME=/home/tester CST_BTRFS_CACHE_ROOT="{w}" PATH="{w}/bin:$PATH" \
+                $cst btrfs cache provision plan >{w}/prov.tester.out
+            if grep -qF "BLOCKED:" {w}/prov.tester.out; then exit 1; fi
+            grep -qF -- "--root" {w}/prov.tester.out
+            mv {w}/fstab.sys.saved {w}/etc/fstab
+            mv {w}/mounts.saved {w}/mounts
+
             $cst btrfs cache system plan >{w}/plan.out
             cmp -s {w}/etc/fstab {w}/fstab.before
             grep -qF "below" {w}/plan.out

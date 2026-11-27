@@ -1275,7 +1275,9 @@ class CacheTestCtx:
         return "/run/host/etc" if self._container else "/etc"
 
     def host_run_dir(self, subpath: str) -> str:
-        return f"/run/host/{subpath}" if self._container else f"/run/{subpath}"
+        cleaned = subpath.strip("/")
+        base = "/run/host/run" if self._container else "/run"
+        return f"{base}/{cleaned}" if cleaned else base
 
 
 class MountTable:

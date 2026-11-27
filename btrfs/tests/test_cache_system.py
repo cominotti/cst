@@ -5,13 +5,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import io
+import json
 import os
 import stat
 import tempfile
 import unittest
 from unittest import mock
 
-from btrfs.cache.adapters.mounts import CacheMountRuntime
+from btrfs.cache.adapters.mounts import CacheMountRuntime, CacheMountTable, canonical_dev_path
 from btrfs.cache.adapters.system import CacheSystemBindAdapter
 from btrfs.cache.application.mounts import CacheMounts
 from btrfs.cache.application.system import SystemEnv, run_system_action
@@ -57,6 +58,7 @@ from btrfs.tests.fakes import (
     RELOAD_FAILED_TEXT,
     UMOUNT_BUSY,
     UUID_CACHE_DRIVE,
+    UUID_ROOT,
     CacheTestCtx,
     CacheWorld,
     FakeCacheAccounts,
@@ -67,6 +69,7 @@ from btrfs.tests.fakes import (
     FakeFstab,
     FakeMountRunner,
 )
+from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.ports import CommandResult
 
@@ -728,6 +731,107 @@ class SystemBindAdapterTest(unittest.TestCase):
             with mock.patch.object(runner, "run", return_value=CommandResult(0, "", "")) as m_mnt:
                 self.assertIsNone(adapter.bind(spec_below.source, spec_below.target))
             self.assertEqual(m_mnt.call_args.args[0][0:2], ["mount", "--bind"])
+
+    def test_mount_table_fills_missing_uuids_from_dev_disk_by_uuid_for_unprivileged_plan(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cst-sysuuid-") as tmp:
+            os.makedirs(os.path.join(tmp, "etc"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "dev/disk/by-uuid"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "dev/mapper"), exist_ok=True)
+            dm0 = os.path.join(tmp, "dev/dm-0")
+            dm3 = os.path.join(tmp, "dev/dm-3")
+            with open(dm0, "wb") as fh:
+                fh.write(b"")
+            with open(dm3, "wb") as fh:
+                fh.write(b"")
+            os.symlink("../dm-3", os.path.join(tmp, "dev/mapper/cache"))
+            os.symlink("../../dm-0", os.path.join(tmp, "dev/disk/by-uuid", UUID_ROOT))
+            os.symlink("../../dm-3", os.path.join(tmp, "dev/disk/by-uuid", UUID_CACHE_DRIVE))
+
+            runner = FakeMountRunner(tmp)
+            rt = CacheMountRuntime(seam_root=tmp, ctx=CacheTestCtx(root=False), runner=runner, env_map={})
+            payload = {
+                "filesystems": [
+                    {
+                        "source": "/dev/dm-0[/var]",
+                        "target": "/var",
+                        "fstype": "btrfs",
+                        "options": "rw,noatime",
+                        "uuid": None,
+                        "fsroot": "/var",
+                    },
+                    {
+                        "source": "/dev/mapper/cache[/cache]",
+                        "target": "/var/mnt/cache",
+                        "fstype": "btrfs",
+                        "options": "rw,noatime,compress-force=zstd:1",
+                        "uuid": None,
+                        "fsroot": "/cache",
+                    },
+                ]
+            }
+            with mock.patch.object(runner, "run", return_value=CommandResult(0, json.dumps(payload), "")):
+                mounts, err = CacheMountTable(rt).read()
+            self.assertIsNone(err)
+            self.assertEqual(
+                [(m.target, m.uuid) for m in mounts], [("/var", UUID_ROOT), ("/var/mnt/cache", UUID_CACHE_DRIVE)]
+            )
+
+            os.makedirs(os.path.join(tmp, "var/log/below"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "var/log/btrfs-stall-monitor"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "var/tmp"), exist_ok=True)
+            out_buf = io.StringIO()
+            with mock.patch.object(runner, "run", return_value=CommandResult(0, json.dumps(payload), "")):
+                rc = run_cache_mount(
+                    ["system", "plan"],
+                    deps=ManagedCliEnv(
+                        env={"CST_BTRFS_CACHE_ROOT": tmp},
+                        out=out_buf,
+                        err=io.StringIO(),
+                        ctx=CacheTestCtx(root=False),
+                        runner=runner,
+                    ),
+                )
+            self.assertEqual(rc, 0)
+            out_txt = out_buf.getvalue()
+            self.assertNotIn("cannot verify filesystem UUID separation", out_txt)
+            self.assertIn("below", out_txt)
+            self.assertNotIn("BLOCKED:", out_txt)
+
+    def test_canonical_dev_path_in_container_and_btrfs_sysfs_raid1_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cst-raid1uuid-") as tmp:
+            os.makedirs(os.path.join(tmp, "dev/disk/by-uuid"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, "dev/mapper"), exist_ok=True)
+            os.makedirs(os.path.join(tmp, f"sys/fs/btrfs/{UUID_ROOT}/devices"), exist_ok=True)
+            for dev in ("dev/dm-0", "dev/dm-1"):
+                with open(os.path.join(tmp, dev), "wb") as fh:
+                    fh.write(b"")
+            # Simulate a 2-device RAID1 btrfs root where by-uuid points to dm-0 while findmnt reports dm-1
+            os.symlink("../../dm-0", os.path.join(tmp, "dev/disk/by-uuid", UUID_ROOT))
+            os.symlink("/dev/null", os.path.join(tmp, f"sys/fs/btrfs/{UUID_ROOT}/devices/dm-0"))
+            os.symlink("/dev/null", os.path.join(tmp, f"sys/fs/btrfs/{UUID_ROOT}/devices/dm-1"))
+            os.symlink("../dm-1", os.path.join(tmp, "dev/mapper/raid-member"))
+
+            ctx = HostExecutionContext(exists=lambda p: p == "/run/.containerenv", euid=lambda: 1000, host_root=tmp)
+            runner = FakeMountRunner(tmp)
+            rt = CacheMountRuntime(seam_root="", ctx=ctx, runner=runner, env_map={})
+            self.assertEqual(canonical_dev_path("/dev/mapper/raid-member", rt), "/dev/dm-1")
+
+            payload = {
+                "filesystems": [
+                    {
+                        "source": "/dev/dm-1[/var]",
+                        "target": "/var",
+                        "fstype": "btrfs",
+                        "options": "rw,noatime",
+                        "uuid": None,
+                        "fsroot": "/var",
+                    }
+                ]
+            }
+            with mock.patch.object(runner, "run", return_value=CommandResult(0, json.dumps(payload), "")):
+                mounts, err = CacheMountTable(rt).read()
+            self.assertIsNone(err)
+            self.assertEqual([(m.target, m.uuid) for m in mounts], [("/var", UUID_ROOT)])
 
 
 if __name__ == "__main__":

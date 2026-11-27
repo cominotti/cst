@@ -133,6 +133,7 @@ class CacheMountParsedArgs:
     mapper: str | None = None
     do_format: bool = False
     assume_yes: bool = False
+    as_root: bool = False
     system_argv: tuple[str, ...] = ()
     error: str | None = None
     code: int = 0
@@ -274,14 +275,14 @@ def cache_mount_parse_error(parsed: CacheMountParsedArgs) -> tuple[int, str] | N
 
 
 def cache_mount_write_action(parsed: CacheMountParsedArgs) -> str | None:
-    """Return subcommand name when the operation mutates the host."""
+    """Return subcommand name when the operation mutates the host (or needs root via `--root`)."""
     if parsed.action in (CacheMountAction.ATTACH, CacheMountAction.DETACH, CacheMountAction.UNPROVISION):
         return parsed.action.value
-    if parsed.action == CacheMountAction.PROVISION and parsed.provision_action in (
-        ProvisionSubcommand.INIT,
-        ProvisionSubcommand.APPLY,
-    ):
-        return f"provision {parsed.provision_action.value}"
+    if parsed.action == CacheMountAction.PROVISION:
+        if parsed.provision_action in (ProvisionSubcommand.INIT, ProvisionSubcommand.APPLY):
+            return f"provision {parsed.provision_action.value}"
+        if parsed.provision_action == ProvisionSubcommand.PLAN and parsed.as_root:
+            return "provision plan --root"
     return None
 
 
@@ -414,6 +415,7 @@ class _FlagState:
     mapper: str | None = None
     do_format: bool = False
     assume_yes: bool = False
+    as_root: bool = False
 
 
 _VALUE_FLAG_SPECS: Final[dict[str, tuple[str, str]]] = {
@@ -471,6 +473,8 @@ def _step_provision_flag(
             return _consume_value_flag(vflag, tok, next_tok, state)
     if tok == "--format" and sub in (ProvisionSubcommand.PLAN, ProvisionSubcommand.APPLY):
         return replace(state, do_format=True), None, 1
+    if tok == "--root" and sub == ProvisionSubcommand.PLAN:
+        return replace(state, as_root=True), None, 1
     if tok == "--yes" and sub == ProvisionSubcommand.APPLY:
         return replace(state, assume_yes=True), None, 1
     return state, f"unknown or unsupported option {tok!r} for `provision {sub.value}`", 0
@@ -490,6 +494,7 @@ def _parse_provision_args(argv: Sequence[str]) -> CacheMountParsedArgs:
     if sub == ProvisionSubcommand.HELP or any(tok in HELP_WORDS for tok in rest):
         return CacheMountParsedArgs(action=CacheMountAction.PROVISION, provision_action=ProvisionSubcommand.HELP)
     state = _FlagState()
+    err: str | None = None
     i = 0
     while i < len(rest):
         next_tok = rest[i + 1] if i + 1 < len(rest) else None
@@ -499,15 +504,12 @@ def _parse_provision_args(argv: Sequence[str]) -> CacheMountParsedArgs:
                 action=CacheMountAction.PROVISION, provision_action=sub, error=err, code=EXIT_USAGE
             )
         i += step
-    prov_err: str | None = None
     if sub == ProvisionSubcommand.INIT and state.device is None:
-        prov_err = "`provision init` requires --device PATH"
+        err = "`provision init` requires --device PATH"
     elif state.mapper is not None and "/" in state.mapper:
-        prov_err = f"--mapper must be a plain mapper name, not a path: {state.mapper!r}"
-    if prov_err is not None:
-        return CacheMountParsedArgs(
-            action=CacheMountAction.PROVISION, provision_action=sub, error=prov_err, code=EXIT_USAGE
-        )
+        err = f"--mapper must be a plain mapper name, not a path: {state.mapper!r}"
+    if err is not None:
+        return CacheMountParsedArgs(CacheMountAction.PROVISION, provision_action=sub, error=err, code=EXIT_USAGE)
     return CacheMountParsedArgs(
         action=CacheMountAction.PROVISION,
         provision_action=sub,
@@ -515,6 +517,7 @@ def _parse_provision_args(argv: Sequence[str]) -> CacheMountParsedArgs:
         mapper=state.mapper,
         do_format=state.do_format,
         assume_yes=state.assume_yes,
+        as_root=state.as_root,
     )
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import re
 from typing import Final
 
@@ -69,6 +70,15 @@ _PARTUUID_RE: Final = re.compile(r"[0-9a-f]{8}-(?:(?:[0-9a-f]{4}-){3}[0-9a-f]{12
 _MAPPER_NAME_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _SYSTEM_MOUNTS: Final = frozenset({"/", "/sysroot", "/var", "/var/home", "/home", "/boot", "/boot/efi"})
 NOT_REGULAR_FILE_NOTE: Final = "not a regular file (a FIFO, a device, a folder, or a link to one)"
+PERMISSION_DENIED_NOTE: Final = "permission denied (needs root to read)"
+CRYPTTAB_PERMISSION_DENIED: Final = f"cannot read {CRYPTTAB_PATH}: {PERMISSION_DENIED_NOTE}"
+
+
+class ProvisionCheckMode(StrEnum):
+    """Validation strictness: `APPLY` refuses unreadable root files; `PLAN` degrades with a `--root` note."""
+
+    APPLY = "apply"
+    PLAN = "plan"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +164,7 @@ class LuksMapperState:
     mapper_uuid: str = ""
     mapper_label: str = ""
     subvols_present: tuple[str, ...] = ()
+    keyfile_unreadable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +187,7 @@ class ProvisionProbe:
     user_mounts_active: tuple[str, ...] = ()
     fstab_behind: bool | None = False
     system_managed_entries: tuple[ManagedSystemEntry, ...] = ()
+    crypttab_unreadable: bool = False
 
 
 def is_valid_mapper_name(name: str) -> bool:
@@ -392,7 +404,13 @@ def _blank_luks_blockers(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_f
     return [msg for on, msg in checks if on][:1]
 
 
-def _existing_luks_blockers(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_format: bool) -> list[str]:
+def _existing_luks_blockers(
+    probe: ProvisionProbe,
+    spec: CacheHardwareSpec,
+    *,
+    do_format: bool,
+    mode: ProvisionCheckMode = ProvisionCheckMode.APPLY,
+) -> list[str]:
     luks = probe.luks
     non_luks_mapper = luks.mapper_exists and luks.mapper_luks_uuid is None
     luks_mismatch = (
@@ -407,10 +425,11 @@ def _existing_luks_blockers(probe: ProvisionProbe, spec: CacheHardwareSpec, *, d
         BTRFS_CACHE_LABEL,
         spec.mapper_name,
     )
+    keyfile_missing = not luks.keyfile_exists and not (mode == ProvisionCheckMode.PLAN and luks.keyfile_unreadable)
     checks = (
         (luks.keyfile_not_regular, f"{spec.keyfile_path} is {NOT_REGULAR_FILE_NOTE}"),
         (
-            not luks.keyfile_exists,
+            keyfile_missing,
             f"{spec.device_path} is already LUKS2, but {spec.keyfile_path} is missing (add/provide keyfile before apply)",
         ),
         (
@@ -442,7 +461,12 @@ def _existing_luks_blockers(probe: ProvisionProbe, spec: CacheHardwareSpec, *, d
 
 
 def _format_and_luks_blockers(
-    probe: ProvisionProbe, spec: CacheHardwareSpec, dev: BlockDeviceFacts, *, do_format: bool
+    probe: ProvisionProbe,
+    spec: CacheHardwareSpec,
+    dev: BlockDeviceFacts,
+    *,
+    do_format: bool,
+    mode: ProvisionCheckMode = ProvisionCheckMode.APPLY,
 ) -> list[str]:
     if not dev.fstype and not dev.pttype:
         return _blank_luks_blockers(probe, spec, do_format=do_format)
@@ -454,7 +478,7 @@ def _format_and_luks_blockers(
                 "refusing to wipe existing data (wipefs -a manually only if you are sure)"
             )
         ]
-    return _existing_luks_blockers(probe, spec, do_format=do_format)
+    return _existing_luks_blockers(probe, spec, do_format=do_format, mode=mode)
 
 
 def _base_provision_blockers(probe: ProvisionProbe) -> list[str]:
@@ -490,7 +514,12 @@ def _base_provision_blockers(probe: ProvisionProbe) -> list[str]:
     return errors
 
 
-def validate_provision_apply(probe: ProvisionProbe, *, do_format: bool) -> list[str]:
+def validate_provision_apply(
+    probe: ProvisionProbe,
+    *,
+    do_format: bool,
+    mode: ProvisionCheckMode = ProvisionCheckMode.APPLY,
+) -> list[str]:
     """Return every blocking reason refusing `provision apply` (empty when safe to run)."""
     if probe.conf_error is not None:
         return [probe.conf_error]
@@ -502,7 +531,7 @@ def validate_provision_apply(probe: ProvisionProbe, *, do_format: bool) -> list[
         ]
     spec = probe.spec
     errors: list[str] = []
-    if probe.crypttab_error is not None:
+    if probe.crypttab_error is not None and not (mode == ProvisionCheckMode.PLAN and probe.crypttab_unreadable):
         errors.append(probe.crypttab_error)
     if probe.fstab_error is not None:
         errors.append(probe.fstab_error)
@@ -520,7 +549,7 @@ def validate_provision_apply(probe: ProvisionProbe, *, do_format: bool) -> list[
             f"{spec.device_path} size {dev.size_bytes} bytes does not match {CACHE_CONF_PATH} ({spec.size_bytes} bytes)"
         )
     if not errors:
-        errors.extend(_format_and_luks_blockers(probe, spec, dev, do_format=do_format))
+        errors.extend(_format_and_luks_blockers(probe, spec, dev, do_format=do_format, mode=mode))
     if probe.crypttab_text is not None and unmanaged_crypttab_conflict(probe.crypttab_text, spec.mapper_name):
         errors.append(f"{CRYPTTAB_PATH} already has an unmanaged entry for {spec.mapper_name!r}; remove it first")
     errors.extend(_base_provision_blockers(probe))
@@ -609,7 +638,7 @@ def needs_base_remount(base: ProvisionBaseState) -> bool:
 def _provision_plan_steps(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_format: bool) -> list[str]:
     steps: list[str] = []
     luks = probe.luks
-    if not luks.keyfile_exists:
+    if not luks.keyfile_exists and not luks.keyfile_unreadable:
         steps.append(f"create root-only keyfile {spec.keyfile_path} (mode {KEYFILE_MODE:04o})")
     if probe.device is not None and not probe.device.fstype and do_format:
         steps.append(f"luksFormat (LUKS2) {spec.device_path} with {spec.keyfile_path}")
@@ -621,7 +650,7 @@ def _provision_plan_steps(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_
     missing_subvols = [s for s in SUBVOL_FOR_KIND.values() if s not in luks.subvols_present]
     if missing_subvols:
         steps.append(f"create btrfs subvolume(s): {', '.join(missing_subvols)}")
-    crypt_ok = (
+    crypt_ok = probe.crypttab_unreadable or (
         probe.crypttab_text is not None
         and luks.luks_uuid is not None
         and render_crypttab_line(spec, luks.luks_uuid) in file_lines(probe.crypttab_text)
@@ -644,6 +673,21 @@ def _provision_plan_steps(probe: ProvisionProbe, spec: CacheHardwareSpec, *, do_
     return steps
 
 
+def _unreadable_root_note(probe: ProvisionProbe, spec: CacheHardwareSpec, prog: str) -> str | None:
+    hidden = [
+        label
+        for on, label in (
+            (probe.crypttab_unreadable, CRYPTTAB_PATH),
+            (probe.luks.keyfile_unreadable, spec.keyfile_path),
+        )
+        if on
+    ]
+    if not hidden:
+        return None
+    joined = " and ".join(hidden)
+    return f"Note: {joined} not readable as this user; run `{prog} provision plan --root` on the host for a full check."
+
+
 def format_provision_plan(
     probe: ProvisionProbe, prog: str, *, do_format: bool, seam_lines: Sequence[str] = ()
 ) -> list[str]:
@@ -655,15 +699,19 @@ def format_provision_plan(
             f"Configured partition ({CACHE_CONF_PATH}): {spec.device_path} "
             f"(size={spec.size_bytes} bytes, mapper={spec.mapper_name})"
         )
-    blockers = validate_provision_apply(probe, do_format=do_format)
+    blockers = validate_provision_apply(probe, do_format=do_format, mode=ProvisionCheckMode.PLAN)
     if blockers:
         lines.extend(f"BLOCKED: {msg}" for msg in blockers)
         return lines
     if probe.spec is None:
         return [*lines, f"BLOCKED: {CACHE_CONF_PATH} not configured"]
     steps = _provision_plan_steps(probe, probe.spec, do_format=do_format)
+    note = _unreadable_root_note(probe, probe.spec, prog)
     if not steps and probe.fstab_behind is False:
-        return [*lines, f"Already provisioned ({CACHE_BASE}, {SCRATCHPAD_BASE}); nothing to do."]
+        lines.append(f"Already provisioned ({CACHE_BASE}, {SCRATCHPAD_BASE}); nothing to do.")
+        if note is not None:
+            lines.append(note)
+        return lines
     if not steps:
         why = (
             f"systemd has not loaded {FSTAB_PATH} as it is on disk"
@@ -673,6 +721,8 @@ def format_provision_plan(
         lines.append(f"Base mounts are configured; {why}: provision apply runs systemctl daemon-reload.")
     else:
         lines.extend(f"  - {step}" for step in steps)
+    if note is not None:
+        lines.append(note)
     fmt_flag = " --format" if do_format else ""
     lines.append(f"Dry run, nothing changed. Run `{prog} provision apply{fmt_flag}` to apply.")
     return lines

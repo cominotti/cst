@@ -17,10 +17,12 @@ from btrfs.cache.domain import (
     DIR_MODE_PRIVATE,
     FILE_MODE_TAG,
     FINDMNT_COLUMNS,
+    FSTYPE_BTRFS,
     MIN_HUMAN_UID,
     CacheMountBinding,
     CacheMountUser,
     LiveMount,
+    mount_device,
     parse_findmnt_mounts,
 )
 from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
@@ -36,6 +38,7 @@ from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode
 
 _CRYPTTAB_PATH: Final = "/etc/crypttab"
 _ACCOUNT_DB_PATH: Final = "/etc/passwd"
+_DEV_BY_UUID_DIR: Final = "/dev/disk/by-uuid"
 _FINDMNT_TIMEOUT_S: Final = 15
 _ACCOUNT_MIN_FIELDS: Final = 6
 _FSTAB_MODE: Final = 0o644
@@ -118,6 +121,89 @@ def from_toolbox(rt: CacheMountRuntime) -> bool:
     return not rt.seam_root and rt.ctx.is_container()
 
 
+def canonical_dev_path(path: str, rt: CacheMountRuntime) -> str:
+    """Resolve symlinks under the runtime host view and return the canonical host `/dev/...` path."""
+    real = os.path.realpath(map_path(path, rt, read_only=True))
+    prefix = ""
+    if rt.seam_root:
+        prefix = rt.seam_root.rstrip("/")
+    elif from_toolbox(rt):
+        prefix = rt.ctx.path("/").rstrip("/")
+    if prefix and real.startswith(f"{prefix}/"):
+        return real.removeprefix(prefix)
+    return real
+
+
+def _btrfs_sysfs_device_uuids(rt: CacheMountRuntime) -> dict[str, str]:
+    sysfs_root = map_path("/sys/fs/btrfs", rt, read_only=True)
+    try:
+        uuids = sorted(os.listdir(sysfs_root))
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for fs_uuid in uuids:
+        devs_dir = os.path.join(sysfs_root, fs_uuid, "devices")
+        if not os.path.isdir(devs_dir):
+            continue
+        try:
+            dev_names = sorted(os.listdir(devs_dir))
+        except OSError:
+            continue
+        for dev_name in dev_names:
+            out[f"/dev/{dev_name}"] = fs_uuid
+    return out
+
+
+def symlink_index_by_target(host_dir: str, rt: CacheMountRuntime) -> dict[str, str]:
+    """Map canonical target device path -> entry name for symlinks in `host_dir`."""
+    mapped_dir = map_path(host_dir, rt, read_only=True)
+    try:
+        names = sorted(os.listdir(mapped_dir))
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for name in names:
+        out.setdefault(canonical_dev_path(f"{host_dir}/{name}", rt), name)
+    return out
+
+
+def lookup_uuid_for_device(device_path: str, rt: CacheMountRuntime) -> str:
+    """Return filesystem UUID matching `device_path` from `/dev/disk/by-uuid`, or `""`."""
+    return symlink_index_by_target(_DEV_BY_UUID_DIR, rt).get(canonical_dev_path(device_path, rt), "")
+
+
+def _lookup_mount_uuid(
+    dev: str,
+    fstype: str,
+    rt: CacheMountRuntime,
+    caches: tuple[dict[str, str] | None, dict[str, str] | None],
+) -> tuple[str | None, tuple[dict[str, str] | None, dict[str, str] | None]]:
+    uuid_map, btrfs_map = caches
+    canon = canonical_dev_path(dev, rt)
+    if uuid_map is None:
+        uuid_map = symlink_index_by_target(_DEV_BY_UUID_DIR, rt)
+    found = uuid_map.get(canon)
+    if found is None and fstype == FSTYPE_BTRFS:
+        if btrfs_map is None:
+            btrfs_map = _btrfs_sysfs_device_uuids(rt)
+        found = btrfs_map.get(canon)
+    return found, (uuid_map, btrfs_map)
+
+
+def _fill_missing_mount_uuids(mounts: tuple[LiveMount, ...], rt: CacheMountRuntime) -> tuple[LiveMount, ...]:
+    caches: tuple[dict[str, str] | None, dict[str, str] | None] = (None, None)
+    resolved: list[LiveMount] = []
+    for m in mounts:
+        entry = m
+        dev = mount_device(m.source)
+        if not m.uuid and dev.startswith("/dev/"):
+            found, caches = _lookup_mount_uuid(dev, m.fstype, rt, caches)
+            if found is not None:
+                entry = replace(m, uuid=found)
+        resolved.append(entry)
+    return tuple(resolved)
+
+
 def _read_live_mounts(rt: CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str | None]:
     """Every live mount, from one `findmnt -J -l` call (on the host from a toolbox)."""
     res = rt.runner.run(
@@ -132,7 +218,7 @@ def _read_live_mounts(rt: CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str
     mounts = parse_findmnt_mounts(res.stdout)
     if mounts is None:
         return (), "findmnt's answer is not the JSON it should be"
-    return mounts, None
+    return _fill_missing_mount_uuids(mounts, rt), None
 
 
 def dir_is_nonempty(path: str) -> bool:

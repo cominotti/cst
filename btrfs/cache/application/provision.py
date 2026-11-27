@@ -26,6 +26,7 @@ from btrfs.cache.domain.provision import (
     BTRFS_CACHE_LABEL,
     CACHE_CONF_PATH,
     CRYPTTAB_PATH,
+    CRYPTTAB_PERMISSION_DENIED,
     DEFAULT_MAPPER_NAME,
     SUBVOL_FOR_KIND,
     BlockDeviceFacts,
@@ -199,7 +200,7 @@ def _probe_mapper_and_luks(
     unlocks: bool | None = None
     if dev is not None and dev.fstype == "crypto_LUKS":
         luks_uuid = prov.luks_uuid(spec.device_path)
-        if kf.exists and not kf_bad:
+        if kf.exists and not kf_bad and not kf.permission_denied:
             unlocks = prov.test_keyfile(spec.device_path, spec.keyfile_path)
 
     mp_fstype, mp_uuid, mp_label, mp_luks_uuid = (
@@ -220,13 +221,24 @@ def _probe_mapper_and_luks(
         ):
             subvols.append(subvol_name)
     return LuksMapperState(
-        kf.exists, kf_bad, mapper.exists, luks_uuid, mp_luks_uuid, unlocks, mp_fstype, mp_uuid, mp_label, tuple(subvols)
+        kf.exists,
+        kf_bad,
+        mapper.exists,
+        luks_uuid,
+        mp_luks_uuid,
+        unlocks,
+        mp_fstype,
+        mp_uuid,
+        mp_label,
+        tuple(subvols),
+        keyfile_unreadable=kf.permission_denied,
     )
 
 
 def _probe_provision(prov: CacheProvisionPort, env: ProvisionEnv) -> ProvisionProbe:
     conf_text, conf_error, spec, conf_problems = _read_existing_conf(prov)
     crypttab_text, crypttab_error = prov.read_crypttab_exact()
+    crypttab_unreadable = crypttab_error == CRYPTTAB_PERMISSION_DENIED
     fstab_text: str | None = None
     fstab_error: str | None = None
     try:
@@ -257,6 +269,7 @@ def _probe_provision(prov: CacheProvisionPort, env: ProvisionEnv) -> ProvisionPr
         user_mounts_active=_user_mounts_under_bases(live_mounts, bases),
         fstab_behind=fstab_lines_unread(env.systemd.mount_units(), {CACHE_BASE, SCRATCHPAD_BASE}),
         system_managed_entries=parse_system_fstab_entries(fstab_text or ""),
+        crypttab_unreadable=crypttab_unreadable,
     )
 
 
