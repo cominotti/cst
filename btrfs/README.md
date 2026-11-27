@@ -1858,7 +1858,7 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
 
 ```
 cst btrfs cache [--user NAME]                        # status (default; user + toolbox)
-cst btrfs cache provision plan [--device PATH]       # read-only: inspect a partition or /etc/cst/btrfs-cache.conf
+cst btrfs cache provision plan [--device PATH] [--root] # read-only: inspect partition or /etc/cst/btrfs-cache.conf
 cst btrfs cache provision init --device PATH         # root on host: record PARTUUID + byte size (does not touch disk)
 cst btrfs cache provision apply [--format] [--yes]   # root on host: LUKS2 + Btrfs + subvols + crypttab + fstab + mounts
 cst btrfs cache plan [--user NAME] [--migrate]       # dry run + safety/busy-process checks
@@ -1886,7 +1886,8 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   carries `bind,nofail,x-systemd.requires-mounts-for=...` and the marker
   `# managed-by: btrfs-cache (CST) user=<name> kind=<cache|scratchpad>`.
 - **How it reads the mounts:** one `findmnt -J -l -o SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT`
-  call (on the host from a toolbox). A mount at `~/.cache` counts as attached
+  call (on the host from a toolbox); when `findmnt` omits `UUID` for a non-root caller,
+  `/dev/disk/by-uuid` supplies the missing filesystem UUIDs. A mount at `~/.cache` counts as attached
   only when it is on the cache drive's filesystem (the same UUID) and shows
   the folder `<user>` of the subvolume (its FSROOT is `/cache/<user>`); any
   other mount there is "a mount CST did not make", and `attach` refuses.
@@ -1997,9 +1998,12 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   cache check's hints), so a hand edit of `/etc/fstab` on a machine
   without the cache drive says nothing.
 - **Provisioning, safe and idempotent (`provision` / `unprovision`):**
-  - **Step 1 — Inspect (`provision plan --device PATH`):** read-only check of the partition
+  - **Step 1 — Inspect (`provision plan [--device PATH] [--root]`):** read-only check of the partition
     (`TYPE=part`, non-zero size, GPT/MBR `PARTUUID`, not swap, not mounted, no unexpected
-    device-mapper/RAID holders). Previews `/etc/cst/btrfs-cache.conf`.
+    device-mapper/RAID holders, falling back to sysfs and `/dev/disk/by-uuid` when unprivileged).
+    Previews `/etc/cst/btrfs-cache.conf` or existing provisioning state; without root, `/etc/crypttab`
+    (`0600`) and `/etc/cryptsetup-keys.d` (`0700`) show a note instead of blocking (`--root` re-runs the
+    dry run via `sudo` on the host for full inspection).
   - **Step 2 — Record hardware identity (`provision init --device PATH [--mapper NAME]`):**
     writes `/etc/cst/btrfs-cache.conf` (`CACHE_MAPPER_NAME`, `CACHE_PARTUUID`,
     `CACHE_SIZE_BYTES`) without formatting or touching the partition. `provision apply`

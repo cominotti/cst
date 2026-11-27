@@ -15,7 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import override
+from typing import NoReturn, override
 import unittest
 from unittest import mock
 
@@ -32,6 +32,7 @@ from btrfs.cache.domain import (
     CacheMountKind,
     CacheMountUser,
     ProvisionSubcommand,
+    cache_mount_write_action,
     parse_cache_mount_args,
 )
 from btrfs.cache.domain.migrate import MIGRATE_BACKUP_SUFFIX, backup_path_for, cleanup_hint
@@ -39,13 +40,17 @@ from btrfs.cache.domain.provision import (
     BASE_MOUNT_OPTIONS,
     BTRFS_CACHE_LABEL,
     CRYPTTAB_PATH,
+    CRYPTTAB_PERMISSION_DENIED,
+    NOT_REGULAR_FILE_NOTE,
     PROVISION_BASE_MARKER,
     SUBVOL_FOR_KIND,
     BlockDeviceFacts,
     CacheHardwareSpec,
     LuksMapperState,
     ProvisionBaseState,
+    ProvisionCheckMode,
     ProvisionProbe,
+    format_provision_plan,
     parse_cache_conf,
     plan_provision_crypttab,
     plan_provision_fstab,
@@ -58,6 +63,7 @@ from btrfs.cache.domain.provision import (
     validate_unprovision,
 )
 from btrfs.cache.ports import CachePathKind
+from btrfs.cache.wiring import run_cache_mount
 from btrfs.tests.fakes import (
     RELOAD_FAILED,
     UUID_CACHE_DRIVE,
@@ -71,6 +77,7 @@ from btrfs.tests.fakes import (
     FakeFstab,
     FakeMountRunner,
 )
+from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.ports import CommandResult, ReplacedNotSynced
 
 SAMPLE_PARTUUID = "12345678-1234-1234-1234-123456789abc"
@@ -1128,3 +1135,230 @@ class ProvisionAndMigrationAdapterTests(unittest.TestCase):
         with mock.patch.object(runner, "run", return_value=CommandResult(1, "", "busy")):
             err = prov.remount_base(CACHE_BASE)
         self.assertIn(f"mount -o remount,{OPT_COMPRESS_FORCE} {CACHE_BASE}", err or "")
+
+    def test_provision_cli_root_flag_parsing_and_write_action_gating(self) -> None:
+        parsed = parse_cache_mount_args(["provision", "plan", "--root"])
+        self.assertIsNone(parsed.error)
+        self.assertTrue(parsed.as_root)
+        self.assertEqual(cache_mount_write_action(parsed), "provision plan --root")
+
+        plain_plan = parse_cache_mount_args(["provision", "plan"])
+        self.assertFalse(plain_plan.as_root)
+        self.assertIsNone(cache_mount_write_action(plain_plan))
+
+        for sub in ("init", "apply"):
+            bad = parse_cache_mount_args(["provision", sub, "--root"])
+            self.assertNotEqual(bad.code, 0)
+            self.assertIn("--root", bad.error or "")
+
+        box_err = io.StringIO()
+        rc_box = run_cache_mount(
+            ["provision", "plan", "--root"],
+            deps=ManagedCliEnv(err=box_err, ctx=CacheTestCtx(container=True, root=False)),
+        )
+        self.assertEqual(rc_box, 1)
+        self.assertIn("toolbox", box_err.getvalue().lower())
+
+        elevated: list[list[str]] = []
+
+        def fake_elevate(argv: list[str]) -> NoReturn:
+            elevated.append(argv)
+            raise SystemExit(99)
+
+        with tempfile.TemporaryDirectory(prefix="cst-prov-elev-") as tmp, self.assertRaises(SystemExit):
+            run_cache_mount(
+                ["provision", "plan", "--root"],
+                deps=ManagedCliEnv(
+                    entry_file=os.path.join(tmp, "btrfs-cache"),
+                    env={"CST_PROG": "cst btrfs cache"},
+                    ctx=CacheTestCtx(container=False, root=False),
+                    elevate=fake_elevate,
+                ),
+            )
+        self.assertEqual(len(elevated), 1)
+        self.assertEqual(elevated[0][0], "sudo")
+        self.assertEqual(elevated[0][-3:], ["provision", "plan", "--root"])
+
+    def test_unprivileged_provision_sysfs_fallbacks(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-prov-unpriv-")
+        self.addCleanup(shutil.rmtree, tmp)
+        partuuid = "d72cc792-ec12-498e-9678-b87838cb18b7"
+        luks_hex = "590f47437bcb40bb9a18b5b28b470c8d"
+        luks_uuid = "590f4743-7bcb-40bb-9a18-b5b28b470c8d"
+
+        for d in (
+            "dev/disk/by-partuuid",
+            "dev/disk/by-uuid",
+            "dev/mapper",
+            "sys/class/block/nvme2n1p1/holders",
+            "sys/class/block/dm-3/dm",
+            f"sys/fs/btrfs/{UUID_CACHE_DRIVE}",
+        ):
+            os.makedirs(os.path.join(tmp, d))
+        for rel in ("dev/nvme2n1p1", "dev/dm-3"):
+            with open(os.path.join(tmp, rel), "wb") as fh:
+                fh.write(b"")
+        os.symlink("../../nvme2n1p1", os.path.join(tmp, "dev/disk/by-partuuid", partuuid))
+        os.symlink("../dm-3", os.path.join(tmp, "dev/mapper/cache"))
+        os.symlink("../../dm-3", os.path.join(tmp, "dev/disk/by-uuid", UUID_CACHE_DRIVE))
+        os.symlink("/dev/null", os.path.join(tmp, "sys/class/block/nvme2n1p1/holders/dm-3"))
+        files = {
+            "sys/class/block/nvme2n1p1/uevent": f"MAJOR=259\nPARTUUID={partuuid}\n",
+            "sys/class/block/dm-3/dm/name": "cache\n",
+            "sys/class/block/dm-3/dm/uuid": f"CRYPT-LUKS2-{luks_hex}-cache\n",
+            f"sys/fs/btrfs/{UUID_CACHE_DRIVE}/label": "cache\n",
+        }
+        for rel, body in files.items():
+            with open(os.path.join(tmp, rel), "w", encoding="utf-8") as fh:
+                fh.write(body)
+
+        lsblk_json = json.dumps(
+            {
+                "blockdevices": [
+                    {
+                        "name": "/dev/nvme2n1p1",
+                        "type": "part",
+                        "partuuid": None,
+                        "size": 536870912000,
+                        "fstype": None,
+                        "uuid": None,
+                        "mountpoints": [],
+                    }
+                ]
+            }
+        )
+        runner = FakeMountRunner(tmp)
+        rt = CacheMountRuntime(seam_root=tmp, ctx=CacheTestCtx(root=False), runner=runner, env_map={})
+        prov = CacheProvisionAdapter(rt)
+
+        def fake_run(argv: Sequence[str], **kwargs: object) -> CommandResult:
+            del kwargs
+            if argv[0] == "lsblk":
+                return CommandResult(0, lsblk_json, "", argv=tuple(argv))
+            if argv[0] in ("blkid", "dmsetup", "cryptsetup"):
+                return CommandResult(1, "", "permission denied", argv=tuple(argv))
+            return CommandResult(0, "", "", argv=tuple(argv))
+
+        with mock.patch.object(runner, "run", side_effect=fake_run):
+            facts, dev_err = prov.inspect_device(f"/dev/disk/by-partuuid/{partuuid}")
+            self.assertIsNone(dev_err)
+            assert facts is not None
+            self.assertEqual(facts.partuuid, partuuid)
+            self.assertEqual(facts.fstype, "crypto_LUKS")
+            self.assertEqual(facts.uuid, luks_uuid)
+            self.assertEqual(facts.holder_dm_names, ("cache",))
+
+            self.assertEqual(prov.luks_uuid(facts.dev_path), luks_uuid)
+            self.assertEqual(prov.mapper_fs_info("/dev/mapper/cache"), ("btrfs", UUID_CACHE_DRIVE, "cache", luks_uuid))
+
+        # Without root, list_top_subvolumes does not attempt /run mount (with or without seam_root)
+        non_root_seam = CacheMountRuntime(seam_root=tmp, ctx=CacheTestCtx(root=False), runner=runner, env_map={})
+        non_root_rt = CacheMountRuntime(seam_root="", ctx=CacheTestCtx(root=False), runner=runner, env_map={})
+        self.assertEqual(CacheProvisionAdapter(non_root_seam).list_top_subvolumes("/dev/mapper/cache"), ((), None))
+        self.assertEqual(CacheProvisionAdapter(non_root_rt).list_top_subvolumes("/dev/mapper/cache"), ((), None))
+
+    def test_provision_plan_degrades_root_only_crypttab_and_keyfile(self) -> None:
+        partuuid = "d72cc792-ec12-498e-9678-b87838cb18b7"
+        luks_uuid = "590f4743-7bcb-40bb-9a18-b5b28b470c8d"
+        spec = CacheHardwareSpec(partuuid=partuuid, size_bytes=536870912000)
+        facts = BlockDeviceFacts(
+            dev_path=spec.device_path,
+            real_path="/dev/nvme2n1p1",
+            dev_type="part",
+            partuuid=partuuid,
+            size_bytes=spec.size_bytes,
+            fstype="crypto_LUKS",
+            uuid=luks_uuid,
+            holders=("dm-3",),
+            holder_dm_names=("cache",),
+        )
+        fstab_ok = (
+            f"{render_base_fstab_line(spec, CacheMountKind.CACHE)}\n"
+            f"{render_base_fstab_line(spec, CacheMountKind.SCRATCHPAD)}\n"
+        )
+        bases = {
+            kind: ProvisionBaseState(
+                kind=kind,
+                dir_exists=True,
+                dir_is_symlink=False,
+                dir_not_dir=False,
+                mounted_source=f"/dev/mapper/cache[/{SUBVOL_FOR_KIND[kind]}]",
+                mounted_fstype="btrfs",
+                mounted_uuid=UUID_CACHE_DRIVE,
+                mounted_fsroot=f"/{SUBVOL_FOR_KIND[kind]}",
+                mounted_options=BASE_MOUNT_OPTIONS,
+                fstab_source="/dev/mapper/cache",
+                fstab_managed=True,
+                fstab_unmanaged=False,
+            )
+            for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD)
+        }
+        probe = ProvisionProbe(
+            conf_text=render_cache_conf(spec),
+            conf_error=None,
+            spec=spec,
+            conf_problems=(),
+            device=facts,
+            device_error=None,
+            luks=LuksMapperState(
+                keyfile_exists=False,
+                keyfile_not_regular=False,
+                mapper_exists=True,
+                luks_uuid=luks_uuid,
+                mapper_luks_uuid=luks_uuid,
+                keyfile_unlocks_luks=None,
+                mapper_fstype="btrfs",
+                mapper_uuid=UUID_CACHE_DRIVE,
+                mapper_label="cache",
+                subvols_present=("cache", "scratchpad"),
+                keyfile_unreadable=True,
+            ),
+            crypttab_text=None,
+            crypttab_error=CRYPTTAB_PERMISSION_DENIED,
+            fstab_text=fstab_ok,
+            fstab_error=None,
+            bases=bases,
+            user_managed_entries=(),
+            fstab_behind=False,
+            crypttab_unreadable=True,
+        )
+        plan_lines = "\n".join(format_provision_plan(probe, "cst btrfs cache", do_format=False))
+        self.assertNotIn("BLOCKED:", plan_lines)
+        self.assertIn("Already provisioned", plan_lines)
+        self.assertIn("--root", plan_lines)
+
+        apply_blockers = validate_provision_apply(probe, do_format=False, mode=ProvisionCheckMode.APPLY)
+        self.assertTrue(any("permission denied" in msg for msg in apply_blockers))
+        unprov_blockers = validate_unprovision(probe)
+        self.assertTrue(any("permission denied" in msg for msg in unprov_blockers))
+
+        # Non-regular /etc/crypttab (via real adapter FIFO probe) still blocks even in PLAN mode
+        with tempfile.TemporaryDirectory(prefix="cst-fifo-ct-") as fifo_tmp:
+            os.makedirs(os.path.join(fifo_tmp, "etc"), exist_ok=True)
+            os.mkfifo(os.path.join(fifo_tmp, "etc/crypttab"))
+            fifo_prov = CacheProvisionAdapter(
+                CacheMountRuntime(
+                    seam_root=fifo_tmp, ctx=CacheTestCtx(root=False), runner=FakeMountRunner(fifo_tmp), env_map={}
+                )
+            )
+            fifo_text, fifo_err = fifo_prov.read_crypttab_exact()
+        self.assertIsNone(fifo_text)
+        self.assertIn(NOT_REGULAR_FILE_NOTE, fifo_err or "")
+        fifo_probe = ProvisionProbe(
+            conf_text=probe.conf_text,
+            conf_error=None,
+            spec=spec,
+            conf_problems=(),
+            device=facts,
+            device_error=None,
+            luks=probe.luks,
+            crypttab_text=fifo_text,
+            crypttab_error=fifo_err,
+            fstab_text=fstab_ok,
+            fstab_error=None,
+            bases=bases,
+            user_managed_entries=(),
+            crypttab_unreadable=fifo_err == CRYPTTAB_PERMISSION_DENIED,
+        )
+        fifo_plan = "\n".join(format_provision_plan(fifo_probe, "cst btrfs cache", do_format=False))
+        self.assertIn(f"BLOCKED: /etc/crypttab is {NOT_REGULAR_FILE_NOTE}", fifo_plan)

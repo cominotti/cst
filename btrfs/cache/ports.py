@@ -39,6 +39,7 @@ class CachePathKind:
     is_dir: bool
     is_symlink: bool
     is_regular: bool
+    permission_denied: bool = False
 
 
 class FstabPort(Protocol):

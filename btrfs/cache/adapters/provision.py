@@ -12,7 +12,15 @@ import sys
 import tempfile
 from typing import Final, TypedDict
 
-from btrfs.cache.adapters.mounts import MOUNT_TIMEOUT_S, CacheMountRuntime, from_toolbox, map_path
+from btrfs.cache.adapters.mounts import (
+    MOUNT_TIMEOUT_S,
+    CacheMountRuntime,
+    canonical_dev_path,
+    from_toolbox,
+    lookup_uuid_for_device,
+    map_path,
+    symlink_index_by_target,
+)
 from btrfs.cache.domain import OPT_COMPRESS_FORCE, CacheMountKind
 from btrfs.cache.domain.provision import (
     BASE_DIR_MODE,
@@ -26,6 +34,7 @@ from btrfs.cache.domain.provision import (
     KEYFILE_MODE,
     KEYS_DIR_MODE,
     NOT_REGULAR_FILE_NOTE,
+    PERMISSION_DENIED_NOTE,
     SUBVOL_FOR_KIND,
     BlockDeviceFacts,
 )
@@ -69,12 +78,16 @@ def _read_regular_guarded(path: str, label: str, *, nonblock_note: bool = True) 
     except OSError as exc:
         if nonblock_note and exc.errno == errno.EINVAL:
             return None, f"{label} is {NOT_REGULAR_FILE_NOTE}"
+        if exc.errno == errno.EACCES:
+            return None, f"cannot read {label}: {PERMISSION_DENIED_NOTE}"
         return None, f"cannot read {label}: {exc.strerror or exc}"
 
 
 def _stat_kind(path: str) -> CachePathKind:
     try:
         st = os.lstat(path)
+    except PermissionError:
+        return CachePathKind(exists=False, is_dir=False, is_symlink=False, is_regular=False, permission_denied=True)
     except OSError:
         return CachePathKind(exists=False, is_dir=False, is_symlink=False, is_regular=False)
     if stat.S_ISLNK(st.st_mode):
@@ -88,11 +101,13 @@ def _stat_kind(path: str) -> CachePathKind:
             )
         except OSError:
             return CachePathKind(exists=True, is_dir=False, is_symlink=True, is_regular=False)
+    is_reg = stat.S_ISREG(st.st_mode)
     return CachePathKind(
         exists=True,
         is_dir=stat.S_ISDIR(st.st_mode),
         is_symlink=False,
-        is_regular=stat.S_ISREG(st.st_mode),
+        is_regular=is_reg,
+        permission_denied=is_reg and not os.access(path, os.R_OK),
     )
 
 
@@ -173,6 +188,41 @@ def _sysfs_holders(kname: str, rt: CacheMountRuntime) -> tuple[tuple[str, ...], 
     return tuple(entries), tuple(dm_names)
 
 
+def _sysfs_partuuid(kname: str, real_path: str, rt: CacheMountRuntime) -> str:
+    uevent = read_text(map_path(f"/sys/class/block/{kname}/uevent", rt, read_only=True)) or ""
+    for line in uevent.splitlines():
+        if line.startswith("PARTUUID=") and (val := line.split("=", 1)[1].strip().lower()):
+            return val
+    return symlink_index_by_target("/dev/disk/by-partuuid", rt).get(real_path, "").lower()
+
+
+def _sysfs_holder_luks_uuid(holders: tuple[str, ...], rt: CacheMountRuntime) -> str | None:
+    for h in holders:
+        dm_uuid = (read_text(map_path(f"/sys/class/block/{h}/dm/uuid", rt, read_only=True)) or "").strip()
+        if (luks_id := _format_dm_luks_uuid(dm_uuid)) is not None:
+            return luks_id
+    return None
+
+
+def _btrfs_sysfs_label(fs_uuid: str, rt: CacheMountRuntime) -> str | None:
+    btrfs_dir = map_path(f"/sys/fs/btrfs/{fs_uuid}", rt, read_only=True)
+    if not os.path.isdir(btrfs_dir):
+        return None
+    return (read_text(os.path.join(btrfs_dir, "label")) or "").strip()
+
+
+def _resolve_dev_signatures(
+    entry: _LsblkRow, blkid: dict[str, str], holders: tuple[str, ...], rt: CacheMountRuntime
+) -> tuple[str, str]:
+    fstype = entry.get("fstype") or blkid.get("TYPE", "")
+    uuid = entry.get("uuid") or blkid.get("UUID", "")
+    if not fstype and (holder_luks := _sysfs_holder_luks_uuid(holders, rt)) is not None:
+        fstype = "crypto_LUKS"
+        if not uuid:
+            uuid = holder_luks
+    return fstype, uuid
+
+
 def _is_swap_device(real_path: str, rt: CacheMountRuntime) -> bool:
     swaps_text = read_text(map_path(_BLKSWAPS_PATH, rt, read_only=True)) or ""
     for line in swaps_text.splitlines()[1:]:
@@ -226,9 +276,7 @@ class CacheProvisionAdapter:
         if parse_err is not None or entry is None:
             return None, parse_err
         name_val = entry.get("name")
-        real_path = name_val or device_path
-        if not self._rt.seam_root and os.path.exists(real_path):
-            real_path = os.path.realpath(real_path)
+        real_path = canonical_dev_path(name_val or device_path, self._rt)
         blkid, blkid_err = self._run_blkid(device_path, on_host=on_host)
         if blkid_err is not None:
             return None, blkid_err
@@ -240,17 +288,21 @@ class CacheProvisionAdapter:
         # On a partition, lsblk's PTTYPE reports the enclosing disk's table (udev ID_PART_TABLE_TYPE),
         # not a nested partition table inside the partition; only blkid -p detects an inner PTTYPE.
         pttype = blkid.get("PTTYPE", "") if dev_type == "part" else (entry.get("pttype") or blkid.get("PTTYPE", ""))
+        partuuid = (
+            entry.get("partuuid") or blkid.get("PARTUUID") or blkid.get("PART_ENTRY_UUID", "")
+        ).lower() or _sysfs_partuuid(kname, real_path, self._rt)
+        fstype, uuid = _resolve_dev_signatures(entry, blkid, holders, self._rt)
         return (
             BlockDeviceFacts(
                 dev_path=device_path,
                 real_path=real_path,
                 dev_type=dev_type,
-                partuuid=(entry.get("partuuid") or blkid.get("PARTUUID") or blkid.get("PART_ENTRY_UUID", "")).lower(),
+                partuuid=partuuid,
                 size_bytes=_lsblk_size(entry.get("size")),
                 model=(entry.get("model") or "").strip(),
-                fstype=entry.get("fstype") or blkid.get("TYPE", ""),
+                fstype=fstype,
                 pttype=pttype,
-                uuid=entry.get("uuid") or blkid.get("UUID", ""),
+                uuid=uuid,
                 mountpoints=mps,
                 holders=holders,
                 holder_dm_names=holder_dm,
@@ -296,8 +348,20 @@ class CacheProvisionAdapter:
         )
         if dm.returncode == 0:
             luks_uuid = _format_dm_luks_uuid(dm.stdout.strip())
+        if luks_uuid is None:
+            dm_kname = os.path.basename(canonical_dev_path(mapper_path, self._rt))
+            dm_uuid = (
+                read_text(map_path(f"/sys/class/block/{dm_kname}/dm/uuid", self._rt, read_only=True)) or ""
+            ).strip()
+            luks_uuid = _format_dm_luks_uuid(dm_uuid)
         fstype = "ambivalent" if blkid_err is not None else blkid.get("TYPE", "")
-        return fstype, blkid.get("UUID", ""), blkid.get("LABEL", ""), luks_uuid
+        fs_uuid = blkid.get("UUID", "") or lookup_uuid_for_device(mapper_path, self._rt)
+        label = blkid.get("LABEL", "")
+        if not fstype and fs_uuid and (sysfs_label := _btrfs_sysfs_label(fs_uuid, self._rt)) is not None:
+            fstype = "btrfs"
+            if not label:
+                label = sysfs_label
+        return fstype, fs_uuid, label, luks_uuid
 
     def luks_uuid(self, device_path: str) -> str | None:
         res = self._rt.runner.run(
@@ -308,7 +372,11 @@ class CacheProvisionAdapter:
             output=OutputMode.CAPTURE,
         )
         val = res.stdout.strip()
-        return val if res.returncode == 0 and val else None
+        if res.returncode == 0 and val:
+            return val
+        kname = os.path.basename(canonical_dev_path(device_path, self._rt))
+        holders, _ = _sysfs_holders(kname, self._rt)
+        return _sysfs_holder_luks_uuid(holders, self._rt)
 
     def test_keyfile(self, device_path: str, keyfile_path: str) -> bool:
         on_host = from_toolbox(self._rt)
@@ -423,7 +491,7 @@ class CacheProvisionAdapter:
         return tuple(names), None
 
     def list_top_subvolumes(self, mapper_path: str) -> tuple[tuple[str, ...], str | None]:
-        if from_toolbox(self._rt):
+        if from_toolbox(self._rt) or not self._rt.ctx.is_root():
             return (), None
         with self.top_mount(mapper_path) as (mnt, merr):
             if merr is not None or mnt is None:
