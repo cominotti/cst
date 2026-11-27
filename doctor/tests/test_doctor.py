@@ -1941,6 +1941,81 @@ class BtrfsCacheDoctorTest(Scratch):
         self.assertIn("WARN   btrfs cache: /var/log/below (system=below) is in /etc/fstab but not mounted", warn_text)
         self.assertIn("fix: cst btrfs cache system apply --only below", warn_text)
 
+    def test_btrfs_offload_checks(self) -> None:
+        silent = self.run_tool()
+        self.assertNotIn("btrfs offload:", "\n".join(area_lines(silent.stdout, "btrfs")))
+
+        home_abs = self.env["HOME"]
+        home_in_root = os.path.join(self.root, home_abs.lstrip("/"))
+        conf_file = os.path.join(home_in_root, ".config/cst/scratchpad-offload.toml")
+        os.makedirs(os.path.dirname(conf_file), exist_ok=True)
+        with open(conf_file, "w", encoding="utf-8") as fh:
+            fh.write('version = 1\n[entries.gemini]\nsource = ".gemini/cli"\nbackup = true\n')
+        os.makedirs(os.path.join(home_in_root, "Scratchpad/offload/gemini"), exist_ok=True)
+        os.makedirs(os.path.join(home_in_root, ".gemini"), exist_ok=True)
+        os.symlink(
+            os.path.join(home_abs, "Scratchpad/offload/gemini"),
+            os.path.join(home_in_root, ".gemini/cli"),
+        )
+        state_file = os.path.join(home_in_root, ".local/state/cst/scratchpad-offload-backups.json")
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        with open(state_file, "w", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "gemini": {
+                                "last_backup_epoch": 1_700_000_000.0,
+                                "sqlite_dbs": 1,
+                                "ok": True,
+                                "detail": "ok",
+                            }
+                        },
+                    }
+                )
+            )
+        show_user = os.path.join(self.env["FIX_SHOW"], "usr", "cst-scratchpad-backup.timer")
+        os.makedirs(os.path.dirname(show_user), exist_ok=True)
+        with open(show_user, "w", encoding="utf-8") as fh:
+            fh.write("ActiveState=active\nUnitFileState=enabled\n")
+
+        self.env["CST_DOCTOR_NOW"] = "1700000100"
+        ok_res = self.run_tool()
+        ok_text = "\n".join(area_lines(ok_res.stdout, "btrfs"))
+        self.assertIn("ok     btrfs offload: gemini: active (zstd), backed up (1 sqlite db(s))", ok_text)
+
+        os.unlink(os.path.join(home_in_root, ".gemini/cli"))
+        os.symlink("/nonexistent/target", os.path.join(home_in_root, ".gemini/cli"))
+        warn_res = self.run_tool()
+        self.assertEqual(warn_res.returncode, 1)
+        warn_text = "\n".join(area_lines(warn_res.stdout, "btrfs"))
+        self.assertIn("WARN   btrfs offload: gemini: wrong_target", warn_text)
+
+        # Silverblue `/home` -> `/var/home` symlink + inaccessible `systemctl --user`
+        alt_home = os.path.join(self.root, "var/home/silver")
+        os.makedirs(os.path.join(alt_home, "Scratchpad/offload/gemini"), exist_ok=True)
+        os.makedirs(os.path.join(alt_home, ".gemini"), exist_ok=True)
+        os.symlink(
+            os.path.join(alt_home, "Scratchpad/offload/gemini"),
+            os.path.join(alt_home, ".gemini/cli"),
+        )
+        conf_silver = os.path.join(alt_home, ".config/cst/scratchpad-offload.toml")
+        os.makedirs(os.path.dirname(conf_silver), exist_ok=True)
+        with open(conf_silver, "w", encoding="utf-8") as fh:
+            fh.write('version = 1\n[entries.gemini]\nsource = ".gemini/cli"\nbackup = true\n')
+        os.makedirs(os.path.join(self.root, "home"), exist_ok=True)
+        os.symlink("../var/home/silver", os.path.join(self.root, "home/silver"))
+        self.env["HOME"] = "/home/silver"
+        os.unlink(show_user)
+        with open(self.sys_failed.replace("sys-failed", "bin/systemctl"), "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 1\n")
+        silver_res = self.run_tool()
+        silver_text = "\n".join(area_lines(silver_res.stdout, "btrfs"))
+        self.assertIn("btrfs offload: gemini: active", silver_text)
+        self.assertNotIn("wrong_target", silver_text)
+        self.assertNotIn("is not active/enabled", silver_text)
+
 
 class SnapshotsWritableTest(Scratch):
     """check_snapshots_writable: the lists btrfs-snapshot-core keeps in

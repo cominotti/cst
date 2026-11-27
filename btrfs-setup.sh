@@ -177,8 +177,10 @@
 #                          crypttab + fstab base mounts via /etc/cst/btrfs-cache.conf),
 #                          manage per-user bind mounts (/var/mnt/cache/<user> ->
 #                          ~/.cache with optional --migrate, /var/mnt/scratchpad/<user> ->
-#                          ~/Scratchpad), and bind system hot paths under
-#                          /var/mnt/cache/system/* (`system <status|plan|apply|revert>`).
+#                          ~/Scratchpad), bind system hot paths under
+#                          /var/mnt/cache/system/* (`system <status|plan|apply|revert>`),
+#                          and manage user hot-data symlinks + daily mirrors onto
+#                          ~/Scratchpad (`offload <status|init|plan|apply|backup|revert>`).
 #                          `status`, `plan`, `system status/plan`, and `provision plan`
 #                          work in a toolbox; mutating commands need root on the host.
 #   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
@@ -295,6 +297,10 @@ case "${cmd}" in
         CST_PROG="${PROG} flushoncommit" exec python3 -I -B "${SRC}/btrfs-flushoncommit" "$@"
         ;;
     cache)
+        if [[ "${1-}" == "offload" ]]; then
+            shift
+            CST_PROG="${PROG} cache offload" exec python3 -I -B "${SRC}/btrfs-cache-offload" "$@"
+        fi
         CST_PROG="${PROG} cache" exec python3 -I -B "${SRC}/btrfs-cache" "$@"
         ;;
     iocost)

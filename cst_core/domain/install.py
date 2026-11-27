@@ -66,6 +66,7 @@ class Component(StrEnum):
     BTRFS_DOCKER_GC = "btrfs:docker-gc"
     BTRFS_DEGRADED_BOOT = "btrfs:degraded-boot"
     BTRFS_IOCOST = "btrfs:iocost"
+    BTRFS_OFFLOAD = "btrfs:offload"
     BTRFS_REPORT_LAUNCHER = "btrfs:report-launcher"
     CPU_CORE = "cpu:core"
     CPU_GAMEMODE = "cpu:gamemode"
@@ -199,6 +200,7 @@ btrfs/udev/65-cst-nvme-apst.rules                   /etc/udev/rules.d/65-cst-nvm
 btrfs/btrfs-iocost                                  /usr/local/sbin/btrfs-iocost                                  755  root  python-entry  root   btrfs:iocost
 btrfs/units/cst-btrfs-iocost.service                /etc/systemd/system/cst-btrfs-iocost.service                  644  root  unit          root   btrfs:iocost
 btrfs/udev/91-cst-iocost.rules                      /etc/udev/rules.d/91-cst-iocost.rules                         644  root  data          root   btrfs:iocost
+btrfs/btrfs-cache-offload                           ~/.local/lib/cst/btrfs-cache-offload                          755  user  python-entry  user   btrfs:offload
 # cpu
 cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root   cpu:core
 cpu/cpu-irq                                         /usr/local/sbin/cpu-irq                                       755  root  python-entry  root   cpu:core
@@ -252,6 +254,7 @@ _COMMANDS: Final = {
     "btrfs:docker-gc": "cst btrfs docker-gc enable",
     "btrfs:degraded-boot": "cst btrfs degraded-boot install",
     "btrfs:iocost": "cst btrfs iocost apply",
+    "btrfs:offload": "cst btrfs cache offload refresh",
     "btrfs:report-launcher": "cst btrfs install",
     "cpu:core": "cst cpu install",
     "cpu:gamemode": "cst cpu install",
@@ -279,6 +282,9 @@ _SYNC_SPECS: Final[Mapping[Component, _ComponentSyncSpec]] = {
     Component.BTRFS_SNAPSHOTS: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "snapshots", "refresh"), needs_root=True),
     Component.BTRFS_DOCKER_GC: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "docker-gc", "enable"), needs_root=True),
     Component.BTRFS_IOCOST: _ComponentSyncSpec(SyncSafety.SAFE, ("btrfs", "iocost", "apply"), needs_root=True),
+    Component.BTRFS_OFFLOAD: _ComponentSyncSpec(
+        SyncSafety.SAFE, ("btrfs", "cache", "offload", "refresh"), needs_root=False
+    ),
     Component.BTRFS_TOP_MOUNT: _ComponentSyncSpec(
         SyncSafety.RISKY,
         ("btrfs", "snapshots", "setup", "--yes"),

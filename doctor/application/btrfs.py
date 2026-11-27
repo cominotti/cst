@@ -33,7 +33,7 @@ from btrfs.compress.domain import (
 from btrfs.snapshot_runtime.domain import DEFAULTS as SNAPSHOT_DEFAULTS, GUARD_KEYS, guard_number, nas_unreadable
 from cst_core.domain.text import YES_WORDS, ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
-from doctor.application import btrfs_cache, docker_nocow
+from doctor.application import btrfs_cache, btrfs_offload, docker_nocow
 from doctor.application.cpu import unit_props
 from doctor.application.findmnt import findmnt_root_btrfs_info
 from doctor.application.shared import (
@@ -759,3 +759,9 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     return btrfs_cache.run_btrfs_cache_check(
         host, has_sysfs_btrfs=bool(_btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS)))
     )
+
+
+@check(CHECKS, "btrfs")
+def check_btrfs_offload(host: DoctorHostPort) -> Iterator[Result]:
+    """Check user `~/Scratchpad` offload configuration, symlinks, backups, and user timer."""
+    return btrfs_offload.run_btrfs_offload_check(host)
