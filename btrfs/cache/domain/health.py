@@ -26,6 +26,8 @@ from btrfs.cache.domain import (
     source_fsroot,
     split_tagged_fstab_line,
 )
+from btrfs.cache.domain.system import ManagedSystemEntry, parse_system_fstab_entries
+from btrfs.cache.domain.system_spec import SYSTEM_SPEC_BY_ID, SystemBindId
 from btrfs.compress.domain import MountEntry
 from btrfs.compress.domain.root_option import OPT_FLUSHONCOMMIT
 from cst_core.domain.text import file_lines, split_ascii_blanks, unescape_mount_field
@@ -117,8 +119,11 @@ def _collect_active_bases(
     live_by_target: dict[str, MountEntry],
     fstab_by_target: dict[str, MountEntry],
     managed: Sequence[ManagedFstabEntry],
+    system_entries: Sequence[ManagedSystemEntry] = (),
 ) -> tuple[str, ...]:
     referenced = {BASE_FOR_KIND[m.kind] for m in managed}
+    if system_entries:
+        referenced.add(CACHE_BASE)
     return tuple(
         base
         for base in (CACHE_BASE, SCRATCHPAD_BASE)
@@ -201,6 +206,44 @@ def _is_cst_bind(live: MountEntry, base_live: MountEntry | None, user: str) -> b
     return root == posixpath.join("/" if base_root is None else base_root, user)
 
 
+def _append_system_findings(
+    findings: list[CacheMountFinding],
+    system_entries: Sequence[ManagedSystemEntry],
+    live_by_target: dict[str, MountEntry],
+) -> None:
+    cache_base_live = live_by_target.get(CACHE_BASE)
+    for entry in system_entries:
+        live = live_by_target.get(entry.target)
+        if live is None:
+            if entry.bind_id == SystemBindId.VAR_TMP:
+                findings.append(
+                    CacheMountFinding(
+                        CacheMountFindingSeverity.INFO,
+                        f"{entry.target} (system={entry.bind_id.value}) is staged in /etc/fstab "
+                        "(activates cleanly on next reboot)",
+                    )
+                )
+            else:
+                findings.append(
+                    CacheMountFinding(
+                        CacheMountFindingSeverity.WARN,
+                        f"{entry.target} (system={entry.bind_id.value}) is in /etc/fstab but not mounted",
+                        fix=f"btrfs cache system apply --only {entry.bind_id.value}",
+                    )
+                )
+            continue
+        spec = SYSTEM_SPEC_BY_ID[entry.bind_id]
+        if not _is_cst_bind(live, cache_base_live, posixpath.join("system", spec.rel_dir)):
+            findings.append(
+                CacheMountFinding(
+                    CacheMountFindingSeverity.WARN,
+                    f"{entry.target} (system={entry.bind_id.value}) has a mount that is not CST's bind of "
+                    f"{entry.source}",
+                    fix="btrfs cache system status",
+                )
+            )
+
+
 def assess_cache_mount_health(
     fstab_text: str | None,
     proc_mounts_text: str | None,
@@ -213,8 +256,9 @@ def assess_cache_mount_health(
     live_by_target = {m.target: m for m in live_all}
     fstab_by_target = {m.target: m for m in parse_all_mounts(fstab_text or "")}
     managed = parse_managed_fstab_entries(fstab_text or "")
-    active_bases = _collect_active_bases(live_by_target, fstab_by_target, managed)
-    if not active_bases and not managed:
+    system_entries = parse_system_fstab_entries(fstab_text or "")
+    active_bases = _collect_active_bases(live_by_target, fstab_by_target, managed, system_entries)
+    if not active_bases and not managed and not system_entries:
         return []
 
     provisioned = _provisioned_base_targets(fstab_text or "")
@@ -253,13 +297,15 @@ def assess_cache_mount_health(
         if (live := live_by_target.get(entry.target)) is not None
         and not _is_cst_bind(live, live_by_target.get(BASE_FOR_KIND[entry.kind]), entry.user)
     )
+    _append_system_findings(findings, system_entries, live_by_target)
 
-    if not findings:
+    if not any(f.severity == CacheMountFindingSeverity.WARN for f in findings):
         bases_str = ", ".join(active_bases)
+        sys_suffix = f"; {len(system_entries)} system bind mount(s) configured" if system_entries else ""
         findings.append(
             CacheMountFinding(
                 CacheMountFindingSeverity.OK,
-                f"{bases_str} mounted (btrfs, no flushoncommit); {len(managed)} user bind mount(s) active",
+                f"{bases_str} mounted (btrfs, no flushoncommit); {len(managed)} user bind mount(s) active{sys_suffix}",
             )
         )
     return findings

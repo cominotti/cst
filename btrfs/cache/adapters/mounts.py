@@ -149,16 +149,21 @@ def dir_is_nonempty(path: str) -> bool:
         return False
 
 
-def ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
-    """Create folder at host_path, set 0700 and user ownership through O_NOFOLLOW|O_DIRECTORY fd."""
-    ensure_dir(host_path, DIR_MODE_PRIVATE, relabel=True)
+def ensure_owned_dir(host_path: str, mode: int, owner: tuple[int, int] | None = None) -> None:
+    """Create folder at `host_path`, set `mode` (and `owner` when root) via `O_NOFOLLOW|O_DIRECTORY` fd."""
+    ensure_dir(host_path, mode, relabel=True)
     fd = os.open(host_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        os.fchmod(fd, DIR_MODE_PRIVATE)
-        if os.geteuid() == 0:
-            os.fchown(fd, user.uid, user.gid)
+        os.fchmod(fd, mode)
+        if owner is not None and os.geteuid() == 0:
+            os.fchown(fd, owner[0], owner[1])
     finally:
         os.close(fd)
+
+
+def ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
+    """Create folder at host_path, set 0700 and user ownership through O_NOFOLLOW|O_DIRECTORY fd."""
+    ensure_owned_dir(host_path, DIR_MODE_PRIVATE, (user.uid, user.gid))
 
 
 def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
@@ -169,7 +174,7 @@ def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
     write_atomic(tag_path, payload, mode=FILE_MODE_TAG, owner=(user.uid, user.gid))
 
 
-def _run_mount(rt: CacheMountRuntime, argv: list[str], what: str) -> str | None:
+def run_mount(rt: CacheMountRuntime, argv: list[str], what: str) -> str | None:
     """Run mount or umount; None, or why it failed."""
     res = rt.runner.run(argv, timeout=MOUNT_TIMEOUT_S, locale_c=True, output=OutputMode.CAPTURE)
     return None if res.returncode == 0 else res.failure(what)
@@ -208,11 +213,11 @@ class CacheMountTable:
             map_path(binding.source, rt, read_only=False),
             map_path(binding.target, rt, read_only=False),
         ]
-        return _run_mount(rt, argv, f"mount --bind {binding.source} {binding.target}")
+        return run_mount(rt, argv, f"mount --bind {binding.source} {binding.target}")
 
     def unbind(self, binding: CacheMountBinding) -> str | None:
         rt = self._rt
-        return _run_mount(rt, ["umount", map_path(binding.target, rt, read_only=False)], f"umount {binding.target}")
+        return run_mount(rt, ["umount", map_path(binding.target, rt, read_only=False)], f"umount {binding.target}")
 
 
 def loaded_mount_units(runner: CommandRunnerPort, *, from_toolbox: bool) -> list[dict[str, str]] | None:

@@ -172,13 +172,15 @@
 #                          (`apply` removes it as the CST default; `revert`
 #                          re-enables it). `status` and `plan` work in a
 #                          toolbox; `apply` and `revert` need root on the host.
-#   cache [status|plan|attach|detach|provision|unprovision] [OPTIONS]
+#   cache [status|plan|attach|detach|system|provision|unprovision] [OPTIONS]
 #                          provision the dedicated NVMe cache drive (LUKS2 + Btrfs +
-#                          crypttab + fstab base mounts via /etc/cst/btrfs-cache.conf)
-#                          and manage per-user bind mounts (/var/mnt/cache/<user> ->
+#                          crypttab + fstab base mounts via /etc/cst/btrfs-cache.conf),
+#                          manage per-user bind mounts (/var/mnt/cache/<user> ->
 #                          ~/.cache with optional --migrate, /var/mnt/scratchpad/<user> ->
-#                          ~/Scratchpad). `status`, `plan`, and `provision plan` work in a
-#                          toolbox; mutating commands need root on the host.
+#                          ~/Scratchpad), and bind system hot paths under
+#                          /var/mnt/cache/system/* (`system <status|plan|apply|revert>`).
+#                          `status`, `plan`, `system status/plan`, and `provision plan`
+#                          work in a toolbox; mutating commands need root on the host.
 #   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
 #                          per-device weekly scrub speed limit (SCRUB_LIMIT in
 #                          /etc/btrfs-setup/snapshots.conf + service drop-in).
