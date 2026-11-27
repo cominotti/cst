@@ -9,6 +9,8 @@ from enum import StrEnum
 import posixpath
 from typing import Final
 
+from btrfs.offload.domain import OFFLOAD_DEFAULT_CALENDAR
+from btrfs.offload.domain.units import OFFLOAD_SERVICE, OFFLOAD_TIMER, render_offload_service, render_offload_timer
 from cpu.irq.domain import IRQ_DROPIN_PATH, IRQ_ENV_PATH, render_irq_dropin, render_irq_env
 from cpu.setup.domain import (
     DROPIN_NAME as CPU_DROPIN_NAME,
@@ -273,6 +275,15 @@ def _toolchains_auto_bytes(dest: str, values: Mapping[str, str] | None) -> bytes
     return None
 
 
+def _btrfs_offload_bytes(dest: str, values: Mapping[str, str] | None) -> bytes | None:
+    if dest.endswith(f"/{OFFLOAD_SERVICE}"):
+        return render_offload_service().encode("utf-8")
+    if dest.endswith(f"/{OFFLOAD_TIMER}"):
+        cal = (values or {}).get("on_calendar") or OFFLOAD_DEFAULT_CALENDAR
+        return render_offload_timer(cal).encode("utf-8")
+    return None
+
+
 def _vm_timer_bytes(dest: str, values: Mapping[str, str] | None) -> bytes | None:
     if dest == posixpath.join(SYSTEM_UNIT_DIR, VM_TIMER):
         return render_vm_timer().encode("utf-8")
@@ -331,6 +342,7 @@ def _tmpfs_generated_bytes(dest: str, values: Mapping[str, str] | None) -> bytes
 
 
 _GENERATED_RENDERERS: Final = {
+    Component.BTRFS_OFFLOAD: _btrfs_offload_bytes,
     Component.TOOLCHAINS_AUTO: _toolchains_auto_bytes,
     Component.VM_BACKUP_TIMER: _vm_timer_bytes,
     Component.CPU_CORE: _cpu_core_bytes,

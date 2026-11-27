@@ -3280,6 +3280,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
             "/usr/local/sbin/cpu-game-profile": ("--help", 2),
             "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
+            "/home/tester/.local/lib/cst/btrfs-cache-offload": ("help", 0),
             "/home/tester/.local/lib/cst/cst-toolchains": ("help", 0),
             "/usr/local/sbin/cst-desktop": ("help", 0),
             "/usr/local/sbin/cst-vm": ("help", 0),
@@ -16602,3 +16603,151 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-288-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
+    def test_289_btrfs_cache_offload(self) -> None:
+        """`cst btrfs cache offload` user workflow with real systemd --user timer, WAL sqlite online backup,
+        rejection of `.local/share/containers`, `cst doctor`, `cst sync plan`, and `revert`."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-cache-offload"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            set +e
+            runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+                CST_BTRFS_OFFLOAD_HERE=1 \
+                /opt/cst-rw/cst btrfs cache offload revert >/dev/null 2>&1 || true
+            rm -rf {w} /home/tester/Scratchpad /home/tester/.gemini \
+                /home/tester/.config/cst/scratchpad-offload.toml \
+                /home/tester/.local/share/cst/scratchpad-mirrors \
+                /home/tester/.local/state/cst/scratchpad-offload-backups.json \
+                /home/tester/.local/state/cst/scratchpad-offload.lock \
+                /home/tester/.local/lib/cst/btrfs-cache-offload \
+                /home/tester/.config/systemd/user/cst-scratchpad-backup.service \
+                /home/tester/.config/systemd/user/cst-scratchpad-backup.timer || true
+            """,
+            check=False,
+        )
+        sql_seed = (
+            "            as_tester /usr/bin/python3 -I -B - \"$sample/state.db\" <<'PY'\n"
+            "import contextlib, sqlite3, sys\n"
+            "with contextlib.closing(sqlite3.connect(sys.argv[1])) as conn:\n"
+            '    conn.execute("PRAGMA journal_mode=WAL")\n'
+            '    conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, val TEXT)")\n'
+            '    conn.execute("INSERT INTO items (val) VALUES (?)", ("alive",))\n'
+            "    conn.commit()\n"
+            "PY\n"
+        )
+        sql_check = (
+            "            as_tester /usr/bin/python3 -I -B - \"$mirror/state.db\" <<'PY'\n"
+            "import contextlib, sqlite3, sys\n"
+            "with contextlib.closing(sqlite3.connect(sys.argv[1])) as conn:\n"
+            '    rows = conn.execute("SELECT val FROM items").fetchall()\n'
+            'assert rows == [("alive",)], rows\n'
+            "PY\n"
+        )
+        script = (
+            f"""
+            set -euo pipefail
+            STEP="setup"
+            trap 'rc=$?; echo "FAILED AT STEP=$STEP rc=$rc" >&2; head -n 50 {w}/*.out >&2 || true' ERR
+            rm -rf {w}
+            mkdir -p {w}
+            chmod 1777 {w}
+            home_dir=/home/tester
+            sp_dir="$home_dir/Scratchpad"
+            sample="$home_dir/.gemini/antigravity-cli"
+            conf="$home_dir/.config/cst/scratchpad-offload.toml"
+            as_tester() {{
+                runuser -u tester -- env HOME="$home_dir" USER=tester LOGNAME=tester \\
+                    XDG_RUNTIME_DIR=/run/user/1000 \\
+                    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \\
+                    CST_BTRFS_OFFLOAD_HERE=1 "$@"
+            }}
+            STEP="seed"
+            as_tester mkdir -p "$sp_dir" "$sample/sub"
+            echo "hello offload" >"$sample/sub/note.txt"
+            chown tester:tester "$sample/sub/note.txt"
+"""
+            + sql_seed
+            + f"""
+            STEP="init"
+            as_tester /opt/cst-rw/cst btrfs cache offload init >{w}/init.out
+            [[ -f "$conf" ]]
+
+            STEP="bad-toml"
+            # Reject podman toolboxes (~/.local/share/containers)
+            cat >{w}/bad.toml <<'BAD'
+version = 1
+[entries.toolbox]
+source = ".local/share/containers"
+BAD
+            rc=0
+            as_tester /opt/cst-rw/cst btrfs cache offload plan --config {w}/bad.toml >{w}/bad.out 2>&1 || rc=$?
+            [[ $rc == 1 ]]
+            grep -qF "conflicts with" {w}/bad.out
+
+            STEP="plan"
+            cat >"$conf" <<'CONF'
+version = 1
+backup_on_calendar = "daily"
+
+[entries.gemini]
+source = ".gemini/antigravity-cli"
+scratchpad_subpath = "offload/gemini-cli"
+mode = "zstd"
+backup = true
+nocow_paths = ["*.db"]
+sqlite_globs = ["*.db"]
+CONF
+            chown tester:tester "$conf"
+
+            as_tester /opt/cst-rw/cst btrfs cache offload plan >{w}/plan.out
+            grep -qF "gemini:" {w}/plan.out
+            [[ ! -L "$sample" ]]
+
+            STEP="apply"
+            as_tester /opt/cst-rw/cst btrfs cache offload apply >{w}/apply.out
+            [[ -L "$sample" ]]
+            [[ "$(readlink -f "$sample")" == "$sp_dir/offload/gemini-cli" ]]
+            [[ -f "$sp_dir/offload/gemini-cli/sub/note.txt" ]]
+            [[ "$(as_tester systemctl --user is-enabled cst-scratchpad-backup.timer)" == "enabled" ]]
+            STEP="verify"
+            as_tester systemd-analyze --user verify --man=no --recursive-errors=no \
+                "$home_dir/.config/systemd/user/cst-scratchpad-backup.service" \
+                "$home_dir/.config/systemd/user/cst-scratchpad-backup.timer"
+
+            STEP="idempotent"
+            as_tester /opt/cst-rw/cst btrfs cache offload apply | grep -qF "unchanged:"
+
+            STEP="backup"
+            as_tester /opt/cst-rw/cst btrfs cache offload backup >{w}/backup.out
+            grep -qF "1 sqlite db(s)" {w}/backup.out
+            mirror="$home_dir/.local/share/cst/scratchpad-mirrors/gemini"
+            [[ -f "$mirror/sub/note.txt" ]]
+"""
+            + sql_check
+            + f"""
+            STEP="doctor"
+            as_tester /opt/cst-rw/cst doctor >{w}/doc.out 2>&1 || true
+            grep -qF "btrfs offload: gemini: active" {w}/doc.out
+            STEP="sync"
+            printf '\\n# e2e outdated test\\n' >>"$home_dir/.config/systemd/user/cst-scratchpad-backup.timer"
+            chown tester:tester "$home_dir/.config/systemd/user/cst-scratchpad-backup.timer"
+            as_tester /opt/cst-rw/cst sync plan >{w}/sync.out
+            grep -qF "btrfs:offload" {w}/sync.out
+
+            STEP="revert"
+            as_tester /opt/cst-rw/cst btrfs cache offload revert >{w}/revert.out
+            [[ ! -L "$sample" && -d "$sample" ]]
+            [[ -f "$sample/sub/note.txt" ]]
+            [[ ! -e "$home_dir/.config/systemd/user/cst-scratchpad-backup.timer" ]]
+            [[ ! -e "$home_dir/.local/lib/cst/btrfs-cache-offload" ]]
+            echo E2E-289-OK
+            """
+        )
+        out = exec_bash(c, script).stdout
+        self.assertIn("E2E-289-OK", out)

@@ -526,7 +526,18 @@ class InstallerCliTest(unittest.TestCase):
         return out
 
     def test_full_cycle_on_the_btrfs_module(self) -> None:
-        sel = ["--root", self.stage, "--module", "btrfs", "--set", "UUID=u-1", "--set", "OPTIONS=o"]
+        sel = [
+            "--root",
+            self.stage,
+            "--module",
+            "btrfs",
+            "--home",
+            "/home/u",
+            "--set",
+            "UUID=u-1",
+            "--set",
+            "OPTIONS=o",
+        ]
         plan = self.cli("plan", *sel)
         self.assertEqual(plan.returncode, 0, plan.stderr)
         self.assertEqual(self.files(), {}, "plan wrote something")
@@ -552,7 +563,7 @@ class InstallerCliTest(unittest.TestCase):
         self.assertTrue(zipfile.is_zipfile(gc))
         self.assertEqual(stat.S_IMODE(gc.stat().st_mode), 0o755)
 
-        dests = self.cli("dests", "--module", "btrfs").stdout.decode().split()
+        dests = self.cli("dests", "--module", "btrfs", "--home", "/home/u").stdout.decode().split()
         self.assertEqual(len(dests), n)
         for d in dests:
             os.unlink(self.stage + d)
@@ -575,7 +586,7 @@ class InstallerCliTest(unittest.TestCase):
         sets = ["--set", "UUID=u", "--set", "OPTIONS=o", "--set", "USER=u"]
         for sel in (
             ["--component", "btrfs:docker-gc"],
-            ["--module", "btrfs", "--set", "UUID=u", "--set", "OPTIONS=o"],
+            ["--module", "btrfs", "--home", "/home/u", "--set", "UUID=u", "--set", "OPTIONS=o"],
             ["--owner", "root", *sets],
             ["btrfs/docker-gc"],
         ):

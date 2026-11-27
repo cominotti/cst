@@ -32,6 +32,7 @@ def format_cache_mount_usage(prog: str) -> str:
         "  attach [OPTIONS]                     (root, host only) create 0700 dirs, CACHEDIR.TAG, mount, then update fstab\n"
         "  detach [OPTIONS]                     (root, host only) remove its fstab lines, then unmount its binds; keeps data\n"
         "  system <status|plan|apply|revert>    (root apply/revert) bind /var/log/below, btrfs-stall-monitor, /var/tmp to NVMe\n"
+        "  offload <cmd> [OPTIONS]              (user on host) offload hot user dirs to ~/Scratchpad + daily /home backups\n"
         "  provision plan [--device DEV]        read-only: inspect a partition or saved /etc/cst/btrfs-cache.conf\n"
         "  provision init --device DEV          (root, host only) write /etc/cst/btrfs-cache.conf (does not touch disk)\n"
         "  provision apply [--format] [--yes]   (root, host only) LUKS2 + Btrfs + subvols + crypttab + fstab + mounts\n"

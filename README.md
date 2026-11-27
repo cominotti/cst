@@ -388,6 +388,7 @@ swap and memory, with counters since boot.
 | blk-iocost QoS on SSDs | `cst btrfs iocost revert` (removes the service and the udev rule, then resets the disks CST enabled; `--live-only` only resets them) | [btrfs/README.md, section 9.2](btrfs/README.md#92-iocost-enable-kernel-blk-iocost-qos-for-slice-ioweight) |
 | Root btrfs commit interval | `cst btrfs commit-interval revert` (back to the kernel's 30 s in every layer) | [btrfs/README.md, section 9.3](btrfs/README.md#93-commit-interval-coherent-commit60-across-root-btrfs-layers) |
 | Cache drive bind mounts | `cst btrfs cache detach [--user NAME]` (removes only that user's lines from `/etc/fstab`; the data on the drive stays) | [btrfs/README.md, section 9.4](btrfs/README.md#94-dedicated-nvme-cache-drive-cache) |
+| Scratchpad user hot-data offload | `cst btrfs cache offload revert` (moves data back onto `/home`, removes symlinks and backup timer) | [btrfs/README.md, section 9.4](btrfs/README.md#94-dedicated-nvme-cache-drive-cache) |
 | Weekly btrfs scrub limit | `cst btrfs scrub-limit off` | [btrfs/README.md, section 4.3](btrfs/README.md#43-weekly-scrub) |
 | Snapshots and NAS backup | `cst btrfs snapshots disable` (add `--purge` to delete the snapshots) | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#12-how-to-undo) |
 | One `~/Bulk` link | `cst btrfs bulk keep ID`, then remove the link and move the folder back by hand | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#undo-one-bulk-link) |
