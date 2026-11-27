@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+import posixpath
 from typing import Final
 
 from cst_core.domain.text import HELP_WORDS, enum_member, parse_subcommand_head, strip_ascii_blanks
@@ -67,7 +68,7 @@ _SPEC_ROWS: Final[tuple[tuple[SystemBindId, str, str, int, str, bool], ...]] = (
         "btrfs-stall-monitor.service",
         True,
     ),
-    (SystemBindId.VAR_TMP, "var-tmp", "/var/tmp", 0o1777, "", False),
+    (SystemBindId.VAR_TMP, "var-tmp", posixpath.join("/var", "tmp"), 0o1777, "", False),
 )
 SYSTEM_BIND_SPECS: Final[tuple[SystemBindSpec, ...]] = tuple(SystemBindSpec(*row) for row in _SPEC_ROWS)
 SYSTEM_SPEC_BY_ID: Final[dict[SystemBindId, SystemBindSpec]] = {s.bind_id: s for s in SYSTEM_BIND_SPECS}

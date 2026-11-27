@@ -309,6 +309,32 @@ def _plan_probe_actions(probe: SystemBindProbe, *, mount_var_tmp_now: bool) -> l
     return actions
 
 
+def _apply_command_flags(probes: Sequence[SystemBindProbe], opts: SystemPlanOptions) -> str:
+    flags: list[str] = []
+    if len(probes) < len(SYSTEM_BIND_SPECS):
+        flags.append(f"--only {','.join(p.spec.bind_id.value for p in probes)}")
+    if opts.allow_nonempty:
+        flags.append("--allow-nonempty")
+    if opts.mount_var_tmp_now:
+        flags.append("--mount-var-tmp-now")
+    return f" {' '.join(flags)}" if flags else ""
+
+
+def _format_plan_tail(snap: SystemCacheSnapshot, prog: str, opts: SystemPlanOptions) -> str:
+    if all(p.in_fstab and not should_mount_live(p, mount_var_tmp_now=opts.mount_var_tmp_now) for p in snap.probes):
+        why = (
+            f"systemd has not reloaded {FSTAB_PATH}"
+            if snap.fstab_behind is True
+            else f"systemctl cannot say whether systemd has loaded {FSTAB_PATH}"
+        )
+        return format_ready_tail(
+            done_msg="System cache bind mounts already configured; nothing to do.",
+            behind_msg=f"System cache bind mounts configured; {why}, apply runs daemon-reload.",
+            fstab_behind=snap.fstab_behind,
+        )
+    return f"Dry run, nothing changed. Run `{prog} system apply{_apply_command_flags(snap.probes, opts)}` to apply."
+
+
 def format_system_plan(snap: SystemCacheSnapshot, prog: str, *, options: SystemPlanOptions | None = None) -> list[str]:
     """Render dry-run lines for `cst btrfs cache system plan`."""
     opts = SystemPlanOptions() if options is None else options
@@ -317,36 +343,12 @@ def format_system_plan(snap: SystemCacheSnapshot, prog: str, *, options: SystemP
         err = f"cannot list mounts: {snap.mounts_error}" if snap.mounts_error is not None else (snap.fstab_error or "")
         return [*lines, f"BLOCKED: {err}"]
     for probe in snap.probes:
-        s = probe.spec
         actions = _plan_probe_actions(probe, mount_var_tmp_now=opts.mount_var_tmp_now)
         summary = ", ".join(actions) if actions else "already active"
-        lines.append(f"  {s.bind_id.value:<14} {s.source} -> {s.target}: {summary}")
+        lines.append(f"  {probe.spec.bind_id.value:<14} {probe.spec.source} -> {probe.spec.target}: {summary}")
     blockers = validate_system_apply(snap, allow_nonempty=opts.allow_nonempty, mount_var_tmp_now=opts.mount_var_tmp_now)
     if blockers:
         lines.extend(f"BLOCKED: {msg}" for msg in blockers)
         return lines
-    if all(p.in_fstab and not should_mount_live(p, mount_var_tmp_now=opts.mount_var_tmp_now) for p in snap.probes):
-        why = (
-            f"systemd has not reloaded {FSTAB_PATH}"
-            if snap.fstab_behind is True
-            else f"systemctl cannot say whether systemd has loaded {FSTAB_PATH}"
-        )
-        lines.append(
-            format_ready_tail(
-                done_msg="System cache bind mounts already configured; nothing to do.",
-                behind_msg=f"System cache bind mounts configured; {why}, apply runs daemon-reload.",
-                fstab_behind=snap.fstab_behind,
-            )
-        )
-        return lines
-    flags: list[str] = []
-    if len(snap.probes) < len(SYSTEM_BIND_SPECS):
-        only_ids = ",".join(p.spec.bind_id.value for p in snap.probes)
-        flags.append(f"--only {only_ids}")
-    if opts.allow_nonempty:
-        flags.append("--allow-nonempty")
-    if opts.mount_var_tmp_now:
-        flags.append("--mount-var-tmp-now")
-    suffix = f" {' '.join(flags)}" if flags else ""
-    lines.append(f"Dry run, nothing changed. Run `{prog} system apply{suffix}` to apply.")
+    lines.append(_format_plan_tail(snap, prog, opts))
     return lines

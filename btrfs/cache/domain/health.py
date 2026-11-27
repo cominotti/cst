@@ -115,6 +115,32 @@ def parse_crypttab_cache_issues(
     return [issue for raw in systemd_lines(crypttab_text) if (issue := _crypttab_issue(raw, mappers)) is not None]
 
 
+def _append_user_findings(
+    findings: list[CacheMountFinding],
+    managed: Sequence[ManagedFstabEntry],
+    live_by_target: dict[str, MountEntry],
+) -> None:
+    findings.extend(
+        CacheMountFinding(
+            CacheMountFindingSeverity.WARN,
+            f"{entry.target} (user={entry.user}) is in /etc/fstab but not mounted",
+            fix=f"btrfs cache attach --user {entry.user}",
+        )
+        for entry in managed
+        if entry.target not in live_by_target
+    )
+    findings.extend(
+        CacheMountFinding(
+            CacheMountFindingSeverity.WARN,
+            f"{entry.target} (user={entry.user}) has a mount that is not CST's bind of {entry.source}",
+            fix=f"btrfs cache status --user {entry.user}",
+        )
+        for entry in managed
+        if (live := live_by_target.get(entry.target)) is not None
+        and not _is_cst_bind(live, live_by_target.get(BASE_FOR_KIND[entry.kind]), entry.user)
+    )
+
+
 def _collect_active_bases(
     live_by_target: dict[str, MountEntry],
     fstab_by_target: dict[str, MountEntry],
@@ -278,25 +304,7 @@ def assess_cache_mount_health(
         for issue in parse_crypttab_cache_issues(crypttab_text, backing_sources, dm_names)
     )
 
-    findings.extend(
-        CacheMountFinding(
-            CacheMountFindingSeverity.WARN,
-            f"{entry.target} (user={entry.user}) is in /etc/fstab but not mounted",
-            fix=f"btrfs cache attach --user {entry.user}",
-        )
-        for entry in managed
-        if entry.target not in live_by_target
-    )
-    findings.extend(
-        CacheMountFinding(
-            CacheMountFindingSeverity.WARN,
-            f"{entry.target} (user={entry.user}) has a mount that is not CST's bind of {entry.source}",
-            fix=f"btrfs cache status --user {entry.user}",
-        )
-        for entry in managed
-        if (live := live_by_target.get(entry.target)) is not None
-        and not _is_cst_bind(live, live_by_target.get(BASE_FOR_KIND[entry.kind]), entry.user)
-    )
+    _append_user_findings(findings, managed, live_by_target)
     _append_system_findings(findings, system_entries, live_by_target)
 
     if not any(f.severity == CacheMountFindingSeverity.WARN for f in findings):

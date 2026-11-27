@@ -9,7 +9,7 @@ btrfs/cache/cli.py hands argv to this module.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import os
 
 from btrfs.cache import domain as cache_mount_domain
@@ -18,6 +18,7 @@ from btrfs.cache.adapters.mounts import (
     CacheAccounts,
     CacheFolders,
     CacheHostView,
+    CacheMountRuntime,
     CacheMountTable,
     CacheSystemd,
     FstabFile,
@@ -48,17 +49,27 @@ def start_cache_mount_process() -> None:
     undo_python_start()
 
 
+def _core_ports(
+    rt: CacheMountRuntime,
+) -> tuple[FstabFile, CacheMountTable, CacheSystemd, CacheFolders, CacheHostView, CacheAccounts]:
+    return (
+        FstabFile(rt),
+        CacheMountTable(rt),
+        CacheSystemd(rt),
+        CacheFolders(rt),
+        CacheHostView(rt),
+        CacheAccounts(rt),
+    )
+
+
 def build_cache_mounts(
     env_map: Mapping[str, str], ctx: ExecutionContextPort | None, runner: CommandRunnerPort | None
 ) -> CacheMounts:
     """The use cases over the real files and commands: the test root from env_map (CST_BTRFS_CACHE_ROOT), ctx
     and runner (None: the host's, a subprocess)."""
     rt = cache_runtime(env_map, ctx, runner)
-    mounts = CacheMounts(
-        FstabFile(rt), CacheMountTable(rt), CacheSystemd(rt), CacheFolders(rt), CacheHostView(rt), CacheAccounts(rt)
-    )
-    return replace(
-        mounts,
+    return CacheMounts(
+        *_core_ports(rt),
         provision=CacheProvisionAdapter(rt),
         migration=CacheMigrationAdapter(rt),
         system_binds=CacheSystemBindAdapter(rt),

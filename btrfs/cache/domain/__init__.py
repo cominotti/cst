@@ -499,15 +499,11 @@ def _parse_provision_args(argv: Sequence[str]) -> CacheMountParsedArgs:
                 action=CacheMountAction.PROVISION, provision_action=sub, error=err, code=EXIT_USAGE
             )
         i += step
-    prov_err = (
-        "`provision init` requires --device PATH"
-        if sub == ProvisionSubcommand.INIT and state.device is None
-        else (
-            f"--mapper must be a plain mapper name, not a path: {state.mapper!r}"
-            if state.mapper is not None and "/" in state.mapper
-            else None
-        )
-    )
+    prov_err: str | None = None
+    if sub == ProvisionSubcommand.INIT and state.device is None:
+        prov_err = "`provision init` requires --device PATH"
+    elif state.mapper is not None and "/" in state.mapper:
+        prov_err = f"--mapper must be a plain mapper name, not a path: {state.mapper!r}"
     if prov_err is not None:
         return CacheMountParsedArgs(
             action=CacheMountAction.PROVISION, provision_action=sub, error=prov_err, code=EXIT_USAGE

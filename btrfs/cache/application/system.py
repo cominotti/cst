@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Final
 
 from btrfs.cache.application.fstab_ops import commit_fstab, format_undo_error, probe_base_mount, restore_fstab
@@ -175,6 +175,35 @@ def _undo_system_apply(
     return errors
 
 
+def _prepare_one_system_probe(binds: CacheSystemBindPort, probe: SystemBindProbe) -> tuple[bool, str | None]:
+    spec = probe.spec
+    try:
+        if not probe.target_exists:
+            binds.ensure_root_dir(spec.target, spec.mode)
+        binds.ensure_root_dir(spec.source, spec.mode, reference_selinux=spec.target)
+    except OSError as exc:
+        return False, f"cannot prepare {spec.source} / {spec.target}: {exc.strerror or exc}"
+    needs_copy = (
+        not probe.mounted_from_source
+        and spec.mount_live_by_default
+        and probe.target_nonempty
+        and not probe.source_nonempty
+    )
+    if not needs_copy:
+        return False, None
+    copy_err = binds.copy_tree(spec.target, spec.source)
+    if copy_err is not None:
+        binds.clear_dir_contents(spec.source)
+        return False, copy_err
+    try:
+        # `cp -a src/. dst` overwrites `dst` directory mode/attrs with `src`'s; restore target mode + SELinux.
+        binds.ensure_root_dir(spec.source, spec.mode, reference_selinux=spec.target)
+    except OSError as exc:
+        binds.clear_dir_contents(spec.source)
+        return False, f"cannot finalize {spec.source}: {exc.strerror or exc}"
+    return True, None
+
+
 def _prepare_and_copy_system(
     binds: CacheSystemBindPort,
     probes: Sequence[SystemBindProbe],
@@ -186,30 +215,11 @@ def _prepare_and_copy_system(
         return [], f"cannot create {SYSTEM_CACHE_ROOT}: {exc.strerror or exc}"
 
     for probe in probes:
-        spec = probe.spec
-        try:
-            if not probe.target_exists:
-                binds.ensure_root_dir(spec.target, spec.mode)
-            binds.ensure_root_dir(spec.source, spec.mode, reference_selinux=spec.target)
-        except OSError as exc:
-            return copied, f"cannot prepare {spec.source} / {spec.target}: {exc.strerror or exc}"
-        if (
-            not probe.mounted_from_source
-            and spec.mount_live_by_default
-            and probe.target_nonempty
-            and not probe.source_nonempty
-        ):
-            copy_err = binds.copy_tree(spec.target, spec.source)
-            if copy_err is not None:
-                binds.clear_dir_contents(spec.source)
-                return copied, copy_err
-            try:
-                # `cp -a src/. dst` overwrites `dst` directory mode/attrs with `src`'s; restore target mode + SELinux.
-                binds.ensure_root_dir(spec.source, spec.mode, reference_selinux=spec.target)
-            except OSError as exc:
-                binds.clear_dir_contents(spec.source)
-                return copied, f"cannot finalize {spec.source}: {exc.strerror or exc}"
-            copied.append(spec)
+        did_copy, err = _prepare_one_system_probe(binds, probe)
+        if did_copy:
+            copied.append(probe.spec)
+        if err is not None:
+            return copied, err
     return copied, None
 
 
@@ -350,6 +360,21 @@ def _unbind_system_mounts(binds: CacheSystemBindPort, probes: Sequence[SystemBin
     return _UnbindResult(stopped, unmounted, notes)
 
 
+def _revert_fstab_and_reload(snap: SystemCacheSnapshot, env: SystemEnv) -> tuple[str, str, list[str], str | None]:
+    cur_fstab = snap.fstab_text or ""
+    new_fstab = plan_system_revert_fstab(cur_fstab, {p.spec.bind_id for p in snap.probes})
+    if new_fstab != cur_fstab:
+        failed = commit_fstab(snap.fstab_text, new_fstab, env.fstab, env.systemd)
+        err = format_undo_error(failed.cause, failed.undo_errors) if failed is not None else None
+        return cur_fstab, new_fstab, [], err
+    if snap.fstab_behind is not False:
+        cause, reloaded = catch_up_words(behind=snap.fstab_behind, reload_error=env.systemd.daemon_reload())
+        if cause is not None:
+            return cur_fstab, new_fstab, [], f"ERROR: {cause}"
+        return cur_fstab, new_fstab, reloaded, None
+    return cur_fstab, new_fstab, [], None
+
+
 def _revert_system(snap: SystemCacheSnapshot, env: SystemEnv) -> ExitAndLines:
     assert env.binds is not None
     binds = env.binds
@@ -358,17 +383,10 @@ def _revert_system(snap: SystemCacheSnapshot, env: SystemEnv) -> ExitAndLines:
     if blockers:
         return 1, [*lines, *(f"ERROR: {msg}" for msg in blockers)]
 
-    cur_fstab = snap.fstab_text or ""
-    new_fstab = plan_system_revert_fstab(cur_fstab, {p.spec.bind_id for p in snap.probes})
-    if new_fstab != cur_fstab:
-        failed = commit_fstab(snap.fstab_text, new_fstab, env.fstab, env.systemd)
-        if failed is not None:
-            return 1, [*lines, format_undo_error(failed.cause, failed.undo_errors)]
-    elif snap.fstab_behind is not False:
-        cause, reloaded = catch_up_words(behind=snap.fstab_behind, reload_error=env.systemd.daemon_reload())
-        if cause is not None:
-            return 1, [*lines, f"ERROR: {cause}"]
-        lines.extend(reloaded)
+    cur_fstab, new_fstab, reloaded, fstab_err = _revert_fstab_and_reload(snap, env)
+    if fstab_err is not None:
+        return 1, [*lines, fstab_err]
+    lines.extend(reloaded)
 
     res = _unbind_system_mounts(binds, snap.probes)
     if res.error is not None:
@@ -385,10 +403,12 @@ def _revert_system(snap: SystemCacheSnapshot, env: SystemEnv) -> ExitAndLines:
         lines.extend(res.notes)
         if new_fstab != cur_fstab:
             lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")
-        if res.unmounted or new_fstab != cur_fstab or res.notes:
-            lines.append(f"Data in {SYSTEM_CACHE_ROOT} kept untouched.")
-        else:
-            lines.append("No system cache bind mounts configured; nothing to do.")
+        summary = (
+            f"Data in {SYSTEM_CACHE_ROOT} kept untouched."
+            if (res.unmounted or new_fstab != cur_fstab or res.notes)
+            else "No system cache bind mounts configured; nothing to do."
+        )
+        lines.append(summary)
     return (1, [*lines, *(f"ERROR: {e}" for e in restart_errs)]) if restart_errs else (0, lines)
 
 
@@ -404,7 +424,7 @@ def run_system_action(parsed: SystemArgsResult, env: SystemEnv, prog: str) -> Ex
             mount_var_tmp_now=parsed.mount_var_tmp_now,
             seam_root=env.seam_root,
         )
-        res: ExitAndLines = (0, format_system_plan(replace(probed), prog, options=opts))
+        res: ExitAndLines = (0, format_system_plan(probed, prog, options=opts))
     elif action == SystemAction.APPLY:
         res = _apply_system(probed, parsed, env)
     elif action == SystemAction.REVERT:
