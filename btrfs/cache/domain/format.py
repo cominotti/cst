@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 from btrfs.cache.domain import (
     CACHE_SEAM_ROOT_ENV,
-    OPT_FLUSHONCOMMIT,
     BaseMountInfo,
     BindingProbe,
     CacheMountKind,
@@ -17,6 +16,7 @@ from btrfs.cache.domain import (
 )
 from btrfs.cache.domain.migrate import cleanup_hint, format_busy_blocker, needs_migration, validate_migration
 from btrfs.compress.domain import FSTAB_PATH
+from btrfs.compress.domain.root_option import OPT_FLUSHONCOMMIT
 
 
 def format_cache_mount_usage(prog: str) -> str:

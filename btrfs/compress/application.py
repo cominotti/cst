@@ -21,6 +21,7 @@ from btrfs.compress.domain import (
     CompressSnapshot,
     CompressStatusView,
     MountEntry,
+    RootOptionLayerPlan,
     assess_coherence,
     build_plan,
     effective_compress_spec,
@@ -36,6 +37,7 @@ from btrfs.compress.domain.args import CompressArgs, CompressCommand
 from btrfs.compress.domain.rpm_ostree import kargs_refused
 from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
 from cst_core.domain.errors import Refused
+from cst_core.domain.values import ExitAndLines
 from cst_core.ports import CommandFailed
 
 
@@ -464,3 +466,71 @@ class CompressService:
             messages=(*reloaded, *msgs),
             error=err_msg or "",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RootOptionChangeOps[PlanT]:
+    """Callbacks parameterizing transactional apply/revert for root btrfs option tools."""
+
+    build_plan: Callable[[CompressSnapshot], PlanT]
+    has_changes: Callable[[PlanT], bool]
+    new_fstab_text: Callable[[PlanT], str | None]
+    confirm_prompt: Callable[[PlanT], str]
+    steps: Callable[[LayerRun, PlanT], tuple[LayerStep, ...]]
+    format_plan: Callable[[PlanT, str], list[str]]
+
+
+def _confirm_layer_change(host: CompressHostPort, lines: list[str], prompt: str) -> ExitAndLines | None:
+    try:
+        confirmed = host.confirm(prompt)
+    except Refused as exc:
+        return 1, [*lines, f"ERROR: {exc} (pass --yes to apply non-interactively)."]
+    if not confirmed:
+        return 1, [*lines, "Aborted; nothing changed."]
+    return None
+
+
+def run_root_option_change[PlanT](
+    host: CompressHostPort,
+    snap_read: tuple[CompressSnapshot, bool, str],
+    ops: RootOptionChangeOps[PlanT],
+    *,
+    yes: bool,
+) -> ExitAndLines:
+    """Shared confirmation, systemd catch-up reload, layer execution, and rollback driver."""
+    snap, kargs_ok, kargs_err = snap_read
+    if not kargs_ok:
+        return 1, [f"ERROR: cannot inspect rpm-ostree kargs: {kargs_err}"]
+    plan = ops.build_plan(snap)
+    if not ops.has_changes(plan):
+        cause, reloaded = catch_up_reload(host, None)
+        said = cause or "\n".join(reloaded)
+        lines = ops.format_plan(plan, said)
+        return (1, [*lines, f"ERROR: {cause}"]) if cause is not None else (0, [*lines, *reloaded])
+    lines = ops.format_plan(plan, "")
+    if not yes and (stopped := _confirm_layer_change(host, lines, ops.confirm_prompt(plan))) is not None:
+        return stopped
+    cause, reloaded = catch_up_reload(host, ops.new_fstab_text(plan))
+    if cause is not None:
+        return 1, [*lines, f"ERROR: {cause}"]
+    lines.extend(reloaded)
+    run = LayerRun(host, snap)
+    err = run_layers(run, ops.steps(run, plan))
+    return (1, [*lines, *run.msgs, f"ERROR: {err}"]) if err is not None else (0, [*lines, *run.msgs])
+
+
+def make_layer_steps(
+    run: LayerRun,
+    plan: RootOptionLayerPlan,
+    remount: RemountStep | None,
+    *,
+    fstab_done: str,
+    kargs_done: str,
+) -> tuple[LayerStep, ...]:
+    """Build standard 4-layer execution sequence for root btrfs option tools."""
+    return (
+        lambda: step_fstab(run, plan.new_fstab_text, fstab_done),
+        lambda: step_kargs(run, plan.kargs_edits, kargs_done),
+        lambda: step_remount(run, remount),
+        lambda: step_top_mount(run, plan.new_top_mount_options),
+    )

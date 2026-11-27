@@ -15,6 +15,7 @@ from pathlib import Path
 import pwd
 import signal
 import stat
+import sys
 from typing import NoReturn, Protocol, TextIO
 import zipfile
 
@@ -424,3 +425,9 @@ def run_managed_cli[P](args: Sequence[str], spec: ManagedCliSpec[P], env: Manage
     default_err_pred = _explicit_error_line if has_explicit_err else _not_aborted_line
     _write_output_lines(rc, output_lines, spec.is_err_line or default_err_pred, out_fh, err_fh)
     return rc
+
+
+def run_managed_entry[P](spec: ManagedCliSpec[P], argv: Sequence[str] | None = None, entry_file: str = "") -> int:
+    """Standard `main()` wrapper for `ManagedCliSpec` entry points."""
+    undo_python_start()
+    return run_managed_cli(sys.argv[1:] if argv is None else argv, spec, ManagedCliEnv(entry_file=entry_file))

@@ -350,6 +350,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "btrfs/btrfs-cache",
         "btrfs/btrfs-commit-interval",
         "btrfs/btrfs-compress",
+        "btrfs/btrfs-flushoncommit",
         "btrfs/btrfs-scrub-limit",
         "btrfs/btrfs-stall-watch",
         "btrfs/chrome-cache",

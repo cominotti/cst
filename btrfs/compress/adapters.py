@@ -3,13 +3,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
-from typing import Final
+from typing import Final, Protocol
 
 from btrfs.cache.adapters.mounts import loaded_mount_units, reload_failure
+from btrfs.compress.application import (
+    LayerRun,
+    LayerStep,
+    RootOptionChangeOps,
+    reload_pending_line,
+    run_root_option_change,
+)
 from btrfs.compress.domain import (
     KARGS_SETTLE_POLL_S,
     KARGS_SETTLE_TIMEOUT_S,
@@ -18,22 +25,31 @@ from btrfs.compress.domain import (
     PROC_MOUNTS_PATH,
     ROOT_ANCHOR_TARGETS,
     TOP_MOUNT_UNIT_NAME,
+    CompressSnapshot,
     TopMountInfo,
     parse_top_mount_unit,
     transaction_running,
 )
-from btrfs.compress.ports import TOP_MOUNT_ERRORS
+from btrfs.compress.domain.root_option import RootOptionAction, RootOptionPlanMixin
+from btrfs.compress.ports import TOP_MOUNT_ERRORS, CompressHostPort
+from btrfs.compress.presenter import (
+    RootOptionPlanView,
+    RootOptionStatusSpec,
+    format_seam_notice,
+    render_root_option_plan_lines,
+    render_root_option_status,
+)
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, SystemdUnitVerifier
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
-from cst_core.adapters.runtime import checkout_commit, checkout_root
+from cst_core.adapters.runtime import ManagedCliEnv, ManagedCliSpec, checkout_commit, checkout_root
 from cst_core.adapters.terminal import confirm as terminal_confirm
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService
 from cst_core.domain.install import INSTALL_MANIFEST, Component
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.domain.values import MINUTE
+from cst_core.domain.values import MINUTE, ExitAndLines
 from cst_core.ports import (
     ClockPort,
     CommandFailed,
@@ -273,3 +289,174 @@ class LinuxCompressHostAdapter:
     def confirm(self, prompt: str) -> bool:
         """Ask interactive confirmation on the terminal."""
         return terminal_confirm(prompt)
+
+
+def make_root_option_host(
+    env: ManagedCliEnv, *, proc_seam_var: str, root_seam_var: str
+) -> tuple[CompressHostPort, str, dict[str, str]]:
+    """Build `LinuxCompressHostAdapter` from `ManagedCliEnv` and test seam variable names."""
+    env_map = dict(os.environ if env.env is None else env.env)
+    seam_proc = env_map.get(proc_seam_var, "")
+    host_root = env_map.get(root_seam_var, "")
+    cfg = CompressAdapterConfig(
+        entry_file=env.entry_file,
+        fallback_root=env.fallback_root,
+        proc_dir=seam_proc or "/proc",
+        host_root=host_root,
+    )
+    return LinuxCompressHostAdapter(cfg, ctx=env.ctx, runner=env.runner), seam_proc, env_map
+
+
+def read_root_option_snapshot(host: CompressHostPort) -> tuple[CompressSnapshot, bool, str]:
+    """Read current root btrfs state across fstab, rpm-ostree kargs, live mounts, and top-mount."""
+    is_ostree = host.is_ostree()
+    kargs_ok, kargs_text, kargs_err = host.read_kargs() if is_ostree else (True, "", "")
+    snap = CompressSnapshot(
+        is_ostree=is_ostree,
+        root_uuid=host.root_uuid(),
+        fstab_text=host.read_fstab(),
+        kargs_text=kargs_text if (is_ostree and kargs_ok) else None,
+        proc_mounts_text=host.read_proc_mounts(),
+        top_mount=host.read_top_mount(),
+    )
+    return snap, (True if not is_ostree else kargs_ok), kargs_err
+
+
+class _RootOptionParsed(Protocol):
+    @property
+    def action(self) -> RootOptionAction: ...
+    @property
+    def error(self) -> str | None: ...
+    @property
+    def code(self) -> int: ...
+    @property
+    def yes(self) -> bool: ...
+
+
+class RootOptionDriver[ParsedT: _RootOptionParsed, PlanT: RootOptionPlanMixin](Protocol):
+    """Behavior hooks implemented per root btrfs mount option tool."""
+
+    def build_plan(self, snap: CompressSnapshot, parsed: ParsedT) -> PlanT: ...
+    def confirm_prompt(self, plan: PlanT) -> str: ...
+    def build_steps(self, run: LayerRun, plan: PlanT) -> tuple[LayerStep, ...]: ...
+    def status_spec(
+        self, snap: CompressSnapshot, proc_cmdline: str | None, *, kargs_ok: bool
+    ) -> RootOptionStatusSpec: ...
+    def plan_view(self, plan: PlanT, prog: str, *, dry_run: bool, reload_pending: str) -> RootOptionPlanView: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RootOptionTool[ParsedT: _RootOptionParsed, PlanT: RootOptionPlanMixin]:
+    """Shared orchestrator for `status`, `plan`, `apply`, and `revert` of a root btrfs option."""
+
+    default_prog: str
+    seam_proc_var: str
+    seam_root_var: str
+    driver: RootOptionDriver[ParsedT, PlanT]
+
+    def status_lines(
+        self,
+        snap: CompressSnapshot,
+        proc_cmdline: str | None,
+        *,
+        kargs: tuple[bool, str],
+        seam_proc: str = "",
+    ) -> list[str]:
+        """Render `status` lines for this option tool."""
+        kargs_ok, kargs_error = kargs
+        spec = self.driver.status_spec(snap, proc_cmdline, kargs_ok=kargs_ok)
+        return render_root_option_status(snap, spec, kargs_ok=kargs_ok, kargs_error=kargs_error, seam_proc=seam_proc)
+
+    def plan_lines(self, plan: PlanT, hint_prog: str, *, seam_proc: str = "", reload_pending: str = "") -> list[str]:
+        """Render `plan` / action header lines (`hint_prog` non-empty enables the dry-run hint)."""
+        view = self.driver.plan_view(plan, hint_prog, dry_run=bool(hint_prog), reload_pending=reload_pending)
+        return render_root_option_plan_lines(replace(view, seam_line=format_seam_notice(self.seam_proc_var, seam_proc)))
+
+    def execute(self, host: CompressHostPort, parsed: ParsedT, *, prog: str = "", seam_proc: str = "") -> ExitAndLines:
+        """Run transactional `apply` or `revert` against `host`."""
+        del prog
+        ops = RootOptionChangeOps(
+            build_plan=lambda snap: self.driver.build_plan(snap, parsed),
+            has_changes=lambda p: p.has_changes,
+            new_fstab_text=lambda p: p.new_fstab_text,
+            confirm_prompt=self.driver.confirm_prompt,
+            steps=self.driver.build_steps,
+            format_plan=lambda p, said: self.plan_lines(p, "", seam_proc=seam_proc, reload_pending=said),
+        )
+        return run_root_option_change(host, read_root_option_snapshot(host), ops, yes=parsed.yes)
+
+    def dispatch(
+        self,
+        parsed: ParsedT,
+        env: ManagedCliEnv,
+        *,
+        host_for_env: Callable[[ManagedCliEnv], tuple[CompressHostPort, str, dict[str, str]]] | None = None,
+    ) -> ExitAndLines:
+        """Resolve host adapter and run the requested subcommand."""
+        resolver = host_for_env or (
+            lambda e: make_root_option_host(e, proc_seam_var=self.seam_proc_var, root_seam_var=self.seam_root_var)
+        )
+        host, seam_proc, env_map = resolver(env)
+        prog = _resolve_root_prog(self.default_prog, env_map.get("CST_PROG") or "")
+        if parsed.action == RootOptionAction.STATUS:
+            snap, kargs_ok, kargs_err = read_root_option_snapshot(host)
+            lines = self.status_lines(snap, host.read_proc_cmdline(), kargs=(kargs_ok, kargs_err), seam_proc=seam_proc)
+            if reload := reload_pending_line(host):
+                lines.insert(-1, f"  {reload}")
+            return 0, lines
+        if parsed.action == RootOptionAction.PLAN:
+            snap, kargs_ok, kargs_err = read_root_option_snapshot(host)
+            if not kargs_ok:
+                return 1, [f"ERROR: cannot inspect rpm-ostree kargs: {kargs_err}"]
+            plan = self.driver.build_plan(snap, parsed)
+            pending = reload_pending_line(host) if plan.new_fstab_text is None else ""
+            return 0, self.plan_lines(plan, prog, seam_proc=seam_proc, reload_pending=pending)
+        return self.execute(host, parsed, prog=prog, seam_proc=seam_proc)
+
+    def cli_spec(
+        self,
+        parse: Callable[[Sequence[str]], ParsedT],
+        format_usage: Callable[[str], str],
+        elevation_reason: str,
+    ) -> ManagedCliSpec[ParsedT]:
+        """Build `ManagedCliSpec` wired to `self.dispatch`."""
+        return make_btrfs_option_cli_spec(
+            self.default_prog,
+            parse=parse,
+            format_usage=format_usage,
+            elevation_reason=elevation_reason,
+            execute=self.dispatch,
+        )
+
+
+def _resolve_root_prog(default_prog: str, raw: str) -> str:
+    return default_prog if raw == "cst btrfs" else (raw or default_prog)
+
+
+def make_btrfs_option_cli_spec[ParsedT: _RootOptionParsed](
+    default_prog: str,
+    *,
+    parse: Callable[[Sequence[str]], ParsedT],
+    format_usage: Callable[[str], str],
+    elevation_reason: str,
+    execute: Callable[[ParsedT, ManagedCliEnv], ExitAndLines],
+) -> ManagedCliSpec[ParsedT]:
+    """Build `ManagedCliSpec` for a `cst btrfs <option>` tool with standard subcommands."""
+
+    def _run(parsed: ParsedT, env: ManagedCliEnv, *, read_only: bool) -> ExitAndLines:
+        del read_only
+        return execute(parsed, env)
+
+    return ManagedCliSpec(
+        default_prog=default_prog,
+        parse=parse,
+        format_usage=format_usage,
+        is_help=lambda p: p.action == RootOptionAction.HELP,
+        parse_error=lambda p: None if p.error is None else (p.code, p.error),
+        write_action=lambda p: (
+            p.action.value if p.action in (RootOptionAction.APPLY, RootOptionAction.REVERT) else None
+        ),
+        elevation_reason=elevation_reason,
+        execute=_run,
+        resolve_prog=lambda raw: _resolve_root_prog(default_prog, raw),
+    )

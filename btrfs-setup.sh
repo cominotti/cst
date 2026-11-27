@@ -163,9 +163,15 @@
 #   commit-interval [status|plan [SECONDS|--revert]|apply [SECONDS]|revert] [--yes]
 #                          root btrfs `commit=N` interval (default 60s) across
 #                          /etc/fstab, rpm-ostree kargs, live mount, and
-#                          btrfs:top-mount (keeps flushoncommit untouched).
+#                          btrfs:top-mount (leaves other options untouched).
 #                          `status` and `plan` work in a toolbox; `apply` and
 #                          `revert` need root on the host.
+#   flushoncommit [status|plan [--revert]|apply|revert] [--yes]
+#                          root btrfs `flushoncommit` across /etc/fstab,
+#                          rpm-ostree kargs, live mount, and btrfs:top-mount
+#                          (`apply` removes it as the CST default; `revert`
+#                          re-enables it). `status` and `plan` work in a
+#                          toolbox; `apply` and `revert` need root on the host.
 #   cache [status|plan|attach|detach|provision|unprovision] [OPTIONS]
 #                          provision the dedicated NVMe cache drive (LUKS2 + Btrfs +
 #                          crypttab + fstab base mounts via /etc/cst/btrfs-cache.conf)
@@ -233,8 +239,9 @@ BTRFS_SYSFS=/sys/fs/btrfs
 SCRUB_SERVICE=btrfs-scrub-weekly.service
 SCRUB_DROPIN="${UNIT_DIR}/${SCRUB_SERVICE}.d/10-cst-limit.conf"
 # Mount options every btrfs mount of the root fs is expected to carry
-# (compression itself is checked separately to allow compress=zstd:* or compress-force=zstd:*).
-EXPECTED_OPTS=(flushoncommit noatime discard=async degraded space_cache=v2 ssd)
+# (compression itself is checked separately to allow compress=zstd:* or compress-force=zstd:*;
+# flushoncommit is intentionally omitted as the CST default to avoid commit-barrier flushes).
+EXPECTED_OPTS=(noatime discard=async degraded space_cache=v2 ssd)
 
 # Shown in the help and in hints: "cst btrfs" when run through the cst
 # command (it sets CST_PROG), else the name this script was started with.
@@ -281,6 +288,9 @@ case "${cmd}" in
         ;;
     commit-interval)
         CST_PROG="${PROG} commit-interval" exec python3 -I -B "${SRC}/btrfs-commit-interval" "$@"
+        ;;
+    flushoncommit)
+        CST_PROG="${PROG} flushoncommit" exec python3 -I -B "${SRC}/btrfs-flushoncommit" "$@"
         ;;
     cache)
         CST_PROG="${PROG} cache" exec python3 -I -B "${SRC}/btrfs-cache" "$@"

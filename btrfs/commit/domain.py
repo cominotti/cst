@@ -5,18 +5,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Final
 
 from btrfs.compress.domain import (
     CompressSnapshot,
-    LayerPlan,
     OptionLayerOps,
-    ROOTFLAGS_PREFIX,
     RootOptionLayerPlan,
-    collect_layer_options,
-    extract_rootflags_tokens,
-    plan_root_option_layers,
+)
+from btrfs.compress.domain.root_option import (
+    RootOptionAction,
+    RootOptionPlanMixin,
+    assess_root_option_coherence,
+    booted_rootflags_diff,
+    describe_unique_options,
+    plan_compact_option_layers,
 )
 from cst_core.domain.text import HELP_WORDS, parse_subcommand_head, strip_mount_blanks
 from cst_core.domain.values import parse_whole_number
@@ -34,20 +36,7 @@ _OCTAL_DIGITS: Final = frozenset("01234567")
 # The command's name in its own messages, when CST_PROG does not give it.
 COMMIT_PROG: Final = "cst btrfs commit-interval"
 
-
-class CommitAction(StrEnum):
-    """Supported subcommands of `cst btrfs commit-interval`."""
-
-    STATUS = "status"
-    PLAN = "plan"
-    APPLY = "apply"
-    REVERT = "revert"
-    HELP = "help"
-
-
-def is_commit_write(action: CommitAction) -> bool:
-    """True for mutating `commit-interval` subcommands."""
-    return action in (CommitAction.APPLY, CommitAction.REVERT)
+CommitAction = RootOptionAction
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +52,7 @@ class CommitParsedArgs:
 
 
 @dataclass(frozen=True, slots=True)
-class CommitPlan:
+class CommitPlan(RootOptionPlanMixin):
     """Complete plan for aligning root btrfs `commit=` across all active layers."""
 
     target_seconds: int
@@ -71,41 +60,6 @@ class CommitPlan:
     is_ostree: bool
     root_uuid: str
     core: RootOptionLayerPlan
-
-    @property
-    def layers(self) -> tuple[LayerPlan, ...]:
-        """Per-layer plan entries from `core`."""
-        return self.core.layers
-
-    @property
-    def has_changes(self) -> bool:
-        """True when any layer needs updating."""
-        return any(lp.changed for lp in self.core.layers)
-
-    @property
-    def new_fstab_text(self) -> str | None:
-        """Updated `/etc/fstab` text when fstab changes."""
-        return self.core.new_fstab_text
-
-    @property
-    def kargs_edits(self) -> tuple[tuple[str, str], ...]:
-        """`rpm-ostree kargs` delete/append edit pairs."""
-        return self.core.kargs_edits
-
-    @property
-    def remount_target(self) -> str | None:
-        """Live root btrfs mount target to remount when needed."""
-        return self.core.remount_target
-
-    @property
-    def new_top_mount_options(self) -> str | None:
-        """Updated `Options=` string for the top-mount systemd unit."""
-        return self.core.new_top_mount_options
-
-    @property
-    def left_alone_notes(self) -> tuple[str, ...]:
-        """A note per line of a separate /var filesystem that has a `commit=`, from `core`."""
-        return self.core.left_alone_notes
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +141,7 @@ def format_commit_label(seconds: int | None, *, explicit: bool = False) -> str:
 
 
 def rewrite_commit_options(options_str: str, target_seconds: int | None) -> str:
-    """Rewrite or remove `commit=N` in `options_str`, keeping `flushoncommit` and other flags.
+    """Rewrite or remove `commit=N` in `options_str`, leaving other mount options untouched.
 
     Every `commit=` token goes, also one that is not a number (`commit=abc`, which a mount refuses) or
     `commit=0` (btrfs' default); the target takes the place of the first one."""
@@ -287,12 +241,10 @@ def parse_commit_args(argv: Sequence[str]) -> CommitParsedArgs:
 
 
 def _describe_commit_opts(opt_strings: Sequence[str]) -> str:
-    unique = list(
-        dict.fromkeys(
-            format_commit_label(effective_commit_seconds(o), explicit=has_explicit_commit(o)) for o in opt_strings
-        )
+    return describe_unique_options(
+        opt_strings,
+        lambda o: format_commit_label(effective_commit_seconds(o), explicit=has_explicit_commit(o)),
     )
-    return ", ".join(unique) if unique else "(none)"
 
 
 def build_commit_plan(
@@ -305,7 +257,7 @@ def build_commit_plan(
     eff_target = KERNEL_DEFAULT_COMMIT_S if revert else target_seconds
     opt_target = None if eff_target == KERNEL_DEFAULT_COMMIT_S else eff_target
     target_label = format_commit_label(eff_target, explicit=(opt_target is not None))
-    core = plan_root_option_layers(
+    core = plan_compact_option_layers(
         snap,
         OptionLayerOps(
             target_label=target_label,
@@ -321,11 +273,6 @@ def build_commit_plan(
                 or has_malformed_commit(top.options)
             ),
             set_by_apply=has_explicit_commit,
-            fstab_absent_current="(no root btrfs)",
-            kargs_absent_current="(no rootflags=)",
-            kargs_absent_detail="no rootflags= in rpm-ostree kargs",
-            kargs_skip_detail="non-ostree host",
-            live_absent_detail="no root btrfs mount in /proc/mounts",
         ),
     )
     return CommitPlan(
@@ -339,47 +286,34 @@ def build_commit_plan(
 
 def assess_commit_coherence(snap: CompressSnapshot) -> CommitCoherenceReport:
     """Assess whether all active root btrfs layers agree on `commit=` seconds."""
-    observed: list[tuple[str, int, bool]] = [
-        (name, effective_commit_seconds(opts), has_explicit_commit(opts)) for name, opts in collect_layer_options(snap)
-    ]
-    if not observed:
-        return CommitCoherenceReport(
-            coherent=True,
-            seconds=None,
-            is_custom=False,
-            summary="no root btrfs mount sources found",
-            drift_details=(),
-        )
-    distinct = {sec for _, sec, _ in observed}
-    if len(distinct) > 1:
-        details = tuple(f"{name}={format_commit_label(sec, explicit=exp)}" for name, sec, exp in observed)
+    coherent, sec, distinct, summary, details = assess_root_option_coherence(
+        snap,
+        extract_layer=lambda opts: (
+            (s := effective_commit_seconds(opts)),
+            format_commit_label(s, explicit=has_explicit_commit(opts)),
+        ),
+        format_coherent=lambda s: format_commit_label(s, explicit=s != KERNEL_DEFAULT_COMMIT_S),
+    )
+    if not coherent:
         return CommitCoherenceReport(
             coherent=False,
             seconds=None,
-            is_custom=any(sec != KERNEL_DEFAULT_COMMIT_S for sec in distinct),
-            summary="drift across layers: " + ", ".join(details),
+            is_custom=any(s != KERNEL_DEFAULT_COMMIT_S for s in distinct),
+            summary=summary,
             drift_details=details,
         )
-    sec = observed[0][1]
-    is_custom = sec != KERNEL_DEFAULT_COMMIT_S
-    summary = f"coherent ({format_commit_label(sec, explicit=is_custom)})"
-    return CommitCoherenceReport(coherent=True, seconds=sec, is_custom=is_custom, summary=summary, drift_details=())
+    return CommitCoherenceReport(
+        coherent=True,
+        seconds=sec,
+        is_custom=sec is not None and sec != KERNEL_DEFAULT_COMMIT_S,
+        summary=summary,
+        drift_details=(),
+    )
 
 
 def booted_commit_diff(snap: CompressSnapshot, proc_cmdline: str | None, *, kargs_ok: bool) -> tuple[str, str] | None:
     """Return `(booted_rootflags, next_rootflags)` when their commit interval differs."""
-    if not (snap.is_ostree and kargs_ok and proc_cmdline is not None and snap.kargs_text is not None):
-        return None
-    boot_rf = extract_rootflags_tokens(proc_cmdline)
-    next_rf = extract_rootflags_tokens(snap.kargs_text)
-    if not (boot_rf and next_rf):
-        return None
-    # The kernel uses the last rootflags= of its command line.
-    b_sec = effective_commit_seconds(boot_rf[-1].removeprefix(ROOTFLAGS_PREFIX))
-    n_sec = effective_commit_seconds(next_rf[-1].removeprefix(ROOTFLAGS_PREFIX))
-    if b_sec == n_sec:
-        return None
-    return (boot_rf[-1], next_rf[-1])
+    return booted_rootflags_diff(snap, proc_cmdline, kargs_ok=kargs_ok, parse_value=effective_commit_seconds)
 
 
 def format_commit_usage(prog: str) -> str:
@@ -397,6 +331,6 @@ def format_commit_usage(prog: str) -> str:
         "  revert [--yes]            (root, host only) revert active layers to kernel default (30s)\n"
         "  help                      show this help\n"
         "\n"
-        "Keeps `flushoncommit` untouched on the root RAID1 filesystem.\n"
+        "Leaves other root RAID1 mount options untouched.\n"
         f"\nUsage: {prog} <status|plan|apply|revert|help> [options]\n"
     )

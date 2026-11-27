@@ -16,7 +16,6 @@ from btrfs.cache.domain import (
     CACHE_BASE,
     FSTYPE_BTRFS,
     OPT_COMPRESS_FORCE,
-    OPT_FLUSHONCOMMIT,
     PROVISION_BASE_MARKER,
     SCRATCHPAD_BASE,
     ManagedFstabEntry,
@@ -28,6 +27,7 @@ from btrfs.cache.domain import (
     split_tagged_fstab_line,
 )
 from btrfs.compress.domain import MountEntry
+from btrfs.compress.domain.root_option import OPT_FLUSHONCOMMIT
 from cst_core.domain.text import file_lines, split_ascii_blanks, unescape_mount_field
 from cst_core.domain.units import SYSTEMD_WHITESPACE, systemd_lines
 

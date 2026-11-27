@@ -1592,6 +1592,44 @@ class BtrfsCompressionDoctorTest(Scratch):
             area_lines(r2.stdout, "btrfs"),
         )
 
+    def test_flushoncommit_coherence_info_and_drift(self) -> None:
+        # Coherently omitted (CST & kernel default): silent.
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1,commit=60",
+            live_opt="compress-force=zstd:1,commit=60",
+            top_opt="compress-force=zstd:1,commit=60",
+        )
+        r_clean = self.run_tool()
+        self.assertEqual(r_clean.returncode, 0, r_clean.stdout)
+        self.assertNotIn("root btrfs flushoncommit:", r_clean.stdout)
+
+        # Coherently enabled everywhere: INFO suggesting `cst btrfs flushoncommit apply`.
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,flushoncommit,commit=60",
+            kargs_opt="compress-force=zstd:1,flushoncommit,commit=60",
+            live_opt="compress-force=zstd:1,flushoncommit,commit=60",
+            top_opt="compress-force=zstd:1,flushoncommit,commit=60",
+        )
+        r_on = self.run_tool()
+        self.assertEqual(r_on.returncode, 0, r_on.stdout)
+        btrfs_on = "\n".join(area_lines(r_on.stdout, "btrfs"))
+        self.assertIn("info   root btrfs flushoncommit: enabled across active layers", btrfs_on)
+        self.assertIn("fix: cst btrfs flushoncommit apply", btrfs_on)
+
+        # Drift across layers: WARN with fix.
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1,flushoncommit,commit=60",
+            live_opt="compress-force=zstd:1,commit=60",
+            top_opt="compress-force=zstd:1,commit=60",
+        )
+        r_drift = self.run_tool()
+        self.assertEqual(r_drift.returncode, 1)
+        btrfs_drift = "\n".join(area_lines(r_drift.stdout, "btrfs"))
+        self.assertIn("WARN   root btrfs flushoncommit: drift across layers:", btrfs_drift)
+        self.assertIn("fix: cst btrfs flushoncommit apply", btrfs_drift)
+
 
 class BtrfsCacheDoctorTest(Scratch):
     """check_btrfs_cache: silent when unconfigured; warns on flushoncommit, missing crypttab nofail, or unmounted bind."""

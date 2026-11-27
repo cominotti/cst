@@ -2,7 +2,7 @@
 """The btrfs area of `cst doctor`: chunk allocation, the weekly scrub's speed limit, the snapshot settings,
 snapshots left writable, Docker's NOCOW migration (docker_nocow.py)."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 import os
 import re
@@ -11,12 +11,13 @@ from typing import Final, NamedTuple
 
 from btrfs.commit.domain import (
     DEFAULT_TARGET_COMMIT_S,
-    ROOTFLAGS_PREFIX as COMMIT_ROOTFLAGS_PREFIX,
     assess_commit_coherence,
     effective_commit_seconds,
 )
+from btrfs.flushoncommit.domain import assess_flush_coherence
 from btrfs.compress.domain import (
     OSTREE_BOOTED_PATH,
+    ROOTFLAGS_PREFIX as COMMIT_ROOTFLAGS_PREFIX,
     TOP_MOUNT_UNIT_PATH,
     CoherenceReport,
     CompressMode,
@@ -612,6 +613,7 @@ check(CHECKS, "btrfs")(docker_nocow.check_docker_nocow_outcome)
 
 _COMPRESSION_LABEL: Final[str] = "root btrfs compression"
 _COMMIT_INTERVAL_LABEL: Final[str] = "root btrfs commit interval"
+_FLUSHONCOMMIT_LABEL: Final[str] = "root btrfs flushoncommit"
 
 
 def _read_ostree_kargs(host: DoctorHostPort) -> str | None:
@@ -702,22 +704,53 @@ def _commit_fix_subcmd(snap: CompressSnapshot) -> str:
     return "apply"
 
 
-@check(CHECKS, "btrfs")
-def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
-    """Coherence of root btrfs `commit=N` across /etc/fstab, rpm-ostree kargs, live mounts, and top-mount."""
+def _check_coherence_status(
+    host: DoctorHostPort,
+    *,
+    label: str,
+    assess: Callable[[CompressSnapshot], tuple[bool, str, str | None, tuple[str, str, str | None] | None]],
+) -> Iterator[Result]:
     loaded = _read_root_btrfs_snapshot(host)
     if loaded is None:
         return
     snap, _ = loaded
-    report = assess_commit_coherence(snap)
-    if not report.coherent:
-        yield Result(
-            WARN,
-            f"{_COMMIT_INTERVAL_LABEL}: {report.summary}",
-            f"{host.cst} btrfs commit-interval {_commit_fix_subcmd(snap)}",
-        )
-    elif report.is_custom:
-        yield Result(OK, f"{_COMMIT_INTERVAL_LABEL}: {report.summary}")
+    coherent, summary, warn_subcmd, ok_info = assess(snap)
+    if not coherent:
+        yield Result(WARN, f"{label}: {summary}", f"{host.cst} btrfs {warn_subcmd}")
+    elif ok_info is not None:
+        sev, detail, fix_subcmd = ok_info
+        fix = f"{host.cst} btrfs {fix_subcmd}" if fix_subcmd is not None else ""
+        yield Result(sev, f"{label}: {detail}", fix)
+
+
+@check(CHECKS, "btrfs")
+def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
+    """Coherence of root btrfs `commit=N` across /etc/fstab, rpm-ostree kargs, live mounts, and top-mount."""
+
+    def _assess(snap: CompressSnapshot) -> tuple[bool, str, str | None, tuple[str, str, str | None] | None]:
+        report = assess_commit_coherence(snap)
+        if not report.coherent:
+            return False, report.summary, f"commit-interval {_commit_fix_subcmd(snap)}", None
+        ok_info = (OK, report.summary, None) if report.is_custom else None
+        return True, report.summary, None, ok_info
+
+    return _check_coherence_status(host, label=_COMMIT_INTERVAL_LABEL, assess=_assess)
+
+
+@check(CHECKS, "btrfs")
+def check_btrfs_flushoncommit(host: DoctorHostPort) -> Iterator[Result]:
+    """Coherence of root btrfs `flushoncommit` across /etc/fstab, rpm-ostree kargs, live mounts, and top-mount."""
+
+    def _assess(snap: CompressSnapshot) -> tuple[bool, str, str | None, tuple[str, str, str | None] | None]:
+        report = assess_flush_coherence(snap)
+        if not report.coherent:
+            return False, report.summary, "flushoncommit apply", None
+        if report.enabled is True:
+            msg = "enabled across active layers (CST default is off to avoid forced dirty data flushes on every commit)"
+            return True, report.summary, None, (INFO, msg, "flushoncommit apply")
+        return True, report.summary, None, None
+
+    return _check_coherence_status(host, label=_FLUSHONCOMMIT_LABEL, assess=_assess)
 
 
 @check(CHECKS, "btrfs")
