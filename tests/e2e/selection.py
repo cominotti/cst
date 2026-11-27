@@ -28,6 +28,7 @@ class E2ETag(StrEnum):
     CPU = "cpu"
     BLUETOOTH = "bluetooth"
     SWAP = "swap"
+    DESKTOP = "desktop"
     TOOLCHAINS = "toolchains"
     VM = "vm"
     DOCTOR = "doctor"

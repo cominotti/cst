@@ -36,6 +36,7 @@ It never installs modules you never set up on this machine.
 | Safe (default) | `cpu:core`, `cpu:gamemode`, `cpu:toolbox` | `cst cpu install` | — |
 | Safe (default) | `cpu:docker-slice` | `cst cpu docker-slice install` | — |
 | Safe (default) | `cpu:irq` | `cst cpu irq apply` | — |
+| Safe (default) | `desktop:psd` | `cst desktop psd apply --user $USER` | — |
 | Safe (default) | `toolchains:auto` | `cst toolchains auto on` | — |
 | Safe (default) | `toolchains:sccache` | `cst toolchains config apply` | — |
 | Safe (default) | `toolchains:tmpfs` | `cst toolchains tmpfs apply` | — |

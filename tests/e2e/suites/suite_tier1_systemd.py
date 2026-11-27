@@ -3281,6 +3281,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/cpu-game-profile": ("--help", 2),
             "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
             "/home/tester/.local/lib/cst/cst-toolchains": ("help", 0),
+            "/usr/local/sbin/cst-desktop": ("help", 0),
             "/usr/local/sbin/cst-vm": ("help", 0),
         }
         for dest, (arg, rc) in entries.items():
@@ -3792,6 +3793,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "cpu-game-watchdog.service": 94,
         "cst-btrfs-iocost.service": 68,
         "cst-cpu-power.service": 94,
+        "cst-desktop-psd-resync@e2e.service": 94,
+        "cst-desktop-psd@e2e.service": 94,
         "cst-vm-backup@e2e.service": 94,
         # 23, not 21: no NoNewPrivileges= (it blocks the SELinux move into the
         # Docker domain on Fedora; see btrfs/README.md and test_unit_contract).
@@ -16283,3 +16286,213 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-286-OK", out)
+
+    @e2e_tags(E2ETag.DESKTOP, E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_287_desktop_localsearch_and_psd(self) -> None:
+        """cst desktop: gnome localsearch (restrict/disable/revert) + psd (units, mounts, sync, recover, doctor)."""
+        work = f"/var/tmp/e2e287-{os.getpid()}"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"""
+            systemctl disable --now cst-desktop-psd@tester.service cst-desktop-psd-resync@tester.timer >/dev/null 2>&1 || true
+            rm -f /usr/local/sbin/cst-desktop \
+                  /etc/systemd/system/cst-desktop-psd@.service \
+                  /etc/systemd/system/cst-desktop-psd-resync@.service \
+                  /etc/systemd/system/cst-desktop-psd-resync@.timer
+            rm -rf /etc/systemd/user/localsearch-3.service \
+                   /etc/systemd/user/localsearch-control-3.service \
+                   /etc/systemd/user/localsearch-writeback-3.service
+            rm -rf /home/tester/.config/systemd/user/localsearch-*.service \
+                   /home/tester/.config/cst/desktop-gnome-localsearch.json \
+                   /home/tester/.config/cst/desktop.conf \
+                   /home/tester/.config/mozilla \
+                   /home/tester/.local/share/cst/psd \
+                   {work}
+            runuser -u tester -- systemctl --user daemon-reload >/dev/null 2>&1 || true
+            systemctl daemon-reload
+            . /opt/cst-rw/cst-install.bash && cst_forget desktop:psd >/dev/null 2>&1 || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -euo pipefail
+            REPO=/opt/cst-rw
+            WORK={work!r}
+            rm -rf "$WORK"
+            mkdir -p "$WORK/bin" "$WORK/gs" "$WORK/root/proc" "$WORK/root/etc/systemd/system"
+            chmod 0777 "$WORK" "$WORK/bin" "$WORK/gs" "$WORK/root"
+
+            # Real user systemd stub units for localsearch-3 so mask/unmask runs against real systemd --user.
+            mkdir -p /etc/systemd/user
+            for u in localsearch-3.service localsearch-control-3.service localsearch-writeback-3.service; do
+              printf '[Unit]\\nDescription=Stub %s\\n[Service]\\nType=oneshot\\nRemainAfterExit=yes\\nExecStart=/usr/bin/true\\n' "$u" > "/etc/systemd/user/$u"
+            done
+            runuser -u tester -- env XDG_RUNTIME_DIR="/run/user/$(id -u tester)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u tester)/bus" systemctl --user daemon-reload
+
+            # Fake gsettings backed by files in $WORK/gs.
+            cat > "$WORK/bin/gsettings" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+GS={work!r}/gs
+case "${{1:-}}" in
+  list-schemas) echo "org.freedesktop.Tracker3.Miner.Files" ;;
+  get)
+    f="$GS/${{3}}"
+    if [[ -f "$f" ]]; then cat "$f"
+    elif [[ "$3" == "enable-monitors" ]]; then echo "true"
+    elif [[ "$3" == "index-recursive-directories" ]]; then echo "['$HOME', '&DOCUMENTS']"
+    else echo "['&DOWNLOAD']"; fi ;;
+  set) printf '%s\\n' "$4" > "$GS/${{3}}" ;;
+  reset) rm -f "$GS/${{3}}" ;;
+  *) exit 2 ;;
+esac
+EOF
+            chmod 0755 "$WORK/bin/gsettings"
+
+            # Part A: gnome localsearch (as tester via real user systemd + fake gsettings)
+            UENV="PATH=$WORK/bin:/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u tester) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u tester)/bus"
+            runuser -u tester -- env $UENV "$REPO/cst" desktop gnome localsearch plan | grep -qF "Dry run, nothing changed"
+            test ! -f /home/tester/.config/cst/desktop-gnome-localsearch.json
+
+            runuser -u tester -- env $UENV "$REPO/cst" desktop gnome localsearch apply >/dev/null
+            test -f /home/tester/.config/cst/desktop-gnome-localsearch.json
+            grep -qF "['&DESKTOP', '&DOCUMENTS', '&DOWNLOAD', '&MUSIC', '&PICTURES', '&VIDEOS']" "$WORK/gs/index-recursive-directories"
+            runuser -u tester -- env $UENV "$REPO/cst" desktop gnome localsearch apply | grep -qF "nothing to do"
+            runuser -u tester -- env $UENV "$REPO/cst" desktop status | grep -qF "restricted to standard XDG user folders"
+            doc_ls="$(runuser -u tester -- env $UENV "$REPO/cst" doctor || true)"
+            grep -qF "ok     gnome localsearch: restricted to standard XDG user folders" <<<"$doc_ls" || {{
+              echo "MISSING DOCTOR LOCALSEARCH OK: $doc_ls" >&2; exit 1;
+            }}
+
+            runuser -u tester -- env $UENV "$REPO/cst" desktop gnome localsearch apply --mode disable >/dev/null
+            test "$(cat "$WORK/gs/index-recursive-directories")" = "@as []"
+            test "$(cat "$WORK/gs/enable-monitors")" = "false"
+            test "$(runuser -u tester -- env $UENV systemctl --user is-enabled localsearch-3.service || true)" = "masked"
+
+            runuser -u tester -- env $UENV "$REPO/cst" desktop gnome localsearch status | grep -qF "disabled"
+            runuser -u tester -- env $UENV "$REPO/cst" desktop gnome localsearch revert >/dev/null
+            test ! -f /home/tester/.config/cst/desktop-gnome-localsearch.json
+            test ! "$(runuser -u tester -- env $UENV systemctl --user is-enabled localsearch-3.service 2>/dev/null || true)" = "masked"
+
+            # Part B: psd units install, systemd-analyze verify, sync check, mount/sync/stop seam, and revert
+            mkdir -p /home/tester/.config/mozilla/firefox
+            chown -R tester:tester /home/tester/.config/mozilla
+            "$REPO/cst" desktop psd plan --user tester | grep -qF "firefox"
+            rm -rf /home/tester/.config/mozilla
+
+            # Clean real unit installation with no profiles on real host (avoids container CAP_SYS_ADMIN tmpfs EPERM).
+            STEP="apply"
+            "$REPO/cst" desktop psd apply --user tester
+            STEP="verify"
+            test -x /usr/local/sbin/cst-desktop
+            systemd-analyze verify --man=no --recursive-errors=no \
+              /etc/systemd/system/cst-desktop-psd@.service \
+              /etc/systemd/system/cst-desktop-psd-resync@.service \
+              /etc/systemd/system/cst-desktop-psd-resync@.timer
+            systemctl is-enabled cst-desktop-psd@tester.service
+            systemctl is-enabled cst-desktop-psd-resync@tester.timer
+            STEP="sync-plan"
+            sync_out="$(SUDO_USER=tester "$REPO/cst" sync plan)"
+            grep -qF "0 command(s) to sync, 0 skipped (risky), 0 skipped (modified)" <<<"$sync_out" || {{
+              echo "UNEXPECTED SYNC PLAN: $sync_out" >&2; exit 1;
+            }}
+            STEP="doctor-recovery-warn"
+            install -d -m 0700 -o tester -g tester /home/tester/.local/share/cst/psd/recovery/firefox
+            printf '{{"format": 1, "whiteouts": [], "opaque_dirs": []}}\\n' > /home/tester/.local/share/cst/psd/recovery/firefox/.cst-psd-whiteouts.json
+            chown tester:tester /home/tester/.local/share/cst/psd/recovery/firefox/.cst-psd-whiteouts.json
+            doc_out="$(runuser -u tester -- env $UENV "$REPO/cst" doctor || true)"
+            grep -qF "WARN   desktop psd: unmerged crash-recovery snapshots (firefox)" <<<"$doc_out" || {{
+              echo "MISSING DOCTOR RECOVERY WARN: $doc_out" >&2; exit 1;
+            }}
+            rm -rf /home/tester/.local/share/cst/psd
+
+            # Verify full seam mount -> sync -> stop round-trip with stub mount/umount inside $WORK/root
+            STEP="seam-setup"
+            mkdir -p "$WORK/root/home/tester/.config/mozilla/firefox" "$WORK/root/run" "$WORK/root/etc"
+            cp /etc/passwd /etc/group "$WORK/root/etc/"
+            cp /etc/systemd/system/cst-desktop-psd@.service "$WORK/root/etc/systemd/system/"
+            printf 'MemTotal:       16777216 kB\\n' > "$WORK/root/proc/meminfo"
+            : > "$WORK/root/proc/mounts"
+            printf 'lower-pref=1\\n' > "$WORK/root/home/tester/.config/mozilla/firefox/prefs.js"
+
+            cat > "$WORK/bin/mount" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+MOUNTS={work!r}/root/proc/mounts
+args=("$@")
+target="${{args[$#-1]}}"
+host_target="${{target#{work!r}/root}}"
+if [[ " $* " == *" -t tmpfs "* ]]; then
+  printf 'tmpfs %s tmpfs rw,nosuid,nodev,noexec 0 0\\n' "$host_target" >> "$MOUNTS"
+elif [[ " $* " == *" --bind "* ]]; then
+  printf '/dev/sda1 %s ext4 rw 0 0\\n' "$host_target" >> "$MOUNTS"
+elif [[ " $* " == *" -t overlay "* ]]; then
+  opts=""
+  for ((i=0; i<${{#args[@]}}; i++)); do
+    [[ "${{args[$i]}}" == "-o" ]] && opts="${{args[$((i+1))]}}"
+  done
+  low="${{opts#*lowerdir=}}"; low="${{low%%,*}}"; low="${{low#{work!r}/root}}"
+  up="${{opts#*upperdir=}}"; up="${{up%%,*}}"; up="${{up#{work!r}/root}}"
+  printf 'cst-psd-firefox %s overlay rw,lowerdir=%s,upperdir=%s 0 0\\n' "$host_target" "$low" "$up" >> "$MOUNTS"
+fi
+EOF
+            cat > "$WORK/bin/umount" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+MOUNTS={work!r}/root/proc/mounts
+target="${{1#{work!r}/root}}"
+grep -vF " $target " "$MOUNTS" > "$MOUNTS.tmp" || true
+mv "$MOUNTS.tmp" "$MOUNTS"
+EOF
+            chmod 0755 "$WORK/bin/mount" "$WORK/bin/umount"
+
+            SEAM_ENV="PATH=$WORK/bin:/usr/local/bin:/usr/bin:/bin CST_DESKTOP_PSD_ROOT=$WORK/root CST_DESKTOP_PSD_PROC=$WORK/root/proc"
+            STEP="seam-start"
+            env $SEAM_ENV "$REPO/cst" desktop psd start --user tester
+            grep -qF "/home/tester/.config/mozilla/firefox overlay" "$WORK/root/proc/mounts" || {{
+              echo "MISSING OVERLAY MOUNT IN: $(cat "$WORK/root/proc/mounts")" >&2; exit 1;
+            }}
+            STEP="seam-sync"
+            printf 'upper-pref=2\\n' > "$WORK/root/run/cst-psd/$(id -u tester)/firefox/upper/prefs.js"
+            sync_seam="$(env $SEAM_ENV "$REPO/cst" desktop psd sync --user tester)"
+            grep -qF "synced:   firefox" <<<"$sync_seam" || {{
+              echo "UNEXPECTED PSD SYNC: $sync_seam" >&2; exit 1;
+            }}
+            STEP="seam-verify-lower"
+            grep -qF "upper-pref=2" "$WORK/root/home/tester/.config/mozilla/firefox/prefs.js"
+
+            STEP="seam-busy-sync-and-recover"
+            printf 'upper-pref=3\\n' > "$WORK/root/run/cst-psd/$(id -u tester)/firefox/upper/prefs.js"
+            mkdir -p "$WORK/root/proc/99999/fd"
+            chown -R tester:tester "$WORK/root/proc/99999"
+            printf 'firefox\\n' > "$WORK/root/proc/99999/comm"
+            ln -s /home/tester/.config/mozilla/firefox/prefs.js "$WORK/root/proc/99999/fd/3"
+            busy_sync="$(env $SEAM_ENV "$REPO/cst" desktop psd sync --user tester)"
+            grep -qF "snapshot: firefox" <<<"$busy_sync" || {{
+              echo "UNEXPECTED BUSY SYNC: $busy_sync" >&2; exit 1;
+            }}
+            test -f "$WORK/root/home/tester/.local/share/cst/psd/recovery/firefox/.cst-psd-whiteouts.json"
+            rm -rf "$WORK/root/proc/99999"
+            printf '' > "$WORK/root/proc/mounts"
+            rm -rf "$WORK/root/run/cst-psd"
+            env $SEAM_ENV "$REPO/cst" desktop psd recover --user tester | grep -qF "recovered:firefox"
+            grep -qF "upper-pref=3" "$WORK/root/home/tester/.config/mozilla/firefox/prefs.js"
+
+            STEP="seam-stop"
+            env $SEAM_ENV "$REPO/cst" desktop psd start --user tester
+            env $SEAM_ENV "$REPO/cst" desktop psd stop --user tester
+            test ! -s "$WORK/root/proc/mounts" || {{
+              echo "LEFTOVER MOUNTS: $(cat "$WORK/root/proc/mounts")" >&2; exit 1;
+            }}
+
+            STEP="revert"
+            "$REPO/cst" desktop psd revert --user tester
+            test ! -f /usr/local/sbin/cst-desktop
+            test ! -f /etc/systemd/system/cst-desktop-psd@.service
+            echo E2E-287-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-287-OK", out)

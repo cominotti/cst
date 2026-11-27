@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MPL-2.0
+[Unit]
+Description=Hourly Timer for CST Browser Profile Overlayfs Resync (%i)
+
+[Timer]
+OnBootSec=15m
+OnUnitActiveSec=1h
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

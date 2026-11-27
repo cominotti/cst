@@ -57,6 +57,7 @@ HELP_FROM_HEADER: tuple[tuple[str, tuple[str, ...], int | None], ...] = (
     ("bluetooth-setup.sh", ("help",), 0),
     ("btrfs-setup.sh", ("help",), 0),
     ("cpu-setup.sh", ("help",), 0),
+    ("desktop-setup.sh", ("help",), 0),
     ("toolchains-setup.sh", ("help",), 0),
     ("vm-setup.sh", ("help",), 0),
     # Its usage is the bad-argument answer, printed only after the script has re-run itself

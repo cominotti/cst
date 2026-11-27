@@ -73,6 +73,7 @@ class Component(StrEnum):
     CPU_IRQ = "cpu:irq"
     CPU_TOOLBOX = "cpu:toolbox"
     BLUETOOTH_LDAC = "bluetooth:ldac"
+    DESKTOP_PSD = "desktop:psd"
     SWAP_CORE = "swap:core"
     TOOLCHAINS_AUTO = "toolchains:auto"
     TOOLCHAINS_SCCACHE = "toolchains:sccache"
@@ -216,6 +217,11 @@ cpu/cpu-game.rules.in                               /etc/polkit-1/rules.d/50-cpu
 cpu/udev/65-cst-gpu-pm.rules                        /etc/udev/rules.d/65-cst-gpu-pm.rules                         644  root  data          root   cpu:core
 # bluetooth
 bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-watch                                755  user  python-entry  user   bluetooth:ldac
+# desktop
+desktop/cst-desktop                                 /usr/local/sbin/cst-desktop                                   755  root  python-entry  root   desktop:psd
+desktop/units/cst-desktop-psd@.service              /etc/systemd/system/cst-desktop-psd@.service                  644  root  unit          root   desktop:psd
+desktop/units/cst-desktop-psd-resync@.service       /etc/systemd/system/cst-desktop-psd-resync@.service           644  root  unit          root   desktop:psd
+desktop/units/cst-desktop-psd-resync@.timer         /etc/systemd/system/cst-desktop-psd-resync@.timer             644  root  unit          root   desktop:psd
 # swap
 swap/sysctl/99-swap-tuning.conf                     /etc/sysctl.d/99-swap-tuning.conf                             644  root  data          root   swap:core
 swap/tmpfiles/cst-mm-responsiveness.conf           /etc/tmpfiles.d/cst-mm-responsiveness.conf                   644  root  data          root   swap:core
@@ -253,6 +259,7 @@ _COMMANDS: Final = {
     "cpu:irq": "cst cpu irq apply",
     "cpu:toolbox": "cst cpu install",
     "bluetooth:ldac": "cst bluetooth apply",
+    "desktop:psd": "cst desktop psd apply",
     "swap:core": "cst swap apply",
     "toolchains:auto": "cst toolchains auto on",
     "toolchains:sccache": "cst toolchains config apply",
@@ -297,6 +304,7 @@ _SYNC_SPECS: Final[Mapping[Component, _ComponentSyncSpec]] = {
         needs_root=False,
         reason="restarts bluetooth.service and wireplumber (briefly drops Bluetooth devices and audio)",
     ),
+    Component.DESKTOP_PSD: _ComponentSyncSpec(SyncSafety.SAFE, ("desktop", "psd", "apply"), needs_root=True),
     Component.SWAP_CORE: _ComponentSyncSpec(
         SyncSafety.RISKY,
         ("swap", "apply"),
@@ -335,6 +343,7 @@ SETUP_ENTRYPOINTS: Final[frozenset[str]] = frozenset(
         "cst",
         "cst-install.bash",
         "cst-link.bash",
+        "desktop-setup.sh",
         "swap-setup.sh",
         "toolchains-setup.sh",
         "vm-setup.sh",

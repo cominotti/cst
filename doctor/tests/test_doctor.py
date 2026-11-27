@@ -168,6 +168,11 @@ shift
 while [ "${1#--env=}" != "$1" ]; do export "${1#--env=}"; shift; done
 exec "$@"
 """
+GSETTINGS = """#!/bin/sh
+echo "gsettings $*" >>"$STUB_LOG"
+[ -n "$FIX_GSETTINGS" ] && [ -x "$FIX_GSETTINGS" ] && exec "$FIX_GSETTINGS" "$@"
+exit 1
+"""
 
 
 class Scratch(unittest.TestCase):
@@ -193,6 +198,7 @@ class Scratch(unittest.TestCase):
             ("stat", STAT),
             ("flatpak-spawn", FLATPAK_SPAWN),
             ("virsh", VIRSH),
+            ("gsettings", GSETTINGS),
         ):
             p = os.path.join(self.bin, name)
             with open(p, "w") as f:
@@ -263,6 +269,9 @@ class Scratch(unittest.TestCase):
             "findmnt -rn -t btrfs -o SOURCE,TARGET",
             "findmnt -rn -o SOURCE,TARGET,FSTYPE,OPTIONS",
             "stat -f -c %S %b ",
+            "stat -f -c %b %a ",
+            "gsettings list-schemas",
+            "gsettings get org.freedesktop.Tracker3.Miner.Files ",
             "virsh -r -c qemu:///system list --all --name",
             "virsh -r -c qemu:///system dumpxml --inactive ",
             "virsh -c qemu:///system domcapabilities",
@@ -4738,6 +4747,7 @@ class CommandLineTest(Scratch):
                 "swap",
                 "vm",
                 "responsiveness",
+                "desktop",
                 "toolchains",
                 "install",
             ],
@@ -5870,6 +5880,7 @@ class CstIntegrationTest(Scratch):
             "btrfs",
             "cst_core",
             "cpu",
+            "desktop",
             "perf",
             "swap",
             "sync",
@@ -6471,6 +6482,152 @@ class ToolchainsCheckTest(Scratch):
         self.assertIn(
             f"ok     cargo build-dir tmpfs: mounted at {mp}", "\n".join(area_lines(r_findmnt.stdout, "toolchains"))
         )
+
+
+class DesktopDoctorTest(Scratch):
+    """Doctor checks for `desktop`: GNOME `localsearch-3` and `cst desktop psd`."""
+
+    def _home_file(self, rel: str, content: str) -> str:
+        full = os.path.join(self.root, self.tmp.lstrip("/"), rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return full
+
+    def _root_file(self, rel: str, content: str) -> str:
+        full = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return full
+
+    def _setup_fake_desktop_env(self) -> tuple[int, str, str, str]:
+        uid = os.getuid()
+        user = pwd.getpwuid(uid).pw_name
+        gs_state = os.path.join(self.tmp, "gs-mode")
+        with open(gs_state, "w", encoding="utf-8") as fh:
+            fh.write("home")
+        gs_bin = os.path.join(self.tmp, "gs-helper")
+        with open(gs_bin, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"""#!/bin/sh
+mode="$(cat {gs_state!r})"
+case "$1:$3" in
+  list-schemas:) echo "org.freedesktop.Tracker3.Miner.Files" ;;
+  get:index-recursive-directories)
+    case "$mode" in
+      home) printf '%s\\n' "['\\$HOME']" ;;
+      restrict) echo "['&DESKTOP', '&DOCUMENTS', '&DOWNLOAD', '&MUSIC', '&PICTURES', '&VIDEOS']" ;;
+      disable) echo "@as []" ;;
+      *) exit 1 ;;
+    esac ;;
+  get:index-single-directories)
+    case "$mode" in
+      disable) echo "@as []" ;;
+      *) echo "['&DOWNLOAD']" ;;
+    esac ;;
+  get:enable-monitors)
+    [ "$mode" = disable ] && echo false || echo true ;;
+esac
+"""
+            )
+        os.chmod(gs_bin, 0o755)
+        self.env["FIX_GSETTINGS"] = gs_bin
+        usr_show = os.path.join(self.tmp, "show", "usr")
+        os.makedirs(usr_show, exist_ok=True)
+        self.env["FIX_SHOW"] = os.path.join(self.tmp, "show")
+        for u in ("localsearch-3.service", "localsearch-control-3.service", "localsearch-writeback-3.service"):
+            with open(os.path.join(usr_show, u), "w", encoding="utf-8") as fh:
+                fh.write("LoadState=loaded\nActiveState=inactive\nUnitFileState=enabled\n")
+        return uid, user, gs_state, f"/run/cst-psd/{uid}"
+
+    def test_localsearch_and_psd_checks(self) -> None:
+        _uid, user, gs_state, run_dir = self._setup_fake_desktop_env()
+
+        # 1. Default $HOME indexing -> INFO; PSD unconfigured -> silent for PSD.
+        r_info = self.run_tool()
+        self.assertEqual(r_info.returncode, 0, r_info.stdout + r_info.stderr)
+        lines1 = "\n".join(area_lines(r_info.stdout, "desktop"))
+        self.assertIn("info   gnome localsearch:", lines1)
+        self.assertNotIn("desktop psd:", lines1)
+
+        # 2. Restricted cleanly + PSD active + recovery pending -> WARN for recovery + tmpfs full.
+        with open(gs_state, "w", encoding="utf-8") as fh:
+            fh.write("restrict")
+        self._home_file(
+            ".config/cst/desktop-gnome-localsearch.json",
+            '{"format": 1, "mode": "restrict", "recursive_dirs": ["$HOME"], "single_dirs": ["&DOWNLOAD"], "enable_monitors": true}\n',
+        )
+        self._root_file("etc/systemd/system/cst-desktop-psd@.service", "[Unit]\n")
+        os.makedirs(os.path.join(self.root, self.tmp.lstrip("/"), ".config/mozilla/firefox"), exist_ok=True)
+        os.makedirs(
+            os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/firefox"), exist_ok=True
+        )
+        self._root_file(
+            "proc/mounts",
+            (
+                f"tmpfs {run_dir} tmpfs rw,nosuid,nodev,noexec 0 0\n"
+                f"cst-psd-firefox {self.tmp}/.config/mozilla/firefox overlay rw,"
+                f"lowerdir={run_dir}/firefox/lower,upperdir={run_dir}/firefox/upper 0 0\n"
+            ),
+        )
+        statfs_fix = os.path.join(self.tmp, "statfs.txt")
+        with open(statfs_fix, "w", encoding="utf-8") as fh:
+            fh.write("100 10\n")  # 90% full
+        self.env["FIX_STATFS"] = statfs_fix
+        r_warn = self.run_tool()
+        self.assertEqual(r_warn.returncode, 1, r_warn.stdout + r_warn.stderr)
+        lines2 = "\n".join(area_lines(r_warn.stdout, "desktop"))
+        self.assertIn("ok     gnome localsearch: restricted to standard XDG user folders", lines2)
+        self.assertIn("WARN   desktop psd: unmerged crash-recovery snapshots (firefox)", lines2)
+        self.assertIn(f"fix: cst desktop psd recover --user {user}", lines2)
+        self.assertIn(f"WARN   desktop psd: {run_dir} tmpfs is 90% full", lines2)
+
+        # 3. Clean PSD + low tmpfs usage -> OK on both.
+        os.rmdir(os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/firefox"))
+        with open(statfs_fix, "w", encoding="utf-8") as fh:
+            fh.write("100 80\n")  # 20% full
+        r_ok = self.run_tool()
+        self.assertEqual(r_ok.returncode, 0, r_ok.stdout + r_ok.stderr)
+        lines3 = "\n".join(area_lines(r_ok.stdout, "desktop"))
+        self.assertIn("ok     desktop psd: 1 profile overlay(s) active", lines3)
+        self.assert_read_only()
+
+    def test_psd_edge_warnings_and_unreadable_localsearch(self) -> None:
+        _uid, _user, gs_state, run_dir = self._setup_fake_desktop_env()
+        with open(gs_state, "w", encoding="utf-8") as fh:
+            fh.write("missing")
+        self._root_file("etc/systemd/system/cst-desktop-psd@.service", "[Unit]\n")
+        os.makedirs(
+            os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/chrome-flatpak"),
+            exist_ok=True,
+        )
+        chrome_dir = os.path.join(self.root, self.tmp.lstrip("/"), ".config/google-chrome")
+        os.makedirs(os.path.dirname(chrome_dir), exist_ok=True)
+        os.symlink("/elsewhere", chrome_dir)
+        self._home_file(".config/cst/desktop.conf", "PSD_PROFILES=firefox,chrome,chromium-flatpak\n")
+        os.makedirs(os.path.join(self.root, self.tmp.lstrip("/"), ".config/mozilla/firefox"), exist_ok=True)
+        os.makedirs(
+            os.path.join(self.root, self.tmp.lstrip("/"), ".var/app/org.chromium.Chromium/config/chromium"),
+            exist_ok=True,
+        )
+        self._root_file(
+            "proc/mounts",
+            (
+                f"tmpfs {run_dir} tmpfs rw 0 0\n"
+                f"cst-psd-firefox {self.tmp}/.config/mozilla/firefox overlay rw,"
+                f"lowerdir={run_dir}/firefox/lower,upperdir={run_dir}/firefox/upper 0 0\n"
+                f"other-ovl {self.tmp}/.var/app/org.chromium.Chromium/config/chromium overlay rw,"
+                "lowerdir=/other/low,upperdir=/other/up 0 0\n"
+            ),
+        )
+        r_edge = self.run_tool()
+        self.assertEqual(r_edge.returncode, 1, r_edge.stdout + r_edge.stderr)
+        lines = "\n".join(area_lines(r_edge.stdout, "desktop"))
+        self.assertNotIn("ok     gnome localsearch:", lines)
+        self.assertIn("unmerged crash-recovery snapshots (chrome-flatpak)", lines)
+        self.assertIn("profile folder uses a symlink (chrome)", lines)
+        self.assertIn("non-CST mount over profile folder (chromium-flatpak)", lines)
 
 
 if __name__ == "__main__":
