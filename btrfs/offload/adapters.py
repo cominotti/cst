@@ -40,11 +40,12 @@ from cst_core.application.user_units import manager_unit_path
 from cst_core.domain.install import Component, GeneratedKind, Owner, expand_dest, manifest_by_src
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.units import user_unit_dir
-from cst_core.ports import CommandRunnerPort, OutputMode, UnitName, WriteFailed
+from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode, UnitName, WriteFailed
 
 _RSYNC_TIMEOUT_S: Final = 600
 _OFFLOAD_FINDMNT_TIMEOUT_S: Final = 10
 _MAX_BUSY_PIDS: Final = 8
+_BTRFS_MAGIC: Final = 0x9123683E
 _OFFLOAD_COMPONENT: Final = Component.BTRFS_OFFLOAD
 _HELPER_ENTRY: Final = manifest_by_src()["btrfs/btrfs-cache-offload"]
 _SIDECAR_SUFFIXES: Final = ("", "-wal", "-shm", "-journal")
@@ -444,6 +445,17 @@ class LocalOffloadHost:
     def ensure_dir(self, path: str, *, mode: int = 0o700) -> None:
         ensure_dir(path, mode)
 
+    def _capture_cmd(self, argv: Sequence[str], *, timeout: int = _OFFLOAD_FINDMNT_TIMEOUT_S) -> CommandResult:
+        return self._runner.run(argv, timeout=timeout, locale_c=True, output=OutputMode.CAPTURE)
+
+    def _is_btrfs_fs(self, path: str) -> bool:
+        if not os.path.isdir(path) or os.path.islink(path):
+            return False
+        res = self._capture_cmd(["stat", "-f", "-c", "%t", path])
+        if res.cause is not None or res.returncode != 0:
+            return False
+        return res.stdout.strip().lower().removeprefix("0x").lstrip("0") == f"{_BTRFS_MAGIC:x}"
+
     def probe_scratchpad(self, home: str) -> ScratchpadProbe:
         sp = os.path.join(home, "Scratchpad")
         exists = os.path.lexists(sp)
@@ -451,12 +463,7 @@ class LocalOffloadHost:
         is_dir = exists and not is_link and os.path.isdir(sp)
         mounted, fstype, source = (False, "", "")
         if is_dir:
-            res = self._runner.run(
-                ["findmnt", "-J", "-T", sp],
-                timeout=_OFFLOAD_FINDMNT_TIMEOUT_S,
-                locale_c=True,
-                output=OutputMode.CAPTURE,
-            )
+            res = self._capture_cmd(["findmnt", "-J", "-T", sp])
             if res.cause is None and res.returncode == 0:
                 mounted, fstype, source = _parse_findmnt_target(res.stdout, os.path.realpath(sp))
         if mounted:
@@ -475,13 +482,15 @@ class LocalOffloadHost:
         src = os.path.join(home, entry.source_rel)
         sp = os.path.join(home, entry.scratchpad_rel)
         mirror = os.path.join(home, entry.mirror_rel)
+        is_btrfs = self._is_btrfs_fs(sp)
         return OffloadEntryProbe(
             entry=entry,
             source=_probe_path(src),
-            scratchpad=_probe_path(sp, inspect_nocow=True),
+            scratchpad=_probe_path(sp, inspect_nocow=is_btrfs),
             mirror=_probe_path(mirror),
             busy=_find_busy_pids((src, sp), proc_root=self._proc_root),
-            nocow_paths_missing=_any_missing_nocow(
+            nocow_paths_missing=is_btrfs
+            and _any_missing_nocow(
                 sp,
                 force_nocow=entry.mode == OffloadMode.NOCOW,
                 nocow_paths=entry.nocow_paths,
@@ -565,7 +574,7 @@ class LocalOffloadHost:
         for pat in sorted(excluded):
             argv.extend(["--exclude", f"/{_escape_rsync_literal(pat)}"])
         argv.extend([f"{scratchpad_abs.rstrip('/')}/", f"{mirror_abs.rstrip('/')}/"])
-        res = self._runner.run(argv, timeout=_RSYNC_TIMEOUT_S, locale_c=True, output=OutputMode.CAPTURE)
+        res = self._capture_cmd(argv, timeout=_RSYNC_TIMEOUT_S)
         if res.cause is not None or res.returncode != 0:
             return res.failure("rsync mirror")
         return None

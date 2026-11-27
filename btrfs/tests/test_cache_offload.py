@@ -66,9 +66,10 @@ class _FakeCtx:
 
 
 class _FakeRunner(CommandRunnerPort):
-    def __init__(self, *, findmnt_mounted: bool = False) -> None:
+    def __init__(self, *, findmnt_mounted: bool = False, stat_magic: str = "") -> None:
         self.calls: list[list[str]] = []
         self._findmnt_mounted = findmnt_mounted
+        self._stat_magic = stat_magic
 
     @override
     def run(
@@ -95,6 +96,8 @@ class _FakeRunner(CommandRunnerPort):
         del check, timeout, input_text, env, unset, base_env, cwd, locale_c
         del new_session, on_host, stdin, output, decode_errors, nice, pass_fds, on_line
         self.calls.append(list(argv))
+        if argv and argv[:3] == ["stat", "-f", "-c"] and self._stat_magic:
+            return CommandResult(0, f"{self._stat_magic}\n", "", argv=tuple(argv))
         if argv and argv[0] == "findmnt" and self._findmnt_mounted:
             target = argv[-1]
             payload = {
@@ -724,6 +727,43 @@ class OffloadAdapterAndWiringTests(unittest.TestCase):
             )
             probe = host.probe_entry(tmp, entry)
             self.assertEqual(probe.busy, ("fake-ide(99999)",))
+
+    def test_probe_entry_skips_nocow_drift_on_non_btrfs_and_enforces_on_btrfs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sp_dir = os.path.join(tmp, "Scratchpad/offload/agent")
+            os.makedirs(sp_dir)
+            with open(os.path.join(sp_dir, "state.db"), "wb") as fh:
+                fh.write(b"sqlite")
+            entry = OffloadEntry(
+                name="agent",
+                source_rel=".agent",
+                scratchpad_rel="Scratchpad/offload/agent",
+                mirror_rel="mirrors/agent",
+                mode=OffloadMode.NOCOW,
+                backup=False,
+                nocow_paths=("*.db",),
+                sqlite_globs=(),
+            )
+            with mock.patch("btrfs.offload.adapters.inode_flags", return_value=0):
+                non_btrfs_host = adapters.LocalOffloadHost(
+                    home=tmp,
+                    prog="offload",
+                    runner=_FakeRunner(stat_magic="794c7630"),
+                    proc_root=os.path.join(tmp, "proc"),
+                )
+                probe_overlay = non_btrfs_host.probe_entry(tmp, entry)
+                self.assertIsNone(probe_overlay.scratchpad.nocow_enabled)
+                self.assertFalse(probe_overlay.nocow_paths_missing)
+
+                btrfs_host = adapters.LocalOffloadHost(
+                    home=tmp,
+                    prog="offload",
+                    runner=_FakeRunner(stat_magic="9123683e"),
+                    proc_root=os.path.join(tmp, "proc"),
+                )
+                probe_btrfs = btrfs_host.probe_entry(tmp, entry)
+                self.assertFalse(probe_btrfs.scratchpad.nocow_enabled)
+                self.assertTrue(probe_btrfs.nocow_paths_missing)
 
 
 if __name__ == "__main__":
