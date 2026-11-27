@@ -3793,6 +3793,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "cpu-game-watchdog.service": 94,
         "cst-btrfs-iocost.service": 68,
         "cst-cpu-power.service": 94,
+        "cst-desktop-psd-resync@e2e.service": 94,
+        "cst-desktop-psd@e2e.service": 94,
         "cst-vm-backup@e2e.service": 94,
         # 23, not 21: no NoNewPrivileges= (it blocks the SELinux move into the
         # Docker domain on Fedora; see btrfs/README.md and test_unit_contract).
