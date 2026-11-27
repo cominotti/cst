@@ -107,6 +107,18 @@ class CstDispatcher:
         """Run `perf/cst-perf` as the invoking user, stepping down from sudo if needed."""
         return self._run_checkout_tool(cmd_name="perf", sub_path=("perf", "cst-perf"), args=args)
 
+    def run_sync(self, args: Sequence[str]) -> int:
+        """Run `sync/cst-sync` with the caller's privileges (`apply` elevates via sudo once if needed)."""
+        tool = os.path.join(self._repo_dir, "sync", "cst-sync")
+        if not self._port.is_file(tool):
+            _say(self._stderr, f"{self._cst_name}: sync is not in this copy ({tool} is missing)")
+            return 1
+        env = dict(self._port.environ())
+        env["CST_PROG"] = f"{self._cst_name} sync"
+        env["CST_NAME"] = self._cst_name
+        env["CST_LC_CTYPE"] = ("=" + env["LC_CTYPE"]) if "LC_CTYPE" in env else ""
+        return self._port.run_passthrough(["python3", "-I", "-B", tool, *args], env=env)
+
     def status_all(self) -> int:
         """Run read-only `status` across all modules (elevating once if needed) and finish with `doctor --brief`."""
         need_root = any(
@@ -155,8 +167,9 @@ class CstDispatcher:
                 )
                 return 2
             return self.status_all()
-        if cmd in ("doctor", "perf"):
-            return self.run_doctor(rest) if cmd == "doctor" else self.run_perf(rest)
+        tool_runners = {"doctor": self.run_doctor, "perf": self.run_perf, "sync": self.run_sync}
+        if cmd in tool_runners:
+            return tool_runners[cmd](rest)
         if cmd in MODULE_BY_NAME:
             return self.run_module(cmd, rest)
 

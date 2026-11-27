@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable, Mapping
 import os
 from typing import BinaryIO, Protocol, TextIO
 
-from cst_core.domain.record import InstallRecord
+from cst_core.domain.record import InstallRecord, RecordedFile
 from cst_core.ports import VirshPort
 from doctor.domain import HostPath, Result, ViewPath
 from vm.domain import ImageDir, ImageProbe
@@ -162,4 +162,8 @@ class InstalledFilesPort(Protocol):
     def desired_sha256(self, src: str, values: Mapping[str, str] | None) -> str | None:
         """The sha256 of what this checkout installs for src (a template rendered with values); None
         when it cannot say (no checkout, no such source, a template without its values)."""
+        ...
+
+    def desired_generated_sha256(self, dest: str, f: RecordedFile) -> str | None:
+        """The sha256 of what this checkout generates for recorded file f at dest; None when it cannot say."""
         ...

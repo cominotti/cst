@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import contextlib
 import dataclasses
 import grp
@@ -223,7 +224,7 @@ class TmpfsHost:
             os.chmod(target.mountpoint, 0o700)
             os.chown(target.mountpoint, target.uid, target.gid)
 
-    def put_managed_file(self, path: str, text: str) -> bool:
+    def put_managed_file(self, path: str, text: str, values: Mapping[str, str] | None = None) -> bool:
         """Write root-owned generated file via installer and record it under toolchains:tmpfs."""
         place = Placement(
             path=path,
@@ -234,6 +235,7 @@ class TmpfsHost:
             kind=GeneratedKind.TEXT,
             owner=Owner.ROOT,
             mode=0o644,
+            values=dict(values) if values is not None else None,
         )
         return self._inst().put(place, text.encode("utf-8"), as_root=True)
 

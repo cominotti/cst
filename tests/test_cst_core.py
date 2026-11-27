@@ -1474,6 +1474,28 @@ class CstDispatcherTest(unittest.TestCase):
             ],
         )
 
+    def test_sync_dispatches_as_caller_without_step_down(self) -> None:
+        sync_tool = "/repo/sync/cst-sync"
+        user_port = _FakeDispatchPort(files={sync_tool}, uid=1000, env={"CST_NAME": "cst"})
+        user_disp, _, _ = self._dispatcher(user_port)
+        self.assertEqual(user_disp.dispatch(["sync", "plan"]), 0)
+        self.assertEqual(user_port.calls[0][0], ["python3", "-I", "-B", sync_tool, "plan"])
+        assert user_port.calls[0][1] is not None
+        self.assertEqual(user_port.calls[0][1]["CST_PROG"], "cst sync")
+        self.assertEqual(user_port.calls[0][1]["CST_LC_CTYPE"], "")
+
+        root_port = _FakeDispatchPort(
+            files={sync_tool},
+            uid=0,
+            env={"CST_NAME": "cst", "SUDO_USER": "alice", "LC_CTYPE": "pt_BR.UTF-8"},
+            passwd={"alice": (1001, "/home/alice")},
+        )
+        root_disp, _, _ = self._dispatcher(root_port)
+        self.assertEqual(root_disp.dispatch(["sync", "apply", "--include-risky"]), 0)
+        self.assertEqual(root_port.calls[0][0], ["python3", "-I", "-B", sync_tool, "apply", "--include-risky"])
+        assert root_port.calls[0][1] is not None
+        self.assertEqual(root_port.calls[0][1]["CST_LC_CTYPE"], "=pt_BR.UTF-8")
+
     def test_status_elevation_and_container_skip(self) -> None:
         all_files = {f"/repo/{m.script}" for m in MODULES} | {"/repo/doctor/cst-doctor"}
         host_nonroot = _FakeDispatchPort(files=all_files, container=False, uid=1000, env={"CST_NAME": "cst"})

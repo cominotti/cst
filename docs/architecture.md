@@ -15,7 +15,7 @@ composition root" below).
 
 - `cst MODULE ...` runs `<module>-setup.sh` with `CST_PROG="cst MODULE"` so that help text reads `cst MODULE`.
 - The module metadata (`MODULES`, `MODULE_BY_NAME`) lives only in `cst_core/domain/dispatch.py`; `cst` itself is a short bash wrapper that runs `cst_core/cli.py`.
-- `cst doctor` runs `doctor/cst-doctor`. `cst status` loops over every module.
+- `cst doctor` runs `doctor/cst-doctor`. `cst perf` runs `perf/cst-perf`. `cst sync` runs `sync/cst-sync`. `cst status` loops over every module.
 
 ## Each module has two parts
 
@@ -44,7 +44,7 @@ frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
 and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
-doctor, `perf`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/game`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, cache, compress, docker-gc,
+doctor, `perf`, `sync`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/game`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, cache, compress, docker-gc,
 docker-volumes-nocow, iocost, scrub-limit and snapshot have the full profile (the list is `HEXAGONAL_PACKAGES`); in the other packages `cli.py` orchestrates the commands and some
 still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
@@ -212,7 +212,7 @@ with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
 the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
-`HEXAGONAL_PACKAGES` (swap, doctor, `perf`, cst_core, toolchains, vm, `bluetooth/setup`, `cpu/game`, `cpu/setup`, `btrfs/bulk`, `btrfs/cache`, `btrfs/compress`, `btrfs/docker_gc`,
+`HEXAGONAL_PACKAGES` (swap, doctor, `perf`, `sync`, cst_core, toolchains, vm, `bluetooth/setup`, `cpu/game`, `cpu/setup`, `btrfs/bulk`, `btrfs/cache`, `btrfs/compress`, `btrfs/docker_gc`,
 `btrfs/docker_volumes_nocow`, `btrfs/iocost`, `btrfs/scrub_limit` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other

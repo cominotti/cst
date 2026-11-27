@@ -80,6 +80,10 @@
 #                          free, emergency purge at <=150 GiB; cache folders
 #                          with a CACHEDIR.TAG, e.g. cargo target/, are dropped
 #                          from each new snapshot: SNAPSHOT_EXCLUDE_CACHES).
+#   snapshots refresh [plan|apply]
+#                          (root) update installed snapshot/alert helpers and
+#                          systemd units without touching subvolumes, ~/Bulk,
+#                          toolchain config or Chrome flags (`plan` = dry run).
 #   snapshots status | list [--json] | caches [--json] | prune [--confirm]
 #             | clean-targets [--apply] | disable [--purge]
 #                          list: every snapshot with its keep/delete reason;

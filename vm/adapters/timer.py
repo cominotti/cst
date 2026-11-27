@@ -70,6 +70,11 @@ def timer_files(s: VmSettings, entry_file: str) -> dict[str, tuple[bytes, int]]:
     }
 
 
+def _timer_service_values(s: VmSettings) -> dict[str, str]:
+    """Deterministic rendering parameters recorded for `cst-vm-backup@.service`."""
+    return {"program": s.paths.sbin_copy, "stop_timeout": stop_timeout(s)}
+
+
 def timer_installer(entry_file: str) -> InstallService:
     """The installer's use case for backup-timer's files: written only when they changed, and listed in
     the install record (paths.install_record) under the component vm:backup-timer."""
@@ -77,7 +82,7 @@ def timer_installer(entry_file: str) -> InstallService:
 
 
 def install_timer_files(
-    paths: VmPaths,
+    cfg: VmSettings,
     files: Mapping[str, tuple[bytes, int]],
     states: Mapping[str, UnitFileState],
     entry_file: str,
@@ -85,9 +90,12 @@ def install_timer_files(
 ) -> None:
     """Write (through the installer) each of backup-timer's files that is not current, and report it.
     Its own refusals (a foreign or masked file) come first, in vm.application.timer_on."""
+    paths = cfg.paths
     svc = timer_installer(entry_file)
     as_root = os.geteuid() == 0
     program = program_entry()
+    service_path = os.path.join(paths.unit_dir, SERVICE)
+    service_values = _timer_service_values(cfg)
     for p, (text, mode) in files.items():
         place = (
             Placement.of(program, path=p, dest=p, record=paths.install_record)
@@ -101,6 +109,7 @@ def install_timer_files(
                 kind=GeneratedKind.TEXT,
                 owner=Owner.ROOT,
                 mode=mode,
+                values=service_values if p == service_path else None,
             )
         )
         if svc.put(place, text, as_root=as_root):
@@ -155,7 +164,7 @@ class TimerFiles:
         return timer_file_states(self.cfg.paths, self.files(), os.path.join(self.cfg.paths.unit_dir, unit))
 
     def install(self, states: Mapping[str, UnitFileState], report: Callable[[TimerStep], None]) -> None:
-        install_timer_files(self.cfg.paths, self.files(), states, self.entry_file, report)
+        install_timer_files(self.cfg, self.files(), states, self.entry_file, report)
 
     def mark_complete(self) -> None:
         timer_record_done(self.cfg.paths, self.entry_file)

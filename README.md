@@ -56,8 +56,9 @@ does nothing by itself: it passes your command to one **module**.
 | `cst vm ...` | `vm-setup.sh` | `vm/` | The libvirt VM `win11-devbox`: backups of its disks, UEFI variables and TPM state. The default goes to the NAS (`backup --nas`, restic, into the repository of the `/home` NAS backup), weekly by a timer (`backup-timer on`), with the VM running: a short-lived snapshot, quiesced through the QEMU guest agent when it answers, merged back afterwards; 4 weekly and 3 monthly copies kept, `--keep-tag NAME` until removed. A local copy (instant reflink copies on btrfs, or `--full` real copies, VM shut off) is the quick rollback before a risky upgrade. A list of the backups, and a status that shows the CPU mode, the CET/MBEC fix and whether QEMU/libvirt changed since the last backup. `tune plan`/`apply`: the recommended virtual hardware (disks on virtio-scsi with `cache='none'`, virtio network card, same MAC; Windows only after its virtio drivers are installed). `nocow plan`/`apply`: the VM image folders without copy-on-write (existing images are never converted). `backup`, `backup-timer on/off` and `tune apply` need root (they call sudo); `nocow apply` calls sudo only for `/var/lib/libvirt/images`; `list`, `status`, `backup-timer status`, `tune plan` and `nocow plan` run as your user, also in a toolbox | [vm/README.md](vm/README.md) |
 | `cst doctor [--brief]` | none (`cst` runs `doctor/cst-doctor` itself) | `doctor/` | Read-only check-up: layered packages pinned to a version, local RPMs and replaced base packages, failed system and user units, desktop alerts you have not seen, how full btrfs is (chunks, automatic reclaim, unallocated space per disk), settings of the running game profile that something undid since (drift) and its MemoryLow drop-ins left behind once it is off, slices of your user manager outside the boxes CST manages and `systemd-run --user` jobs next to the game, a host-passthrough VM still given CET/MBEC by QEMU 11, responsiveness telemetry bottlenecks, and QEMU/libvirt changed since the rollback deployment without a pinned rollback or a VM backup; most problems with the command that fixes it. Runs as your user, also in a toolbox (the fixes are then marked "on the host") | [doctor/README.md](doctor/README.md) |
 | `cst perf [--compact] [--json] [--axis AXIS]` | none (`cst` runs `perf/cst-perf` itself) | `perf/` | Read-only 1-screen responsiveness snapshot and objective bottleneck diagnosis across `memory`, `cpu`, `io`, and `gpu` (exit 0 when healthy/skipped, 1 on `ATTENTION`/`BOTTLENECK`). Runs as your user, also in a toolbox | [perf/README.md](perf/README.md) |
+| `cst sync [plan\|apply]` | none (`cst` runs `sync/cst-sync` itself) | `sync/` | Idempotent refresh of already-installed CST components from the current checkout: updates outdated/missing/pending safe components automatically (`sudo` asked at most once) and holds precautionary ones (`btrfs:degraded-boot`, `btrfs:top-mount`, `swap:core`, `bluetooth:ldac`) behind `--include-risky` | [sync/README.md](sync/README.md) |
 
-Three more commands belong to `cst` itself:
+Four more commands belong to `cst` itself:
 
 - `cst help` (or `cst` alone): a short overview, with the modules of this copy.
 - `cst status`: the status of every module, one after the other. `btrfs`
@@ -69,6 +70,12 @@ Three more commands belong to `cst` itself:
 - `cst perf`: one-screen responsiveness snapshot and objective diagnosis across
   memory, CPU/IRQs, I/O, and GPUs. Exit status 0 when healthy/skipped, 1 on
   `ATTENTION`/`BOTTLENECK`. Details: [perf/README.md](perf/README.md).
+- `cst sync [plan|apply]`: idempotently refresh all already-installed CST
+  components after a `git pull`. Safe components refresh automatically;
+  precautionary ones (`btrfs:degraded-boot`, `btrfs:top-mount`, `swap:core`,
+  `bluetooth:ldac`) and manually modified files are reported and skipped unless
+  `--include-risky` / `--overwrite-modified` is given. Details:
+  [sync/README.md](sync/README.md).
 - `cst doctor`: a read-only check-up across the modules, with one line per
   check (`ok`, `info`, `WARN`, `ERROR`) and, under each problem, the exact
   command that fixes it. It never changes anything and needs no `sudo`.

@@ -762,6 +762,48 @@ class ComponentInstallTest(unittest.TestCase):
         out = r.stdout
         self.assertLess(out.index("/usr/local/sbin/btrfs-notify"), out.index("/btrfs-snapshot.service"))
 
+    def test_snapshot_refresh_refuses_when_not_set_up(self) -> None:
+        r = self.run_bash(
+            f'. "$SRC/setup-snapshots.bash"\nSNAP_RUNTIME="{self.tmp}/no-runtime"\nSNAP_PLAN="{self.tmp}/no-plan"\nSNAP_CONF="{self.tmp}/no-conf"\nsnap_refresh',
+            want_rc=1,
+        )
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Not set up:", r.stderr)
+        self.assertEqual(self.staged(), [])
+
+        # A scrub-limit-only snapshots.conf (without snapshot setup keys) must still refuse.
+        scrub_only = os.path.join(self.tmp, "scrub-only.conf")
+        Path(scrub_only).write_text("SCRUB_LIMIT='500M'\n", encoding="utf-8")
+        r_scrub = self.run_bash(
+            f'. "$SRC/setup-snapshots.bash"\nSNAP_RUNTIME="{self.tmp}/no-runtime"\nSNAP_PLAN="{self.tmp}/no-plan"\nSNAP_CONF="{scrub_only}"\nsnap_refresh',
+            want_rc=1,
+        )
+        self.assertEqual(r_scrub.returncode, 1)
+        self.assertIn("Not set up:", r_scrub.stderr)
+        self.assertEqual(self.staged(), [])
+
+    def test_snapshot_refresh_plan_apply_and_idempotency(self) -> None:
+        conf = os.path.join(self.tmp, "snapshots.conf")
+        Path(conf).write_text('SNAP_TARGET="home"\n', encoding="utf-8")
+        prefix = f'. "$SRC/setup-snapshots.bash"\nSNAP_CONF="{conf}"\nSNAP_PLAN="{self.tmp}/no-plan"\nSNAP_RUNTIME="{self.tmp}/no-runtime"\n'
+        plan = self.run_bash(prefix + "snap_refresh plan")
+        self.assertEqual(self.staged(), [])
+        self.assertIn("would write:", plan.stdout)
+        self.assertIn("Dry run: nothing is changed.", plan.stdout)
+        bad = self.run_bash(prefix + "snap_refresh bogus", want_rc=2)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("Usage:", bad.stderr)
+        apply1 = self.run_bash(prefix + "snap_refresh")
+        self.assertIn("written:", apply1.stdout)
+        self.assertEqual(self.staged(), manifest_dests("btrfs:alerts", "btrfs:snapshots"))
+        self.assertEqual(self.record()["components"], {"btrfs:alerts": "done", "btrfs:snapshots": "done"})
+        apply2 = self.run_bash(prefix + "snap_refresh apply")
+        self.assertNotIn("written:", apply2.stdout)
+        self.assertIn("unchanged:", apply2.stdout)
+        plan2 = self.run_bash(prefix + "snap_refresh plan")
+        self.assertNotIn("would write:", plan2.stdout)
+        self.assertIn("Dry run: nothing is changed.", plan2.stdout)
+
     def test_disable_stops_when_the_installer_cannot_list_the_units(self) -> None:
         # A broken installer must not end in "docker-gc disabled" with the timer still enabled.
         script = f"{STAGED_INSTALLER}\n{DOCKER_GC_STAGED}\ncst_component_units() {{ return 1; }}\ndocker_gc disable"

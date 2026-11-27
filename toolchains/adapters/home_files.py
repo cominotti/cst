@@ -62,11 +62,10 @@ from toolchains.domain.common import (
 from toolchains.domain.build import TMPFS_ROOT_REL, expected_templates
 from toolchains.domain.config import (
     CARGO_CFG_REL,
-    SCCACHE_SIZE_LINE,
-    SCCACHE_WORKSPACE_LINE,
     WRAPPER_NAME,
     SettingsRewrite,
     WrapperValues,
+    render_wrapper,
     wrapper_path,
 )
 from toolchains.domain.prune import RunRecord, SavedRun, Settings, checked_settings, is_saved_run, parse_defaults
@@ -346,11 +345,7 @@ def wrapper_text(values: WrapperValues, entry_file: str) -> str | None:
     """The wrapper as installed (the settings written in), or None when its
     source is not next to this program (the timer's copy has none)."""
     text = read_text(os.path.join(program_folder(entry_file), WRAPPER_NAME))
-    if text is None:
-        return None
-    text, n = SCCACHE_SIZE_LINE.subn(f"cache_size={values.size}", text, count=1)
-    text, m = SCCACHE_WORKSPACE_LINE.subn(f"workspace={'yes' if values.workspace else 'no'}", text, count=1)
-    return text if n == m == 1 else None
+    return None if text is None else render_wrapper(text, values)
 
 
 def wrapper_state(home: str, text: str) -> WholeFileState:
