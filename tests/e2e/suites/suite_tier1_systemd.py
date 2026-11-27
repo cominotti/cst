@@ -16496,3 +16496,109 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-287-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
+    def test_288_btrfs_cache_system_binds(self) -> None:
+        """`cst btrfs cache system` (below, stall-monitor, var-tmp) under test_160's mount scaffold + real systemd."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-cache-system"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            set +e
+            {fstab_put_back(w)}
+            {file_put_back("/etc/crypttab", w, "crypttab")}
+            systemctl daemon-reload || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            rm -rf {w}
+            mkdir -p {w}/bin {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad \
+                {w}/var/log/below {w}/var/log/btrfs-stall-monitor {w}/var/tmp
+            chmod 1777 {w}/var/tmp
+            printf 'below-sample\\n' >{w}/var/log/below/sample.log
+            printf 'stall-sample\\n' >{w}/var/log/btrfs-stall-monitor/day.log
+            printf 'existing-tmp\\n' >{w}/var/tmp/existing-sock
+            {fstab_saved(w)}
+            {file_saved("/etc/crypttab", w, "crypttab")}
+            echo "cache UUID=dev-u /etc/cryptsetup-keys.d/cache.key nofail,discard" >{w}/etc/crypttab
+            cat >{w}/etc/fstab <<'EOF'
+UUID=uuid-root-1111 /var btrfs rw,noatime 0 0
+/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress-force=zstd:1,nofail 0 0
+/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress-force=zstd:1,nofail 0 0
+EOF
+            row() {{ printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$@"; }}
+            {{
+                row /dev/dm-0 /var btrfs rw,noatime uuid-root-1111 /var
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime,compress-force=zstd:1 uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime,compress-force=zstd:1 uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cat >{w}/bin/mnt-stub <<'STUB'
+{CACHE_MOUNT_STUB}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            cat >{w}/sync/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then cp {w}/etc/fstab /etc/fstab || exit 1; fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/sync/systemctl
+            export PATH="{w}/sync:{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            cst=/opt/cst-rw/cst
+            absent() {{ ! grep -qF -- "$1" "$2"; }}
+
+            cp {w}/etc/fstab {w}/fstab.before
+            $cst btrfs cache system plan >{w}/plan.out
+            cmp -s {w}/etc/fstab {w}/fstab.before
+            grep -qF "below" {w}/plan.out
+
+            $cst btrfs cache system apply >{w}/apply.out
+            [[ -f {w}/var/mnt/cache/system/below/sample.log ]]
+            [[ -f {w}/var/mnt/cache/system/btrfs-stall-monitor/day.log ]]
+            [[ "$(stat -c '%a' {w}/var/mnt/cache/system/below)" == "755" ]]
+            [[ "$(stat -c '%a' {w}/var/mnt/cache/system/btrfs-stall-monitor)" == "750" ]]
+            [[ "$(stat -c '%a' {w}/var/mnt/cache/system/var-tmp)" == "1777" ]]
+            [[ -f {w}/var/tmp/existing-sock ]]
+            grep -qF "/var/log/below" {w}/mounts
+            grep -qF "/var/log/btrfs-stall-monitor" {w}/mounts
+            absent "$(printf '\\t/var/tmp\\t')" {w}/mounts
+
+            below_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/log/below)"
+            stall_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/log/btrfs-stall-monitor)"
+            vartmp_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/tmp)"
+            [[ -f "$below_unit" && -f "$stall_unit" && -f "$vartmp_unit" ]]
+            below_unit_name="$(basename "$below_unit")"
+            [[ "$(systemctl show -P What "$below_unit_name")" == "/var/mnt/cache/system/below" ]]
+            [[ "$(systemctl show -P Where "$below_unit_name")" == "/var/log/below" ]]
+            [[ "$(systemctl show -P RequiresMountsFor "$below_unit_name")" == *"/var/mnt/cache"* ]]
+
+            $cst btrfs cache system apply | grep -qF "already configured; nothing to do."
+
+            $cst doctor >{w}/doctor.out 2>&1 || true
+            grep -qF "3 system bind mount(s) configured" {w}/doctor.out
+            grep -qF "info   btrfs cache: /var/tmp (system=var-tmp) is staged in /etc/fstab" {w}/doctor.out
+
+            rc=0
+            $cst btrfs cache unprovision >{w}/unprov.out 2>&1 || rc=$?
+            [[ $rc == 1 ]]
+            grep -qF "system bind mounts still configured" {w}/unprov.out
+
+            $cst btrfs cache system revert >{w}/rev.out
+            absent "scope=system" {w}/etc/fstab
+            absent "scope=system" /etc/fstab
+            [[ ! -e "$below_unit" && ! -e "$stall_unit" && ! -e "$vartmp_unit" ]]
+            absent "/var/log/below" {w}/mounts
+            [[ -f {w}/var/mnt/cache/system/below/sample.log ]]
+            echo E2E-288-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-288-OK", out)

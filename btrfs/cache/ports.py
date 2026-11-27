@@ -16,6 +16,7 @@ from typing import Protocol
 
 from btrfs.cache.domain import BusyProcess, CacheMountBinding, CacheMountKind, CacheMountUser, LiveMount
 from btrfs.cache.domain.provision import BlockDeviceFacts
+from btrfs.cache.domain.system_spec import SystemBindSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,4 +271,58 @@ class CacheMigrationPort(Protocol):
 
     def remove_empty_dir(self, path: str) -> None:
         """Remove empty directory `path` on rollback (ignoring FileNotFoundError)."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class SystemBindPaths:
+    """Non-following filesystem probe for one system bind pair (`source` -> `target`)."""
+
+    target_is_link: bool
+    target_exists: bool
+    target_is_dir: bool
+    target_nonempty: bool
+    source_is_link: bool
+    source_exists: bool
+    source_is_dir: bool
+    source_nonempty: bool
+
+
+class CacheSystemBindPort(Protocol):
+    """Host operations for `cst btrfs cache system` (`/var/mnt/cache/system/*`)."""
+
+    def probe_paths(self, spec: SystemBindSpec) -> SystemBindPaths:
+        """Probe source and target directories without following terminal symlinks."""
+        ...
+
+    def ensure_root_dir(self, path: str, mode: int, *, reference_selinux: str = "") -> None:
+        """Create directory (`0o...`, root:root) without following symlinks and copy SELinux context if active."""
+        ...
+
+    def copy_tree(self, src: str, dst: str) -> str | None:
+        """Copy all entries from `src` into `dst` (`cp -a`); returns None or error."""
+        ...
+
+    def clear_dir_contents(self, path: str) -> None:
+        """Best-effort cleanup of copied contents inside `path` on rollback."""
+        ...
+
+    def service_is_active(self, unit: str) -> bool | None:
+        """True if `unit` is active, False if inactive, None when systemd cannot be queried."""
+        ...
+
+    def stop_service(self, unit: str) -> str | None:
+        """Stop `unit`; returns None or error."""
+        ...
+
+    def start_service(self, unit: str) -> str | None:
+        """Start `unit`; returns None or error."""
+        ...
+
+    def bind(self, source: str, target: str) -> str | None:
+        """Run `mount --bind source target`; returns None or error."""
+        ...
+
+    def unbind(self, target: str) -> str | None:
+        """Run `umount target`; returns None or error."""
         ...

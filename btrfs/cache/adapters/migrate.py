@@ -62,6 +62,40 @@ def _pid_hit(pid: int, proc_dir: str, prefixes: tuple[str, ...]) -> BusyProcess 
     return BusyProcess(pid=pid, comm=comm, path=matched)
 
 
+def copy_dir_contents(rt: CacheMountRuntime, src: str, dst: str) -> str | None:
+    """Copy all entries from `src` into `dst` preserving attributes (`cp -a`)."""
+    msrc = map_path(src, rt, read_only=False)
+    mdst = map_path(dst, rt, read_only=False)
+    try:
+        with os.scandir(msrc) as it:
+            if next(it, None) is None:
+                return None
+    except OSError as exc:
+        return f"cannot read source {src}: {exc.strerror or exc}"
+    res = rt.runner.run(
+        ["cp", "-a", f"{msrc.rstrip('/')}/.", mdst],
+        timeout=_CP_TIMEOUT_S,
+        locale_c=True,
+        output=OutputMode.CAPTURE,
+    )
+    return None if res.returncode == 0 else res.failure(f"cp -a {src}/. {dst}")
+
+
+def clear_dir_entries(rt: CacheMountRuntime, path: str) -> None:
+    """Best-effort cleanup of entries directly under `path`."""
+    mapped = map_path(path, rt, read_only=False)
+    try:
+        with os.scandir(mapped) as it:
+            for entry in it:
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                else:
+                    with contextlib.suppress(OSError):
+                        os.unlink(entry.path)
+    except OSError:
+        pass
+
+
 class CacheMigrationAdapter:
     """CacheMigrationPort over local filesystem, `/proc`, and `cp -a`."""
 
@@ -116,34 +150,10 @@ class CacheMigrationAdapter:
         return tuple(found), None
 
     def copy_tree(self, src: str, dst: str) -> str | None:
-        msrc = map_path(src, self._rt, read_only=False)
-        mdst = map_path(dst, self._rt, read_only=False)
-        try:
-            with os.scandir(msrc) as it:
-                if next(it, None) is None:
-                    return None
-        except OSError as exc:
-            return f"cannot read source {src}: {exc.strerror or exc}"
-        res = self._rt.runner.run(
-            ["cp", "-a", f"{msrc.rstrip('/')}/.", mdst],
-            timeout=_CP_TIMEOUT_S,
-            locale_c=True,
-            output=OutputMode.CAPTURE,
-        )
-        return None if res.returncode == 0 else res.failure(f"cp -a {src}/. {dst}")
+        return copy_dir_contents(self._rt, src, dst)
 
     def clear_dir_contents(self, path: str) -> None:
-        mapped = map_path(path, self._rt, read_only=False)
-        try:
-            with os.scandir(mapped) as it:
-                for entry in it:
-                    if entry.is_dir(follow_symlinks=False):
-                        shutil.rmtree(entry.path, ignore_errors=True)
-                    else:
-                        with contextlib.suppress(OSError):
-                            os.unlink(entry.path)
-        except OSError:
-            pass
+        clear_dir_entries(self._rt, path)
 
     def rename(self, old: str, new: str) -> None:
         os.rename(map_path(old, self._rt, read_only=False), map_path(new, self._rt, read_only=False))

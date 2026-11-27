@@ -1886,6 +1886,61 @@ class BtrfsCacheDoctorTest(Scratch):
             fifo_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
         self.assertIn("WARN   btrfs cache: /etc/cst/btrfs-cache.conf is unreadable or not a regular file", fifo_text)
 
+    def test_system_cache_binds_health_and_reload(self) -> None:
+        self._put(
+            "etc",
+            "fstab",
+            text=(
+                f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1 0 0\n"
+                "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress-force=zstd:1,nofail 0 0\n"
+                "/var/mnt/cache/system/below /var/log/below none bind,nofail,x-systemd.requires-mounts-for=/var/mnt/cache 0 0 "
+                "# managed-by: btrfs-cache (CST) scope=system id=below\n"
+                "/var/mnt/cache/system/var-tmp /var/tmp none bind,nofail,x-systemd.requires-mounts-for=/var/mnt/cache 0 0 "
+                "# managed-by: btrfs-cache (CST) scope=system id=var-tmp\n"
+            ),
+        )
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key nofail,discard\n")
+        self._set_findmnt(
+            f"/dev/dm-0 /var compress-force=zstd:1 {UUID}\n"
+            "/dev/mapper/cache /var/mnt/cache noatime,compress-force=zstd:1,subvol=/cache cache-u\n"
+            "/dev/mapper/cache /var/log/below noatime,compress-force=zstd:1,subvol=/cache/system/below cache-u\n"
+        )
+        self._set_findmnt_all(
+            "/dev/dm-0 /var btrfs compress-force=zstd:1\n"
+            "/dev/mapper/cache /var/mnt/cache btrfs noatime,compress-force=zstd:1,subvol=/cache\n"
+            "/dev/mapper/cache /var/log/below btrfs noatime,compress-force=zstd:1,subvol=/cache/system/below\n"
+        )
+        ok_res = self.run_tool()
+        self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
+        ok_text = "\n".join(area_lines(ok_res.stdout, "btrfs"))
+        self.assertIn("2 system bind mount(s) configured", ok_text)
+        self.assertIn("info   btrfs cache: /var/tmp (system=var-tmp) is staged in /etc/fstab", ok_text)
+
+        show = os.path.join(self.env["FIX_SHOW"], "sys", "*.mount")
+        os.makedirs(os.path.dirname(show), exist_ok=True)
+        with open(show, "w", encoding="utf-8") as fh:
+            fh.write(
+                "Id=var-mnt-cache.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload=no\nWhere=/var/mnt/cache\n\n"
+                "Id=var-log-below.mount\nLoadState=loaded\nSourcePath=/proc/self/mountinfo\nNeedDaemonReload=no\nWhere=/var/log/below\n"
+            )
+        reload_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: systemd has not loaded /etc/fstab as it is on disk", reload_text)
+
+        os.unlink(show)
+        self._set_findmnt(
+            f"/dev/dm-0 /var compress-force=zstd:1 {UUID}\n"
+            "/dev/mapper/cache /var/mnt/cache noatime,compress-force=zstd:1,subvol=/cache cache-u\n"
+        )
+        self._set_findmnt_all(
+            "/dev/dm-0 /var btrfs compress-force=zstd:1\n"
+            "/dev/mapper/cache /var/mnt/cache btrfs noatime,compress-force=zstd:1,subvol=/cache\n"
+        )
+        warn_res = self.run_tool()
+        self.assertEqual(warn_res.returncode, 1)
+        warn_text = "\n".join(area_lines(warn_res.stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: /var/log/below (system=below) is in /etc/fstab but not mounted", warn_text)
+        self.assertIn("fix: cst btrfs cache system apply --only below", warn_text)
+
 
 class SnapshotsWritableTest(Scratch):
     """check_snapshots_writable: the lists btrfs-snapshot-core keeps in

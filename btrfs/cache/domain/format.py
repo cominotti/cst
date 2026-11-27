@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from btrfs.cache.domain import (
     CACHE_SEAM_ROOT_ENV,
@@ -29,6 +31,7 @@ def format_cache_mount_usage(prog: str) -> str:
         "  plan [OPTIONS]                       dry run showing directories, fstab edits, migration, and blockers\n"
         "  attach [OPTIONS]                     (root, host only) create 0700 dirs, CACHEDIR.TAG, mount, then update fstab\n"
         "  detach [OPTIONS]                     (root, host only) remove its fstab lines, then unmount its binds; keeps data\n"
+        "  system <status|plan|apply|revert>    (root apply/revert) bind /var/log/below, btrfs-stall-monitor, /var/tmp to NVMe\n"
         "  provision plan [--device DEV]        read-only: inspect a partition or saved /etc/cst/btrfs-cache.conf\n"
         "  provision init --device DEV          (root, host only) write /etc/cst/btrfs-cache.conf (does not touch disk)\n"
         "  provision apply [--format] [--yes]   (root, host only) LUKS2 + Btrfs + subvols + crypttab + fstab + mounts\n"
@@ -39,7 +42,9 @@ def format_cache_mount_usage(prog: str) -> str:
         "  --user NAME                          target user account (default: $SUDO_USER or current user)\n"
         "  --no-cache                           skip ~/.cache binding (/var/mnt/cache/<user>)\n"
         "  --no-scratchpad                      skip ~/Scratchpad binding (/var/mnt/scratchpad/<user>)\n"
-        "  --allow-nonempty                     (plan/attach) allow bind-mounting over non-empty target directory\n"
+        "  --only ID[,ID...]                    (system plan/apply/revert) select below, stall-monitor, and/or var-tmp\n"
+        "  --mount-var-tmp-now                  (system plan/apply) mount /var/tmp live immediately even if non-empty\n"
+        "  --allow-nonempty                     (plan/attach, system) allow bind-mounting over non-empty target directory\n"
         "  --migrate                            (plan/attach) copy existing ~/.cache to /var/mnt/cache/<user> first\n"
         "  --allow-busy                         (plan/attach with --migrate) proceed even if processes use ~/.cache\n"
         "  --device PATH                        (provision plan/init) block partition to inspect/record\n"
@@ -47,28 +52,64 @@ def format_cache_mount_usage(prog: str) -> str:
         "  --format                             (provision plan/apply) initialize blank partition with LUKS2 + Btrfs\n"
         "  --yes                                (provision apply --format) confirm non-interactive formatting\n"
         "\n"
-        f"Usage: {prog} <status|plan|attach|detach|provision|unprovision|help> [options]\n"
+        f"Usage: {prog} <status|plan|attach|detach|system|provision|unprovision|help> [options]\n"
     )
+
+
+class _StateProbe(Protocol):
+    @property
+    def mounted_from_source(self) -> bool: ...
+    @property
+    def in_fstab(self) -> bool: ...
+    @property
+    def source_unchecked(self) -> bool: ...
+    @property
+    def bind_below(self) -> bool: ...
+    @property
+    def mounted_other(self) -> bool: ...
+    @property
+    def fstab_unmanaged(self) -> bool: ...
+    @property
+    def target_is_symlink(self) -> bool: ...
+    @property
+    def source_is_symlink(self) -> bool: ...
+
+
+def format_bind_state_label(
+    probe: _StateProbe,
+    *,
+    unchecked_base: str,
+    in_fstab_label: str,
+    extra: Sequence[tuple[bool, str]] = (),
+    fallback: str,
+) -> str:
+    """Format a shared bind-mount probe status badge."""
+    if probe.mounted_from_source:
+        return "active (fstab + mounted)" if probe.in_fstab else "mounted (not in fstab)"
+    states = (
+        (probe.source_unchecked, f"mounted (source not checked: {unchecked_base} not mounted)"),
+        (probe.bind_below, "mounted (other source on top of CST's bind!)"),
+        (probe.mounted_other, "mounted (other source!)"),
+        (probe.fstab_unmanaged, "fstab line CST does not manage (blocked)"),
+        (probe.in_fstab, in_fstab_label),
+        (probe.target_is_symlink, "symlink (blocked)"),
+        (probe.source_is_symlink, "source is a symlink (blocked)"),
+        *extra,
+    )
+    return next((label for on, label in states if on), fallback)
 
 
 def _binding_state_label(probe: BindingProbe) -> str:
-    if probe.mounted_from_source:
-        return "active (fstab + mounted)" if probe.in_fstab else "mounted (not in fstab)"
-    mount_states = (
-        (probe.source_unchecked, "mounted (source not checked: base not mounted)"),
-        (probe.bind_below, "mounted (other source on top of CST's bind!)"),
+    return format_bind_state_label(
+        probe,
+        unchecked_base="base",
+        in_fstab_label="in fstab (not mounted)",
+        extra=(
+            (probe.target_not_dir, "target is not a folder (blocked)"),
+            (probe.target_nonempty, "unattached (target non-empty)"),
+        ),
+        fallback="not attached",
     )
-    states = (
-        *mount_states,
-        (probe.mounted_other, "mounted (other source!)"),
-        (probe.fstab_unmanaged, "fstab line CST does not manage (blocked)"),
-        (probe.in_fstab, "in fstab (not mounted)"),
-        (probe.target_is_symlink, "symlink (blocked)"),
-        (probe.source_is_symlink, "source is a symlink (blocked)"),
-        (probe.target_not_dir, "target is not a folder (blocked)"),
-        (probe.target_nonempty, "unattached (target non-empty)"),
-    )
-    return next((label for on, label in states if on), "not attached")
 
 
 def cache_seam_lines(seam_root: str) -> list[str]:
@@ -76,13 +117,18 @@ def cache_seam_lines(seam_root: str) -> list[str]:
     return [f"test seam ({CACHE_SEAM_ROOT_ENV}): {seam_root}"] if seam_root else []
 
 
-def _base_status_line(base: BaseMountInfo) -> str:
+def format_base_status_line(base: BaseMountInfo) -> str:
+    """Format one status line for `/var/mnt/cache` or `/var/mnt/scratchpad`."""
     if base.mounted:
         flush_note = " [WARN: flushoncommit]" if has_mount_option(base.options, OPT_FLUSHONCOMMIT) else ""
         return f"  {base.path:<18} mounted ({base.fstype}, uuid={base.uuid or 'unknown'}){flush_note}"
     if base.in_fstab:
         return f"  {base.path:<18} in fstab (not mounted)"
     return f"  {base.path:<18} not provisioned"
+
+
+def _base_status_line(base: BaseMountInfo) -> str:
+    return format_base_status_line(base)
 
 
 def _user_status_lines(snap: CacheMountSnapshot) -> list[str]:
@@ -93,6 +139,15 @@ def _user_status_lines(snap: CacheMountSnapshot) -> list[str]:
         b = probe.binding
         lines.append(f"  {b.kind.value:<18} {b.source} -> {b.target} [{_binding_state_label(probe)}]")
     return lines
+
+
+def systemd_behind_status_lines(*, fstab_behind: bool | None, detail: str) -> list[str]:
+    """Render systemd daemon-reload lag status lines when `/etc/fstab` differs from loaded units."""
+    if fstab_behind is True:
+        return [f"  systemd            has not loaded {FSTAB_PATH} as it is on disk{detail}"]
+    if fstab_behind is None:
+        return [f"  systemd            cannot say whether it has loaded {FSTAB_PATH} (systemctl gave no answer)"]
+    return []
 
 
 def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") -> list[str]:
@@ -107,13 +162,15 @@ def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") 
     other_users = sorted({e.user for e in snap.all_managed if snap.user is None or e.user != snap.user.name})
     if other_users:
         lines.append(f"  other fstab users  {', '.join(other_users)}")
-    if snap.fstab_behind is True:
-        lines.append(
-            f"  systemd            has not loaded {FSTAB_PATH} as it is on disk (an edit, or an attach or detach "
-            "that stopped before its daemon-reload): run that attach or detach again, or systemctl daemon-reload"
+    lines.extend(
+        systemd_behind_status_lines(
+            fstab_behind=snap.fstab_behind,
+            detail=(
+                " (an edit, or an attach or detach that stopped before its daemon-reload): "
+                "run that attach or detach again, or systemctl daemon-reload"
+            ),
         )
-    elif snap.fstab_behind is None:
-        lines.append(f"  systemd            cannot say whether it has loaded {FSTAB_PATH} (systemctl gave no answer)")
+    )
     return lines
 
 
@@ -171,6 +228,11 @@ class CachePlanOptions:
     seam_root: str = ""
 
 
+def format_ready_tail(*, done_msg: str, behind_msg: str, fstab_behind: bool | None) -> str:
+    """Return final plan line when all targets are already configured/attached."""
+    return done_msg if fstab_behind is False else behind_msg
+
+
 def format_cache_mount_plan(
     snap: CacheMountSnapshot, prog: str, *, options: CachePlanOptions | None = None
 ) -> list[str]:
@@ -201,10 +263,13 @@ def format_cache_mount_plan(
         else f"systemctl cannot say whether systemd has loaded {FSTAB_PATH}"
     )
     if all(p.in_fstab and p.mounted_from_source for p in snap.bindings):
-        if snap.fstab_behind is False:
-            lines.append(f"Already attached for {snap.user.name}; nothing to do.")
-        else:
-            lines.append(f"Already attached for {snap.user.name}; {why}: attach runs systemctl daemon-reload.")
+        lines.append(
+            format_ready_tail(
+                done_msg=f"Already attached for {snap.user.name}; nothing to do.",
+                behind_msg=f"Already attached for {snap.user.name}; {why}: attach runs systemctl daemon-reload.",
+                fstab_behind=snap.fstab_behind,
+            )
+        )
         return lines
     if snap.fstab_behind is not False:
         lines.append(

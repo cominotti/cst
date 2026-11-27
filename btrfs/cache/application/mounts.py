@@ -12,9 +12,17 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
-from typing import Final
 
+from btrfs.cache.application.fstab_ops import (
+    FstabFailure,
+    commit_fstab,
+    format_undo_error,
+    probe_base_mount,
+    restore_fstab,
+)
 from btrfs.cache.application.provision import ProvisionEnv, run_provision, run_unprovision
+from btrfs.cache.application.system import SystemEnv, run_system_action
+from btrfs.cache.domain.system_spec import SystemAction, parse_system_args
 from btrfs.cache.domain import (
     BASE_FOR_KIND,
     BaseMountInfo,
@@ -48,6 +56,7 @@ from btrfs.cache.domain.format import (
     cache_seam_lines,
     format_cache_mount_plan,
     format_cache_mount_status,
+    format_cache_mount_usage,
 )
 from btrfs.cache.domain.migrate import (
     MigrationProbe,
@@ -63,15 +72,13 @@ from btrfs.cache.ports import (
     CacheHostViewPort,
     CacheMigrationPort,
     CacheProvisionPort,
+    CacheSystemBindPort,
     CacheSystemdPort,
     FstabPort,
     MountTablePort,
 )
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from cst_core.domain.values import ExitAndLines
-from cst_core.ports import ReplacedNotSynced
-
-_NOT_MOUNTED: Final = LiveMount(source="", target="", fstype="", options="", uuid="", fsroot="")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +93,7 @@ class CacheMounts:
     accounts: CacheAccountsPort
     provision: CacheProvisionPort | None = None
     migration: CacheMigrationPort | None = None
+    system_binds: CacheSystemBindPort | None = None
     seam_root: str = ""
 
     def snapshot(self, parsed: CacheMountParsedArgs) -> CacheMountSnapshot:
@@ -96,18 +104,33 @@ class CacheMounts:
         """The requested subcommand: (exit status, its lines); prog: the command's name in plan's lines."""
         if parsed.action in (CacheMountAction.PROVISION, CacheMountAction.UNPROVISION):
             return _run_provision_action(parsed, self, prog)
+        if parsed.action == CacheMountAction.SYSTEM:
+            sys_args = parse_system_args(parsed.system_argv)
+            if sys_args.error is not None:
+                return sys_args.code, [sys_args.error]
+            if sys_args.action == SystemAction.HELP:
+                return 0, format_cache_mount_usage(prog).splitlines()
+            env = SystemEnv(
+                binds=self.system_binds,
+                fstab=self.fstab,
+                mounts=self.mounts,
+                systemd=self.systemd,
+                seam_root=self.seam_root,
+            )
+            return run_system_action(sys_args, env, prog)
         snap = self.snapshot(parsed)
         match parsed.action:
             case CacheMountAction.STATUS:
-                return self.status(snap)
+                res = self.status(snap)
             case CacheMountAction.PLAN:
-                return self.plan(snap, parsed, prog)
+                res = self.plan(snap, parsed, prog)
             case CacheMountAction.ATTACH:
-                return _apply_attach(snap, parsed, self)
+                res = _apply_attach(snap, parsed, self)
             case CacheMountAction.DETACH:
-                return _apply_detach(snap, parsed, self)
+                res = _apply_detach(snap, parsed, self)
             case _:
-                return 0, format_cache_mount_status(snap, seam_root=self.seam_root)
+                res = (0, format_cache_mount_status(snap, seam_root=self.seam_root))
+        return res
 
     def status(self, snap: CacheMountSnapshot) -> ExitAndLines:
         """The status lines; systemd is asked about /etc/fstab only where the cache is set up."""
@@ -150,21 +173,7 @@ class _MountTables:
 
 
 def _probe_base(kind: CacheMountKind, tables: _MountTables) -> BaseMountInfo:
-    path = BASE_FOR_KIND[kind]
-    live = tables.live.get(path)
-    fst = tables.fstab.get(path)
-    seen = live if live is not None else _NOT_MOUNTED
-    return BaseMountInfo(
-        path=path,
-        mounted=live is not None,
-        fstype=seen.fstype,
-        uuid=seen.uuid,
-        options=seen.options,
-        in_fstab=fst is not None,
-        fstab_options=fst.options if fst is not None else "",
-        source=seen.source,
-        fsroot=seen.fsroot,
-    )
+    return probe_base_mount(BASE_FOR_KIND[kind], tables.live, tables.fstab)
 
 
 def _probe_binding(
@@ -264,36 +273,8 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, m: CacheMounts) -> CacheMountS
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _FstabFailure:
-    """Why writing /etc/fstab and reloading systemd failed, and what of /etc/fstab could not be undone."""
-
-    cause: str
-    undo_errors: tuple[str, ...] = ()  # /etc/fstab could not be put back: its new lines stay
-
-
-def _commit_fstab(previous: str | None, new_text: str, m: CacheMounts) -> _FstabFailure | None:
-    """Write /etc/fstab and reload systemd; None, or why it failed, after /etc/fstab was put back as
-    it was (the previous text, or no file when there was none) or, in undo_errors, why it could not be."""
-    try:
-        m.fstab.write(new_text)
-    except ReplacedNotSynced as exc:
-        return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}", _undo_replaced(previous, new_text, m))
-    except OSError as exc:
-        return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}")
-    why = m.systemd.daemon_reload()
-    if why is None:
-        return None
-    return _FstabFailure(why, _put_fstab_back(previous, m).errors)
-
-
-def _undo_replaced(previous: str | None, new_text: str, m: CacheMounts) -> tuple[str, ...]:
-    """After a write of new_text that raised once its rename was done: /etc/fstab read back, and put back."""
-    try:
-        now = m.fstab.read()
-    except OSError as exc:
-        return (f"cannot read {FSTAB_PATH} back: {exc.strerror or exc}",)
-    return _put_fstab_back(previous, m).errors if now == new_text else ()
+def _commit_fstab(previous: str | None, new_text: str, m: CacheMounts) -> FstabFailure | None:
+    return commit_fstab(previous, new_text, m.fstab, m.systemd)
 
 
 def _fstab_behind(snap: CacheMountSnapshot, m: CacheMounts, mounting: Collection[str] = ()) -> bool | None:
@@ -322,44 +303,12 @@ def _attach_fstab(snap: CacheMountSnapshot) -> tuple[str, str]:
     return cur, plan_attach_fstab(cur, [p.binding for p in snap.bindings])
 
 
-@dataclass(frozen=True, slots=True)
-class _PutBack:
-    """What putting /etc/fstab back did: whether the old text (or no file) is in place, and what failed."""
-
-    in_place: bool
-    error: str | None = None
-
-    @property
-    def errors(self) -> tuple[str, ...]:
-        """The error, if any, as the undo errors it adds."""
-        return () if self.error is None else (self.error,)
-
-
-def _put_fstab_back(previous: str | None, m: CacheMounts) -> _PutBack:
-    """/etc/fstab as it was (the previous text, or no file when there was none)."""
-    try:
-        if previous is None:
-            m.fstab.remove()
-        else:
-            m.fstab.write(previous)
-    except ReplacedNotSynced as exc:
-        return _PutBack(in_place=True, error=f"{FSTAB_PATH} put back, its folder not synced: {exc.strerror or exc}")
-    except OSError as exc:
-        return _PutBack(in_place=False, error=f"cannot put {FSTAB_PATH} back: {exc.strerror or exc}")
-    return _PutBack(in_place=True)
-
-
 def _restore_fstab(previous: str | None, m: CacheMounts) -> list[str]:
-    """Put /etc/fstab back as it was and reload systemd when the old text is in place."""
-    put_back = _put_fstab_back(previous, m)
-    why = m.systemd.daemon_reload() if put_back.in_place else None
-    return [*put_back.errors] if why is None else [*put_back.errors, why]
+    return restore_fstab(previous, m.fstab, m.systemd)
 
 
 def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
-    if undo_errors:
-        return f"ERROR: {cause}; ROLLBACK INCOMPLETE ({'; '.join(undo_errors)})"
-    return f"ERROR: {cause}; mounts and {FSTAB_PATH} restored."
+    return format_undo_error(cause, undo_errors)
 
 
 def _error_after_catch_up(cause: str, undo_errors: Sequence[str], mounted: Sequence[CacheMountBinding]) -> str:

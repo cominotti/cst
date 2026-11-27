@@ -87,6 +87,7 @@ class CacheMountAction(StrEnum):
     DETACH = "detach"
     PROVISION = "provision"
     UNPROVISION = "unprovision"
+    SYSTEM = "system"
     HELP = "help"
 
 
@@ -132,6 +133,7 @@ class CacheMountParsedArgs:
     mapper: str | None = None
     do_format: bool = False
     assume_yes: bool = False
+    system_argv: tuple[str, ...] = ()
     error: str | None = None
     code: int = 0
 
@@ -382,9 +384,8 @@ def source_fsroot(source: str) -> str | None:
     return group(m)[1:-1] if m is not None else None
 
 
-def is_bind_from(live: LiveMount, base: BaseMountInfo, user: str) -> bool:
-    """live is the bind mount of the base's folder for user: the same filesystem (its UUID, or its
-    device when findmnt knows no UUID) and the root `<base FSROOT>/<user>` in it."""
+def bind_matches_fsroot(live: LiveMount, base: BaseMountInfo, rel_subpath: str) -> bool:
+    """Return True when `live` bind-mounts `<base.fsroot>/<rel_subpath>` on the same filesystem."""
     if not base.mounted:
         return False
     if live.uuid and base.uuid:
@@ -392,7 +393,13 @@ def is_bind_from(live: LiveMount, base: BaseMountInfo, user: str) -> bool:
     else:
         dev = mount_device(live.source)
         same_fs = bool(dev) and dev == mount_device(base.source)
-    return same_fs and live.fsroot == posixpath.join(base.fsroot or "/", user)
+    return same_fs and live.fsroot == posixpath.join(base.fsroot or "/", rel_subpath.lstrip("/"))
+
+
+def is_bind_from(live: LiveMount, base: BaseMountInfo, user: str) -> bool:
+    """live is the bind mount of the base's folder for user: the same filesystem (its UUID, or its
+    device when findmnt knows no UUID) and the root `<base FSROOT>/<user>` in it."""
+    return bind_matches_fsroot(live, base, user)
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,19 +499,14 @@ def _parse_provision_args(argv: Sequence[str]) -> CacheMountParsedArgs:
                 action=CacheMountAction.PROVISION, provision_action=sub, error=err, code=EXIT_USAGE
             )
         i += step
+    prov_err: str | None = None
     if sub == ProvisionSubcommand.INIT and state.device is None:
+        prov_err = "`provision init` requires --device PATH"
+    elif state.mapper is not None and "/" in state.mapper:
+        prov_err = f"--mapper must be a plain mapper name, not a path: {state.mapper!r}"
+    if prov_err is not None:
         return CacheMountParsedArgs(
-            action=CacheMountAction.PROVISION,
-            provision_action=sub,
-            error="`provision init` requires --device PATH",
-            code=EXIT_USAGE,
-        )
-    if state.mapper is not None and "/" in state.mapper:
-        return CacheMountParsedArgs(
-            action=CacheMountAction.PROVISION,
-            provision_action=sub,
-            error=f"--mapper must be a plain mapper name, not a path: {state.mapper!r}",
-            code=EXIT_USAGE,
+            action=CacheMountAction.PROVISION, provision_action=sub, error=prov_err, code=EXIT_USAGE
         )
     return CacheMountParsedArgs(
         action=CacheMountAction.PROVISION,
@@ -531,25 +533,7 @@ def _mount_flag_error(action: CacheMountAction, state: _FlagState) -> str | None
     return None
 
 
-def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
-    """Parse `cst btrfs cache` arguments cleanly without touching I/O.
-
-    A first word that is an option (`--user NAME`) means the default command, `status`, with it."""
-    if argv and argv[0].startswith("-") and argv[0] not in HELP_WORDS:
-        action, rest, head_err = CacheMountAction.STATUS, argv, None
-    else:
-        action, rest, head_err = parse_subcommand_head(
-            argv, CacheMountAction, default=CacheMountAction.STATUS, help_action=CacheMountAction.HELP
-        )
-    if head_err is not None:
-        return CacheMountParsedArgs(action=CacheMountAction.HELP, error=head_err, code=EXIT_USAGE)
-    if action == CacheMountAction.HELP or (
-        action != CacheMountAction.PROVISION and any(tok in HELP_WORDS for tok in rest)
-    ):
-        return CacheMountParsedArgs(action=CacheMountAction.HELP)
-    if action == CacheMountAction.PROVISION:
-        return _parse_provision_args(rest)
-
+def _parse_mount_flags(action: CacheMountAction, rest: Sequence[str]) -> CacheMountParsedArgs:
     state = _FlagState()
     i = 0
     while i < len(rest):
@@ -558,7 +542,6 @@ def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
         if err is not None:
             return CacheMountParsedArgs(action=action, error=err, code=EXIT_USAGE)
         i += step
-
     if (flag_err := _mount_flag_error(action, state)) is not None:
         return CacheMountParsedArgs(action=action, error=flag_err, code=EXIT_USAGE)
     return CacheMountParsedArgs(
@@ -572,14 +555,36 @@ def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
     )
 
 
+def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
+    """Parse `cst btrfs cache` arguments cleanly without touching I/O.
+
+    A first word that is an option (`--user NAME`) means the default command, `status`, with it."""
+    if argv and argv[0].startswith("-") and argv[0] not in HELP_WORDS:
+        action, rest, head_err = CacheMountAction.STATUS, argv, None
+    else:
+        action, rest, head_err = parse_subcommand_head(
+            argv, CacheMountAction, default=CacheMountAction.STATUS, help_action=CacheMountAction.HELP
+        )
+    if head_err is not None:
+        return CacheMountParsedArgs(action=CacheMountAction.HELP, error=head_err, code=EXIT_USAGE)
+    if action == CacheMountAction.HELP or (
+        action not in (CacheMountAction.PROVISION, CacheMountAction.SYSTEM) and any(tok in HELP_WORDS for tok in rest)
+    ):
+        return CacheMountParsedArgs(action=CacheMountAction.HELP)
+    if action in (CacheMountAction.PROVISION, CacheMountAction.SYSTEM):
+        return (
+            _parse_provision_args(rest)
+            if action == CacheMountAction.PROVISION
+            else CacheMountParsedArgs(action=action, system_argv=tuple(rest))
+        )
+    return _parse_mount_flags(action, rest)
+
+
 def selected_kinds(*, include_cache: bool = True, include_scratchpad: bool = True) -> tuple[CacheMountKind, ...]:
     """Return active `CacheMountKind` tuple matching caller flags."""
-    kinds: list[CacheMountKind] = []
-    if include_cache:
-        kinds.append(CacheMountKind.CACHE)
-    if include_scratchpad:
-        kinds.append(CacheMountKind.SCRATCHPAD)
-    return tuple(kinds)
+    return tuple(
+        k for k, on in ((CacheMountKind.CACHE, include_cache), (CacheMountKind.SCRATCHPAD, include_scratchpad)) if on
+    )
 
 
 def build_user_bindings(
@@ -587,20 +592,16 @@ def build_user_bindings(
 ) -> tuple[CacheMountBinding, ...]:
     """Construct `/var/mnt/<kind>/<user> -> <home>/<rel>` bindings for `user`."""
     home = user.home.rstrip("/") or "/"
-    out: list[CacheMountBinding] = []
-    for kind in selected_kinds(include_cache=include_cache, include_scratchpad=include_scratchpad):
-        base = BASE_FOR_KIND[kind]
-        rel = REL_FOR_KIND[kind]
-        out.append(
-            CacheMountBinding(
-                kind=kind,
-                user=user.name,
-                base=base,
-                source=f"{base}/{user.name}",
-                target=f"{home}/{rel}",
-            )
+    return tuple(
+        CacheMountBinding(
+            kind=k,
+            user=user.name,
+            base=BASE_FOR_KIND[k],
+            source=f"{BASE_FOR_KIND[k]}/{user.name}",
+            target=f"{home}/{REL_FOR_KIND[k]}",
         )
-    return tuple(out)
+        for k in selected_kinds(include_cache=include_cache, include_scratchpad=include_scratchpad)
+    )
 
 
 def render_bind_fstab_line(binding: CacheMountBinding) -> str:
@@ -642,11 +643,11 @@ def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
     )
 
 
-def unmanaged_fstab_targets(fstab_text: str) -> frozenset[str]:
+def unmanaged_fstab_targets(fstab_text: str, *, known_lines: Collection[str] = ()) -> frozenset[str]:
     """The targets (unescaped) of the /etc/fstab lines CST does not manage."""
     targets: set[str] = set()
     for raw in file_lines(fstab_text):
-        if is_mount_comment(raw) or _parse_one_managed_line(raw) is not None:
+        if raw in known_lines or is_mount_comment(raw) or _parse_one_managed_line(raw) is not None:
             continue
         fields = mount_fields(raw)
         if len(fields) >= _FSTAB_TARGET_FIELDS:

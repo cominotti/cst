@@ -27,6 +27,7 @@ from btrfs.cache.domain import (
     upsert_marked_lines,
 )
 from btrfs.cache.domain.health import CRYPTTAB_MIN_FIELDS
+from btrfs.cache.domain.system import ManagedSystemEntry
 from btrfs.compress.domain import FSTAB_PATH
 from cst_core.domain.text import (
     file_lines,
@@ -174,6 +175,7 @@ class ProvisionProbe:
     user_managed_entries: tuple[ManagedFstabEntry, ...]
     user_mounts_active: tuple[str, ...] = ()
     fstab_behind: bool | None = False
+    system_managed_entries: tuple[ManagedSystemEntry, ...] = ()
 
 
 def is_valid_mapper_name(name: str) -> bool:
@@ -540,6 +542,9 @@ def validate_unprovision(probe: ProvisionProbe) -> list[str]:
     if users:
         cmds = ", ".join(f"`detach --user {u}`" for u in users)
         errors.append(f"user bind mounts still configured in {FSTAB_PATH}; run {cmds} first")
+    if probe.system_managed_entries:
+        ids = ",".join(sorted({e.bind_id.value for e in probe.system_managed_entries}))
+        errors.append(f"system bind mounts still configured in {FSTAB_PATH}; run `system revert --only {ids}` first")
     errors.extend(
         f"active mount under base path at {target}; unmount or detach it first" for target in probe.user_mounts_active
     )

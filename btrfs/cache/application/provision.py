@@ -21,6 +21,7 @@ from btrfs.cache.domain import (
     parse_managed_fstab_entries,
 )
 from btrfs.cache.domain.format import cache_seam_lines
+from btrfs.cache.domain.system import parse_system_fstab_entries
 from btrfs.cache.domain.provision import (
     BTRFS_CACHE_LABEL,
     CACHE_CONF_PATH,
@@ -255,6 +256,7 @@ def _probe_provision(prov: CacheProvisionPort, env: ProvisionEnv) -> ProvisionPr
         user_managed_entries=parse_managed_fstab_entries(fstab_text or ""),
         user_mounts_active=_user_mounts_under_bases(live_mounts, bases),
         fstab_behind=fstab_lines_unread(env.systemd.mount_units(), {CACHE_BASE, SCRATCHPAD_BASE}),
+        system_managed_entries=parse_system_fstab_entries(fstab_text or ""),
     )
 
 
