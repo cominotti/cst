@@ -23,7 +23,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from typing import BinaryIO, Literal, TextIO, overload
+from typing import BinaryIO, Final, Literal, TextIO, overload
 
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, owned_file_state
@@ -433,6 +433,49 @@ def _relabel(path: str) -> None:
         print(f"warning: restorecon {path}: {why} (its SELinux label may be wrong)", file=sys.stderr)
 
 
+def _apply_fd_owner(fd: int, owner: FileOwner | tuple[int, int]) -> None:
+    if os.geteuid() != 0:
+        return
+    if isinstance(owner, tuple):
+        os.fchown(fd, *owner)
+    elif owner == FileOwner.ROOT:
+        os.fchown(fd, 0, 0)
+
+
+def _replace_via_temp(
+    path: str,
+    write_fd: Callable[[int], None],
+    *,
+    bits: int,
+    durable: bool | Literal["file"],
+    owner: FileOwner | tuple[int, int],
+) -> str:
+    abs_path = os.path.abspath(path)
+    parent = os.path.dirname(abs_path)
+    ensure_dir(parent, 0o755)
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(abs_path)}.", dir=parent)
+    try:
+        try:
+            os.fchmod(fd, bits)
+            _apply_fd_owner(fd, owner)
+            write_fd(fd)
+            if durable:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, abs_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    if durable is True:
+        try:
+            _fsync_dir(parent)
+        except OSError as e:
+            raise ReplacedNotSynced(e.errno, e.strerror, e.filename, abs_path) from e
+    return abs_path
+
+
 def write_atomic(
     path: str,
     data: bytes | str,
@@ -472,37 +515,15 @@ def write_atomic(
     OSError with that error's errno, strerror and filename: the new file is in
     place, not yet synced.
     """
-    abs_path = os.path.abspath(path)
-    parent = os.path.dirname(abs_path)
-    ensure_dir(parent, 0o755)
     content = data.encode("utf-8", "surrogateescape") if isinstance(data, str) else data
     bits = 0o666 & ~_umask() if mode == "umask" else mode
-    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(abs_path)}.", dir=parent)
-    try:
-        try:
-            os.fchmod(fd, bits)
-            if os.geteuid() == 0:
-                if isinstance(owner, tuple):
-                    os.fchown(fd, *owner)
-                elif owner == FileOwner.ROOT:
-                    os.fchown(fd, 0, 0)
-            view = memoryview(content)
-            while view:
-                view = view[os.write(fd, view) :]
-            if durable:
-                os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, abs_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-    if durable is True:
-        try:
-            _fsync_dir(parent)
-        except OSError as e:
-            raise ReplacedNotSynced(e.errno, e.strerror, e.filename, abs_path) from e
+
+    def _write_bytes(fd: int) -> None:
+        view = memoryview(content)
+        while view:
+            view = view[os.write(fd, view) :]
+
+    abs_path = _replace_via_temp(path, _write_bytes, bits=bits, durable=durable, owner=owner)
     if relabel and os.geteuid() == 0:
         _relabel(abs_path)
 
@@ -540,3 +561,60 @@ class CounterFile:
 def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
     """The installer's write: write_atomic, durable, owned by root as root (and relabelled)."""
     write_atomic(dest, content, mode=mode, owner=FileOwner.ROOT)
+
+
+_COPY_CHUNK_BYTES: Final = 65536
+
+
+def copy_file_atomic(
+    src: str,
+    dst: str,
+    *,
+    mode: int,
+    durable: bool | Literal["file"] = True,
+    owner: FileOwner | tuple[int, int] = FileOwner.CALLER,
+) -> None:
+    """Copy regular file `src` to `dst` atomically in chunks without reading the whole file into memory."""
+
+    def _copy_fd(fd: int) -> None:
+        with open_regular_bytes(src) as in_fh, os.fdopen(fd, "wb", closefd=False) as out_fh:
+            shutil.copyfileobj(in_fh, out_fh, length=_COPY_CHUNK_BYTES)
+            out_fh.flush()
+
+    _replace_via_temp(dst, _copy_fd, bits=mode, durable=durable, owner=owner)
+
+
+def _remove_tree_or_entry(path: str) -> None:
+    if os.path.islink(path) or not os.path.isdir(path):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+        return
+    shutil.rmtree(path)
+
+
+def swap_dir_staged(staging: str, dest: str, *, durable: bool = True) -> None:
+    """Atomically swap prepared directory `staging` into `dest` via a sibling `.old` backup."""
+    abs_staging = os.path.abspath(staging)
+    abs_dest = os.path.abspath(dest)
+    parent = os.path.dirname(abs_dest)
+    old = f"{abs_dest}.old"
+    if os.path.lexists(old):
+        _remove_tree_or_entry(old)
+    moved_old = False
+    if os.path.lexists(abs_dest):
+        os.replace(abs_dest, old)
+        moved_old = True
+    try:
+        os.replace(abs_staging, abs_dest)
+    except BaseException:
+        if moved_old and not os.path.lexists(abs_dest):
+            with contextlib.suppress(OSError):
+                os.replace(old, abs_dest)
+        raise
+    if durable:
+        try:
+            _fsync_dir(parent)
+        except OSError as e:
+            raise ReplacedNotSynced(e.errno, e.strerror, e.filename, abs_dest) from e
+    if moved_old and os.path.lexists(old):
+        _remove_tree_or_entry(old)

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MPL-2.0
+[Unit]
+Description=CST Browser Profile Overlayfs Sync for %i
+After=local-fs.target
+Before=shutdown.target reboot.target halt.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStopSec=120
+ExecStart=/usr/local/sbin/cst-desktop psd start --user %i --skip-busy
+ExecStop=/usr/local/sbin/cst-desktop psd stop --user %i
+
+[Install]
+WantedBy=multi-user.target

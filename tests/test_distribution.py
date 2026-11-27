@@ -79,6 +79,7 @@ HELP_MODES: Final[dict[str, tuple[tuple[str, ...], int]]] = {
     "cpu/game-profile": (("--help",), 2),
     "cpu/vm-pin": (("--help",), 2),
     "bluetooth/bt-ldac-watch": (("--help",), 0),
+    "desktop/cst-desktop": (("help",), 0),
     "toolchains/cst-toolchains": (("help",), 0),
     "vm/cst-vm": (("help",), 0),
 }

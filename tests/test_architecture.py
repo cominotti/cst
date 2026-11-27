@@ -130,7 +130,7 @@ PURE_NAMES: Final[dict[str, frozenset[str]]] = {
 # Builtins that reach the terminal, files or run code.
 IO_BUILTINS: Final[frozenset[str]] = frozenset({"open", "print", "input", "exec", "eval", "compile", "__import__"})
 REPO_PACKAGES: Final[frozenset[str]] = frozenset(
-    {"bluetooth", "btrfs", "cpu", "cst_core", "doctor", "perf", "swap", "sync", "toolchains", "vm"}
+    {"bluetooth", "btrfs", "cpu", "cst_core", "desktop", "doctor", "perf", "swap", "sync", "toolchains", "vm"}
 )
 IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 
@@ -170,6 +170,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cpu/power/cli.py": 47,
     "cpu/setup/cli.py": 32,
     "cst_core/cli.py": 7,
+    "desktop/cli.py": 45,
     "doctor/cli.py": 24,
     "perf/cli.py": 22,
     "swap/cli.py": 86,
@@ -235,6 +236,7 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "cpu/game": "cpu/game/wiring.py",
     "cpu/setup": "cpu/setup/wiring.py",
     "cst_core": "cst_core/wiring.py",
+    "desktop": "desktop/wiring.py",
     "doctor": "doctor/wiring.py",
     "perf": "perf/wiring.py",
     "swap": "swap/wiring.py",

@@ -102,6 +102,7 @@ before changing that module.
 | CPU: game profile, VM/toolbox/Docker priority, E-cores | [cpu/README.md](cpu/README.md) |
 | Swap and memory | [swap/README.md](swap/README.md) |
 | Bluetooth audio | [bluetooth/README.md](bluetooth/README.md) |
+| Desktop background writes: GNOME localsearch and browser profile sync (`psd`) | [desktop/README.md](desktop/README.md) |
 | Toolchain caches, cargo/uv settings, sccache wrapper | [toolchains/README.md](toolchains/README.md) |
 | The libvirt VM: backups, virtual hardware, NOCOW folders | [vm/README.md](vm/README.md) |
 | `cst doctor` checks | [doctor/README.md](doctor/README.md) |

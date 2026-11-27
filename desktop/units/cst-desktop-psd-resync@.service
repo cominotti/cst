@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MPL-2.0
+[Unit]
+Description=Hourly Resync for CST Browser Profile Overlayfs (%i)
+BindsTo=cst-desktop-psd@%i.service
+After=cst-desktop-psd@%i.service
+
+[Service]
+Type=oneshot
+IOSchedulingClass=idle
+Nice=10
+ExecStart=/usr/local/sbin/cst-desktop psd sync --user %i

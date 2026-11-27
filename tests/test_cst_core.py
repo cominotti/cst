@@ -1517,6 +1517,7 @@ class CstDispatcherTest(unittest.TestCase):
             [
                 ["bash", "/repo/swap-setup.sh", "status"],
                 ["bash", "/repo/bluetooth-setup.sh", "status"],
+                ["bash", "/repo/desktop-setup.sh", "status"],
                 ["bash", "/repo/toolchains-setup.sh", "status"],
                 ["bash", "/repo/vm-setup.sh", "status"],
                 ["python3", "-I", "-B", "/repo/doctor/cst-doctor", "--brief"],
@@ -2269,6 +2270,19 @@ class ModuleRouterTest(unittest.TestCase):
         self.assertEqual(self._router("toolchains", port, sudo_user="bob").route(["status"]), 1)
         self.assertEqual(port.said, [("err", "cst x: ERROR: SUDO_USER=bob: no such user\n")])
         self.assertEqual(port.execs, [])
+
+        # `desktop status` bridges to host inside a container as user AND steps down from root under SUDO_USER.
+        box_port = _FakeRoutePort(euid=1000, container=True)
+        self.assertEqual(self._router("desktop", box_port).route(["status"]), 0)
+        self.assertEqual(len(box_port.execs), 1)
+        self.assertEqual(
+            box_port.execs[0][0][:5],
+            ["flatpak-spawn", "python3", "-I", "-B", "/c/desktop/cst-desktop"],
+        )
+
+        root_port = _FakeRoutePort(euid=0)
+        self._router("desktop", root_port, sudo_user="alice").route(["status"])
+        self.assertEqual(root_port.execs[0][0][:4], ["runuser", "-u", "alice", "--"])
 
     def test_the_router_starts_with_ctrl_c_as_bash_had_it(self) -> None:
         for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGPIPE, signal.SIGXFSZ):

@@ -4,13 +4,25 @@
 from collections.abc import Iterable, Iterator
 from typing import Final
 
-from doctor.application import alerts, btrfs, cpu, install, responsiveness, rpm_ostree, services, swap, toolchains, vm
+from doctor.application import (
+    alerts,
+    btrfs,
+    cpu,
+    desktop,
+    install,
+    responsiveness,
+    rpm_ostree,
+    services,
+    swap,
+    toolchains,
+    vm,
+)
 from doctor.domain import ERROR, Result
 from doctor.ports import CheckFn, DoctorHostPort, InstalledFilesPort, VmToolsPort
 
 # The areas in the order the report prints them; an area's checks come in the order its module
 # registers them (@check).
-AREAS: Final = (rpm_ostree, services, alerts, btrfs, cpu, swap, vm, responsiveness, toolchains, install)
+AREAS: Final = (rpm_ostree, services, alerts, btrfs, cpu, swap, vm, responsiveness, desktop, toolchains, install)
 CHECKS: list[tuple[str, CheckFn]] = [c for area in AREAS for c in area.CHECKS]
 
 

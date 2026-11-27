@@ -244,6 +244,8 @@ class ModuleRouter:
             self._port.say("err", f"{routed.message}\n")
             return 2
         if routed.privilege == Privilege.AS_USER:
+            if routed.on_host_from_container and self._in_container() and self._port.euid() != 0:
+                return self._read(cmd, rest)
             return self._as_user(cmd, rest)
         if routed.privilege == Privilege.READ:
             return self._read(cmd, rest)

@@ -46,6 +46,12 @@ MODULES: Final[tuple[ModuleSpec, ...]] = (
         status_needs_root=False,
     ),
     ModuleSpec(
+        name="desktop",
+        script="desktop-setup.sh",
+        about="desktop background writes: GNOME localsearch restriction/disable, overlayfs browser profile sync",
+        status_needs_root=False,
+    ),
+    ModuleSpec(
         name="toolchains",
         script="toolchains-setup.sh",
         about="toolchain caches and settings: pruning of cargo build folders and uv's cache, cargo/uv settings",
@@ -80,6 +86,9 @@ its own; through cst its help and hints say `cst MODULE ...`.
   cst bluetooth [ARGS...]
                          Bluetooth audio: LE Audio (BAP/LC3) in BlueZ,
                          adaptive LDAC for the headset (bluetooth-setup.sh)
+  cst desktop [ARGS...]  desktop background writes: GNOME localsearch-3 scope
+                         (gnome localsearch) and overlayfs browser profile sync
+                         (psd) (desktop-setup.sh)
   cst toolchains [ARGS...]
                          toolchain caches and settings: hourly pruning of
                          cargo's build folders, uv cache prune, cargo
@@ -165,6 +174,7 @@ class _Route:
 
     privilege: Privilege
     root_with: str = ""
+    on_host_from_container: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +246,29 @@ ROUTING: Final[Mapping[str, ModuleRouting]] = {
         user_reason="toolchain caches and settings belong to your user",
         user_unset=("XDG_CONFIG_HOME",),
     ),
+    "desktop": ModuleRouting(
+        program="desktop/cst-desktop",
+        commands={
+            "status": _CommandRoutes(_Route(Privilege.AS_USER, on_host_from_container=True)),
+            "gnome": _AS_USER,
+            "psd": _CommandRoutes(
+                subcommands={
+                    "status": _READ,
+                    "plan": _READ,
+                    "apply": _ROOT,
+                    "revert": _ROOT,
+                    "start": _ROOT,
+                    "stop": _ROOT,
+                    "sync": _ROOT,
+                    "recover": _ROOT,
+                },
+                usage="Usage: {prog} psd <status|plan|apply|revert|start|stop|sync|recover> [options]",
+            ),
+        },
+        container_override="CST_DESKTOP_CONTAINER",
+        user_reason="GNOME desktop settings and browser profile config belong to your user",
+        user_unset=("XDG_CONFIG_HOME",),
+    ),
 }
 
 
@@ -246,6 +279,7 @@ class Routed:
     action: RouteAction
     privilege: Privilege = Privilege.READ
     message: str = ""
+    on_host_from_container: bool = False
 
 
 def route_command(routing: ModuleRouting, cmd: str, rest: Sequence[str], prog: str) -> Routed:
@@ -263,7 +297,7 @@ def route_command(routing: ModuleRouting, cmd: str, rest: Sequence[str], prog: s
     assert route is not None, cmd
     if route.root_with and route.root_with in rest:
         return Routed(RouteAction.RUN, Privilege.ROOT)
-    return Routed(RouteAction.RUN, route.privilege)
+    return Routed(RouteAction.RUN, route.privilege, on_host_from_container=route.on_host_from_container)
 
 
 def step_down_argv(user: str, uid: int, home: str, *, unset: Sequence[str], then: Sequence[str]) -> list[str]:
