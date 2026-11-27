@@ -41,7 +41,6 @@ CACHE_SEAM_ROOT_ENV: Final = "CST_BTRFS_CACHE_ROOT"
 """The test root: every host path below this folder (status, plan, attach and detach say so first)."""
 
 FSTYPE_BTRFS: Final = "btrfs"
-OPT_FLUSHONCOMMIT: Final = "flushoncommit"
 OPT_COMPRESS_FORCE: Final = "compress-force=zstd:1"
 PROVISION_BASE_MARKER: Final = "# managed-by: btrfs-cache (CST) provision=base"
 FSTAB_MIN_FIELDS: Final = 4

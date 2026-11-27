@@ -1993,13 +1993,13 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         return r.stdout
 
     def test_accepts_compress_and_compress_force_and_flags_missing(self) -> None:
-        base = "flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
+        base = "noatime,discard=async,degraded,space_cache=v2,ssd"
         out_comp = self._run_status_mounts(f'    /var) echo "compress=zstd:1,{base}" ;;')
         self.assertIn("/var       ok (compress=zstd:1 ", out_comp)
         self.assertIn("vm.dirty_writeback_centisecs", out_comp)
         self.assertIn("1500 ok", out_comp)
         self.assertIn("journald write budget", out_comp)
-        out_force = self._run_status_mounts(f'    /var) echo "compress-force=zstd:1,{base}" ;;')
+        out_force = self._run_status_mounts(f'    /var) echo "compress-force=zstd:1,{base},flushoncommit" ;;')
         self.assertIn("/var       ok (compress-force=zstd:1 ", out_force)
         out_missing = self._run_status_mounts(f'    /var) echo "{base}" ;;')
         self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
@@ -2007,7 +2007,7 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
     def test_a_separate_home_filesystem_is_named_not_judged(self) -> None:
         # A btrfs /var/home of its own (another UUID than the root's) was judged by the root's options:
         # "MISSING: compress=zstd/compress-force=zstd ...", though CST never sets them there.
-        full = "compress=zstd:1,flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
+        full = "compress=zstd:1,noatime,discard=async,degraded,space_cache=v2,ssd"
 
         def stub(root_uuid: str, var_uuid: str, home_uuid: str, home_opts: str = "noatime,ssd") -> str:
             # findmnt -rn -o UUID --target /sysroot, and findmnt -rn -o OPTIONS,UUID -M MNT (or the
@@ -2175,6 +2175,7 @@ findmnt() {
         for cmd, needle in (
             ("compress-force", "revert"),
             ("commit-interval", "commit=SECONDS"),
+            ("flushoncommit", "revert"),
             ("cache", "--allow-nonempty"),
         ):
             r = subprocess.run(

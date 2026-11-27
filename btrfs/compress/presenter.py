@@ -3,16 +3,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import TextIO
 
 from btrfs.compress.application import CompressChangeResult, CompressPlanResult
 from btrfs.compress.domain import (
     CompressPlan,
+    CompressSnapshot,
     CompressStatusView,
     LayerName,
     LayerPlan,
     LayerStatus,
+    extract_rootflags_tokens,
+    parse_proc_mounts,
+    pick_root_mounts,
 )
 
 
@@ -63,6 +68,117 @@ def format_layer_status_lines(
 def format_status_note_lines(notes: Sequence[str]) -> list[str]:
     """Render a `status` note line per note (after `format_layer_status_lines`)."""
     return [f"  note            {note}" for note in notes]
+
+
+def format_seam_notice(var_name: str, seam_proc: str) -> str:
+    """Format standard `/proc` test seam header line when `seam_proc` is non-empty."""
+    return f"test seam ({var_name}): /proc in {seam_proc}, not the kernel's" if seam_proc else ""
+
+
+@dataclass(frozen=True, slots=True)
+class RootOptionStatusView:
+    """Shared view model for root btrfs option `status` output."""
+
+    header: str
+    seam_line: str
+    live_entries: Sequence[tuple[str, str]]
+    layers: Sequence[LayerPlan]
+    left_alone_notes: Sequence[str]
+    overall_summary: str
+    kargs_error: str = ""
+    booted_diff: tuple[str, str] | None = None
+    reload_pending: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RootOptionStatusSpec:
+    """Inputs for building a `RootOptionStatusView` from a snapshot."""
+
+    header: str
+    seam_var: str
+    format_live_opts: Callable[[str], str]
+    layers: Sequence[LayerPlan]
+    left_alone_notes: Sequence[str]
+    coherence_summary: str
+    booted_diff: tuple[str, str] | None
+
+
+def render_root_option_status(
+    snap: CompressSnapshot,
+    spec: RootOptionStatusSpec,
+    *,
+    kargs_ok: bool,
+    kargs_error: str,
+    seam_proc: str = "",
+) -> list[str]:
+    """Build live mount rows, ostree kargs completeness check, and render status lines."""
+    live_roots = pick_root_mounts(parse_proc_mounts(snap.proc_mounts_text or ""))
+    live_entries = [(entry.target, spec.format_live_opts(entry.options)) for entry in live_roots]
+    if snap.is_ostree and not kargs_ok:
+        overall = f"incomplete (rpm-ostree kargs error: {kargs_error})"
+    elif snap.is_ostree and snap.kargs_text is not None and not extract_rootflags_tokens(snap.kargs_text):
+        overall = "incomplete (no rootflags= in rpm-ostree kargs)"
+    else:
+        overall = spec.coherence_summary
+    return render_root_option_status_lines(
+        RootOptionStatusView(
+            header=spec.header,
+            seam_line=format_seam_notice(spec.seam_var, seam_proc),
+            live_entries=live_entries,
+            layers=spec.layers,
+            left_alone_notes=spec.left_alone_notes,
+            overall_summary=overall,
+            kargs_error="" if kargs_ok else kargs_error,
+            booted_diff=spec.booted_diff,
+        )
+    )
+
+
+def render_root_option_status_lines(view: RootOptionStatusView) -> list[str]:
+    """Render shared `status` output lines for root btrfs mount option tools."""
+    out: list[str] = [view.seam_line] if view.seam_line else []
+    out.extend(
+        format_layer_status_lines(
+            view.header,
+            view.live_entries,
+            view.layers,
+            kargs_error=view.kargs_error,
+            booted_diff=view.booted_diff,
+        )
+    )
+    out.extend(format_status_note_lines(view.left_alone_notes))
+    if view.reload_pending:
+        out.append(f"  {view.reload_pending}")
+    out.append(f"  overall         {view.overall_summary}")
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class RootOptionPlanView:
+    """Shared view model for root btrfs option `plan`/`apply`/`revert` header lines."""
+
+    header: str
+    seam_line: str
+    layers: Sequence[LayerPlan]
+    notes: Sequence[str]
+    has_changes: bool
+    already_msg: str
+    dry_run_hint: str = ""
+    reload_pending: str = ""
+
+
+def render_root_option_plan_lines(view: RootOptionPlanView) -> list[str]:
+    """Render shared `plan` / action header lines for root btrfs mount option tools."""
+    out: list[str] = [view.seam_line] if view.seam_line else []
+    out.extend(format_layer_plan_lines(view.header, view.layers, view.notes))
+    if view.dry_run_hint and view.reload_pending:
+        out.append(view.reload_pending)
+    if not view.has_changes and not view.reload_pending:
+        out.append(view.already_msg)
+        return out
+    if view.dry_run_hint:
+        out.append(view.dry_run_hint)
+    return out
 
 
 def _emit_seam(seam_proc: str, out: TextIO) -> None:

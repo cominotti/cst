@@ -3,14 +3,12 @@
 
 from __future__ import annotations
 
-import os
 from typing import Final
 
 from btrfs.commit.domain import (
     COMMIT_PROG,
     DEFAULT_TARGET_COMMIT_S,
     KERNEL_DEFAULT_COMMIT_S,
-    CommitAction,
     CommitParsedArgs,
     CommitPlan,
     assess_commit_coherence,
@@ -20,30 +18,16 @@ from btrfs.commit.domain import (
     format_commit_label,
     has_explicit_commit,
 )
-from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
-from btrfs.compress.application import (
-    LayerRun,
-    LayerStep,
-    RemountStep,
-    catch_up_reload,
-    reload_pending_line,
-    run_layers,
-    step_fstab,
-    step_kargs,
-    step_remount,
-    step_top_mount,
+from btrfs.compress.adapters import (
+    RootOptionTool,
+    make_root_option_host,
+    read_root_option_snapshot,
 )
-from btrfs.compress.domain import (
-    FSTAB_PATH,
-    CompressSnapshot,
-    extract_rootflags_tokens,
-    parse_proc_mounts,
-    pick_root_mounts,
-)
+from btrfs.compress.application import LayerRun, LayerStep, RemountStep, make_layer_steps
+from btrfs.compress.domain import FSTAB_PATH, CompressSnapshot, parse_proc_mounts, pick_root_mounts
 from btrfs.compress.ports import CompressHostPort
-from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines, format_status_note_lines
+from btrfs.compress.presenter import RootOptionPlanView, RootOptionStatusSpec
 from cst_core.adapters.runtime import ManagedCliEnv
-from cst_core.domain.errors import Refused
 from cst_core.domain.values import ExitAndLines
 
 SEAM_COMMIT_PROC: Final = "CST_BTRFS_COMMIT_PROC"
@@ -51,187 +35,98 @@ SEAM_COMMIT_ROOT: Final = "CST_BTRFS_COMMIT_ROOT"
 
 
 def _host_for_env(env: ManagedCliEnv) -> tuple[CompressHostPort, str, dict[str, str]]:
-    env_map = dict(os.environ if env.env is None else env.env)
-    seam_proc = env_map.get(SEAM_COMMIT_PROC, "")
-    host_root = env_map.get(SEAM_COMMIT_ROOT, "")
-    cfg = CompressAdapterConfig(
-        entry_file=env.entry_file,
-        fallback_root=env.fallback_root,
-        proc_dir=seam_proc or "/proc",
-        host_root=host_root,
-    )
-    return LinuxCompressHostAdapter(cfg, ctx=env.ctx, runner=env.runner), seam_proc, env_map
+    return make_root_option_host(env, proc_seam_var=SEAM_COMMIT_PROC, root_seam_var=SEAM_COMMIT_ROOT)
 
 
 def read_commit_snapshot(host: CompressHostPort) -> tuple[CompressSnapshot, bool, str]:
     """Read current state across fstab, rpm-ostree kargs, live mounts, and top-mount."""
-    is_ostree = host.is_ostree()
-    kargs_ok, kargs_text, kargs_err = host.read_kargs() if is_ostree else (True, "", "")
-    snap = CompressSnapshot(
-        is_ostree=is_ostree,
-        root_uuid=host.root_uuid(),
-        fstab_text=host.read_fstab(),
-        kargs_text=kargs_text if (is_ostree and kargs_ok) else None,
-        proc_mounts_text=host.read_proc_mounts(),
-        top_mount=host.read_top_mount(),
-    )
-    return snap, (True if not is_ostree else kargs_ok), kargs_err
+    return read_root_option_snapshot(host)
 
 
-def _commit_steps(run: LayerRun, plan: CommitPlan) -> tuple[LayerStep, ...]:
-    """commit-interval's four layers, in their order, with its own words and its remount's undo and check."""
-    seconds = plan.target_seconds
-    remount: RemountStep | None = None
-    if plan.remount_target is not None:
-        prior_roots = pick_root_mounts(parse_proc_mounts(run.snap.proc_mounts_text or ""))
-        prior = next((m for m in prior_roots if m.target == plan.remount_target), None)
-        prev_sec = effective_commit_seconds(prior.options) if prior is not None else KERNEL_DEFAULT_COMMIT_S
-        remount = RemountStep(
-            plan.remount_target,
-            f"commit={seconds}",
-            f"commit={prev_sec}",
-            lambda m: effective_commit_seconds(m.options) == seconds,
-            f"commit={seconds}s",
+class _CommitDriver:
+    def build_plan(self, snap: CompressSnapshot, parsed: CommitParsedArgs) -> CommitPlan:
+        return build_commit_plan(snap, target_seconds=parsed.seconds, revert=parsed.revert)
+
+    def confirm_prompt(self, plan: CommitPlan) -> str:
+        return f"Apply commit={plan.target_seconds}s across active layers?"
+
+    def build_steps(self, run: LayerRun, plan: CommitPlan) -> tuple[LayerStep, ...]:
+        seconds = plan.target_seconds
+        remount: RemountStep | None = None
+        if plan.remount_target is not None:
+            prior_roots = pick_root_mounts(parse_proc_mounts(run.snap.proc_mounts_text or ""))
+            prior = next((m for m in prior_roots if m.target == plan.remount_target), None)
+            prev_sec = effective_commit_seconds(prior.options) if prior is not None else KERNEL_DEFAULT_COMMIT_S
+            remount = RemountStep(
+                plan.remount_target,
+                f"commit={seconds}",
+                f"commit={prev_sec}",
+                lambda m: effective_commit_seconds(m.options) == seconds,
+                f"commit={seconds}s",
+            )
+        return make_layer_steps(
+            run,
+            plan.core,
+            remount,
+            fstab_done=f"Updated {FSTAB_PATH} (commit={seconds}s) and reloaded systemd.",
+            kargs_done=f"Updated rpm-ostree kargs (commit={seconds}s for next boot).",
         )
-    return (
-        lambda: step_fstab(run, plan.new_fstab_text, f"Updated {FSTAB_PATH} (commit={seconds}s) and reloaded systemd."),
-        lambda: step_kargs(run, plan.kargs_edits, f"Updated rpm-ostree kargs (commit={seconds}s for next boot)."),
-        lambda: step_remount(run, remount),
-        lambda: step_top_mount(run, plan.new_top_mount_options),
-    )
+
+    def status_spec(self, snap: CompressSnapshot, proc_cmdline: str | None, *, kargs_ok: bool) -> RootOptionStatusSpec:
+        coherence = assess_commit_coherence(snap)
+        plan_view = build_commit_plan(snap, target_seconds=coherence.seconds or DEFAULT_TARGET_COMMIT_S)
+        return RootOptionStatusSpec(
+            header="Root btrfs commit interval:",
+            seam_var=SEAM_COMMIT_PROC,
+            format_live_opts=lambda o: format_commit_label(
+                effective_commit_seconds(o), explicit=has_explicit_commit(o)
+            ),
+            layers=plan_view.layers,
+            left_alone_notes=plan_view.left_alone_notes,
+            coherence_summary=coherence.summary,
+            booted_diff=booted_commit_diff(snap, proc_cmdline, kargs_ok=kargs_ok),
+        )
+
+    def plan_view(self, plan: CommitPlan, prog: str, *, dry_run: bool, reload_pending: str) -> RootOptionPlanView:
+        hint_word = "revert" if plan.revert else f"apply {plan.target_seconds}"
+        hint = f"Dry run, nothing changed. Run `{prog} {hint_word}` to apply." if dry_run else ""
+        return RootOptionPlanView(
+            header=f"Target root btrfs commit interval: {plan.target_seconds}s",
+            seam_line="",
+            layers=plan.layers,
+            notes=plan.left_alone_notes,
+            has_changes=plan.has_changes,
+            already_msg=f"Already at {plan.target_seconds}s across all active layers; nothing to do.",
+            dry_run_hint=hint,
+            reload_pending=reload_pending,
+        )
 
 
-def _not_confirmed(host: CompressHostPort, plan: CommitPlan, lines: list[str]) -> ExitAndLines | None:
-    """Ask before a change: None when confirmed, else the exit and lines of the run that stops there."""
-    try:
-        confirmed = host.confirm(f"Apply commit={plan.target_seconds}s across active layers?")
-    except Refused as exc:
-        return 1, [*lines, f"ERROR: {exc} (pass --yes to apply non-interactively)."]
-    if not confirmed:
-        return 1, [*lines, "Aborted; nothing changed."]
-    return None
+_COMMIT_TOOL = RootOptionTool(COMMIT_PROG, SEAM_COMMIT_PROC, SEAM_COMMIT_ROOT, _CommitDriver())
 
 
 def execute_commit_change(
-    host: CompressHostPort,
-    parsed: CommitParsedArgs,
-    *,
-    prog: str = COMMIT_PROG,
-    seam_proc: str = "",
+    host: CompressHostPort, parsed: CommitParsedArgs, *, prog: str = COMMIT_PROG, seam_proc: str = ""
 ) -> ExitAndLines:
     """Run transactional `apply` or `revert` against `host` (`CompressHostPort`)."""
-    snap, kargs_ok, kargs_err = read_commit_snapshot(host)
-    if not kargs_ok:
-        return 1, [f"ERROR: cannot inspect rpm-ostree kargs: {kargs_err}"]
-    plan = build_commit_plan(snap, target_seconds=parsed.seconds, revert=parsed.revert)
-    if not plan.has_changes:
-        cause, reloaded = catch_up_reload(host, None)
-        said = cause or "\n".join(reloaded)
-        lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc, reload_pending=said)
-        return (1, [*lines, f"ERROR: {cause}"]) if cause is not None else (0, [*lines, *reloaded])
-    lines = format_commit_plan_lines(plan, prog, dry_run=False, seam_proc=seam_proc)
-    refused = None if parsed.yes else _not_confirmed(host, plan, lines)
-    if refused is not None:
-        return refused
-
-    cause, reloaded = catch_up_reload(host, plan.core.new_fstab_text)
-    if cause is not None:
-        return 1, [*lines, f"ERROR: {cause}"]
-    lines.extend(reloaded)
-    run = LayerRun(host, snap)
-    err = run_layers(run, _commit_steps(run, plan))
-    if err is not None:
-        return 1, [*lines, *run.msgs, f"ERROR: {err}"]
-    return 0, [*lines, *run.msgs]
+    return _COMMIT_TOOL.execute(host, parsed, prog=prog, seam_proc=seam_proc)
 
 
 def format_commit_status(
-    snap: CompressSnapshot,
-    *,
-    kargs_ok: bool,
-    kargs_error: str,
-    proc_cmdline: str | None,
-    seam_proc: str = "",
+    snap: CompressSnapshot, *, kargs_ok: bool, kargs_error: str, proc_cmdline: str | None, seam_proc: str = ""
 ) -> list[str]:
     """Render status lines for `cst btrfs commit-interval status`."""
-    out: list[str] = []
-    if seam_proc:
-        out.append(f"test seam (CST_BTRFS_COMMIT_PROC): /proc in {seam_proc}, not the kernel's")
-    live_roots = pick_root_mounts(parse_proc_mounts(snap.proc_mounts_text or ""))
-    live_entries = [
-        (
-            entry.target,
-            format_commit_label(effective_commit_seconds(entry.options), explicit=has_explicit_commit(entry.options)),
-        )
-        for entry in live_roots
-    ]
-    coherence = assess_commit_coherence(snap)
-    plan_view = build_commit_plan(snap, target_seconds=coherence.seconds or DEFAULT_TARGET_COMMIT_S)
-    out.extend(
-        format_layer_status_lines(
-            "Root btrfs commit interval:",
-            live_entries,
-            plan_view.layers,
-            kargs_error="" if kargs_ok else kargs_error,
-            booted_diff=booted_commit_diff(snap, proc_cmdline, kargs_ok=kargs_ok),
-        )
-    )
-    out.extend(format_status_note_lines(plan_view.left_alone_notes))
-    if snap.is_ostree and not kargs_ok:
-        out.append(f"  overall         incomplete (rpm-ostree kargs error: {kargs_error})")
-    elif snap.is_ostree and snap.kargs_text is not None and not extract_rootflags_tokens(snap.kargs_text):
-        out.append("  overall         incomplete (no rootflags= in rpm-ostree kargs)")
-    else:
-        out.append(f"  overall         {coherence.summary}")
-    return out
+    return _COMMIT_TOOL.status_lines(snap, proc_cmdline, kargs=(kargs_ok, kargs_error), seam_proc=seam_proc)
 
 
 def format_commit_plan_lines(
     plan: CommitPlan, prog: str, *, dry_run: bool, seam_proc: str = "", reload_pending: str = ""
 ) -> list[str]:
-    """Render plan lines for `plan`, `apply`, and `revert`; reload_pending: the run reloads systemd first, ""
-    when not: what a dry run says of it (reload_pending_line), what an apply or revert's reload said (a run
-    with nothing else to do then says no "nothing to do")."""
-    out: list[str] = []
-    if seam_proc:
-        out.append(f"test seam (CST_BTRFS_COMMIT_PROC): /proc in {seam_proc}, not the kernel's")
-    out.extend(
-        format_layer_plan_lines(
-            f"Target root btrfs commit interval: {plan.target_seconds}s", plan.layers, plan.left_alone_notes
-        )
-    )
-    if dry_run and reload_pending:
-        out.append(reload_pending)
-    if not plan.has_changes and not reload_pending:
-        out.append(f"Already at {plan.target_seconds}s across all active layers; nothing to do.")
-        return out
-    if dry_run:
-        hint = "revert" if plan.revert else f"apply {plan.target_seconds}"
-        out.append(f"Dry run, nothing changed. Run `{prog} {hint}` to apply.")
-    return out
+    """Render plan lines for `plan`, `apply`, and `revert`."""
+    return _COMMIT_TOOL.plan_lines(plan, prog if dry_run else "", seam_proc=seam_proc, reload_pending=reload_pending)
 
 
-def dispatch_commit_cli_action(parsed: CommitParsedArgs, env: ManagedCliEnv, *, read_only: bool) -> ExitAndLines:
+def dispatch_commit_cli_action(parsed: CommitParsedArgs, env: ManagedCliEnv, *, read_only: bool = True) -> ExitAndLines:
     """Resolve host adapter and execute the requested `commit-interval` subcommand."""
     del read_only
-    host, seam_proc, env_map = _host_for_env(env)
-    prog = env_map.get("CST_PROG") or COMMIT_PROG
-    match parsed.action:
-        case CommitAction.STATUS:
-            snap, kargs_ok, kargs_err = read_commit_snapshot(host)
-            cmdline = host.read_proc_cmdline()
-            lines = format_commit_status(
-                snap, kargs_ok=kargs_ok, kargs_error=kargs_err, proc_cmdline=cmdline, seam_proc=seam_proc
-            )
-            if reload := reload_pending_line(host):
-                lines.insert(-1, f"  {reload}")  # before the overall line, as compress-force says it
-            return 0, lines
-        case CommitAction.PLAN:
-            snap, kargs_ok, kargs_err = read_commit_snapshot(host)
-            if not kargs_ok:
-                return 1, [f"ERROR: cannot inspect rpm-ostree kargs: {kargs_err}"]
-            plan = build_commit_plan(snap, target_seconds=parsed.seconds, revert=parsed.revert)
-            pending = reload_pending_line(host) if plan.core.new_fstab_text is None else ""
-            return 0, format_commit_plan_lines(plan, prog, dry_run=True, seam_proc=seam_proc, reload_pending=pending)
-        case _:
-            return execute_commit_change(host, parsed, prog=prog, seam_proc=seam_proc)
+    return _COMMIT_TOOL.dispatch(parsed, env, host_for_env=_host_for_env)

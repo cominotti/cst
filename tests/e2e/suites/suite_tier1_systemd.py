@@ -16102,3 +16102,184 @@ PY
             """,
         ).stdout
         self.assertIn("E2E-285-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
+    def test_286_btrfs_flushoncommit_layers(self) -> None:
+        """Full systemd E2E for `cst btrfs flushoncommit` across fstab, kargs, live remount, and top-mount:
+        1) status reports `coherent (flushoncommit)` and `plan` changes nothing;
+        2) `apply --yes` removes `flushoncommit` across all 4 layers (including `mount -o remount,noflushoncommit`
+           and real `btrfs:top-mount` systemd reload) while keeping `commit=60` and separate `/var` untouched;
+        3) 2nd `apply --yes` prints `nothing to do`;
+        4) `revert --yes` restores `flushoncommit` cleanly."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-flush"
+        top_unit = r"var-mnt-btrfs\x2dtop.mount"
+        auto_unit = r"var-mnt-btrfs\x2dtop.automount"
+        uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        other = "0b5e6a1d-0000-4000-8000-00000000beef"
+        var_line = f"UUID={other} /var btrfs subvol=var,compress=zstd:3,noatime,flushoncommit 0 0"
+        var_mount = "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,flushoncommit,subvol=/var 0 0"
+        units = " ".join(shlex.quote(f"/etc/systemd/system/{u}") for u in (top_unit, auto_unit))
+        if exec_bash(c, f"for u in {units}; do [[ ! -e $u ]] || echo $u; done").stdout.strip():
+            self.skipTest("the btrfs top-mount unit or automount already exists (another test's)")
+        exec_bash(
+            c,
+            f"""rm -rf {w}
+            mkdir -p {w}/bin {w}/proc
+            {fstab_saved(w)}
+            {file_saved("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_saved("/run/ostree-booted", w, "ostree-booted")}
+            """,
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""set +e
+            {fstab_put_back(w)}
+            {file_put_back("/var/lib/cst/installed.json", w, "installed.json")}
+            {file_put_back("/run/ostree-booted", w, "ostree-booted")}
+            rm -f {units}
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -Euo pipefail
+            absent() {{ ! grep -qF -- "$1" "$2"; }}
+            touch /run/ostree-booted
+            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit,commit=60 0 0\n%s\n' "{var_line}" >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,commit=60,subvol=/root 0 0\n%s\n' "{var_mount}" >{w}/proc/mounts
+            printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit,commit=60\n' >{w}/kargs
+            cp {w}/kargs {w}/proc/cmdline
+            printf '/sysroot {uuid}\n/ {uuid}\n/var {other}\n' >{w}/uuid-by-target
+
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "status" ]]; then echo '{{"transaction": null}}'; exit 0; fi
+if [[ -f {w}/fail-kargs ]]; then echo "Transaction in progress: simulated rpm-ostree busy" >&2; exit 1; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+    cur="$(cat {w}/kargs)"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --delete=*) old="${{1#--delete=}}"; cur="${{cur//${{old}}/}}" ;;
+            --append=*) add="${{1#--append=}}"; cur="${{cur}} ${{add}}" ;;
+        esac
+        shift
+    done
+    printf '%s\n' "$(echo "${{cur}}" | xargs)" >{w}/kargs
+    exit 0
+fi
+exit 1
+EOF
+            cat >{w}/bin/findmnt <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then
+    while read -r t u; do if [[ "$t" == "${{@: -1}}" ]]; then echo "$u"; exit 0; fi; done <{w}/uuid-by-target
+    exit 1
+fi
+if [[ " $* " == *"OPTIONS,UUID"* ]]; then
+    while read -r src tgt _ opts _; do
+        u=""
+        while read -r t uuid_val; do if [[ "$t" == "$tgt" ]]; then u="$uuid_val"; break; fi; done <{w}/uuid-by-target
+        printf '%s %s %s %s\n' "$src" "$tgt" "$opts" "$u"
+    done <{w}/proc/mounts
+    exit 0
+fi
+if [[ " $* " == *"OPTIONS"* ]]; then
+    while read -r src tgt _ opts _; do printf '%s %s %s\n' "$src" "$tgt" "$opts"; done <{w}/proc/mounts
+    exit 0
+fi
+exec /usr/bin/findmnt "$@"
+EOF
+            cat >{w}/bin/mount <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "mount $*" >>{w}/calls
+opt=""
+for a in "$@"; do case "$a" in remount,*) opt="${{a#remount,}}" ;; esac; done
+if [[ -n "$opt" ]]; then
+    /usr/bin/python3 -I -B - {w}/proc/mounts "$opt" "${{@: -1}}" <<'PY'
+import sys
+p, opt, target = sys.argv[1], sys.argv[2], sys.argv[3]
+enable = (opt == "flushoncommit")
+lines = open(p).read().splitlines(keepends=True)
+dev = next(ln.split()[0] for ln in lines if ln.split()[1] == target)
+out = []
+for ln in lines:
+    toks = ln.split()
+    if toks[0] == dev:
+        kept = [t for t in toks[3].split(",") if t not in ("flushoncommit", "noflushoncommit")]
+        if enable:
+            kept.append("flushoncommit")
+        toks[3] = ",".join(kept)
+    out.append(" ".join(toks) + "\n")
+open(p, "w").write("".join(out))
+PY
+fi
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            . /opt/cst-rw/cst-install.bash
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit=60" --component btrfs:top-mount >/dev/null
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+
+            export PATH="{w}/bin:$PATH" CST_BTRFS_FLUSH_PROC="{w}/proc"
+            cst=/opt/cst-rw/cst
+
+            # 1. Status, doctor info when enabled, and dry-run plan.
+            st1="$("$cst" btrfs flushoncommit status)"
+            grep -qF "coherent (flushoncommit)" <<<"$st1"
+            doc1="$("$cst" doctor || true)"
+            grep -qF "info   root btrfs flushoncommit: enabled across active layers" <<<"$doc1"
+            grep -qE "fix: .* btrfs flushoncommit apply" <<<"$doc1"
+            cp /etc/fstab {w}/fstab.before
+            plan1="$("$cst" btrfs flushoncommit plan)"
+            grep -qF "Dry run, nothing changed." <<<"$plan1"
+            cmp -s /etc/fstab {w}/fstab.before
+
+            # 2. Apply removes flushoncommit everywhere while keeping commit=60, top-mount Options=, and separate /var intact.
+            "$cst" btrfs flushoncommit apply --yes >/dev/null
+            grep -qF "commit=60" /etc/fstab
+            grep -qF "{var_line}" /etc/fstab
+            grep -qF "{var_mount}" {w}/proc/mounts
+            absent "UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit" /etc/fstab
+            absent "flushoncommit" {w}/kargs
+            grep -qF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,commit=60" "/etc/systemd/system/{top_unit}"
+            systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}" >/dev/null
+            grep -qF "remount,noflushoncommit" {w}/calls
+            grep -qF "coherent (no flushoncommit (default))" <<<"$("$cst" btrfs flushoncommit status)"
+            doc2="$("$cst" doctor || true)"
+            if grep -qF "root btrfs flushoncommit:" <<<"$doc2"; then
+                echo "unexpected flushoncommit line in doctor after apply" >&2
+                exit 1
+            fi
+
+            # 3. Second apply is idempotent.
+            "$cst" btrfs flushoncommit apply --yes | grep -qF "nothing to do"
+
+            # 4. Revert restores flushoncommit cleanly across all 4 layers.
+            "$cst" btrfs flushoncommit revert --yes >/dev/null
+            grep -qF "UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,commit=60,flushoncommit 0 0" /etc/fstab
+            grep -qF "flushoncommit" {w}/kargs
+            grep -qF "remount,flushoncommit" {w}/calls
+            grep -qF "{var_line}" /etc/fstab
+            grep -qF "flushoncommit" "/etc/systemd/system/{top_unit}"
+            grep -qF "coherent (flushoncommit)" <<<"$("$cst" btrfs flushoncommit status)"
+
+            # 5. Partial failure during apply (kargs failure) rolls back /etc/fstab.
+            cp /etc/fstab {w}/fstab.with_flush
+            touch {w}/fail-kargs
+            rb_out="$("$cst" btrfs flushoncommit apply --yes 2>&1 || true)"
+            grep -qF "previous configuration restored." <<<"$rb_out"
+            cmp -s /etc/fstab {w}/fstab.with_flush
+            echo E2E-286-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-286-OK", out)

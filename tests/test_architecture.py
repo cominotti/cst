@@ -152,6 +152,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/chrome_cache/cli.py": 84,
     "btrfs/commit/cli.py": 25,
     "btrfs/compress/cli.py": 72,
+    "btrfs/flushoncommit/cli.py": 25,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/health_check/cli.py": 32,
