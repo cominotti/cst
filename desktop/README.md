@@ -100,13 +100,23 @@ the original path inside `$HOME`.
 - **No external `overlay` merge race**: when a browser is closed (`stop`, or
   idle `sync`), CST unmounts the `overlayfs`, merges `upper/` (including overlayfs
   whiteouts `0:0` char devices and `trusted.overlay.opaque` directories) cleanly
-  onto `lower/` via streaming atomic copy (`os.replace()` + `fsync()`), clears any
-  stale crash-recovery snapshot for that profile, and either leaves the profile
-  at rest (`stop`) or re-mounts fresh (`sync`).
-- **Crash recovery**: if power is lost while a snapshot exists under
-  `~/.local/share/cst/psd/recovery/<id>`, the next `start` (or explicit
-  `cst desktop psd recover [--discard]`) replays or discards it before mounting.
-  `cst doctor` warns whenever unmerged recovery snapshots remain on disk.
+  onto `lower/` via streaming atomic copy (`os.replace()` without per-file
+  `fsync()` barriers, followed by a single `syncfs(2)` commit for `lower/`),
+  clears any stale crash-recovery snapshot for that profile, and either leaves
+  the profile at rest (`stop`) or re-mounts fresh (`sync`).
+- **Crash recovery**: while a browser stays open, hourly `sync` builds a full
+  point-in-time mirror of `upper/` (including `Service Worker/CacheStorage` and
+  `ScriptCache` so SQLite/IndexedDB pointers never desync from stale `lower/`
+  blobs) in `~/.local/share/cst/psd/recovery/<id>`. It reuses unchanged files
+  from the previous validated recovery snapshot via hardlinks (`os.link`) when
+  size, `mtime_ns`, mode, owner, and a 2-second safety margin match, writes
+  changed files without per-file `fsync()`, commits once via `syncfs(2)`, and
+  swaps the directory atomically. If power is lost while a snapshot exists, the
+  next `start` (or explicit `cst desktop psd recover [--discard]`) replays or
+  discards it before mounting; when multiple recoveries exist, `recover`
+  applies unmounted ones and skips overlays that are still active. `cst doctor`
+  reports `info` for valid live snapshots of mounted overlays, and `WARN` for
+  unmounted post-crash leftovers or incomplete/corrupt recovery snapshots.
 - **Symlink-safe paths**: real paths are checked; symlinked profile directories
   are refused rather than mounted over unexpectedly, and tmpfs size is capped at
   25% of total RAM (default `4G`, configurable from `256M` to `32G`).

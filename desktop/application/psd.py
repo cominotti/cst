@@ -146,9 +146,11 @@ class PsdService:
         pending = [p for p in (*snap.profiles, *snap.orphan_recoveries) if p.recovery_exists]
         if not pending:
             return ["No pending psd crash-recovery snapshots."]
-        for p in pending:
-            if p.overlay_active:
-                raise Refused(f"{p.spec.profile_id} overlay is active; stop it before recovering")
+        actionable = [p for p in pending if not p.overlay_active]
+        active_live = [p for p in pending if p.overlay_active]
+        if not actionable:
+            raise Refused(f"{active_live[0].spec.profile_id} overlay is active; stop it before recovering")
+        for p in actionable:
             if not discard:
                 if (blocked := _blocked_profile_reason(p)) is not None:
                     raise Refused(blocked)
@@ -157,13 +159,14 @@ class PsdService:
             if p.busy_procs:
                 raise Refused(f"{p.spec.profile_id} in use by {format_busy_procs(p.busy_procs)}; close it first")
         out: list[str] = []
-        for p in pending:
+        for p in actionable:
             if discard:
                 self._host.discard_recovery(p)
                 out.append(f"discarded:{p.spec.profile_id} crash-recovery snapshot")
             else:
                 self._host.apply_recovery(p, user)
                 out.append(f"recovered:{p.spec.profile_id} crash-recovery snapshot -> {p.profile_path}")
+        out.extend(f"skipped:  {p.spec.profile_id} (overlay active; merged on stop or idle sync)" for p in active_live)
         return out
 
     def _apply(self, snap: PsdSnapshot) -> list[str]:

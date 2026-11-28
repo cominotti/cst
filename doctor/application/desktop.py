@@ -8,7 +8,7 @@ import posixpath
 from typing import Final
 
 from cst_core.domain.units import parse_show_props
-from cst_core.domain.values import ROOT_ACCOUNT, DomainValidationError, parse_whole_number
+from cst_core.domain.values import MIB, ROOT_ACCOUNT, DomainValidationError, parse_whole_number
 from desktop.domain import DESKTOP_CONF_REL, LOCALSEARCH_STATE_REL, PSD_RECOVERY_REL, PSD_RUN_ROOT, parse_desktop_config
 from desktop.domain.localsearch import (
     KEY_MONITORS,
@@ -26,9 +26,11 @@ from desktop.domain.localsearch import (
 )
 from desktop.domain.psd import (
     KNOWN_PROFILES,
+    WHITEOUT_MANIFEST_NAME,
     KnownProfile,
     PsdParsedMounts,
     parse_psd_mounts,
+    parse_whiteout_manifest,
     resolve_profile_selection,
 )
 from doctor.application.shared import check, read_text
@@ -39,6 +41,7 @@ CHECKS: list[tuple[str, CheckFn]] = []
 
 _PSD_SERVICE_UNIT: Final = "/etc/systemd/system/cst-desktop-psd@.service"
 _PSD_TMPFS_WARN_PCT: Final = 80
+_PSD_MANIFEST_MAX_BYTES: Final = 4 * MIB
 _STATFS_FIELDS: Final = 2
 
 
@@ -208,6 +211,42 @@ def _emit_psd_profile_results(
         )
 
 
+def _classify_psd_recoveries(
+    host: DoctorHostPort,
+    mounts: PsdParsedMounts,
+    home_variants: tuple[str, ...],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    corrupt_active: list[str] = []
+    corrupt_inactive: list[str] = []
+    unmounted_pending: list[str] = []
+    active_snapshots: list[str] = []
+    for p in KNOWN_PROFILES:
+        rec_host = host_join(host.home, PSD_RECOVERY_REL, p.profile_id)
+        rec_view = host.path(rec_host)
+        is_link = host.islink(rec_view)
+        if not is_link and not host.isdir(rec_view):
+            continue
+        is_active = any(posixpath.join(h, p.rel_path) in mounts.overlay_targets for h in home_variants)
+        if is_link:
+            (corrupt_active if is_active else corrupt_inactive).append(p.profile_id)
+            continue
+        manifest_raw = read_text(host, host.path(host_join(rec_host, WHITEOUT_MANIFEST_NAME)), _PSD_MANIFEST_MAX_BYTES)
+        valid = False
+        if manifest_raw:
+            try:
+                parse_whiteout_manifest(manifest_raw)
+                valid = True
+            except ValueError:
+                valid = False
+        if not valid:
+            (corrupt_active if is_active else corrupt_inactive).append(p.profile_id)
+        elif is_active:
+            active_snapshots.append(p.profile_id)
+        else:
+            unmounted_pending.append(p.profile_id)
+    return corrupt_active, corrupt_inactive, unmounted_pending, active_snapshots
+
+
 @check(CHECKS, "desktop")
 def check_desktop_psd(host: DoctorHostPort) -> Iterator[Result]:
     """Check `desktop:psd` overlayfs mounts, tmpfs headroom, and unmerged crash recovery snapshots."""
@@ -242,16 +281,31 @@ def check_desktop_psd(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(WARN, f"desktop psd: invalid PSD_PROFILES={profiles_raw!r} in ~/{DESKTOP_CONF_REL}")
         return
 
-    pending = [
-        p.profile_id
-        for p in KNOWN_PROFILES
-        if host.isdir(host.path(host_join(host.home, PSD_RECOVERY_REL, p.profile_id)))
-    ]
-    if pending:
+    corrupt_active, corrupt_inactive, unmounted_pending, active_snapshots = _classify_psd_recoveries(
+        host, mounts, home_variants
+    )
+    if corrupt_active:
         yield Result(
             WARN,
-            f"desktop psd: unmerged crash-recovery snapshots ({', '.join(pending)})",
+            f"desktop psd: incomplete or invalid crash-recovery snapshot ({', '.join(corrupt_active)})",
+            f"{host.cst} desktop psd sync --user {user}",
+        )
+    if corrupt_inactive:
+        yield Result(
+            WARN,
+            f"desktop psd: incomplete or invalid crash-recovery snapshot ({', '.join(corrupt_inactive)})",
+            f"{host.cst} desktop psd recover --discard --user {user}",
+        )
+    if unmounted_pending:
+        yield Result(
+            WARN,
+            f"desktop psd: unmerged crash-recovery snapshots ({', '.join(unmounted_pending)})",
             f"{host.cst} desktop psd recover --user {user}",
+        )
+    if active_snapshots:
+        yield Result(
+            INFO,
+            f"desktop psd: live crash-recovery snapshot on disk ({', '.join(active_snapshots)}; merged on browser close/stop)",
         )
     if mounts.tmpfs_mounted:
         pct = _statfs_used_pct(host, run_dir)
@@ -259,4 +313,5 @@ def check_desktop_psd(host: DoctorHostPort) -> Iterator[Result]:
             yield Result(
                 WARN, f"desktop psd: {run_dir} tmpfs is {pct}% full", f"{host.cst} desktop psd sync --user {user}"
             )
-    yield from _emit_psd_profile_results(host, user, selected, mounts, pending=pending)
+    warning_pending = [*corrupt_active, *corrupt_inactive, *unmounted_pending]
+    yield from _emit_psd_profile_results(host, user, selected, mounts, pending=warning_pending)

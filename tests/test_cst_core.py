@@ -2554,5 +2554,78 @@ class SubcommandHeadTest(unittest.TestCase):
         self.assertIn("unknown subcommand", err or "")
 
 
+class SyncFilesystemAndCopyStagedTest(unittest.TestCase):
+    """Tests for batch filesystem sync (`sync_filesystem`) and non-fsyncing staged copy (`copy_file_staged`)."""
+
+    def test_sync_filesystem_handles_file_dir_error_and_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "data.bin")
+            with open(sample, "wb") as fh:
+                fh.write(b"abc")
+            core_files.sync_filesystem(tmp)
+            core_files.sync_filesystem(sample)
+
+            def fail_syncfs(_fd: int, path: str) -> None:
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+
+            with mock.patch.object(core_files, "_load_syncfs", return_value=fail_syncfs):
+                with self.assertRaises(OSError) as caught:
+                    core_files.sync_filesystem(tmp)
+                self.assertEqual(caught.exception.errno, errno.EIO)
+
+            with (
+                mock.patch.object(core_files, "_load_syncfs", return_value=None),
+                mock.patch.object(core_files.os, "sync") as sync_mock,
+            ):
+                core_files.sync_filesystem(tmp)
+                self.assertEqual(sync_mock.call_count, 1)
+
+    def test_copy_file_staged_preserves_mode_mtime_no_fsync_and_cleans_up_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "src.bin")
+            dst = os.path.join(tmp, "dst.bin")
+            with open(src, "wb") as fh:
+                fh.write(b"hello-staged")
+            old_ns = 1_700_000_000_123_456_000
+            os.utime(src, ns=(old_ns, old_ns))
+
+            with mock.patch.object(core_files.os, "fsync") as fsync_mock:
+                st = core_files.copy_file_staged(src, dst, mode=0o640)
+            self.assertEqual(fsync_mock.call_count, 0)
+            self.assertEqual(st.st_size, len(b"hello-staged"))
+            with open(dst, "rb") as fh:
+                self.assertEqual(fh.read(), b"hello-staged")
+            dst_st = os.lstat(dst)
+            self.assertEqual(stat.S_IMODE(dst_st.st_mode), 0o640)
+            self.assertEqual(dst_st.st_mtime_ns, old_ns)
+
+            # Refuses overwriting an existing file or symlink, and refuses symlink src (`O_NOFOLLOW`)
+            with self.assertRaises(FileExistsError):
+                core_files.copy_file_staged(src, dst, mode=0o640)
+            sym = os.path.join(tmp, "sym.bin")
+            os.symlink("dst.bin", sym)
+            with self.assertRaises(FileExistsError):
+                core_files.copy_file_staged(src, sym, mode=0o640)
+            with self.assertRaises(OSError) as sym_src_err:
+                core_files.copy_file_staged(sym, os.path.join(tmp, "from-sym.bin"), mode=0o640)
+            self.assertEqual(sym_src_err.exception.errno, errno.ELOOP)
+            self.assertFalse(os.path.lexists(os.path.join(tmp, "from-sym.bin")))
+
+            # Missing src leaves no dst behind
+            missing_dst = os.path.join(tmp, "missing-dst.bin")
+            with self.assertRaises(FileNotFoundError):
+                core_files.copy_file_staged(os.path.join(tmp, "nope"), missing_dst, mode=0o600)
+            self.assertFalse(os.path.lexists(missing_dst))
+
+            # Mid-stream copy failure removes partial dst
+            partial_dst = os.path.join(tmp, "partial.bin")
+            with (
+                mock.patch.object(core_files.shutil, "copyfileobj", side_effect=OSError(errno.ENOSPC, "no space")),
+                self.assertRaises(OSError),
+            ):
+                core_files.copy_file_staged(src, partial_dst, mode=0o600)
+            self.assertFalse(os.path.lexists(partial_dst))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,8 +6,10 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
+import shutil
 import stat
 import tempfile
+import time
 from typing import override
 import unittest
 from unittest import mock
@@ -16,9 +18,9 @@ from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import GIB, MIB, DomainValidationError
 from desktop.adapters.overlay import (
-    WHITEOUT_MANIFEST_NAME,
     OverlayProbes,
     apply_recovery_to_lower,
+    copy_file_staged,
     has_valid_recovery,
     merge_upper_to_lower,
     snapshot_upper_to_recovery,
@@ -29,6 +31,7 @@ from desktop.domain import PsdAction, parse_desktop_config
 from desktop.domain.psd import (
     KNOWN_PROFILES,
     PROFILE_BY_ID,
+    WHITEOUT_MANIFEST_NAME,
     PsdBusyProcess,
     PsdProfileProbe,
     PsdProfileState,
@@ -661,10 +664,16 @@ class PsdReviewFixesTest(unittest.TestCase):
             self.assertTrue(has_valid_recovery(str(rec)))
             self.assertFalse((rec / "vanished.txt").exists())
 
-            # `discard_recovery` removes a symlink rather than silently leaving it behind.
+            # `discard_recovery` and `read_snapshot` see a dangling symlink recovery entry and clean it.
             sym_rec = Path(tmp, "home/u/.local/share/cst/psd/recovery/firefox")
             sym_rec.parent.mkdir(parents=True)
-            sym_rec.symlink_to("/tmp")
+            sym_rec.symlink_to("/nonexistent-target")
+            with mock.patch("desktop.adapters.psd._resolve_psd_user", return_value=user):
+                snap_sym = LinuxPsdHost(__file__, runner=_mount_stub_runner(tmp), seam_root=tmp).read_snapshot(
+                    user="u", profiles_override="chrome-flatpak"
+                )
+            self.assertEqual(len(snap_sym.orphan_recoveries), 1)
+            self.assertEqual(snap_sym.orphan_recoveries[0].state, PsdProfileState.RECOVERY_PENDING)
             LinuxPsdHost(__file__, runner=_mount_stub_runner(tmp), seam_root=tmp).discard_recovery(
                 PsdProfileProbe(
                     PROFILE_BY_ID["firefox"],
@@ -714,3 +723,161 @@ class PsdSystemdUnitTest(unittest.TestCase):
         self.assertIn("Nice=10", lines)
         self.assertIn("BindsTo=cst-desktop-psd@%i.service", lines)
         self.assertIn("After=cst-desktop-psd@%i.service", lines)
+
+
+class PsdBatchSyncAndIncrementalReuseTest(unittest.TestCase):
+    """Verify batch syncfs durability, incremental hardlink reuse/guards, and mixed-recovery handling."""
+
+    def test_batch_syncfs_avoids_per_file_fsync_on_snapshot_merge_and_apply(self) -> None:
+        uid, gid = os.getuid(), os.getgid()
+        with tempfile.TemporaryDirectory() as tmp:
+            upper = Path(tmp, "upper")
+            lower = Path(tmp, "lower")
+            rec = Path(tmp, "home/.local/share/cst/psd/recovery/firefox")
+            upper.mkdir()
+            lower.mkdir()
+            for idx in range(5):
+                (upper / f"file_{idx}.dat").write_text(f"payload-{idx}", encoding="utf-8")
+
+            fsync_calls = 0
+            orig_fsync = os.fsync
+
+            def count_fsync(fd: int) -> None:
+                nonlocal fsync_calls
+                fsync_calls += 1
+                orig_fsync(fd)
+
+            with (
+                mock.patch("cst_core.adapters.files.os.fsync", side_effect=count_fsync),
+                mock.patch("desktop.adapters.overlay.sync_filesystem") as sync_mock,
+            ):
+                snapshot_upper_to_recovery(str(upper), str(rec), owner=(uid, gid), home_boundary=str(Path(tmp, "home")))
+                # Only 1 dir fsync for swap_dir_staged (not 5+ per-file fsyncs) and 1 batch sync_filesystem.
+                self.assertEqual(fsync_calls, 1)
+                self.assertEqual(sync_mock.call_count, 1)
+
+                fsync_calls = 0
+                merge_upper_to_lower(str(upper), str(lower), uid=uid, gid=gid)
+                self.assertEqual(fsync_calls, 0)
+                self.assertEqual(sync_mock.call_count, 2)
+
+                lower2 = Path(tmp, "lower2")
+                lower2.mkdir()
+                apply_recovery_to_lower(str(rec), str(lower2), uid=uid, gid=gid)
+                self.assertEqual(fsync_calls, 0)
+                self.assertEqual(sync_mock.call_count, 3)
+
+    def test_incremental_hardlink_reuse_and_racy_clean_guard(self) -> None:
+        uid, gid = os.getuid(), os.getgid()
+        with tempfile.TemporaryDirectory() as tmp:
+            upper = Path(tmp, "upper")
+            sub = upper / "Default"
+            rec = Path(tmp, "home/.local/share/cst/psd/recovery/chrome-flatpak")
+            home_bound = Path(tmp, "home")
+            sub.mkdir(parents=True)
+
+            old_ns = time.time_ns() - 10_000_000_000
+            stable, modified, mode_changed, racy, ext_linked = (
+                sub / "stable.bin",
+                sub / "modified.bin",
+                sub / "mode.bin",
+                sub / "racy.bin",
+                sub / "ext_linked.bin",
+            )
+            for p, text in (
+                (stable, "unchanged-data"),
+                (modified, "v1"),
+                (mode_changed, "same-bytes"),
+                (ext_linked, "external"),
+            ):
+                p.write_text(text, encoding="utf-8")
+                os.chmod(p, 0o600)
+                os.utime(p, ns=(old_ns, old_ns))
+            racy.write_text("racy-v1", encoding="utf-8")
+
+            snapshot_upper_to_recovery(str(upper), str(rec), owner=(uid, gid), home_boundary=str(home_bound))
+            inos_1 = {
+                n: (rec / "Default" / n).stat().st_ino
+                for n in ("stable.bin", "racy.bin", "modified.bin", "mode.bin", "ext_linked.bin")
+            }
+
+            modified.write_text("v2-longer", encoding="utf-8")
+            os.utime(modified, ns=(old_ns, old_ns))
+            os.chmod(mode_changed, 0o644)
+            os.utime(mode_changed, ns=(old_ns, old_ns))
+            os.link(rec / "Default/ext_linked.bin", Path(tmp, "external-alias"))
+
+            # Simulate 1 hour later: racy.bin still has prev.ctime - src.mtime < 2s so it must be re-copied.
+            future_ns = time.time_ns() + 3_600_000_000_000
+            with (
+                mock.patch("desktop.adapters.overlay.time.time_ns", return_value=future_ns),
+                mock.patch("desktop.adapters.overlay.copy_file_staged", wraps=copy_file_staged) as copy_spy,
+            ):
+                snapshot_upper_to_recovery(str(upper), str(rec), owner=(uid, gid), home_boundary=str(home_bound))
+                copied_names = [Path(call.args[0]).name for call in copy_spy.call_args_list]
+                self.assertNotIn("stable.bin", copied_names)
+                for expected in ("modified.bin", "mode.bin", "racy.bin", "ext_linked.bin"):
+                    self.assertIn(expected, copied_names)
+
+            self.assertEqual((rec / "Default/stable.bin").stat().st_ino, inos_1["stable.bin"])
+            self.assertEqual((rec / "Default/stable.bin").stat().st_nlink, 1)
+            for changed in ("modified.bin", "mode.bin", "racy.bin", "ext_linked.bin"):
+                self.assertNotEqual((rec / "Default" / changed).stat().st_ino, inos_1[changed])
+
+    def test_incremental_hardlink_symlink_manifest_and_exdev_fallbacks(self) -> None:
+        uid, gid = os.getuid(), os.getgid()
+        with tempfile.TemporaryDirectory() as tmp:
+            upper = Path(tmp, "upper")
+            sub = upper / "Default"
+            rec = Path(tmp, "home/.local/share/cst/psd/recovery/chrome-flatpak")
+            home_bound = Path(tmp, "home")
+            sub.mkdir(parents=True)
+            old_ns = time.time_ns() - 10_000_000_000
+            stable = sub / "stable.bin"
+            stable.write_text("unchanged-data", encoding="utf-8")
+            os.chmod(stable, 0o600)
+            os.utime(stable, ns=(old_ns, old_ns))
+
+            snapshot_upper_to_recovery(str(upper), str(rec), owner=(uid, gid), home_boundary=str(home_bound))
+
+            # Intermediate symlink inside prev recovery is never followed.
+            outside = Path(tmp, "outside")
+            outside.mkdir()
+            (outside / "stable.bin").write_text("hijacked", encoding="utf-8")
+            os.utime(outside / "stable.bin", ns=(old_ns, old_ns))
+            os.chmod(outside / "stable.bin", 0o600)
+            shutil.rmtree(rec / "Default")
+            (rec / "Default").symlink_to(outside)
+            snapshot_upper_to_recovery(str(upper), str(rec), owner=(uid, gid), home_boundary=str(home_bound))
+            self.assertFalse((rec / "Default").is_symlink())
+            self.assertEqual((rec / "Default/stable.bin").read_text(encoding="utf-8"), "unchanged-data")
+
+            # Corrupt manifest disables reuse, and os.link EXDEV falls back to copy_file_staged cleanly.
+            (rec / WHITEOUT_MANIFEST_NAME).write_text("{bad json", encoding="utf-8")
+            ino_before_corrupt = (rec / "Default/stable.bin").stat().st_ino
+            snapshot_upper_to_recovery(str(upper), str(rec), owner=(uid, gid), home_boundary=str(home_bound))
+            self.assertNotEqual((rec / "Default/stable.bin").stat().st_ino, ino_before_corrupt)
+
+            ino_before_exdev = (rec / "Default/stable.bin").stat().st_ino
+            with mock.patch("desktop.adapters.overlay.os.link", side_effect=OSError(18, "cross-device link")):
+                snapshot_upper_to_recovery(str(upper), str(rec), owner=(uid, gid), home_boundary=str(home_bound))
+            self.assertNotEqual((rec / "Default/stable.bin").stat().st_ino, ino_before_exdev)
+            self.assertEqual((rec / "Default/stable.bin").read_text(encoding="utf-8"), "unchanged-data")
+
+    def test_recover_skips_active_overlays_when_unmounted_recovery_exists(self) -> None:
+        p_active = PsdServiceLifecycleTest._probe("firefox", active=True, busy=True, recovery=True)
+        p_unmounted = PsdServiceLifecycleTest._probe("chrome-flatpak", active=False, busy=False, recovery=True)
+        host = _FakePsdHost((p_active, p_unmounted), tmpfs_mounted=True)
+        rc, lines = PsdService(host, prog="cst desktop").run(PsdRequest(PsdAction.RECOVER, user="alice"))
+        self.assertEqual(rc, 0)
+        joined = "\n".join(lines)
+        self.assertIn("recovered:chrome-flatpak", joined)
+        self.assertIn("skipped:  firefox (overlay active", joined)
+        self.assertEqual(host.events, ["apply_recovery:chrome-flatpak"])
+
+        host_only_active = _FakePsdHost((p_active,), tmpfs_mounted=True)
+        rc_fail, fail_lines = PsdService(host_only_active, prog="cst desktop").run(
+            PsdRequest(PsdAction.RECOVER, user="alice")
+        )
+        self.assertEqual(rc_fail, 1)
+        self.assertIn("overlay is active", "\n".join(fail_lines))
