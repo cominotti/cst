@@ -16417,9 +16417,8 @@ EOF
               echo "UNEXPECTED SYNC PLAN: $sync_out" >&2; exit 1;
             }}
             STEP="doctor-recovery-warn"
-            install -d -m 0700 -o tester -g tester /home/tester/.local/share/cst/psd/recovery/firefox
-            printf '{{"format": 1, "whiteouts": [], "opaque_dirs": []}}\\n' > /home/tester/.local/share/cst/psd/recovery/firefox/.cst-psd-whiteouts.json
-            chown tester:tester /home/tester/.local/share/cst/psd/recovery/firefox/.cst-psd-whiteouts.json
+            runuser -u tester -- install -d -m 0700 /home/tester/.local/share/cst/psd/recovery/firefox
+            printf '{{"format": 1, "whiteouts": [], "opaque_dirs": []}}\\n' | runuser -u tester -- tee /home/tester/.local/share/cst/psd/recovery/firefox/.cst-psd-whiteouts.json >/dev/null
             doc_out="$(runuser -u tester -- env $UENV "$REPO/cst" doctor || true)"
             grep -qF "WARN   desktop psd: unmerged crash-recovery snapshots (firefox)" <<<"$doc_out" || {{
               echo "MISSING DOCTOR RECOVERY WARN: $doc_out" >&2; exit 1;
