@@ -598,7 +598,7 @@ cmds: [
 		category:    "ci"
 		description: "Print the archive and binary SHA256 pins for .github/actions/setup-invowk (downloads to a temp dir; verifies cosign)"
 		args: [
-			{name: "version", description: "Exact invowk release tag, e.g. v0.16.0", required: true},
+			{name: "version", description: "Exact invowk release tag, e.g. v0.18.0", required: true},
 		]
 		flags: [
 			{name: "skip_cosign", type: "bool", default_value: "false", description: "Skip the cosign check of checksums.txt when cosign is not installed (prints a warning; do not commit pins made this way unchecked)"},

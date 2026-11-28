@@ -107,6 +107,15 @@ class PinInvowkTests(unittest.TestCase):
             assert m is not None
             self.assertEqual(row, pin.case_line(*m.groups()))
 
+    def test_default_version_has_both_arch_pins(self) -> None:
+        text = ACTION.read_text(encoding="utf-8")
+        default_match = re.search(r"^\s*default:\s*'(v[^']+)'\s*$", text, re.MULTILINE)
+        self.assertIsNotNone(default_match, "missing default version in action.yml")
+        assert default_match is not None
+        default_ver = default_match.group(1)
+        for arch in ("amd64", "arm64"):
+            self.assertIn(f"{default_ver}/{arch})", text)
+
 
 if __name__ == "__main__":
     unittest.main()
