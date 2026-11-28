@@ -27,6 +27,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 invowk cmd test pylint        # ruff check (the select list of pyproject.toml), ruff format --check, then the ruff budgets: every Python file
 invowk cmd test types         # ty check on the ty gate list (with the mbt group), then ruff check --select ANN on every Python file
 invowk cmd test workflows     # zizmor --offline on .github, with the exceptions in .github/zizmor.yml
+invowk cmd ci fast-gates      # run invowk cmd check inside CI's Fedora 45 container as user ci (read-only mount)
 invowk cmd test coverage      # the unit suite under coverage.py, its reports, then COVERAGE_FLOORS (slow; the nightly runs it)
 invowk cmd test mbt           # the Hypothesis tests of tests/mbt (see "Property and model-based tests")
 tests/uv-dev ruff format      # rewrite the files the format check complains about
@@ -57,7 +58,17 @@ selects only the static gates and unit modules statically reachable from your
 changed files, falling back conservatively to the full suite for `cst_core` or
 shared files, and then runs the affected `tests/mbt` modules (see
 [Property and model-based tests](#property-and-model-based-tests)); `invowk cmd test e2e tier1` supports `--match`, `--tag`,
-`--list_tests`, `--shard I/N`, and `--jobs N`.
+`--list_tests`, `--shard I/N`, and `--jobs N`. For interactive selection in a
+terminal, `invowk cmd test pick` filters unit test modules (`invowk tui filter`)
+and `invowk cmd test e2e pick` picks Tier 1 E2E tags (`invowk tui choose --no-limit`).
+`invowk cmd cst perf` and `invowk cmd cst sync plan` expose the read-only
+`./cst perf` and `./cst sync plan` checks alongside `cst doctor` and `cst status`.
+
+From invowk `v0.17.0` onward, usage errors (such as a mistyped task or flag)
+exit `2`, and `INVOWK_NO_CWD=1` / `--ivk-no-cwd` (paired with `INVOWK_CONFIG`
+pointing at a user config that `includes` `cst.invowkmod`) allows invoking the
+module from another directory without discovering `./invowkfile.cue` or
+`./config.cue` from the current directory.
 
 ## Test performance on a workstation
 
@@ -1614,7 +1625,10 @@ One tool per pull request, so that new findings are clearly the new version's:
    change mutation operators; read the new survivors.
 
 For uv itself, change `version` and `checksum` of the `Setup uv` step in
-`.github/workflows/ci.yml` together. The checksum is the content of
+`.github/workflows/ci.yml`, `.github/workflows/nightly.yml` and
+`tests/ci/fast-gates.Dockerfile` (`ARG UV_VERSION` / `ARG UV_SHA256`) together
+(`tests/test_invowk_tasks.py` fails when `fast-gates.Dockerfile` drifts from
+`ci.yml`). The checksum is the content of
 `uv-x86_64-unknown-linux-gnu.tar.gz.sha256` in that uv release. The action
 `astral-sh/setup-uv` is pinned by its full commit SHA, with the tag in a
 comment.

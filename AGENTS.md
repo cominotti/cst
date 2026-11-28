@@ -141,6 +141,7 @@ invowk cmd check                              # every fast gate: validate, audit
 invowk cmd test unit                          # all unit tests in parallel across CPUs, socket as stdin (tests/run_unit.py; --jobs 1 disables parallelism; CST_TEST_JOBS=N sets the default worker count, --jobs wins)
 invowk cmd test affected [--list] [--base REF] # static --affected unit test selection from git diff + AST imports (falls back to full suite on cst_core/shared edits), then the affected tests/mbt modules
 invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
+invowk cmd test pick                          # fuzzy-pick one unit test module (interactive TTY) and run it
 invowk cmd test arch                          # the static gates only (seconds)
 invowk cmd test docs                          # the docs gate only
 invowk cmd test license                       # the license header gate only (tests/test_license_headers.py)
@@ -150,10 +151,12 @@ invowk cmd test lint                          # bash -n + shellcheck -S warning 
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + ruff's annotation rules (ANN) on every Python file (through uv)
 invowk cmd test workflows                     # zizmor (offline) on .github, exceptions in .github/zizmor.yml (through uv)
+invowk cmd ci fast-gates [--mbt] [--rebuild] [--jobs N] # local CI-parity Fedora 45 container run as user ci (/repo mounted read-only)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test coverage                      # unit suite under coverage.py + COVERAGE_FLOORS (slow; the nightly runs it)
 invowk cmd test mbt [--profile dev|ci|nightly] [--examples N] [--seed N] [--jobs N] [--affected [--base REF]] # Hypothesis tests of tests/mbt (through uv; CI: ci profile)
 invowk cmd test e2e tier1 [--tag T] [--match P] [--shard I/N] [--jobs N] [--list_tests] # Docker, Fedora 45 + systemd; auto-parallel locally when >4 tests selected
+invowk cmd test e2e pick [--keep_logs] [--rebuild] [--jobs N] # pick Tier 1 E2E tag(s) interactively (TTY) and run them
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 invowk cmd test quint [--instance NAME] [--traces] # optional: TLC on the Quint specs (pinned tools in ~/.cache/cst-quint; CI runs it when a module a spec models, or a spec, changes)
 ```

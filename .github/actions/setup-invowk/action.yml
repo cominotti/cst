@@ -11,7 +11,7 @@ inputs:
   version:
     description: Exact invowk release tag to install
     required: false
-    default: 'v0.16.0'
+    default: 'v0.18.0'
   sha256:
     description: >-
       Expected SHA256 of invowk_<version>_linux_<arch>.tar.gz. Only needed for a
@@ -69,8 +69,8 @@ runs:
         # checks each archive against checksums.txt, hashes the binary inside,
         # and prints the two lines to paste here. Then change the default above.
         case "${INPUT_VERSION}/${arch}" in
-          v0.16.0/amd64) pinned="5518d93d2c4b13a821c5966ffe3e30a1f2a0085c1cf35b0f979781c1505500d6"; pinned_bin="c789227525fa1ff53cdaaaea0364f03b5615d6d7948be3f09283edc58f6bfe4b" ;;
-          v0.16.0/arm64) pinned="b802a2b06655c034e97ef7dfcef3aef483d50bbb086484d9a9b315a48b166645"; pinned_bin="579479d00bfe8c53b9a80e7cf3c0f6d852cac7685bcccfbdfd6a4128061f85d4" ;;
+          v0.18.0/amd64) pinned="484a7be0d504e9c714ba7ae0eb17061a078987261842a3708a62cdeed586a310"; pinned_bin="c6d87278e6b1e48eb901cf747cfc550ed11984a8059543eeaecd63fcc2b94f9a" ;;
+          v0.18.0/arm64) pinned="3d2321b2c8233b9bfdb760e7df3d43c66e1cfba8da1f3a5da1f22c507eff5a52"; pinned_bin="5f47915a74cb69da3ef6e725ae56e8b61a1edb08d9d56ae4e6414a2bcd7335e8" ;;
           *) pinned=""; pinned_bin="" ;;
         esac
 
