@@ -11181,7 +11181,7 @@ EOF
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_159_btrfs_commit_interval_journald_and_below_interval(self) -> None:
         """`cst btrfs commit-interval` updates real fstab + top-mount coherently with `cst doctor`,
-        `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval 15`.
+        `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval-s 15`.
         A separate btrfs /var/home (its own UUID, dm-1) keeps its fstab line and mount, and no remount names it.
         A separate btrfs /var (its own UUID, dm-2): plan changes nothing, apply, a second apply and revert change
         only the root's / line; a commit= an older CST wrote on the /var line is named by status and revert and
@@ -11313,7 +11313,7 @@ EOF
             {installer} install btrfs/units/journald.conf.d/10-cst-write-budget.conf >/dev/null
             [[ -f {journald_dest} ]]
             grep -qxF "SyncIntervalSec=15m" {journald_dest}
-            grep -qF -- "--interval 15" /opt/cst-rw/btrfs/units/below.service.d/10-cst.conf
+            grep -qF -- "--interval-s 15" /opt/cst-rw/btrfs/units/below.service.d/10-cst.conf
             grep -qxF "vm.dirty_expire_centisecs = 6000" /opt/cst-rw/btrfs/sysctl/90-btrfs-writeback.conf
             {installer} remove btrfs/units/journald.conf.d/10-cst-write-budget.conf >/dev/null
             [[ ! -e {journald_dest} ]]
@@ -17094,3 +17094,69 @@ PY
             """,
         ).stdout
         self.assertIn("E2E-293-OK", out)
+
+    @e2e_tags(E2ETag.DOCTOR)
+    def test_294_doctor_detects_restarting_crash_loop_unit(self) -> None:
+        """`cst doctor` reports a real systemd unit stuck in `activating (auto-restart)` as a `WARN`
+        under `== services` without emitting a `reset-failed` fix line, and clears once stopped/removed."""
+        c = self.SYSTEMD_CONTAINER
+        unit_name = "e2e294-crashloop.service"
+        unit_path = f"/etc/systemd/system/{unit_name}"
+        if exec_bash(c, f"[[ ! -e {unit_path} ]] || echo present").stdout.strip():
+            self.skipTest(f"{unit_path} already present (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"set +e; systemctl stop {unit_name} 2>/dev/null; rm -f {unit_path}; "
+            f"systemctl daemon-reload; systemctl reset-failed {unit_name} 2>/dev/null",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            cat >{unit_path} <<'EOF'
+[Unit]
+Description=CST E2E 294 auto-restart probe
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/false
+Restart=always
+RestartSec=30
+EOF
+            systemctl daemon-reload
+            systemctl start --no-block {unit_name}
+            seen=""
+            for _ in $(seq 1 20); do
+                if [[ "$(systemctl show -P SubState {unit_name} 2>/dev/null || true)" == "auto-restart" ]]; then
+                    seen=1
+                    break
+                fi
+                sleep 0.5
+            done
+            [[ -n "${{seen}}" ]] || {{ systemctl status {unit_name} >&2 || true; exit 1; }}
+
+            doc_warn="$(/opt/cst-rw/cst doctor || true)"
+            grep -qF "WARN   system units restarting (crash loop?): {unit_name}" <<<"${{doc_warn}}"
+            if grep -qF "no failed system units" <<<"${{doc_warn}}"; then
+                echo "unexpected ok line during crash loop" >&2
+                exit 1
+            fi
+            if grep -qF "reset-failed {unit_name}" <<<"${{doc_warn}}"; then
+                echo "unexpected reset-failed fix for auto-restart unit" >&2
+                exit 1
+            fi
+
+            systemctl stop {unit_name}
+            rm -f {unit_path}
+            systemctl daemon-reload
+            doc_after="$(/opt/cst-rw/cst doctor || true)"
+            if grep -qF "{unit_name}" <<<"${{doc_after}}"; then
+                echo "unit still reported after removal" >&2
+                exit 1
+            fi
+            echo E2E-294-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-294-OK", out)

@@ -305,7 +305,7 @@ def _rate_number(v: object) -> float:
     return float(group(m, 1)) if m else 0.0
 
 
-# below records every 15 s (--interval 15, btrfs/units/below.service.d/10-cst.conf): a row without a
+# below records every 15 s (--interval-s 15, btrfs/units/below.service.d/10-cst.conf): a row without a
 # usable time counts that long.
 _DEFAULT_BELOW_INTERVAL_S: Final = 15.0
 _MIN_BELOW_INTERVAL_S: Final = 1.0

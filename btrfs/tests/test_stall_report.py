@@ -2225,7 +2225,7 @@ class ReportCommandsTest(unittest.TestCase):
         self.assertEqual(rp_adapters.container_names(), {"docker-0123456789ab": "w\ufffdeb"})
 
     def test_below_top_integrates_actual_timestamp_intervals(self) -> None:
-        # 15 s interval (e.g. below --interval 15) across epoch timestamps + ISO timestamps, plus a gap > 300 s.
+        # 15 s interval (e.g. below --interval-s 15) across epoch timestamps + ISO timestamps, plus a gap > 300 s.
         rows = [
             {"timestamp": 1000, "comm": "worker", "cgroup": "/builds.slice", "io.wbytes_per_sec": 100},
             {"timestamp": 1015, "comm": "worker", "cgroup": "/builds.slice", "io.wbytes_per_sec": 100},

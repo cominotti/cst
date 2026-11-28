@@ -263,8 +263,8 @@ class Scratch(unittest.TestCase):
             "rpm-ostree status --json",
             "rpm-ostree db list ",
             "rpm-ostree kargs",
-            "systemctl list-units --state=failed",
-            "systemctl --user list-units --state=failed",
+            "systemctl list-units --state=failed,auto-restart,auto-restart-queued",
+            "systemctl --user list-units --state=failed,auto-restart,auto-restart-queued",
             "flatpak-spawn --host ",
             "findmnt -rn -t btrfs -o SOURCE,TARGET",
             "findmnt -rn -o SOURCE,TARGET,FSTYPE,OPTIONS",
@@ -598,6 +598,58 @@ class ServicesTest(Scratch):
             f.write("run-r1.service loaded failed failed x\n")
         r = self.run_tool()
         self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_restarting_units_warn_without_reset_failed_fix(self) -> None:
+        with open(self.sys_failed, "w") as f:
+            f.write("below.service loaded activating auto-restart below system monitor recording daemon\n")
+        with open(self.user_failed, "w") as f:
+            f.write("queued.service loaded activating auto-restart-queued queued user daemon\n")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        svc = area_lines(r.stdout, "services")
+        self.assertEqual(
+            svc,
+            [
+                "  WARN   system units restarting (crash loop?): below.service. Read why: journalctl -b -u below.service",
+                "  WARN   user units restarting (crash loop?): queued.service. Read why: journalctl --user -b -u queued.service",
+            ],
+        )
+        self.assertNotIn("reset-failed", "\n".join(svc))
+        self.assert_read_only()
+
+    def test_failed_and_restarting_units_together(self) -> None:
+        with open(self.sys_failed, "w") as f:
+            f.write(
+                "btrfs-health-check.service loaded failed failed btrfs health\n"
+                "below.service loaded activating auto-restart below daemon\n"
+            )
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        svc = area_lines(r.stdout, "services")
+        self.assertIn(
+            "  WARN   system units failed: btrfs-health-check.service. Read why first: "
+            "journalctl -b -u btrfs-health-check.service (the fix only clears the mark, not the cause)",
+            svc,
+        )
+        self.assertIn("         fix: sudo systemctl reset-failed btrfs-health-check.service", svc)
+        self.assertIn(
+            "  WARN   system units restarting (crash loop?): below.service. Read why: journalctl -b -u below.service",
+            svc,
+        )
+        self.assertNotIn("reset-failed below.service", "\n".join(svc))
+        self.assert_read_only()
+
+    def test_transient_restarting_unit_is_info_exit_0(self) -> None:
+        with open(self.user_failed, "w") as f:
+            f.write("run-r2.service loaded activating auto-restart [systemd-run] x\n")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            "info   user: 1 transient unit(s) restarting (systemd-run, low priority): run-r2.service",
+            r.stdout,
+        )
+        self.assertNotIn("no failed user units", r.stdout)
+        self.assert_read_only()
 
     def test_user_units_skipped_as_root(self) -> None:
         host = doc_adapters.Host(self.env, repo=REPO)
@@ -5861,7 +5913,7 @@ class ToolboxTest(Scratch):
         self.assertEqual(len(spawned), len(direct))  # each stub call came through flatpak-spawn
         self.assertIn("flatpak-spawn --host rpm-ostree status --json", calls)
         self.assertIn(
-            "flatpak-spawn --host systemctl --user list-units --state=failed --no-legend --plain --full --no-pager",
+            "flatpak-spawn --host systemctl --user list-units --state=failed,auto-restart,auto-restart-queued --no-legend --plain --full --no-pager",
             calls,
         )
         self.assert_read_only()
