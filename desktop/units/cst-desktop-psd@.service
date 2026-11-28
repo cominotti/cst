@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 [Unit]
 Description=CST Browser Profile Overlayfs Sync for %i
+RequiresMountsFor=/var/home
 After=local-fs.target
-Before=shutdown.target reboot.target halt.target
+Before=systemd-user-sessions.service display-manager.service
 
 [Service]
 Type=oneshot

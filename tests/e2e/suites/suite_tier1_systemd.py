@@ -16498,6 +16498,57 @@ EOF
         ).stdout
         self.assertIn("E2E-287-OK", out)
 
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DESKTOP)
+    def test_290_desktop_psd_unit_ordering_and_weights(self) -> None:
+        """Install `desktop:psd` units, reload PID 1, and inspect systemd-merged ordering and cgroup weights."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-290-psd-units"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            set +e
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py remove --component desktop:psd >/dev/null 2>&1 || true
+            {file_put_back("/var/lib/cst/installed.json", w, "record")}
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            rm -rf {w}
+            mkdir -p {w}
+            {file_saved("/var/lib/cst/installed.json", w, "record")}
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install --component desktop:psd >/dev/null
+            systemctl daemon-reload
+            echo "---PSD---"
+            systemctl show -p Before -p After -p RequiresMountsFor cst-desktop-psd@tester.service
+            echo "---RESYNC---"
+            systemctl show -p CPUWeight -p IOWeight cst-desktop-psd-resync@tester.service
+            """,
+        ).stdout
+        _, _, psd_and_resync = out.partition("---PSD---\n")
+        psd_text, _, resync_text = psd_and_resync.partition("---RESYNC---\n")
+        psd_props = dict(line.split("=", 1) for line in psd_text.strip().splitlines() if "=" in line)
+        resync_props = dict(line.split("=", 1) for line in resync_text.strip().splitlines() if "=" in line)
+
+        before_tokens = psd_props["Before"].split()
+        after_tokens = psd_props["After"].split()
+        mounts_tokens = psd_props["RequiresMountsFor"].split()
+        self.assertIn("systemd-user-sessions.service", before_tokens)
+        self.assertIn("display-manager.service", before_tokens)
+        self.assertIn("shutdown.target", before_tokens)
+        self.assertNotIn("reboot.target", before_tokens)
+        self.assertNotIn("halt.target", before_tokens)
+        self.assertIn("local-fs.target", after_tokens)
+        self.assertIn("/var/home", mounts_tokens)
+
+        self.assertEqual(resync_props["CPUWeight"], "20")
+        self.assertEqual(resync_props["IOWeight"], "20")
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
     def test_288_btrfs_cache_system_binds(self) -> None:
         """`cst btrfs cache system` (below, stall-monitor, var-tmp) under test_160's mount scaffold + real systemd."""

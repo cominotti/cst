@@ -681,3 +681,36 @@ class PsdReviewFixesTest(unittest.TestCase):
                 )
             )
             self.assertFalse(sym_rec.is_symlink())
+
+
+class PsdSystemdUnitTest(unittest.TestCase):
+    """Verify shipped `cst-desktop-psd` systemd template ordering and resource weights."""
+
+    UNITS_DIR = Path(__file__).resolve().parents[1] / "units"
+
+    @staticmethod
+    def _unit_lines(path: Path) -> list[str]:
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def test_psd_service_orders_before_user_sessions_and_requires_var_home(self) -> None:
+        lines = self._unit_lines(self.UNITS_DIR / "cst-desktop-psd@.service")
+        self.assertIn("RequiresMountsFor=/var/home", lines)
+        self.assertIn("After=local-fs.target", lines)
+        self.assertIn("Before=systemd-user-sessions.service display-manager.service", lines)
+        before_lines = [line for line in lines if line.startswith("Before=")]
+        self.assertEqual(len(before_lines), 1)
+        for target in ("shutdown.target", "reboot.target", "halt.target"):
+            self.assertNotIn(target, before_lines[0])
+        self.assertIn("Type=oneshot", lines)
+        self.assertIn("RemainAfterExit=yes", lines)
+        self.assertIn("TimeoutStopSec=120", lines)
+        self.assertIn("WantedBy=multi-user.target", lines)
+
+    def test_psd_resync_service_sets_low_cpu_and_io_weights(self) -> None:
+        lines = self._unit_lines(self.UNITS_DIR / "cst-desktop-psd-resync@.service")
+        self.assertIn("CPUWeight=20", lines)
+        self.assertIn("IOWeight=20", lines)
+        self.assertIn("IOSchedulingClass=idle", lines)
+        self.assertIn("Nice=10", lines)
+        self.assertIn("BindsTo=cst-desktop-psd@%i.service", lines)
+        self.assertIn("After=cst-desktop-psd@%i.service", lines)

@@ -6,6 +6,8 @@ After=cst-desktop-psd@%i.service
 
 [Service]
 Type=oneshot
+CPUWeight=20
+IOWeight=20
 IOSchedulingClass=idle
 Nice=10
 ExecStart=/usr/local/sbin/cst-desktop psd sync --user %i
