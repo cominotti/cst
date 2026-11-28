@@ -22,12 +22,33 @@ in a variable).
 import ast
 from collections.abc import Iterator
 import os
+from typing import Final
 import unittest
 
+from tests.budgets import budget_problems, lowered
 from tests.repo_files import REPO, repo_files
 
-CALLS = {"run", "Popen", "call", "check_call", "check_output"}
-SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}
+CALLS: Final = frozenset({"run", "Popen", "call", "check_call", "check_output"})
+SHELLS: Final = frozenset({"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"})
+_SUBPROCESS_BUDGET_EXEMPT_PREFIXES: Final = ("tests/e2e/", "tests/mutation/")
+SUBPROCESS_CALL_CAP: Final = 4
+
+# Existing unit test files above SUBPROCESS_CALL_CAP (ratcheting budget: never
+# above; lowered with `invowk cmd fix budgets --apply`). See .agents/rules/fast-tests-and-ci.md.
+SUBPROCESS_BUDGETS: Final[dict[str, int]] = {
+    "bluetooth/tests/test_bluetooth.py": 22,
+    "bluetooth/tests/test_ldac_watch.py": 5,
+    "btrfs/tests/test_btrfs_setup.py": 19,
+    "btrfs/tests/test_pending_alerts.py": 5,
+    "btrfs/tests/test_stall_report.py": 5,
+    "tests/test_cst_core.py": 12,
+    "tests/test_cst_core_shared.py": 8,
+    "tests/test_run_unit.py": 15,
+    "toolchains/tests/test_rules.py": 13,
+    "toolchains/tests/test_toolchains.py": 9,
+    "vm/tests/test_vm.py": 9,
+    "vm/tests/test_vm_nas.py": 11,
+}
 
 
 def test_files() -> Iterator[tuple[str, str]]:
@@ -66,6 +87,30 @@ def offenders(source: str, rel: str) -> list[str]:
     ]
 
 
+def subprocess_call_count(source: str, rel: str) -> int:
+    """Count direct `subprocess.<call>` AST calls in `source`."""
+    return sum(
+        1
+        for node in ast.walk(ast.parse(source, rel))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in CALLS
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+    )
+
+
+def measure_subprocess_calls() -> dict[str, int]:
+    """Direct subprocess call counts per unit test file (`tests/e2e/` and `tests/mutation/` excluded)."""
+    counts: dict[str, int] = {}
+    for rel, path in test_files():
+        if rel.startswith(_SUBPROCESS_BUDGET_EXEMPT_PREFIXES):
+            continue
+        with open(path, encoding="utf-8") as f:
+            counts[rel] = subprocess_call_count(f.read(), rel)
+    return counts
+
+
 class SubprocessHygieneTest(unittest.TestCase):
     def test_shell_calls_in_tests_set_stdin(self) -> None:
         bad: list[str] = []
@@ -90,6 +135,31 @@ class SubprocessHygieneTest(unittest.TestCase):
             "subprocess.run(['python3', '-c', 'x'])\n"
         )
         self.assertEqual(offenders(src, "t.py"), ["t.py:2", "t.py:3"])
+
+    def test_subprocess_calls_within_budget(self) -> None:
+        problems = budget_problems(
+            measure_subprocess_calls(), SUBPROCESS_BUDGETS, "subprocess calls", default=SUBPROCESS_CALL_CAP
+        )
+        self.assertEqual(
+            problems,
+            [],
+            f"a test file above its SUBPROCESS_BUDGETS entry, or above {SUBPROCESS_CALL_CAP} subprocess calls: "
+            "run behaviour tests in-process through port fakes (.agents/rules/fast-tests-and-ci.md)",
+        )
+
+    def test_subprocess_budget_rule(self) -> None:
+        budget = {"legacy.py": 8}
+        self.assertEqual(budget_problems({"legacy.py": 8, "new.py": 4}, budget, "subprocess calls", default=4), [])
+        self.assertEqual(budget_problems({"legacy.py": 5}, budget, "subprocess calls", default=4), [])
+        self.assertEqual(
+            budget_problems({"legacy.py": 9, "new.py": 5}, budget, "subprocess calls", default=4),
+            [
+                "legacy.py: 9 subprocess calls, budget 8: the change added 1",
+                "new.py: 5 subprocess calls, budget 4: the change added 1",
+            ],
+        )
+        self.assertEqual(lowered({"legacy.py": 5, "dropped.py": 4}, budget, default=4), {"legacy.py": 5})
+        self.assertEqual(lowered({"legacy.py": 4}, budget, default=4), {})
 
 
 if __name__ == "__main__":

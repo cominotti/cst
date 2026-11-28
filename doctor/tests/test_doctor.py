@@ -17,7 +17,9 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s doctor/tests -t . -v
 """
 
-from collections.abc import Iterator, Mapping, Sequence
+import ast
+from collections.abc import Callable, Iterator, Mapping, Sequence
+import contextlib
 from dataclasses import replace
 import errno
 import hashlib
@@ -32,7 +34,8 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Protocol, Self, TextIO, override
+import time
+from typing import Final, Protocol, Self, TextIO, TypedDict, Unpack, override
 import types
 import unittest
 from unittest import mock
@@ -76,12 +79,20 @@ from btrfs.health_check import domain as hc_domain
 from btrfs.snapshot_runtime import domain as snap_domain
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.adapters.runner import SubprocessCommandRunner, c_locale, on_host_argv
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService, Placement
 from cst_core.domain.install import INSTALL_MANIFEST, GeneratedKind, Owner
 from cst_core.domain.record import ComponentState, InstallRecord
 from cst_core.domain.errors import Usage
-from cst_core.ports import CommandResult
+from cst_core.ports import (
+    CommandFailed,
+    CommandResult,
+    ContainerProbePort,
+    DecodeErrors,
+    OutputMode,
+    StdinMode,
+)
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
 from tests.probes import bytes_program, time_bound
@@ -175,6 +186,276 @@ exit 1
 """
 
 
+def _load_tool_doc() -> str:
+    with open(TOOL, encoding="utf-8") as fh:
+        return ast.get_docstring(ast.parse(fh.read(), TOOL), clean=False) or ""
+
+
+_CST_DOCTOR_DOC: Final = _load_tool_doc()
+_STUB_BODIES: Final[dict[str, str]] = {
+    "rpm-ostree": RPM_OSTREE,
+    "systemctl": SYSTEMCTL,
+    "findmnt": FINDMNT,
+    "stat": STAT,
+    "flatpak-spawn": FLATPAK_SPAWN,
+    "virsh": VIRSH,
+    "gsettings": GSETTINGS,
+}
+
+
+def _cat_stub_file(path: str, decode_errors: DecodeErrors) -> tuple[int, str, str]:
+    try:
+        with open(path, "rb") as fh:
+            return 0, fh.read().decode("utf-8", errors=decode_errors), ""
+    except OSError as exc:
+        return 1, "", f"cat: {path}: {exc.strerror}\n"
+
+
+def _stub_rpm_ostree(args: Sequence[str], env: Mapping[str, str], decode_errors: DecodeErrors) -> tuple[int, str, str]:
+    sub = args[0] if args else ""
+    if sub == "status" and len(args) >= 2 and args[1] == "--json":
+        return _cat_stub_file(env.get("FIX_STATUS", ""), decode_errors)
+    if sub == "db" and len(args) >= 3 and args[1] == "list":
+        db_file = os.path.join(env.get("FIX_DB", ""), args[2])
+        if os.path.isfile(db_file):
+            return _cat_stub_file(db_file, decode_errors)
+    if sub == "kargs":
+        kargs = env.get("FIX_KARGS", "")
+        if kargs and os.path.isfile(kargs):
+            return _cat_stub_file(kargs, decode_errors)
+    return 1, "", ""
+
+
+def _systemctl_show(
+    args: Sequence[str], fix_show: str, mgr: str, joined: str, decode_errors: DecodeErrors
+) -> tuple[int, str, str]:
+    last = args[-1]
+    if " --state=" not in joined:
+        active = os.path.join(fix_show, mgr, f"{last}.active")
+        if os.path.isfile(active):
+            return _cat_stub_file(active, decode_errors)
+    unit_file = os.path.join(fix_show, mgr, last)
+    if os.path.isfile(unit_file):
+        return _cat_stub_file(unit_file, decode_errors)
+    return 1, "", "Failed to connect to bus\n"
+
+
+def _stub_systemctl(args: Sequence[str], env: Mapping[str, str], decode_errors: DecodeErrors) -> tuple[int, str, str]:
+    joined = f" {' '.join(args)} "
+    mgr = "usr" if " --user " in joined else "sys"
+    fix_show = env.get("FIX_SHOW", "")
+    if " show -p UnitPath --value " in joined:
+        unit_path = os.path.join(fix_show, mgr, "UnitPath")
+        if os.path.isfile(unit_path):
+            return _cat_stub_file(unit_path, decode_errors)
+        return 1, "", "Failed to connect to bus\n"
+    if " show " in joined and args:
+        return _systemctl_show(args, fix_show, mgr, joined, decode_errors)
+    key = "FIX_USER_FAILED" if " --user " in joined else "FIX_SYSTEM_FAILED"
+    return _cat_stub_file(env.get(key, ""), decode_errors)
+
+
+def _stub_findmnt(args: Sequence[str], env: Mapping[str, str], decode_errors: DecodeErrors) -> tuple[int, str, str]:
+    joined = f" {' '.join(args)} "
+    if "FSTYPE,OPTIONS" in joined:
+        path = env.get("FIX_FINDMNT_ALL", "")
+        if path and os.path.isfile(path):
+            return _cat_stub_file(path, decode_errors)
+    elif "OPTIONS" in joined:
+        path = env.get("FIX_FINDMNT_OPTS", "")
+        if path and os.path.isfile(path):
+            return _cat_stub_file(path, decode_errors)
+    base = env.get("FIX_FINDMNT", "")
+    if base and os.path.isfile(base):
+        return _cat_stub_file(base, decode_errors)
+    return 1, "", ""
+
+
+def _stub_stat(_args: Sequence[str], env: Mapping[str, str], decode_errors: DecodeErrors) -> tuple[int, str, str]:
+    path = env.get("FIX_STATFS", "")
+    return _cat_stub_file(path, decode_errors) if path and os.path.isfile(path) else (1, "", "")
+
+
+def _virsh_blklist(args: Sequence[str], fix_virsh: str, decode_errors: DecodeErrors) -> tuple[int, str, str]:
+    vm = ""
+    for arg in args:
+        if not arg.startswith("-") and arg not in ("domblklist", "qemu:///system"):
+            vm = arg
+    if os.path.isfile(os.path.join(fix_virsh, f"{vm}.blkfail")):
+        return 1, "", "error: failed\n"
+    blk = os.path.join(fix_virsh, f"{vm}.blk")
+    if os.path.isfile(blk):
+        return _cat_stub_file(blk, decode_errors)
+    return 0, " Type   Device   Target   Source\n---\n", ""
+
+
+def _stub_virsh(args: Sequence[str], env: Mapping[str, str], decode_errors: DecodeErrors) -> tuple[int, str, str]:
+    fix_virsh = env.get("FIX_VIRSH", "")
+    if not fix_virsh:
+        return 1, "", "error: failed to connect to the hypervisor\n"
+    joined = f" {' '.join(args)} "
+    last = args[-1] if args else ""
+    if " list --all --name " in joined:
+        return _cat_stub_file(os.path.join(fix_virsh, "list.txt"), decode_errors)
+    if " domstate " in joined:
+        state = os.path.join(fix_virsh, f"{last}.state")
+        return _cat_stub_file(state, decode_errors) if os.path.isfile(state) else (0, "running\n", "")
+    if " domblklist " in joined:
+        return _virsh_blklist(args, fix_virsh, decode_errors)
+    target = (
+        os.path.join(fix_virsh, "caps.xml")
+        if " domcapabilities " in joined
+        else os.path.join(fix_virsh, f"{last}.xml")
+        if " dumpxml --inactive " in joined
+        else ""
+    )
+    if target and os.path.isfile(target):
+        return _cat_stub_file(target, decode_errors)
+    return 1, "", "error: unsupported in the stub\n"
+
+
+def _stub_gsettings(
+    _args: Sequence[str], _env: Mapping[str, str], _decode_errors: DecodeErrors
+) -> tuple[int, str, str]:
+    return 1, "", ""
+
+
+_STUB_HANDLERS: Final[dict[str, Callable[[Sequence[str], Mapping[str, str], DecodeErrors], tuple[int, str, str]]]] = {
+    "rpm-ostree": _stub_rpm_ostree,
+    "systemctl": _stub_systemctl,
+    "findmnt": _stub_findmnt,
+    "stat": _stub_stat,
+    "virsh": _stub_virsh,
+    "gsettings": _stub_gsettings,
+}
+
+
+def _unwrap_flatpak_spawn(cmd: Sequence[str], cmd_env: Mapping[str, str]) -> tuple[list[str], dict[str, str]] | None:
+    if len(cmd) < 3 or cmd[0] != "flatpak-spawn" or cmd[1] != "--host":
+        return None
+    inner_env = dict(cmd_env)
+    idx = 2
+    while idx < len(cmd) and cmd[idx].startswith("--env="):
+        key, _, val = cmd[idx][len("--env=") :].partition("=")
+        inner_env[key] = val
+        idx += 1
+    if idx >= len(cmd):
+        return None
+    return list(cmd[idx:]), inner_env
+
+
+class _RunnerKwargs(TypedDict, total=False):
+    check: bool
+    timeout: float | None
+    input_text: str | None
+    env: Mapping[str, str] | None
+    unset: Sequence[str]
+    base_env: Mapping[str, str] | None
+    cwd: str | None
+    locale_c: bool
+    new_session: bool
+    on_host: bool
+    stdin: StdinMode
+    output: OutputMode
+    decode_errors: DecodeErrors
+    nice: int | None
+    pass_fds: Sequence[int]
+    on_line: Callable[[str], None] | None
+
+
+class _StubCommandRunner:
+    """In-process CommandRunnerPort replicating Scratch's 7 shell stubs, with subprocess fallback."""
+
+    def __init__(self, ctx: ContainerProbePort, base_env: Mapping[str, str], bin_dir: str) -> None:
+        self._ctx = ctx
+        self._base_env = base_env
+        self._bin_dir = bin_dir
+        self._fallback = SubprocessCommandRunner(ctx, base_env=base_env, words=doc_adapters.host_words)
+
+    def _is_default_stub(self, prog: str, cmd_env: Mapping[str, str]) -> bool:
+        expected = _STUB_BODIES.get(prog)
+        if expected is None or (prog == "gsettings" and cmd_env.get("FIX_GSETTINGS", "") != ""):
+            return False
+        path_entries = cmd_env.get("PATH", "").split(os.pathsep)
+        if not path_entries or path_entries[0] != self._bin_dir:
+            return False
+        try:
+            with open(os.path.join(self._bin_dir, prog), encoding="utf-8") as fh:
+                return fh.read() == expected
+        except OSError:
+            return False
+
+    def _log_call(self, name: str, args: Sequence[str], cmd_env: Mapping[str, str]) -> None:
+        log_path = cmd_env.get("STUB_LOG", "")
+        if log_path:
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"{name} {' '.join(args)}\n")
+
+    def _dispatch_stub(
+        self, prog: str, args: Sequence[str], cmd_env: Mapping[str, str], decode_errors: DecodeErrors
+    ) -> tuple[int, str, str] | None:
+        if not self._is_default_stub(prog, cmd_env):
+            return None
+        handler = _STUB_HANDLERS.get(prog)
+        if handler is None:
+            return None
+        self._log_call(prog, args, cmd_env)
+        return handler(args, cmd_env, decode_errors)
+
+    def _emulate(
+        self, cmd: Sequence[str], cmd_env: Mapping[str, str], decode_errors: DecodeErrors
+    ) -> CommandResult | None:
+        if not cmd:
+            return None
+        if cmd[0] == "flatpak-spawn":
+            unwrapped = _unwrap_flatpak_spawn(cmd, cmd_env)
+            if unwrapped is None or not self._is_default_stub("flatpak-spawn", cmd_env):
+                return None
+            inner_cmd, inner_env = unwrapped
+            if not self._is_default_stub(inner_cmd[0], inner_env) or inner_cmd[0] not in _STUB_HANDLERS:
+                return None
+            self._log_call("flatpak-spawn", cmd[1:], cmd_env)
+            answered = self._dispatch_stub(inner_cmd[0], inner_cmd[1:], inner_env, decode_errors)
+        else:
+            answered = self._dispatch_stub(cmd[0], cmd[1:], cmd_env, decode_errors)
+        if answered is None:
+            return None
+        rc, out, err = answered
+        return CommandResult(rc, out, err, argv=tuple(cmd))
+
+    def run(self, argv: Sequence[str], **kw: Unpack[_RunnerKwargs]) -> CommandResult:
+        env = kw.get("env")
+        unset = kw.get("unset", ())
+        base_env = kw.get("base_env")
+        locale_c = kw.get("locale_c", False)
+        on_host = kw.get("on_host", False)
+        decode_errors = kw.get("decode_errors", "replace")
+        check = kw.get("check", False)
+        on_line = kw.get("on_line")
+
+        additions = {**(c_locale() if locale_c else {}), **(env or {})}
+        if on_host and self._ctx.is_container():
+            if unset:
+                raise ValueError("unset cannot reach a command run on the host from a container")
+            cmd = on_host_argv(argv, additions)
+        else:
+            cmd = list(argv)
+
+        merged = {**(self._base_env if base_env is None else base_env), **additions}
+        for name in unset:
+            merged.pop(name, None)
+
+        res = self._emulate(cmd, merged, decode_errors)
+        if res is None:
+            return self._fallback.run(argv, **kw)
+        if on_line is not None:
+            for line in res.stdout.splitlines(keepends=True):
+                on_line(line.removesuffix("\n"))
+        if check and res.returncode != 0:
+            raise CommandFailed(cmd, res.returncode, res.stdout, res.stderr)
+        return res
+
+
 class Scratch(unittest.TestCase):
     """A scratch host root, stub commands, and helpers to run the doctor."""
 
@@ -239,17 +520,53 @@ class Scratch(unittest.TestCase):
     def status(self, name: str) -> None:
         self.env["FIX_STATUS"] = os.path.join(FIX, name)
 
+    def _run_in_process(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        real_host = doc_wiring.host
+
+        def make_host(env: Mapping[str, str], entry_file: str) -> DoctorHostPort:
+            host = real_host(env, entry_file)
+            assert isinstance(host, doc_adapters.Host)
+            host._commands = _StubCommandRunner(host, env, self.bin)
+            return host
+
+        try:
+            with (
+                io.StringIO() as stdout_buf,
+                io.StringIO() as stderr_buf,
+                mock.patch.dict(os.environ, self.env, clear=True),
+                mock.patch.object(doc_wiring, "start_doctor", lambda: None),
+                mock.patch.object(doc_wiring, "host", make_host),
+                contextlib.redirect_stderr(stderr_buf),
+            ):
+                time.tzset()
+                rc = doc_cli.main(
+                    list(args),
+                    doc=_CST_DOCTOR_DOC,
+                    entry_file=TOOL,
+                    out=stdout_buf,
+                    env=self.env,
+                )
+                return subprocess.CompletedProcess(
+                    ["python3", "-I", TOOL, *args],
+                    rc,
+                    stdout_buf.getvalue(),
+                    stderr_buf.getvalue(),
+                )
+        finally:
+            time.tzset()
+
     def run_tool(self, *args: str, cmd: list[str] | None = None) -> subprocess.CompletedProcess[str]:
-        cmd = cmd or ["python3", "-I", TOOL]
-        return subprocess.run(
-            cmd + list(args),
-            check=False,
-            env=self.env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-        )
+        if cmd is not None:
+            return subprocess.run(
+                cmd + list(args),
+                check=False,
+                env=self.env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                stdin=subprocess.DEVNULL,
+            )
+        return self._run_in_process(args)
 
     def calls(self) -> list[str]:
         try:
@@ -5905,7 +6222,7 @@ class ToolboxTest(Scratch):
     def test_commands_go_through_flatpak_spawn(self) -> None:
         self.env["CST_DOCTOR_CONTAINER"] = "1"
         self.status("pinned.json")
-        r = self.run_tool()
+        r = self.run_tool(cmd=["python3", "-I", TOOL])
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         calls = self.calls()
         spawned = [c for c in calls if c.startswith("flatpak-spawn")]

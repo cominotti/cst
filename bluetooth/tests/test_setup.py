@@ -22,7 +22,7 @@ from typing import Final
 import unittest
 
 from bluetooth.setup.domain import senders_of, watcher_prog_state
-from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine
+from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine, SubprocessMode
 from cst_core.domain.files import OwnedState
 from bluetooth.tests.test_bluetooth import JOURNAL, OLD_WP, VENDOR
 from bluetooth.tests.test_ldac_watch import cards, pw_dump
@@ -144,7 +144,7 @@ class StoppedTest(unittest.TestCase):
         m.put(m.main_conf, GENERAL)
         m.services()
         m.put("fail-sudo-cp", "TERM")
-        r = m.run("apply", "--yes")
+        r = m.run_subprocess("apply", "--yes")
         self.assertEqual(r.returncode, 143, r.text)
         self.assertTrue(
             r.stderr.endswith(
@@ -164,11 +164,11 @@ class StepDownTest(unittest.TestCase):
             self.skipTest("needs an unprivileged user namespace (unshare -r); tier 1 test_96 runs it as root")
         m = Machine(self)
         me = pwd.getpwuid(os.getuid())
-        r = m.run(
+        r = m.run_subprocess(
             "plan",
             "--device",
             "AA:BB:CC:DD:EE:FF",
-            root=True,
+            mode=SubprocessMode.ROOT,
             env={"SUDO_USER": me.pw_name, "CST_BT_LIBWP": "/nowhere/libwp.so"},
         )
         self.assertEqual(r.returncode, 0, r.text)
@@ -1023,7 +1023,7 @@ class OwedBeforeTheWriteTest(SetupCase):
         m = self.machine()
         m.adapter(listed=False)  # it answers the wait after the restart; the checks find none
         m.put("fail-sudo-mv", "PARENT-HUP")
-        r = m.run("apply", "--yes")
+        r = m.run_subprocess("apply", "--yes")
         self.assertEqual(r.returncode, -signal.SIGHUP, r.text)
         self.wait_for_main_conf(m, keys=True)
         m.flag("fail-sudo-mv", on=False)
@@ -1040,7 +1040,7 @@ class OwedBeforeTheWriteTest(SetupCase):
         # comes right before its restarts, after the rule and the drop-in are written.
         m = self.machine(DONE)
         m.put("term-show-when", m.le_conf)
-        r = m.run("apply", "--yes")
+        r = m.run_subprocess("apply", "--yes")
         self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
         self.assertTrue(os.path.exists(m.wp_conf) and os.path.exists(m.le_conf), r.text)
         m.flag("term-show-when", on=False)
@@ -1057,7 +1057,7 @@ class OwedBeforeTheWriteTest(SetupCase):
         m.run("apply", "--yes")
         self.assertFalse(os.path.exists(m.pending))
         m.put("fail-sudo-mv", "PARENT-HUP")
-        r = m.run("revert", "--yes")
+        r = m.run_subprocess("revert", "--yes")
         self.assertEqual(r.returncode, -signal.SIGHUP, r.text)
         self.wait_for_main_conf(m, keys=False)
         m.flag("fail-sudo-mv", on=False)
@@ -1092,7 +1092,7 @@ class RevertResumesTest(SetupCase):
         m.put("bt-journal", BAP_REGISTERED)  # LE Audio on again after revert: the restart waits for it
         m.run("apply", "--yes")
         m.put("fail-sudo-systemctl", "PARENT-TERM")  # stopped at bluetoothd's restart
-        r = m.run("revert", "--yes")
+        r = m.run_subprocess("revert", "--yes")
         self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
         m.flag("fail-sudo-systemctl", on=False)
         owed = {
@@ -1530,7 +1530,7 @@ class LeAudioCommandTest(SetupCase):
     def test_without_a_settings_folder(self) -> None:
         m = self.machine(DONE)
         m.put("bt-journal", BAP_REGISTERED)
-        r = m.run("le-audio", "on", "--yes", "--no-restart", env={"CST_PROG": "cst-t"})
+        r = m.run_subprocess("le-audio", "on", "--yes", "--no-restart", env={"CST_PROG": "cst-t"})
         self.assertEqual(r.returncode, 1, r.text)  # apply's checks: no adapter on this machine
         self.assertEqual(r.stderr, "cst-t: ERROR: verification found problems (see above).\n")
         self.assertTrue(
@@ -2402,8 +2402,8 @@ class EnvironmentTest(SetupCase):
             log = os.path.join(m.state, "env-log")
             if os.path.exists(log):
                 os.unlink(log)
-            m.run("status", env=extra)
-            m.run("apply", "--no-restart", env=extra)
+            m.run_subprocess("status", env=extra)
+            m.run_subprocess("apply", "--no-restart", env=extra)
             seen: set[str] = set()
             shows: list[set[str]] = []
             for line in m.env_log().splitlines():
@@ -2433,21 +2433,21 @@ class ScratchFileTest(SetupCase):
         m = self.machine()
         env = self.scratch(m)
         for args in (("plan",), ("status",), ("revert", "--check"), ("le-audio",)):
-            r = m.run(*args, closed_stdout=True, env=env)
+            r = m.run_subprocess(*args, mode=SubprocessMode.CLOSED_STDOUT, env=env)
             self.assertEqual((r.returncode, r.stderr), (-signal.SIGPIPE, ""), args)
             self.assertEqual(os.listdir(env["TMPDIR"]), [], args)
         self.assertEqual(self.text(m.main_conf), VENDOR)
 
     def test_the_help_on_a_closed_stdout_exits_141(self) -> None:
         # The help came from sed in a pipeline: sed died by SIGPIPE, the script exited 141.
-        r = self.machine().run("help", closed_stdout=True)
+        r = self.machine().run_subprocess("help", mode=SubprocessMode.CLOSED_STDOUT)
         self.assertEqual((r.returncode, r.stderr), (141, ""))
 
     def test_sighup_ignored_at_start_stays_ignored(self) -> None:
         # As under nohup: a shell cannot trap a signal ignored on entry, so apply goes on.
         m = self.machine()
         m.put("fail-sudo-cp", "PARENT-HUP")
-        r = m.run("apply", "--yes", "--no-restart", ignore_hup=True)
+        r = m.run_subprocess("apply", "--yes", "--no-restart", mode=SubprocessMode.IGNORE_HUP)
         self.assertNotEqual(r.returncode, -signal.SIGHUP, r.text)
         self.assertIn(ISO, self.text(m.main_conf))
 
@@ -2474,7 +2474,7 @@ class ScratchFileTest(SetupCase):
         m = self.machine()
         env = self.scratch(m)
         m.put("fail-sudo-cp", "PARENT-TERM")
-        r = m.run("apply", "--yes", env=env)
+        r = m.run_subprocess("apply", "--yes", env=env)
         self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
         self.assertEqual(os.listdir(env["TMPDIR"]), [])
         self.assertEqual(self.text(m.main_conf), VENDOR)
@@ -2491,14 +2491,14 @@ class ClosedOutputTest(SetupCase):
         os.mkdir(scratch)
         env = {"TMPDIR": scratch, "CST_PROG": "cst-t"}
         for args in (("apply", "--yes"), ("revert", "--yes")):
-            r = m.run(*args, closed_stdout=True, env=env)
+            r = m.run_subprocess(*args, mode=SubprocessMode.CLOSED_STDOUT, env=env)
             self.assertEqual(r.returncode, 1, r.text)
             self.assertEqual(
                 r.stderr, "cst-t: stopped: its output was closed. Backup of main.conf: none taken. Undo: cst-t revert\n"
             )
             self.assertEqual(os.listdir(scratch), [], args)
         self.assertEqual(self.text(m.main_conf), VENDOR)
-        r = m.run("le-audio", "on", closed_stdout=True, env=env)
+        r = m.run_subprocess("le-audio", "on", mode=SubprocessMode.CLOSED_STDOUT, env=env)
         self.assertEqual((r.returncode, r.stderr), (1, "cst-t: stopped: its output was closed.\n"))
         self.assertEqual(os.listdir(scratch), [])
 
