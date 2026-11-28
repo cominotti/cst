@@ -243,6 +243,8 @@ the reclaim state and the state of `below`.
 health check makes sure you hear about it.
 
 **How:** `btrfs-health-check` reads the state of the filesystem and the disks.
+`btrfs-health-check.service` runs at low priority (`Nice=10`,
+`IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`).
 It **never changes the filesystem**. It only writes its own small state files in
 `/var/lib/btrfs-health-check` (and markers of the degraded-boot part, see
 section 8). Every number it reads and computes (counters, sizes, the
@@ -2081,8 +2083,11 @@ backup: nothing on the cache drive is in a snapshot or a backup.
     copying files, plus optional selective `nocow_paths` patterns inside a `zstd` entry for SQLite
     WAL databases).
   - When `backup = true` (the default), `apply` installs `~/.local/lib/cst/btrfs-cache-offload`
-    and user units `cst-scratchpad-backup.{service,timer}` (`daily` by default, recorded under
-    component `btrfs:offload` and refreshed by `cst sync`). Each backup run mirrors the tree to
+    and user units `cst-scratchpad-backup.{service,timer}` (`daily` by default, custom
+    `backup_on_calendar` validated with `systemd-analyze calendar` before applying, recorded under
+    component `btrfs:offload` and refreshed by `cst sync`). The service runs in
+    `background.slice` (`Slice=background.slice`) at low priority (`Nice=19`,
+    `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`). Each backup run mirrors the tree to
     `~/.local/share/cst/scratchpad-mirrors/<name>` (`rsync -a --delete` with SQLite files excluded
     first, followed by online `sqlite3 .backup()` snapshots for every matching database so live WAL
     files never mirror half-flushed). `revert` copies files back onto `/home`, replaces symlinks
@@ -2496,7 +2501,8 @@ list). It needs a terminal.
 - the settings `/etc/cst/docker-gc.conf` (root, 0644), only when it is
   missing (11.4).
 
-Both services run sandboxed: no capabilities, the whole file system read-only
+Both services run sandboxed (`docker-gc.service` also runs at low priority with
+`Nice=19`, `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`): no capabilities, the whole file system read-only
 except `/var/lib/docker-gc` (`ProtectSystem=strict` with
 `StateDirectory=docker-gc`) and, for the weekly run, `/run/docker-gc`
 (`RuntimeDirectory=docker-gc`, kept after the run so that a `cleanup-now`

@@ -42,7 +42,7 @@ from btrfs.offload.domain.plan import (
 from btrfs.offload.domain.units import OFFLOAD_SERVICE, OFFLOAD_TIMER, render_offload_service, render_offload_timer
 from cst_core.adapters.nocow import FS_NOCOW_FL
 from cst_core.adapters.runner import SubprocessCommandRunner
-from cst_core.ports import CommandResult, CommandRunnerPort, DecodeErrors, OutputMode, StdinMode
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, DecodeErrors, OutputMode, StdinMode
 
 
 class _FakeCtx:
@@ -66,10 +66,17 @@ class _FakeCtx:
 
 
 class _FakeRunner(CommandRunnerPort):
-    def __init__(self, *, findmnt_mounted: bool = False, stat_magic: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        findmnt_mounted: bool = False,
+        stat_magic: str = "",
+        calendar_result: CommandResult | None = None,
+    ) -> None:
         self.calls: list[list[str]] = []
         self._findmnt_mounted = findmnt_mounted
         self._stat_magic = stat_magic
+        self._calendar_result = calendar_result
 
     @override
     def run(
@@ -96,21 +103,23 @@ class _FakeRunner(CommandRunnerPort):
         del check, timeout, input_text, env, unset, base_env, cwd, locale_c
         del new_session, on_host, stdin, output, decode_errors, nice, pass_fds, on_line
         self.calls.append(list(argv))
+        result = CommandResult(0, "", "", argv=tuple(argv))
         if argv and argv[:3] == ["stat", "-f", "-c"] and self._stat_magic:
-            return CommandResult(0, f"{self._stat_magic}\n", "", argv=tuple(argv))
-        if argv and argv[0] == "findmnt" and self._findmnt_mounted:
+            result = CommandResult(0, f"{self._stat_magic}\n", "", argv=tuple(argv))
+        elif argv and argv[0] == "findmnt" and self._findmnt_mounted:
             target = argv[-1]
             payload = {
                 "filesystems": [{"target": target, "fstype": "btrfs", "source": "/dev/mapper/cache[/scratchpad]"}]
             }
-            return CommandResult(0, json.dumps(payload), "", argv=tuple(argv))
-        if argv and argv[0] == "systemctl":
+            result = CommandResult(0, json.dumps(payload), "", argv=tuple(argv))
+        elif argv and argv[0] == "systemd-analyze" and self._calendar_result is not None:
+            result = self._calendar_result
+        elif argv and argv[0] == "systemctl":
             if "is-active" in argv:
-                return CommandResult(3, "inactive\n", "", argv=tuple(argv))
-            if "is-enabled" in argv:
-                return CommandResult(1, "disabled\n", "", argv=tuple(argv))
-            return CommandResult(0, "", "", argv=tuple(argv))
-        return CommandResult(0, "", "", argv=tuple(argv))
+                result = CommandResult(3, "inactive\n", "", argv=tuple(argv))
+            elif "is-enabled" in argv:
+                result = CommandResult(1, "disabled\n", "", argv=tuple(argv))
+        return result
 
 
 class _FakeHost:
@@ -254,11 +263,12 @@ class _FakeHost:
 
 
 class _FakeUnits:
-    def __init__(self, *, unit_err: str | None = None) -> None:
+    def __init__(self, *, unit_err: str | None = None, calendar_err: str | None = None) -> None:
         self.reloads = 0
         self.enabled = False
         self.disabled = False
         self.unit_err = unit_err
+        self.calendar_err = calendar_err
 
     def unit_dir(self, home: str) -> str:
         return os.path.join(home, ".config/systemd/user")
@@ -266,6 +276,10 @@ class _FakeUnits:
     def probe_units(self, home: str) -> tuple[str, str, bool, bool]:
         del home
         return ("active" if self.enabled else "inactive", "enabled" if self.enabled else "disabled", False, False)
+
+    def validate_calendar(self, on_calendar: str) -> str | None:
+        del on_calendar
+        return self.calendar_err
 
     def enable_backup_timer(self) -> str | None:
         if self.unit_err is not None:
@@ -379,9 +393,12 @@ backup = false
         self.assertTrue(parse_offload_args(["init", "--force"]).force)
         self.assertIsNone(parse_offload_args(["apply", "--no-backup-timer"]).error)
         self.assertIsNotNone(parse_offload_args(["status", "--force"]).error)
-        self.assertIn("backup", render_offload_service())
+        svc_text = render_offload_service()
+        self.assertIn("backup", svc_text)
+        for directive in ("Slice=background.slice", "Nice=19", "IOSchedulingClass=idle", "CPUWeight=20", "IOWeight=20"):
+            self.assertIn(directive + "\n", svc_text)
         self.assertIn("Persistent=true", render_offload_timer("daily"))
-        self.assertIn(OFFLOAD_SERVICE, render_offload_service() + OFFLOAD_SERVICE)
+        self.assertIn(OFFLOAD_SERVICE, svc_text + OFFLOAD_SERVICE)
         self.assertIn("cst-scratchpad-backup.timer", render_offload_timer("daily") + OFFLOAD_TIMER)
         self.assertIn("apply", format_offload_usage("cst btrfs cache offload"))
 
@@ -764,6 +781,57 @@ class OffloadAdapterAndWiringTests(unittest.TestCase):
                 probe_btrfs = btrfs_host.probe_entry(tmp, entry)
                 self.assertFalse(probe_btrfs.scratchpad.nocow_enabled)
                 self.assertTrue(probe_btrfs.nocow_paths_missing)
+
+    def test_custom_backup_on_calendar_validated_with_systemd_analyze(self) -> None:
+        bad_runner = _FakeRunner(
+            calendar_result=CommandResult(
+                1, "Failed to parse calendar specification 'bogus': Invalid argument\n", "", argv=("systemd-analyze",)
+            )
+        )
+        usd = adapters.OffloadUserSystemd(
+            lambda: adapters.SystemctlAdapter(bad_runner),
+            runner=bad_runner,
+            which=lambda _name: "/usr/bin/systemd-analyze",
+        )
+        err = usd.validate_calendar("bogus")
+        self.assertIsNotNone(err)
+        self.assertIn("invalid backup_on_calendar 'bogus'", err or "")
+        self.assertEqual(bad_runner.calls[-1], ["systemd-analyze", "calendar", "--", "bogus"])
+
+        missing_runner = _FakeRunner(
+            calendar_result=CommandResult(127, "", "not found", argv=("systemd-analyze",), fault=CommandFault.MISSING)
+        )
+        usd_missing = adapters.OffloadUserSystemd(
+            lambda: adapters.SystemctlAdapter(missing_runner),
+            runner=missing_runner,
+            which=lambda _name: None,
+        )
+        self.assertIsNone(usd_missing.validate_calendar("bogus"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home/tester")
+            cfg_path = os.path.join(home, ".config/cst/scratchpad-offload.toml")
+            host = _FakeHost(home)
+            host.files[cfg_path] = (
+                'version = 1\nbackup_on_calendar = "bogus"\n'
+                '[entries.gemini]\nsource = ".gemini"\nscratchpad_subpath = "offload/gemini"\n'
+            )
+            host.dirs.add(os.path.join(home, ".gemini"))
+            svc = OffloadService(
+                host=host,
+                units=_FakeUnits(calendar_err="invalid backup_on_calendar 'bogus': Invalid argument"),
+                installer=_FakeInstaller(),
+            )
+            plan_rc, plan_lines = svc.run(parse_offload_args(["plan", "--config", cfg_path]))
+            apply_rc, apply_lines = svc.run(parse_offload_args(["apply", "--config", cfg_path]))
+            refresh_rc, refresh_lines = svc.run(parse_offload_args(["refresh", "--config", cfg_path]))
+            self.assertEqual(plan_rc, 1)
+            self.assertIn("invalid backup_on_calendar", "\n".join(plan_lines))
+            self.assertEqual(apply_rc, 1)
+            self.assertIn("invalid backup_on_calendar", "\n".join(apply_lines))
+            self.assertEqual(host.applied, [])
+            self.assertEqual(refresh_rc, 1)
+            self.assertIn("invalid backup_on_calendar", "\n".join(refresh_lines))
 
 
 if __name__ == "__main__":

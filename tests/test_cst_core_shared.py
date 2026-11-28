@@ -105,7 +105,12 @@ from cst_core.domain.text import (
     strip_mount_blanks,
     unescape_mount_field,
 )
-from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
+from cst_core.domain.units import (
+    masked_refusal,
+    render_timer,
+    render_unit_file,
+    render_user_background_service,
+)
 from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from tests.probes import assert_replaced_durably, open_fds, recorded_fsyncs, time_bound
@@ -272,6 +277,33 @@ class DomainTest(unittest.TestCase):
             "WantedBy=timers.target\n"
         )
         self.assertEqual(vm_domain.render_timer(), before)
+
+    def test_render_user_background_service_sets_slice_and_weights(self) -> None:
+        text = render_user_background_service(
+            ["# head"],
+            "CST: background job",
+            ("%h/.local/lib/cst/prog",),
+            "/usr/bin/python3 -I %h/.local/lib/cst/prog run",
+            "cst-job",
+        )
+        self.assertEqual(
+            text,
+            "# head\n"
+            "[Unit]\n"
+            "Description=CST: background job\n"
+            "ConditionPathExists=%h/.local/lib/cst/prog\n\n"
+            "[Service]\n"
+            "Type=oneshot\n"
+            "Slice=background.slice\n"
+            "ExecStart=/usr/bin/python3 -I %h/.local/lib/cst/prog run\n"
+            "SyslogIdentifier=cst-job\n"
+            "Nice=19\n"
+            "IOSchedulingClass=idle\n"
+            "CPUWeight=20\n"
+            "IOWeight=20\n"
+            "TimeoutStartSec=30min\n"
+            "NoNewPrivileges=yes\n",
+        )
 
 
 class AdaptersTest(unittest.TestCase):

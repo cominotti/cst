@@ -887,10 +887,14 @@ The lines carry the program's name (`SyslogIdentifier=cst-toolchains`), so
 older CST shows as `change` in `status`; `auto on` rewrites it.
 
 The timer starts at a random moment in each hour (up to 10 minutes late) and
-the run has the lowest CPU priority (`Nice=19`) and the idle IO class
-(`IOSchedulingClass=idle`), so it does not get in the way of builds or games.
+the run places `cst-toolchains-prune.service` in `background.slice`
+(`Slice=background.slice`) with the lowest CPU priority (`Nice=19`), the idle
+IO class (`IOSchedulingClass=idle`), and low cgroup v2 weights (`CPUWeight=20`,
+`IOWeight=20`), so it does not get in the way of builds or games.
 The IO class only works with the BFQ or Kyber IO schedulers; these NVMe disks
-use `none`, so here only the CPU priority is lower (see
+use `none`, so here the CPU priority and cgroup weights (`CPUWeight=20`, and
+`IOWeight=20` when `blk-iocost` is active via `cst btrfs iocost`) arbitrate the
+background load (see
 [cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
 
 **Each run has a time budget of 25 minutes**; systemd stops the service

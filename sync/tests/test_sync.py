@@ -409,6 +409,19 @@ class PlanAndApplyTest(unittest.TestCase):
         adapter = HostSyncInspectAdapter(repo_entry)
         self.assertIsNotNone(adapter.desired_manifest_sha256("btrfs/docker-gc", None))
 
+        # Generated user background services include background.slice + low cgroup weights.
+        for dest, comp in (
+            ("/home/tester/.config/systemd/user/cst-toolchains-prune.service", "toolchains:auto"),
+            ("/home/tester/.config/systemd/user/cst-scratchpad-backup.service", "btrfs:offload"),
+        ):
+            rec_file = RecordedFile(None, comp, GeneratedKind.TEXT, "0" * 64, 0o644, Owner.USER, None)
+            svc_bytes = desired_generated_bytes(dest, rec_file)
+            self.assertIsNotNone(svc_bytes)
+            assert svc_bytes is not None
+            svc_text = svc_bytes.decode("utf-8")
+            for line in ("Slice=background.slice", "CPUWeight=20", "IOWeight=20"):
+                self.assertIn(line + "\n", svc_text, dest)
+
     def test_alerts_modified_holds_back_snapshots_refresh(self) -> None:
         snap = "/usr/local/sbin/btrfs-snapshot"
         notify = "/usr/local/sbin/btrfs-notify"

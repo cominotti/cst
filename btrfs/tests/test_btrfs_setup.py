@@ -1284,7 +1284,7 @@ class DockerGcUnitsTest(unittest.TestCase):
         # The block is written out in each unit (systemd has no include): a setting added to
         # one only shows here. What differs is the job, and the weekly run's lock folder.
         own = {"Type", "ExecCondition", "ExecStart", "Restart", "RestartSec", "RestartPreventExitStatus", "Nice"}
-        own |= {"IOSchedulingClass"}
+        own |= {"IOSchedulingClass", "CPUWeight", "IOWeight"}
         own |= {"TimeoutStartSec", "Environment", "RuntimeDirectory", "RuntimeDirectoryPreserve"}
         recorder, weekly = ({k: v for k, v in self.service(name).items() if k not in own} for name in self.UNITS)
         self.assertEqual(recorder, weekly)
@@ -1328,6 +1328,24 @@ class DockerGcUnitsTest(unittest.TestCase):
         gc = self.service("docker-gc.service")
         self.assertEqual((gc.get("RuntimeDirectory"), gc.get("RuntimeDirectoryPreserve")), (["docker-gc"], ["yes"]))
         self.assertNotIn("RuntimeDirectory", self.service("docker-gc-recorder.service"))
+
+
+class MaintenanceUnitWeightsTest(unittest.TestCase):
+    """System maintenance units run at low cgroup v2 CPU and IO weights."""
+
+    UNITS = (
+        "btrfs-snapshot-nas.service",
+        "btrfs-snapshot.service",
+        "docker-gc.service",
+        "btrfs-health-check.service",
+    )
+
+    def test_maintenance_units_set_low_cpu_and_io_weights(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                lines = service_lines(name)
+                self.assertIn("CPUWeight=20", lines)
+                self.assertIn("IOWeight=20", lines)
 
 
 SCRUB_CASES: list[tuple[str, str | None]] = [

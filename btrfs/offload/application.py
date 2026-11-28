@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import posixpath
 from typing import TYPE_CHECKING
 
 from btrfs.offload.domain import (
     OFFLOAD_CONF_REL,
+    OFFLOAD_DEFAULT_CALENDAR,
     OFFLOAD_LOCK_REL,
     OFFLOAD_STATE_REL,
     OffloadAction,
@@ -85,6 +86,11 @@ class OffloadService:
         cfg_err: str | None = None
         if raw_cfg is not None:
             cfg = parse_offload_config(raw_cfg, cfg_file)
+            if (
+                cfg.backup_on_calendar != OFFLOAD_DEFAULT_CALENDAR
+                and (cal_err := self.units.validate_calendar(cfg.backup_on_calendar)) is not None
+            ):
+                cfg = replace(cfg, problems=(*cfg.problems, cal_err))
             cfg_err = "; ".join(cfg.problems) if cfg.problems else None
         elif self.host.path_exists(cfg_file):
             cfg_err = f"{cfg_file}: exists but could not be read as regular UTF-8 text"

@@ -577,8 +577,11 @@ class AutoTest(Scratch):
             self.assertIn(line, timer)
         for line in (
             "Type=oneshot",
+            "Slice=background.slice",
             "Nice=19",
             "IOSchedulingClass=idle",
+            "CPUWeight=20",
+            "IOWeight=20",
             "NoNewPrivileges=yes",
             "ExecStart=/usr/bin/python3 -I %h/.local/lib/cst/cst-toolchains prune apply",
             "SyslogIdentifier=cst-toolchains",
@@ -1812,10 +1815,13 @@ class UnitPathAutoTest(Scratch):
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "Slice=background.slice\n"
         "ExecStart=/usr/bin/python3 -I %h/.local/lib/cst/cst-toolchains prune apply\n"
         "SyslogIdentifier=cst-toolchains\n"
         "Nice=19\n"
         "IOSchedulingClass=idle\n"
+        "CPUWeight=20\n"
+        "IOWeight=20\n"
         "TimeoutStartSec=30min\n"
         "NoNewPrivileges=yes\n"
     )

@@ -1009,9 +1009,12 @@ cst btrfs snapshots clean-targets --apply   # delete
 - `btrfs-snapshot.timer` starts `btrfs-snapshot.service` **every hour**
   (with a random delay up to 5 minutes). If the computer was off or asleep,
   the missed run happens soon after it is on again.
-- It runs at the lowest CPU priority and in the idle IO class. That class only
-  works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`, so only
-  the CPU priority is lower here (see
+- It runs at the lowest CPU priority (`Nice=19`), in the idle IO class
+  (`IOSchedulingClass=idle`), and with low cgroup v2 weights (`CPUWeight=20`,
+  `IOWeight=20`). That IO class only works with the BFQ or Kyber IO schedulers;
+  these NVMe disks use `none`, so here the CPU priority and cgroup weights
+  (`CPUWeight=20`, and `IOWeight=20` when `blk-iocost` is enabled via `cst btrfs
+  iocost`) keep background snapshots out of the way (see
   [cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
 - A snapshot is taken **only if something changed** since the newest snapshot.
   btrfs counts changes with a number called the *generation*; the program
@@ -1340,7 +1343,8 @@ Rules the script follows about the password:
 ### What it does every day
 
 `btrfs-snapshot-nas.timer` starts `btrfs-snapshot-nas.service` once a day
-(random delay up to 1 hour; a missed day runs after the next start). One run:
+(random delay up to 1 hour; a missed day runs after the next start), at low
+priority (`Nice=19`, `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`). One run:
 
 1. Checks the NAS is reachable. If not, it skips the run. You get an alert
    only when the last good backup is `NAS_STALE_DAYS` (7) days old or more.

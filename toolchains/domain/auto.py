@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-from cst_core.domain.units import ActiveState, render_timer as unit_timer, render_unit_file
+from cst_core.domain.units import (
+    ActiveState,
+    render_timer as unit_timer,
+    render_user_background_service,
+)
 from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TIMER, UNIT_DIR_REL, tilde
 
 
@@ -43,35 +47,17 @@ class UserManagerVerb(StrEnum):
 
 
 def render_service() -> str:
-    return render_unit_file(
+    return render_user_background_service(
         [
             UNIT_HEADER,
             "# Prunes the toolchain caches enabled in ~/.config/cst/toolchains.conf",
             "# (cargo's build folders in ~/.cache/cargo-build, ...). Why and how:",
             "# toolchains/README.md in CST.",
         ],
-        [
-            (
-                "Unit",
-                [
-                    "Description=CST: prune old toolchain caches (cst toolchains)",
-                    f"ConditionPathExists=%h/{PROG_REL}",
-                    f"ConditionPathExists=%h/{DEFAULTS_REL}",
-                ],
-            ),
-            (
-                "Service",
-                [
-                    "Type=oneshot",
-                    f"ExecStart=/usr/bin/python3 -I %h/{PROG_REL} prune apply",
-                    "SyslogIdentifier=cst-toolchains",
-                    "Nice=19",
-                    "IOSchedulingClass=idle",
-                    "TimeoutStartSec=30min",
-                    "NoNewPrivileges=yes",
-                ],
-            ),
-        ],
+        "CST: prune old toolchain caches (cst toolchains)",
+        (f"%h/{PROG_REL}", f"%h/{DEFAULTS_REL}"),
+        f"/usr/bin/python3 -I %h/{PROG_REL} prune apply",
+        "cst-toolchains",
     )
 
 

@@ -3857,6 +3857,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         self.assertIn("btrfs-snapshot.service", names)
         self.assertIn("cst-vm-backup@e2e.service", names)
         self.assertIn("user-check-cst-bt-ldac48.service", names)
+        self.assertIn("user-check-cst-scratchpad-backup.service", names)
+        self.assertIn("user-check-cst-scratchpad-backup.timer", names)
+        self.assertIn(r"var-home-tester-.cache-cargo\x2dbuild\x2dtmpfs.mount", names)
         verify = f"systemd-analyze verify --man=no --recursive-errors=no --root={stage} "
         v = exec_bash(c, verify + " ".join(shlex.quote(n) for n in names), check=False)
         self.assertEqual((v.returncode, v.stdout + v.stderr), (0, ""))

@@ -119,6 +119,8 @@ class UnitContractTest(unittest.TestCase):
         for name in (
             "btrfs-snapshot.service",
             "cst-vm-backup@.service",
+            "cst-scratchpad-backup.service",
+            r"var-home-tester-.cache-cargo\x2dbuild\x2dtmpfs.mount",
             "cst-bt-ldac48.service",
             "btrfs-scrub-weekly.service.d/10-cst-limit.conf",
             "below.service.d/10-cst.conf",

@@ -139,6 +139,37 @@ def render_timer(
     )
 
 
+def render_user_background_service(
+    header: Sequence[str],
+    description: str,
+    condition_paths: Sequence[str],
+    exec_start: str,
+    syslog_identifier: str,
+) -> str:
+    """A oneshot user background service in `background.slice` with low CPU and IO priority."""
+    return render_unit_file(
+        header,
+        [
+            ("Unit", [f"Description={description}", *(f"ConditionPathExists={p}" for p in condition_paths)]),
+            (
+                "Service",
+                [
+                    "Type=oneshot",
+                    "Slice=background.slice",
+                    f"ExecStart={exec_start}",
+                    f"SyslogIdentifier={syslog_identifier}",
+                    "Nice=19",
+                    "IOSchedulingClass=idle",
+                    "CPUWeight=20",
+                    "IOWeight=20",
+                    "TimeoutStartSec=30min",
+                    "NoNewPrivileges=yes",
+                ],
+            ),
+        ],
+    )
+
+
 def masked_refusal(paths: Sequence[str], *, user: bool) -> str | None:
     """Why a command that would write or enable these unit files refuses: each
     one is masked (`systemctl mask`: a link to /dev/null). None when the list is
