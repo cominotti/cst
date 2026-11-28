@@ -112,16 +112,17 @@ INSTALLER_REDIRECT: Final = """_cst_installer_as() {
     /usr/bin/python3 -I -B "${CST_INSTALLER}" "${command}" --home "${FAKE}/home" "$@"
 }"""
 REPOINTED: Final = frozenset(re.findall(r"^([A-Z_]+)=", REPOINT, re.MULTILINE))
-# sha256 of the generated files as the previous version of the script
-# wrote them (main at a2cbb82, the version installed today): an install of
-# it must stay current.
+# sha256 of the initramfs-tracked files as the previous version of the script
+# wrote them (main at a2cbb82): an install of them must stay current so no
+# initramfs rebuild is triggered. PREVIOUS_RECORD_SHA256 is the unhardened
+# real-root record unit from a2cbb82 (upgraded without touching initramfs-etc).
 PREVIOUS_SHA256: Final = {
     RULE: "c8ab30283943b551730c0db39ae57db398e158b22a52f1a846bb0fcc1470b3b1",
     SERVICE: "1dd1f77006551c98cda6826ca1d25f5ca6c60e3cad9b5bb0f0446f7a60fb8458",
     TIMER: "75e29b95cd064f890be79c86cfabef7430b3ffd92ccc9c2d56c91b254917eda3",
     HELPER: "6e8ccfcad2636e1ddff768cce0427b058bfa7e1bea6b1a1aae1a15ec2c70f891",
-    RECORD: "ed372e03b49cf9e731b29edb8f3fde89ee74868f43923cf8cd095585748142b5",
 }
+PREVIOUS_RECORD_SHA256: Final = "ed372e03b49cf9e731b29edb8f3fde89ee74868f43923cf8cd095585748142b5"
 # Settings of the prelude that name no file.
 NOT_PATHS: Final = frozenset({"RECORD_UNIT", "OURS_MARK"})
 
@@ -219,6 +220,27 @@ RequiresMountsFor=/var/lib/btrfs-degraded-boot
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/bash /etc/btrfs-degraded-boot/btrfs-last-resort --record
+StateDirectory=btrfs-degraded-boot
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=none
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target
@@ -809,6 +831,15 @@ echo "[$ov] $rc"
                 self.assertEqual(self.read("root" + dest), text)
                 self.assertEqual(os.stat(self.at(dest)).st_mode & 0o7777, mode)
         self.assertIn("udevadm verify --resolve-names=never --no-style", "\n".join(self.calls()))
+        for directive in (
+            "StateDirectory=btrfs-degraded-boot",
+            "ProtectSystem=strict",
+            "ProtectKernelTunables=yes",
+            "ProtectControlGroups=yes",
+            "RestrictAddressFamilies=none",
+            "SystemCallFilter=@system-service",
+        ):
+            self.assertIn(directive, self.read("root" + RECORD))
 
     def test_generated_helper_is_executable_bash(self) -> None:
         self.install()
@@ -1361,6 +1392,17 @@ status() {{ echo STATUS; }}
                 self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", r.stdout)
                 self.assertEqual([c for c in self.mutating_calls() if c.startswith("rpm-ostree ")], [])
                 self.assertEqual(self.tree(), before)
+
+        # Upgrading from an unhardened record unit rewrites only RECORD, without touching initramfs-etc.
+        old_record = EXPECTED_RECORD.split("StateDirectory=")[0] + "\n[Install]\nWantedBy=multi-user.target\n"
+        self.assertEqual(hashlib.sha256(old_record.encode("utf-8")).hexdigest(), PREVIOUS_RECORD_SHA256)
+        self.put("root" + RECORD, old_record)
+        r = self.install_path(plan=False, overlay=overlay)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"written:   {self.at(RECORD)}\n", r.stdout)
+        self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", r.stdout)
+        self.assertEqual([c for c in self.mutating_calls() if c.startswith("rpm-ostree ")], [])
+        self.assertEqual(self.read("root" + RECORD), EXPECTED_RECORD)
 
     # ------------------------------------------------------------- status --
     def status(self, *, overlay: str | None = "") -> str:

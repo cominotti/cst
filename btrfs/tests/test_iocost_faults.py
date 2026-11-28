@@ -37,7 +37,7 @@ import os
 import unittest
 from typing import override
 
-from btrfs.tests.fakes import FakeManagedDevices, IocostWorld
+from btrfs.tests.fakes import IOCOST_ENTRIES, FakeManagedDevices, IocostWorld
 from cst_core.domain.values import ExitAndLines
 from tests.fault_injection import Fault, FaultMode, Killed, cut_points, every_fault
 
@@ -68,7 +68,7 @@ class IocostApplyFaultTest(unittest.TestCase):
         w = self.world
         unit = w.file(w.unit_path)
         if w.state() == "done":
-            self.assertEqual(len(w.in_place()), 3, f"{when}: done, files not installed")
+            self.assertEqual(len(w.in_place()), len(IOCOST_ENTRIES), f"{when}: done, files not installed")
             self.assertTrue(
                 unit is not None and w.systemd.loaded == unit, f"{when}: done, systemd not reloaded after the install"
             )

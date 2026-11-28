@@ -248,9 +248,10 @@ Rules:
 | `~/.local/bin/cst` | Link to the `cst` of the CST folder, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
 | `/etc/systemd/system/cpu-game.service` | Runs `cpu-game-profile on` when started, `off` when stopped. |
 | `/etc/systemd/system/cpu-game-watchdog.service` + `.timer` | Watchdog, every 30 s (first run 2 min after boot). Enabled and started. |
-| `/etc/systemd/system/cst-cpu-power.service` | Applies baseline GPU runtime PM and CPU C-state limits at boot (`cpu-power apply`). Enabled, and restarted by each `install`: it applies them now too, also when the unit already ran (states turned back on since, or a changed `CPU_CSTATE_MAX_LATENCY_US`). When that `cpu-power apply` fails (for example its run lock still held by the game profile after 60 s), `install` stops with systemctl's exit status before it marks `cpu:core`, `cpu:toolbox` and `cpu:gamemode` done, also on a second run; `systemctl status cst-cpu-power.service` shows why. Run `install` again once the cause is gone. |
+| `/etc/systemd/system/cst-cpu-power.service` | Applies baseline GPU runtime PM and CPU C-state limits at boot (`cpu-power apply`), sandboxed with `ProtectSystem=strict`, `ReadWritePaths=-/sys/devices`, and `RuntimeDirectory=cpu-setup` (`RuntimeDirectoryPreserve=yes`). Enabled, and restarted by each `install`: it applies them now too, also when the unit already ran (states turned back on since, or a changed `CPU_CSTATE_MAX_LATENCY_US`). When that `cpu-power apply` fails (for example its run lock still held by the game profile after 60 s), `install` stops with systemctl's exit status before it marks `cpu:core`, `cpu:toolbox` and `cpu:gamemode` done, also on a second run; `systemctl status cst-cpu-power.service` shows why. Run `install` again once the cause is gone. |
+| `/etc/systemd/system/cst-cpu-power-gpu.service` | Re-applies connected display GPU runtime PM (`cpu-power apply --gpu-only`) under the same systemd sandbox when triggered by `65-cst-gpu-pm.rules` via `SYSTEMD_WANTS`. |
 | `/etc/cpu-setup/irqbalance.env`, `/etc/systemd/system/irqbalance.service.d/10-cst-ban.conf` | Managed by `cst cpu irq apply` (component `cpu:irq`): sets `IRQBALANCE_BANNED_CPULIST` from `BUILD_CPUS` & online CPUs. |
-| `/etc/udev/rules.d/65-cst-gpu-pm.rules` | Re-runs `cpu-power apply --gpu-only` on DRM card `add`/`change` (monitor hotplug). |
+| `/etc/udev/rules.d/65-cst-gpu-pm.rules` | Triggers `cst-cpu-power-gpu.service` via `TAG+="systemd"`, `ENV{SYSTEMD_WANTS}+=...` on DRM card `add`/`change` (monitor hotplug). |
 | `/etc/systemd/system/machine.slice.d/10-cpu-setup.conf` | VM baseline weights `CPUWeight=50`, `IOWeight=50`. |
 | `/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf` | `Delegate=cpuset` for user managers (6.3). |
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
@@ -1927,7 +1928,7 @@ this is harmless.
 | `gamemode.ini` | `~/.config/gamemode.ini` |
 | `cpu-game.rules.in` | polkit rule (`@USER@` replaced by your user) |
 | `udev/65-cst-gpu-pm.rules` | `/etc/udev/rules.d/65-cst-gpu-pm.rules` (hotplug GPU runtime PM) |
-| `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer`, `units/cst-cpu-power.service` | `/etc/systemd/system/` |
+| `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer`, `units/cst-cpu-power.service`, `units/cst-cpu-power-gpu.service` | `/etc/systemd/system/` |
 | `units/machine.slice.d-10-cpu-setup.conf` | `machine.slice.d/10-cpu-setup.conf` |
 | `units/user@.service.d-50-cpu-setup-cpuset.conf` | `user@.service.d/50-cpu-setup-cpuset.conf` |
 | `units/builds.slice` | `/etc/systemd/system/builds.slice` (by `docker-slice install`: `CPUWeight=20`, `IOWeight=20`, no `AllowedCPUs`) |

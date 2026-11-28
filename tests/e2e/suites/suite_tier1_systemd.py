@@ -3780,27 +3780,38 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
     # generates, on its 0-100 scale (--threshold takes it so: 25 = 2.5). Only
     # goes down: a hardened unit lowers its line in the same change.
     SECURITY_CEILINGS: ClassVar[dict[str, int]] = {
+        # Mount-namespace services (host /home, /var/mnt/btrfs-top, /var/lib/libvirt, or /var/lib/btrfs-bulk).
         "btrfs-bulk-boot.service": 94,
-        "btrfs-degraded-boot-record.service": 94,
+        "btrfs-degraded-boot-record.service": 16,
+        # Reads host /sys/fs/btrfs, /dev, nvme SMART, and delivers alerts via btrfs-notify (runuser/D-Bus).
         "btrfs-health-check.service": 94,
+        # Initramfs service: runs in initrd before switch-root (/dev, /run, /lib/dracut, plymouth, systemctl).
         "btrfs-last-resort@e2e.service": 94,
+        # Mount-namespace / btrfs scrub across /var and /var/mnt/cache plus btrfs-notify alerts.
         "btrfs-scrub-weekly.service": 94,
         "btrfs-snapshot-nas.service": 94,
         "btrfs-snapshot.service": 94,
+        # runuser/PAM desktop D-Bus notification delivery via btrfs-notify.
         "btrfs-stall-alert.service": 94,
         "btrfs-stall-monitor.service": 25,
         "btrfs-subvol-convert.service": 94,
+        # Cgroup-mutating game profile & watchdog (system/user systemctl set-property, /sys/fs/cgroup, /sys/devices).
         "cpu-game.service": 94,
         "cpu-game-watchdog.service": 94,
-        "cst-btrfs-iocost.service": 68,
-        "cst-cpu-power.service": 94,
+        "cst-btrfs-iocost.service": 19,
+        "cst-btrfs-iocost@e2e.service": 19,
+        "cst-cpu-power.service": 17,
+        "cst-cpu-power-gpu.service": 17,
+        # Mount-namespace user-home browser profile sync (psd).
         "cst-desktop-psd-resync@e2e.service": 94,
         "cst-desktop-psd@e2e.service": 94,
+        # Libvirt VM backup / NAS SFTP (/var/lib/libvirt, /root/.ssh).
         "cst-vm-backup@e2e.service": 94,
         # 23, not 21: no NoNewPrivileges= (it blocks the SELinux move into the
         # Docker domain on Fedora; see btrfs/README.md and test_unit_contract).
         "docker-gc-recorder.service": 23,
         "docker-gc.service": 23,
+        # Host-wide /var/lib/docker NOCOW migration and btrfs-notify alerts.
         "docker-volumes-nocow.service": 94,
     }
 
@@ -5066,6 +5077,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             {installer} install --set USER=tester --component cpu:core >/dev/null
             {installer} srcs --component cpu:core | grep -qxF "cpu/cpu-power"
             {installer} srcs --component cpu:core | grep -qxF "cpu/units/cst-cpu-power.service"
+            {installer} srcs --component cpu:core | grep -qxF "cpu/units/cst-cpu-power-gpu.service"
             {installer} srcs --component cpu:core | grep -qxF "cpu/udev/65-cst-gpu-pm.rules"
             udevadm verify --resolve-names=never --no-style \\
                 /etc/udev/rules.d/65-cst-gpu-pm.rules \\
@@ -5204,7 +5216,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ "$({record})" == *" done" ]]
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "unchanged:     component btrfs:iocost (active, enabled)"
             /usr/local/sbin/btrfs-iocost revert
-            [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && ! -e /etc/udev/rules.d/91-cst-iocost.rules ]]
+            [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && ! -e /etc/systemd/system/cst-btrfs-iocost@.service && ! -e /etc/udev/rules.d/91-cst-iocost.rules ]]
             [[ ! -e /usr/local/sbin/btrfs-iocost && ! -e /run/btrfs-setup/iocost-managed ]]
             [[ "$({record})" == "- -" ]]
             /opt/cst-rw/cst btrfs iocost revert
@@ -7528,7 +7540,7 @@ PY
 ' ' ')
             # The game profile becomes a zipapp; cpu-watch, cpu-irq, cpu-power, cpu-vm-pin, new unit/udev rule,
             # and both user drop-ins upgraded to baseline CPUWeight=20 IOWeight=20 without AllowedCPUs.
-            [[ "$written" == "/etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
+            [[ "$written" == "/etc/systemd/system/cst-cpu-power-gpu.service /etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
                 || {{ echo "written over the previous version's install: $written" >&2; cat /tmp/e2e-84-new.txt >&2; exit 1; }}
             grep -q '^game profile: off' <<<"$(/usr/bin/python3 -I /usr/local/sbin/cpu-game-profile state)"  # no pipe: grep -q would cut it
             grep -q 'unchanged: /etc/systemd/system/cpu-game.service' /tmp/e2e-84-new.txt
@@ -7605,7 +7617,7 @@ PY
             fi
             # uninstall, twice.
             as_root /opt/cst-rw/cst cpu uninstall
-            for f in /etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service /etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
+            for f in /etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service /etc/systemd/system/cst-cpu-power.service /etc/systemd/system/cst-cpu-power-gpu.service /etc/udev/rules.d/65-cst-gpu-pm.rules /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
                 [[ ! -e "$f" ]] || {{ echo "uninstall left $f" >&2; exit 1; }}
             done
             if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi
@@ -16989,3 +17001,97 @@ CONF
             """,
         ).stdout
         self.assertIn("E2E-292-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.CPU, E2ETag.INSTALL)
+    def test_293_udev_rules_and_hardened_services_run(self) -> None:
+        """`91-cst-iocost.rules` and `65-cst-gpu-pm.rules` pass `udevadm verify` with
+        `SYSTEMD_WANTS` (no `RUN+=`), and `cst-cpu-power.service`,
+        `cst-cpu-power-gpu.service`, `cst-btrfs-iocost.service`,
+        `cst-btrfs-iocost@nonexistent0.service`, and `btrfs-degraded-boot-record.service`
+        actually run cleanly inside the systemd container under their sandboxes."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(
+            c,
+            "[[ ! -e /etc/systemd/system/cst-cpu-power.service ]] && [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service ]] "
+            "&& [[ ! -e /etc/systemd/system/btrfs-degraded-boot-record.service ]] || echo busy",
+        ).stdout.strip():
+            self.skipTest("target services already exist on container (another test's)")
+        uuid = DEGRADED_BOOT_UUID
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"systemctl disable --now cst-cpu-power.service cst-btrfs-iocost.service 2>/dev/null || true; "
+            f"systemctl stop cst-cpu-power-gpu.service cst-btrfs-iocost@nonexistent0.service btrfs-degraded-boot-record.service 2>/dev/null || true; "
+            f"/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1 || true; "
+            f"{installer} remove --component cpu:core >/dev/null 2>&1 || true; "
+            f"rm -rf /etc/btrfs-degraded-boot /etc/systemd/system/btrfs-degraded-boot-record.service "
+            f"/run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot /run/cpu-setup /run/btrfs-setup; "
+            f"systemctl reset-failed cst-cpu-power.service cst-cpu-power-gpu.service cst-btrfs-iocost.service "
+            f"cst-btrfs-iocost@nonexistent0.service btrfs-degraded-boot-record.service 2>/dev/null || true; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            trap 'echo "e2e-293 failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            udevadm verify --resolve-names=never --no-style \\
+                /opt/cst-rw/btrfs/udev/91-cst-iocost.rules \\
+                /opt/cst-rw/cpu/udev/65-cst-gpu-pm.rules
+            grep -qF 'TAG+="systemd"' /opt/cst-rw/btrfs/udev/91-cst-iocost.rules
+            grep -qF 'ENV{{SYSTEMD_WANTS}}+="cst-btrfs-iocost@%k.service"' /opt/cst-rw/btrfs/udev/91-cst-iocost.rules
+            if grep -qF 'RUN+=' /opt/cst-rw/btrfs/udev/91-cst-iocost.rules; then echo "unexpected RUN+=" >&2; exit 1; fi
+            grep -qF 'TAG+="systemd"' /opt/cst-rw/cpu/udev/65-cst-gpu-pm.rules
+            grep -qF 'ENV{{SYSTEMD_WANTS}}+="cst-cpu-power-gpu.service"' /opt/cst-rw/cpu/udev/65-cst-gpu-pm.rules
+            if grep -qF 'RUN+=' /opt/cst-rw/cpu/udev/65-cst-gpu-pm.rules; then echo "unexpected RUN+=" >&2; exit 1; fi
+
+            {installer} install --set USER=tester --component cpu:core >/dev/null
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            systemctl daemon-reload
+
+            # cst-cpu-power.service and cst-cpu-power-gpu.service run cleanly under ProtectSystem=strict,
+            # keeping /run/cpu-setup preserved via RuntimeDirectoryPreserve=yes.
+            systemctl start cst-cpu-power.service
+            [[ "$(systemctl show -P ActiveState -P Result cst-cpu-power.service | tr '\\n' ' ')" == "active success " ]]
+            [[ -d /run/cpu-setup ]]
+            systemctl start cst-cpu-power-gpu.service
+            [[ "$(systemctl show -P Result -P ExecMainStatus cst-cpu-power-gpu.service | tr '\\n' ' ')" == "success 0 " ]]
+            [[ -d /run/cpu-setup ]]
+
+            # cst-btrfs-iocost.service and cst-btrfs-iocost@.service run cleanly (ReadWritePaths=- skips absent io.cost.qos).
+            systemctl restart cst-btrfs-iocost.service
+            [[ "$(systemctl show -P ActiveState -P Result -P ExecMainStatus cst-btrfs-iocost.service | tr '\\n' ' ')" == "active success 0 " ]]
+            [[ -e /run/btrfs-setup/iocost-managed.lock ]]
+            systemctl start cst-btrfs-iocost@nonexistent0.service
+            [[ "$(systemctl show -P Result -P ExecMainStatus cst-btrfs-iocost@nonexistent0.service | tr '\\n' ' ')" == "success 0 " ]]
+
+            # btrfs-degraded-boot-record.service runs --record under StateDirectory=btrfs-degraded-boot + ProtectSystem=strict.
+            /usr/bin/python3 -I -B - <<'PY'
+import os, sys
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.tests.test_degraded_boot import EXPECTED_RECORD, SCRIPT
+with open(SCRIPT, encoding="utf-8") as fh:
+    text = fh.read()
+start = text.index("cat >\\"${{helper_tmp}}\\" <<'HELPER'\\n") + len("cat >\\"${{helper_tmp}}\\" <<'HELPER'\\n")
+end = text.index("\\nHELPER\\n", start)
+os.makedirs("/etc/btrfs-degraded-boot", exist_ok=True)
+with open("/etc/btrfs-degraded-boot/btrfs-last-resort", "w", encoding="utf-8") as fh:
+    fh.write(text[start:end] + "\\n")
+os.chmod("/etc/btrfs-degraded-boot/btrfs-last-resort", 0o755)
+with open("/etc/systemd/system/btrfs-degraded-boot-record.service", "w", encoding="utf-8") as fh:
+    fh.write(EXPECTED_RECORD)
+PY
+            mkdir -p /run/btrfs-allow-degraded
+            : >/run/btrfs-allow-degraded/{uuid}
+            systemctl daemon-reload
+            systemctl start btrfs-degraded-boot-record.service
+            [[ "$(systemctl show -P Result -P ExecMainStatus btrfs-degraded-boot-record.service | tr '\\n' ' ')" == "success 0 " ]]
+            [[ -f /var/lib/btrfs-degraded-boot/degraded-{uuid} ]]
+            grep -q '^since=' /var/lib/btrfs-degraded-boot/degraded-{uuid}
+            grep -q '^since_human=' /var/lib/btrfs-degraded-boot/degraded-{uuid}
+            echo E2E-293-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-293-OK", out)

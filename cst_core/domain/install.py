@@ -199,6 +199,7 @@ btrfs/tmpfiles/cst-nvme-apst.conf                   /etc/tmpfiles.d/cst-nvme-aps
 btrfs/udev/65-cst-nvme-apst.rules                   /etc/udev/rules.d/65-cst-nvme-apst.rules                      644  root  data          root   btrfs:core
 btrfs/btrfs-iocost                                  /usr/local/sbin/btrfs-iocost                                  755  root  python-entry  root   btrfs:iocost
 btrfs/units/cst-btrfs-iocost.service                /etc/systemd/system/cst-btrfs-iocost.service                  644  root  unit          root   btrfs:iocost
+btrfs/units/cst-btrfs-iocost@.service               /etc/systemd/system/cst-btrfs-iocost@.service                 644  root  unit          root   btrfs:iocost
 btrfs/udev/91-cst-iocost.rules                      /etc/udev/rules.d/91-cst-iocost.rules                         644  root  data          root   btrfs:iocost
 btrfs/btrfs-cache-offload                           ~/.local/lib/cst/btrfs-cache-offload                          755  user  python-entry  user   btrfs:offload
 # cpu
@@ -212,6 +213,7 @@ cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game
 cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root   cpu:core
 cpu/units/cpu-game-watchdog.timer                   /etc/systemd/system/cpu-game-watchdog.timer                   644  root  unit          root   cpu:core
 cpu/units/cst-cpu-power.service                     /etc/systemd/system/cst-cpu-power.service                     644  root  unit          root   cpu:core
+cpu/units/cst-cpu-power-gpu.service                 /etc/systemd/system/cst-cpu-power-gpu.service                 644  root  unit          root   cpu:core
 cpu/units/machine.slice.d-10-cpu-setup.conf         /etc/systemd/system/machine.slice.d/10-cpu-setup.conf         644  root  unit          root   cpu:core
 cpu/units/user@.service.d-50-cpu-setup-cpuset.conf  /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf  644  root  unit          root   cpu:core
 cpu/gamemode.ini                                    ~/.config/gamemode.ini                                        644  user  data          user   cpu:gamemode
