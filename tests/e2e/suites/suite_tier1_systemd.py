@@ -16885,7 +16885,7 @@ CONF
         """1) btrfs-stall-monitor.service carries OOM protection (OOMScoreAdjust=-500,
         ManagedOOMPreference=avoid, MemoryLow=32M) alongside MemoryMax=192M;
         2) docker-gc-recorder.service (Type=notify, NotifyAccess=main, WatchdogSec=3min,
-        LimitCORE=0, MemoryMax=128M, TasksMax=16) with a stub docker CLI stays activating
+        LimitCORE=0, MemoryMax=128M, TasksMax=64) with a stub docker CLI stays activating
         until READY=1, becomes active once READY=1 arrives, and advances WatchdogTimestamp
         on subsequent flush ticks without restarting."""
         c = self.SYSTEMD_CONTAINER
@@ -16975,7 +16975,7 @@ CONF
             [[ "$(systemctl show -p NotifyAccess --value {gc_unit})" == "main" ]]
             [[ "$(systemctl show -p LimitCORE --value {gc_unit})" == "0" ]]
             [[ "$(systemctl show -p MemoryMax --value {gc_unit})" == "134217728" ]]
-            [[ "$(systemctl show -p TasksMax --value {gc_unit})" == "16" ]]
+            [[ "$(systemctl show -p TasksMax --value {gc_unit})" == "64" ]]
 
             systemctl start --no-block {gc_unit}
             sleep 1

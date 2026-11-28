@@ -14,3 +14,5 @@ ExecStart=/usr/bin/sh -c 'if /usr/bin/findmnt -rn -t btrfs -M /var/mnt/cache >/d
 ExecStartPost=-/usr/local/sbin/btrfs-health-check
 Nice=19
 IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20

@@ -1315,7 +1315,7 @@ class DockerGcUnitsTest(unittest.TestCase):
             ("WatchdogSec", "3min"),
             ("LimitCORE", "0"),
             ("MemoryMax", "128M"),
-            ("TasksMax", "16"),
+            ("TasksMax", "64"),
         ):
             self.assertEqual(s.get(key), [value], key)
         self.assertNotIn("NoNewPrivileges", s)
@@ -1367,6 +1367,7 @@ class MaintenanceUnitWeightsTest(unittest.TestCase):
     UNITS = (
         "btrfs-snapshot-nas.service",
         "btrfs-snapshot.service",
+        "btrfs-scrub-weekly.service",
         "docker-gc.service",
         "btrfs-health-check.service",
     )

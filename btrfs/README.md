@@ -327,10 +327,13 @@ need that file, and by then the other copy may be bad too.
 
 **How:** `btrfs-scrub-weekly.timer` runs `btrfs scrub start -B /var` (and
 `btrfs scrub start -B /var/mnt/cache` when `/var/mnt/cache` is mounted as btrfs)
-every Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
-only works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`,
-so on this PC the scrub reads at the disks' full speed (see
-[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)) unless you set a speed limit (below). If the PC was off, it runs after the
+every Sunday at 02:00, at low priority (`Nice=19`, `IOSchedulingClass=idle`,
+`CPUWeight=20`, `IOWeight=20`; see
+[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
+`IOSchedulingClass=idle` only works with BFQ or Kyber; on NVMe `none`, `IOWeight=20`
+throttles `ExecStartPost` (`btrfs-health-check`) under `blk-iocost`, while the
+kernel's btrfs scrub I/O threads run outside the service cgroup at full speed
+unless you set a per-device speed limit (below). If the PC was off, it runs after the
 next boot, up to 15 minutes later (`RandomizedDelaySec=15min`), so not in
 the first minutes after login. After the scrub, the health check runs at once.
 If the scrub fails, the health check also runs and alerts.
@@ -2538,7 +2541,7 @@ They do not set `NoNewPrivileges=`: Fedora's SELinux policy labels
 `NoNewPrivileges` forbids (every docker call then fails with "permission
 denied"). `tests/test_unit_contract.py` keeps it out.
 `docker-gc-recorder.service` also bounds the daemon with `MemoryMax=128M`,
-`TasksMax=16`, and `LimitCORE=0` alongside its `Type=notify` watchdog.
+`TasksMax=64`, and `LimitCORE=0` alongside its `Type=notify` watchdog.
 `systemd-analyze security docker-gc-recorder.service` rates them about 2.3
 (it was 9.4). Versions before this one kept the lock in `/run/docker-gc.lock`:
 until `enable` installs the new program, an old installed copy and
