@@ -14,6 +14,7 @@ Two text readers decode on purpose in two ways; do not merge them:
 
 from collections.abc import Callable, Generator
 import contextlib
+import ctypes
 from enum import StrEnum
 import errno
 import locale
@@ -192,9 +193,12 @@ def unit_file_state_at(
     return owned_file_state_at(path, wanted, is_ours, owner=owner)
 
 
-def _open_regular_fd(path: str) -> int:
+def _open_regular_fd(path: str, *, follow_symlinks: bool = True) -> int:
     """Open path read-only without waiting and require a regular file; raise OSError(EINVAL) otherwise."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+    if not follow_symlinks:
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, "not a regular file", path)
@@ -217,9 +221,9 @@ def open_regular_text(path: str, *, errors: str = "surrogateescape", newline: st
         raise
 
 
-def open_regular_bytes(path: str) -> BinaryIO:
-    """path opened for reading raw bytes if it is a regular file (after links), else OSError(EINVAL); never waits."""
-    fd = _open_regular_fd(path)
+def open_regular_bytes(path: str, *, follow_symlinks: bool = True) -> BinaryIO:
+    """path opened for reading raw bytes if it is a regular file (after links unless follow_symlinks=False), else OSError."""
+    fd = _open_regular_fd(path, follow_symlinks=follow_symlinks)
     try:
         return os.fdopen(fd, "rb")
     except BaseException:
@@ -564,6 +568,76 @@ def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
 
 
 _COPY_CHUNK_BYTES: Final = 65536
+_SYNCFS_STATE: list[Callable[[int, str], None] | None] = []
+
+
+def _load_syncfs() -> Callable[[int, str], None] | None:
+    if not _SYNCFS_STATE:
+        loaded: Callable[[int, str], None] | None = None
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            raw_syncfs = libc.syncfs
+            raw_syncfs.argtypes = [ctypes.c_int]
+            raw_syncfs.restype = ctypes.c_int
+
+            def _call(fd: int, path: str) -> None:
+                ctypes.set_errno(0)
+                if raw_syncfs(fd) != 0:
+                    err = ctypes.get_errno()
+                    raise OSError(err, os.strerror(err), path)
+
+            loaded = _call
+        except OSError, AttributeError:
+            loaded = None
+        _SYNCFS_STATE.append(loaded)
+    return _SYNCFS_STATE[0]
+
+
+def sync_filesystem(path: str) -> None:
+    """Commit all buffered data and metadata on the filesystem containing `path` via `syncfs(2)`."""
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        syncfs_fn = _load_syncfs()
+        if syncfs_fn is not None:
+            syncfs_fn(fd, path)
+        else:
+            os.sync()
+    finally:
+        os.close(fd)
+
+
+def copy_file_staged(
+    src: str,
+    dst: str,
+    *,
+    mode: int,
+    owner: FileOwner | tuple[int, int] = FileOwner.CALLER,
+) -> os.stat_result:
+    """Copy regular file `src` directly to a new staged path `dst` without per-file fsync.
+
+    Assumes `dst`'s parent directory already exists and is inside a private staging tree
+    made durable once at the end via `sync_filesystem()`. Returns the pre-read `fstat` of `src`.
+    """
+    with open_regular_bytes(src, follow_symlinks=False) as in_fh:
+        # Capture mtime_ns before copying so a concurrent write mid-copy keeps dst older than src.
+        src_st = os.fstat(in_fh.fileno())
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            try:
+                os.fchmod(fd, mode)
+                _apply_fd_owner(fd, owner)
+                with os.fdopen(fd, "wb", closefd=False) as out_fh:
+                    shutil.copyfileobj(in_fh, out_fh, length=_COPY_CHUNK_BYTES)
+                    out_fh.flush()
+                with contextlib.suppress(OSError):
+                    os.utime(fd, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
+            finally:
+                os.close(fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(dst)
+            raise
+        return src_st
 
 
 def copy_file_atomic(

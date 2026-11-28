@@ -126,7 +126,7 @@ unit has a name, a record read by key is a TypedDict) and
 [fast-tests-and-ci](.agents/rules/fast-tests-and-ci.md) (in-process unit tests,
 minimal fixtures, targeted local runs, parallel fail-closed CI). `.agents/skills/` holds checklists for
 one kind of task (`<name>/SKILL.md`): `cst-new-command`, `cst-new-helper`,
-`cst-shell-to-python` and `cst-refactor-parity`; open the one whose
+`cst-shell-to-python`, `cst-refactor-parity` and `generate-report`; open the one whose
 description fits the task. `.claude/rules` and `.claude/skills` are links to
 these two folders, for Claude Code. `.agents/workflows/cst-change.js` (linked as
 `.claude/workflows`) runs one change to a reviewed branch; its header says how.

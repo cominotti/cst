@@ -204,7 +204,7 @@ def _probe_profile(
 
     overlay_active = mounted_target is not None
     lower_bind_active = lower_dir in mounts.lower_binds
-    recovery_exists = os.path.isdir(m_rec)
+    recovery_exists = os.path.lexists(m_rec)
     upper_used = dir_size_bytes(m_upper) if overlay_active else 0
 
     if _has_symlink_within_home(m_home, spec.rel_path):
@@ -355,7 +355,7 @@ class LinuxPsdHost:
             for p in KNOWN_PROFILES
             if os.path.isdir(_map_host_path(posixpath.join(target_user.home, p.rel_path), self._seam_root))
             or any(posixpath.join(h, p.rel_path) in mounts.overlay_targets for h in target_user.home_variants)
-            or os.path.isdir(_map_host_path(posixpath.join(target_user.recovery_root, p.profile_id), self._seam_root))
+            or os.path.lexists(_map_host_path(posixpath.join(target_user.recovery_root, p.profile_id), self._seam_root))
         }
         selected = ()
         if not cfg_err:
@@ -370,7 +370,9 @@ class LinuxPsdHost:
             p
             for p in KNOWN_PROFILES
             if p.profile_id not in selected_ids
-            and os.path.isdir(_map_host_path(posixpath.join(target_user.recovery_root, p.profile_id), self._seam_root))
+            and os.path.lexists(
+                _map_host_path(posixpath.join(target_user.recovery_root, p.profile_id), self._seam_root)
+            )
         )
         orphan_probes = self._probe_profiles(orphan_profiles, target_user, mounts)
 

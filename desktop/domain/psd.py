@@ -30,6 +30,7 @@ PSD_SEAM_PROC_ENV: Final = "CST_DESKTOP_PSD_PROC"
 PSD_TMPFS_FSTYPE: Final = "tmpfs"
 PSD_OVERLAY_FSTYPE: Final = "overlay"
 PSD_WHITEOUT_FORMAT: Final = 1
+WHITEOUT_MANIFEST_NAME: Final = ".cst-psd-whiteouts.json"
 _MEMINFO_MIN_PARTS: Final = 2
 _BUSY_PREVIEW_LIMIT: Final = 5
 

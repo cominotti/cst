@@ -7050,7 +7050,7 @@ esac
         self.assertIn("info   gnome localsearch:", lines1)
         self.assertNotIn("desktop psd:", lines1)
 
-        # 2. Restricted cleanly + PSD active + recovery pending -> WARN for recovery + tmpfs full.
+        # 2. Restricted cleanly + PSD active + unmounted recovery & corrupt active recovery & tmpfs full -> WARN.
         with open(gs_state, "w", encoding="utf-8") as fh:
             fh.write("restrict")
         self._home_file(
@@ -7059,9 +7059,8 @@ esac
         )
         self._root_file("etc/systemd/system/cst-desktop-psd@.service", "[Unit]\n")
         os.makedirs(os.path.join(self.root, self.tmp.lstrip("/"), ".config/mozilla/firefox"), exist_ok=True)
-        os.makedirs(
-            os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/firefox"), exist_ok=True
-        )
+        rec_firefox = os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/firefox")
+        os.makedirs(rec_firefox, exist_ok=True)
         self._root_file(
             "proc/mounts",
             (
@@ -7078,18 +7077,29 @@ esac
         self.assertEqual(r_warn.returncode, 1, r_warn.stdout + r_warn.stderr)
         lines2 = "\n".join(area_lines(r_warn.stdout, "desktop"))
         self.assertIn("ok     gnome localsearch: restricted to standard XDG user folders", lines2)
-        self.assertIn("WARN   desktop psd: unmerged crash-recovery snapshots (firefox)", lines2)
-        self.assertIn(f"fix: cst desktop psd recover --user {user}", lines2)
+        self.assertIn("WARN   desktop psd: incomplete or invalid crash-recovery snapshot (firefox)", lines2)
+        self.assertIn(f"fix: cst desktop psd sync --user {user}", lines2)
         self.assertIn(f"WARN   desktop psd: {run_dir} tmpfs is 90% full", lines2)
 
-        # 3. Clean PSD + low tmpfs usage -> OK on both.
-        os.rmdir(os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/firefox"))
+        # 3. Active PSD + valid live recovery snapshot + low tmpfs usage -> INFO (not WARN) + OK, exit 0.
+        with open(os.path.join(rec_firefox, ".cst-psd-whiteouts.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"format": 1, "whiteouts": [], "opaque_dirs": []}\n')
         with open(statfs_fix, "w", encoding="utf-8") as fh:
             fh.write("100 80\n")  # 20% full
+        r_live = self.run_tool()
+        self.assertEqual(r_live.returncode, 0, r_live.stdout + r_live.stderr)
+        lines_live = "\n".join(area_lines(r_live.stdout, "desktop"))
+        self.assertIn("info   desktop psd: live crash-recovery snapshot on disk (firefox;", lines_live)
+        self.assertIn("ok     desktop psd: 1 profile overlay(s) active", lines_live)
+
+        # 4. Clean PSD (no recovery) + low tmpfs usage -> OK without live recovery info.
+        os.remove(os.path.join(rec_firefox, ".cst-psd-whiteouts.json"))
+        os.rmdir(rec_firefox)
         r_ok = self.run_tool()
         self.assertEqual(r_ok.returncode, 0, r_ok.stdout + r_ok.stderr)
         lines3 = "\n".join(area_lines(r_ok.stdout, "desktop"))
         self.assertIn("ok     desktop psd: 1 profile overlay(s) active", lines3)
+        self.assertNotIn("live crash-recovery snapshot", lines3)
         self.assert_read_only()
 
     def test_psd_edge_warnings_and_unreadable_localsearch(self) -> None:
@@ -7097,10 +7107,16 @@ esac
         with open(gs_state, "w", encoding="utf-8") as fh:
             fh.write("missing")
         self._root_file("etc/systemd/system/cst-desktop-psd@.service", "[Unit]\n")
-        os.makedirs(
-            os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/chrome-flatpak"),
-            exist_ok=True,
-        )
+        rec_chrome = os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/chrome-flatpak")
+        os.makedirs(rec_chrome, exist_ok=True)
+        with open(os.path.join(rec_chrome, ".cst-psd-whiteouts.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"format": 1, "whiteouts": [], "opaque_dirs": []}\n')
+        rec_ff = os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/firefox")
+        os.makedirs(rec_ff, exist_ok=True)
+        with open(os.path.join(rec_ff, ".cst-psd-whiteouts.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"format": 1, "whiteouts": [], "opaque_dirs": []}\n')
+        rec_bad = os.path.join(self.root, self.tmp.lstrip("/"), ".local/share/cst/psd/recovery/firefox-legacy")
+        os.makedirs(rec_bad, exist_ok=True)
         chrome_dir = os.path.join(self.root, self.tmp.lstrip("/"), ".config/google-chrome")
         os.makedirs(os.path.dirname(chrome_dir), exist_ok=True)
         os.symlink("/elsewhere", chrome_dir)
@@ -7124,7 +7140,10 @@ esac
         self.assertEqual(r_edge.returncode, 1, r_edge.stdout + r_edge.stderr)
         lines = "\n".join(area_lines(r_edge.stdout, "desktop"))
         self.assertNotIn("ok     gnome localsearch:", lines)
-        self.assertIn("unmerged crash-recovery snapshots (chrome-flatpak)", lines)
+        self.assertIn("WARN   desktop psd: unmerged crash-recovery snapshots (chrome-flatpak)", lines)
+        self.assertIn("WARN   desktop psd: incomplete or invalid crash-recovery snapshot (firefox-legacy)", lines)
+        self.assertIn("fix: cst desktop psd recover --discard --user", lines)
+        self.assertIn("info   desktop psd: live crash-recovery snapshot on disk (firefox;", lines)
         self.assertIn("profile folder uses a symlink (chrome)", lines)
         self.assertIn("non-CST mount over profile folder (chromium-flatpak)", lines)
 

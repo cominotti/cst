@@ -16482,6 +16482,8 @@ EOF
 
             STEP="seam-busy-sync-and-recover"
             printf 'upper-pref=3\\n' > "$WORK/root/run/cst-psd/$(id -u tester)/firefox/upper/prefs.js"
+            printf 'stable-value=1\\n' > "$WORK/root/run/cst-psd/$(id -u tester)/firefox/upper/stable.js"
+            touch -d '10 seconds ago' "$WORK/root/run/cst-psd/$(id -u tester)/firefox/upper/stable.js"
             mkdir -p "$WORK/root/proc/99999/fd"
             chown -R tester:tester "$WORK/root/proc/99999"
             printf 'firefox\\n' > "$WORK/root/proc/99999/comm"
@@ -16491,11 +16493,21 @@ EOF
               echo "UNEXPECTED BUSY SYNC: $busy_sync" >&2; exit 1;
             }}
             test -f "$WORK/root/home/tester/.local/share/cst/psd/recovery/firefox/.cst-psd-whiteouts.json"
+            ino_1="$(stat -c %i "$WORK/root/home/tester/.local/share/cst/psd/recovery/firefox/stable.js")"
+            busy_sync2="$(env $SEAM_ENV "$REPO/cst" desktop psd sync --user tester)"
+            grep -qF "snapshot: firefox" <<<"$busy_sync2" || {{
+              echo "UNEXPECTED SECOND BUSY SYNC: $busy_sync2" >&2; exit 1;
+            }}
+            ino_2="$(stat -c %i "$WORK/root/home/tester/.local/share/cst/psd/recovery/firefox/stable.js")"
+            test "$ino_1" = "$ino_2" || {{
+              echo "EXPECTED HARDLINK REUSE ON stable.js: $ino_1 != $ino_2" >&2; exit 1;
+            }}
             rm -rf "$WORK/root/proc/99999"
             printf '' > "$WORK/root/proc/mounts"
             rm -rf "$WORK/root/run/cst-psd"
             env $SEAM_ENV "$REPO/cst" desktop psd recover --user tester | grep -qF "recovered:firefox"
             grep -qF "upper-pref=3" "$WORK/root/home/tester/.config/mozilla/firefox/prefs.js"
+            grep -qF "stable-value=1" "$WORK/root/home/tester/.config/mozilla/firefox/stable.js"
 
             STEP="seam-stop"
             env $SEAM_ENV "$REPO/cst" desktop psd start --user tester
