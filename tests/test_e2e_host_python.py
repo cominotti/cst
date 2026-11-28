@@ -16,7 +16,7 @@ import importlib
 import os
 import shutil
 import tempfile
-from typing import override
+from typing import ClassVar, Final, override
 import unittest
 
 from tests import e2e_host_python as gate
@@ -41,6 +41,29 @@ _READ_FILES = (
     "tests/quint/cst-quint",
     "tests/xdg_cache.py",
 )
+
+
+_STUB_SUITES: Final[dict[str, str]] = {
+    "tests/e2e/suites/suite_tier1_systemd.py": (
+        "# SPDX-License-Identifier: MPL-2.0\nfrom tests.e2e.selection import E2ETag, e2e_tags\n"
+    ),
+    "tests/e2e/suites/suite_tier2_storage_cpu.py": "# SPDX-License-Identifier: MPL-2.0\n# stub\n",
+}
+
+
+def _build_planted_template(dst: str) -> None:
+    """Copy the files the gate reads, replacing the large E2E suites with minimal valid stubs."""
+    for tree in _READ_TREES:
+        shutil.copytree(os.path.join(REPO, tree), os.path.join(dst, tree))
+    for rel in _READ_FILES:
+        dest = os.path.join(dst, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        stub = _STUB_SUITES.get(rel)
+        if stub is not None:
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(stub)
+        else:
+            shutil.copyfile(os.path.join(REPO, rel), dest)
 
 
 class CheckoutTest(unittest.TestCase):
@@ -91,17 +114,29 @@ class CheckoutTest(unittest.TestCase):
 class PlantedTest(unittest.TestCase):
     """A temporary copy of the files the gate reads, with one problem planted."""
 
+    _template: ClassVar[str]
+
+    @classmethod
+    @override
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        cls._template = tmp.name
+        _build_planted_template(cls._template)
+        repo_closure, repo_problems = gate.host_closure(REPO)
+        tpl_closure, tpl_problems = gate.host_closure(cls._template)
+        if repo_problems or tpl_problems or tpl_closure != repo_closure:
+            raise AssertionError("planted template closure drifted from repository")
+        if gate.problems(cls._template):
+            raise AssertionError("planted template is not clean")
+
     @override
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.repo = tmp.name
-        for tree in _READ_TREES:
-            shutil.copytree(os.path.join(REPO, tree), os.path.join(self.repo, tree))
-        for rel in _READ_FILES:
-            os.makedirs(os.path.dirname(os.path.join(self.repo, rel)), exist_ok=True)
-            shutil.copyfile(os.path.join(REPO, rel), os.path.join(self.repo, rel))
-        self.assertEqual(gate.problems(self.repo), [])
+        shutil.copytree(self._template, self.repo, dirs_exist_ok=True)
 
     def append(self, rel: str, text: str) -> None:
         """Append text to the copy's file rel (created when it is not there)."""
@@ -577,11 +612,7 @@ class RuffTargetTest(unittest.TestCase):
 
     def test_a_pyproject_without_the_entry_fails_the_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            for tree in _READ_TREES:
-                shutil.copytree(os.path.join(REPO, tree), os.path.join(tmp, tree))
-            for rel in _READ_FILES:
-                os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
-                shutil.copyfile(os.path.join(REPO, rel), os.path.join(tmp, rel))
+            _build_planted_template(tmp)
             path = os.path.join(tmp, "pyproject.toml")
             with open(path, encoding="utf-8") as fh:
                 lines = [line for line in fh if not line.startswith("per-file-target-version")]

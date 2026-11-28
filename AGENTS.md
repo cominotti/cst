@@ -116,13 +116,15 @@ before changing that module.
 
 ## Agent rules and skills
 
-Read the three rules in `.agents/rules/` before any change:
+Read the four rules in `.agents/rules/` before any change:
 [reuse-primitives](.agents/rules/reuse-primitives.md) (use what `cst_core`
 provides, never a copy),
 [refactor-vs-behaviour](.agents/rules/refactor-vs-behaviour.md) (one kind of
-change per commit, with its proof) and
+change per commit, with its proof),
 [magic-values](.agents/rules/magic-values.md) (a vocabulary is a StrEnum, a
-unit has a name, a record read by key is a TypedDict). `.agents/skills/` holds checklists for
+unit has a name, a record read by key is a TypedDict) and
+[fast-tests-and-ci](.agents/rules/fast-tests-and-ci.md) (in-process unit tests,
+minimal fixtures, targeted local runs, parallel fail-closed CI). `.agents/skills/` holds checklists for
 one kind of task (`<name>/SKILL.md`): `cst-new-command`, `cst-new-helper`,
 `cst-shell-to-python` and `cst-refactor-parity`; open the one whose
 description fits the task. `.claude/rules` and `.claude/skills` are links to
