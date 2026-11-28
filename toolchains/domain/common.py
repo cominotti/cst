@@ -281,7 +281,7 @@ USAGE = """\
 usage: cst-toolchains status [--brief]
        cst-toolchains prune plan|apply [TARGET...]
        cst-toolchains auto on [--unless-off] | auto off
-       cst-toolchains config plan|apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]
+       cst-toolchains config plan|apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache] | config init [--plan] [--force]
        cst-toolchains tmpfs status|plan|apply|revert [--size SIZE] [--user USER]
        (commands except tmpfs also take --home DIR; help: cst-toolchains help)"""
 
@@ -298,10 +298,11 @@ class ToolchainsCommand(StrEnum):
 
 
 class ToolchainsAction(StrEnum):
-    """The word after a command: plan/apply/status/revert or on/off."""
+    """The word after a command: plan/apply/init/status/revert or on/off."""
 
     PLAN = "plan"
     APPLY = "apply"
+    INIT = "init"
     ON = "on"
     OFF = "off"
     STATUS = "status"
@@ -317,6 +318,8 @@ class ParsedArgs(TypedDict):
     home: str | None
     lean: bool | None
     sccache: bool | None
+    plan: bool
+    force: bool
     user: str | None
     size: str | None
 
@@ -373,9 +376,19 @@ def _auto_argv(rest: Sequence[str], out: ParsedArgs) -> None:
 
 def _config_argv(rest: Sequence[str], out: ParsedArgs) -> None:
     """The arguments after `config`, into OUT; raises Usage."""
-    out["action"] = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY)
-    if out["action"] is None:
-        raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]")
+    act = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY, ToolchainsAction.INIT)
+    if act is None:
+        raise Usage("config: plan, apply or init [--plan] [--force]")
+    out["action"] = act
+    if act == ToolchainsAction.INIT:
+        for a in rest[1:]:
+            if a == "--plan" and not out["plan"]:
+                out["plan"] = True
+            elif a == "--force" and not out["force"]:
+                out["force"] = True
+            else:
+                raise Usage(f"config init: unknown argument '{a}'")
+        return
     for a in rest[1:]:
         if a in ("--lean-debuginfo", "--no-lean-debuginfo") and out["lean"] is None:
             out["lean"] = a == "--lean-debuginfo"
@@ -427,6 +440,8 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
         "home": home,
         "lean": None,
         "sccache": None,
+        "plan": False,
+        "force": False,
         "user": None,
         "size": None,
     }

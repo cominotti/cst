@@ -45,6 +45,10 @@
 #                          Opt-in (RUST_SCCACHE=yes or --sccache): rustc through
 #                          sccache via ~/.local/libexec/cst/rustc-wrapper as
 #                          [build] rustc-wrapper; --no-sccache removes CST's line
+#   config init [--plan] [--force]
+#                          write ~/.config/cst/toolchains.conf pre-filled with
+#                          commented defaults and active CST overrides; --plan is
+#                          a dry run; --force refreshes while keeping overrides
 #   tmpfs status|plan|apply|revert [--size SIZE] [--user USER]
 #                          opt-in dedicated RAM tmpfs for cargo build-dir at
 #                          ~/.cache/cargo-build-tmpfs (isolated from /tmp,

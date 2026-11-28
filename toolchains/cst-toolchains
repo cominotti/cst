@@ -27,6 +27,11 @@ Commands:
                                  opt-in lean debug info (RUST_LEAN_DEBUGINFO)
                                  and the opt-in sccache (RUST_SCCACHE; only
                                  --no-sccache removes it again)
+  config init [--plan] [--force]
+                                 write ~/.config/cst/toolchains.conf pre-filled
+                                 with commented defaults and active CST overrides;
+                                 --plan is a dry run; --force refreshes while
+                                 preserving valid overrides
   tmpfs status|plan|apply|revert [--size SIZE] [--user USER]
                                  opt-in dedicated RAM tmpfs mount for cargo's
                                  build-dir (~/.cache/cargo-build-tmpfs, isolated

@@ -17160,3 +17160,94 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-294-OK", out)
+
+    @e2e_tags(E2ETag.TOOLCHAINS)
+    def test_295_toolchains_config_init_cycle(self) -> None:
+        """`cst toolchains config init` as `tester`: `--plan` changes nothing, writes starter
+        `~/.config/cst/toolchains.conf`, seeds active CST overrides from `~/.cargo/config.toml` +
+        `rustc-wrapper`, preserves minimal overrides on `--force` idempotently, and undo restores defaults."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-toolchains-config-init"
+        conf = "/home/tester/.config/cst/toolchains.conf"
+        cargo_cfg = "/home/tester/.cargo/config.toml"
+        uv_cfg = "/home/tester/.config/uv/uv.toml"
+        wrapper = "/home/tester/.local/libexec/cst/rustc-wrapper"
+        rec = "/home/tester/.local/state/cst/installed.json"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            set +e
+            {file_put_back(conf, w, "toolchains.conf")}
+            {file_put_back(cargo_cfg, w, "cargo.toml")}
+            {file_put_back(uv_cfg, w, "uv.toml")}
+            {file_put_back(wrapper, w, "rustc-wrapper")}
+            {file_put_back(rec, w, "installed.json")}
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            rm -rf {w}
+            mkdir -p {w}
+            {file_saved(conf, w, "toolchains.conf")}
+            {file_saved(cargo_cfg, w, "cargo.toml")}
+            {file_saved(uv_cfg, w, "uv.toml")}
+            {file_saved(wrapper, w, "rustc-wrapper")}
+            {file_saved(rec, w, "installed.json")}
+            rm -f {conf} {cargo_cfg} {wrapper}
+            """,
+        )
+        out = as_tester_bash(
+            c,
+            f"""
+            set -euo pipefail
+            plan_out="$(/opt/cst-rw/cst toolchains config init --plan)"
+            grep -qF "would write: ~/.config/cst/toolchains.conf (all settings commented out at CST defaults)" <<<"${{plan_out}}"
+            [[ ! -e {conf} ]]
+
+            init_out="$(/opt/cst-rw/cst toolchains config init)"
+            grep -qF "written:   ~/.config/cst/toolchains.conf" <<<"${{init_out}}"
+            [[ -f {conf} ]]
+            [[ "$(stat -c '%a' {conf})" == "644" ]]
+            /opt/cst-rw/cst toolchains status >/dev/null
+            /opt/cst-rw/cst toolchains config plan >/dev/null
+
+            before="$(cat {conf})"
+            if /opt/cst-rw/cst toolchains config init 2>/dev/null; then
+                echo "expected second init without --force to fail" >&2
+                exit 1
+            fi
+            [[ "$(cat {conf})" == "${{before}}" ]]
+
+            CARGO_NET_OFFLINE=true /opt/cst-rw/cst toolchains config apply --sccache --lean-debuginfo >/dev/null
+            rm -f {conf}
+            seed_out="$(/opt/cst-rw/cst toolchains config init)"
+            grep -qF "2 active override(s): RUST_LEAN_DEBUGINFO, RUST_SCCACHE" <<<"${{seed_out}}"
+            grep -qxF "RUST_LEAN_DEBUGINFO=yes" {conf}
+            grep -qxF "RUST_SCCACHE=yes" {conf}
+            grep -qxF "# RUST_INCREMENTAL=auto" {conf}
+            plan_seed="$(/opt/cst-rw/cst toolchains config plan)"
+            grep -qF "lean debug info set" <<<"${{plan_seed}}"
+
+            printf 'RUST_INCREMENTAL=off\\n' >{conf}
+            force_out="$(/opt/cst-rw/cst toolchains config init --force)"
+            grep -qF "written:   ~/.config/cst/toolchains.conf (1 active override(s): RUST_INCREMENTAL)" <<<"${{force_out}}"
+            grep -qxF "RUST_INCREMENTAL=off" {conf}
+            grep -qxF "# RUST_BUILD_MAX_IDLE=48h" {conf}
+
+            idem_out="$(/opt/cst-rw/cst toolchains config init --force)"
+            grep -qxF "unchanged: ~/.config/cst/toolchains.conf" <<<"${{idem_out}}"
+
+            rm -f {conf}
+            st_after="$(/opt/cst-rw/cst toolchains status)"
+            grep -qF "defaults" <<<"${{st_after}}"
+            plan_after="$(/opt/cst-rw/cst toolchains config plan)"
+            grep -qF "RUST_LEAN_DEBUGINFO=no" <<<"${{plan_after}}"
+            echo E2E-295-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-295-OK", out)

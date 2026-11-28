@@ -112,14 +112,14 @@ def home_folder(home: str | None) -> str:
     return os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if home is None else home)
 
 
-def output_mode(cmd: ToolchainsCommand, action: ToolchainsAction | None) -> None:
-    """A command that only reads (help, status, prune plan, config plan, tmpfs status/plan) gets
-    SIGPIPE back at its default, so `cst toolchains status | head` ends
-    quietly. The ones that change files (prune, auto, config apply, tmpfs apply/revert) keep
-    Python's handling: a closed pipe never cuts their lock release or file
-    writes short."""
-    if cmd in (ToolchainsCommand.HELP, ToolchainsCommand.STATUS) or action in (
-        ToolchainsAction.PLAN,
-        ToolchainsAction.STATUS,
+def output_mode(cmd: ToolchainsCommand, action: ToolchainsAction | None, *, plan: bool = False) -> None:
+    """A command that only reads (help, status, prune plan, config plan, config init --plan,
+    tmpfs status/plan) gets SIGPIPE back at its default, so `cst toolchains status | head` ends
+    quietly. The ones that change files keep Python's handling: a closed pipe never cuts their lock
+    release or file writes short."""
+    if (
+        plan
+        or cmd in (ToolchainsCommand.HELP, ToolchainsCommand.STATUS)
+        or action in (ToolchainsAction.PLAN, ToolchainsAction.STATUS)
     ):
         restore_default_signals()
