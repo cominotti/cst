@@ -8,6 +8,13 @@ After=docker.service
 BindsTo=docker.service
 
 [Service]
+# Tells systemd READY=1 once the initial state is saved and WATCHDOG=1 at each
+# DOCKER_GC_FLUSH (30 s) tick; 3 min leaves room when Docker or disk I/O stalls.
+Type=notify
+NotifyAccess=main
+WatchdogSec=3min
+# Watchdog kills with SIGABRT; no core dump written on a busy or full disk.
+LimitCORE=0
 ExecStart=/usr/local/sbin/docker-gc record
 Restart=on-failure
 RestartSec=10
@@ -17,6 +24,8 @@ RestartSec=10
 # Only docker-gc's own refusals: when `docker events` itself ends with 65 or 76, record exits 1 (restarted).
 RestartPreventExitStatus=65 76
 Nice=10
+MemoryMax=128M
+TasksMax=16
 # Sandbox: it needs only the docker CLI over /run/docker.sock (owned by root, so
 # no capability), `systemctl is-active` and writes in /var/lib/docker-gc (its
 # state), the one writable place (StateDirectory=). It takes no run lock.

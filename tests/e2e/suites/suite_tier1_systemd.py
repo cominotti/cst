@@ -9854,7 +9854,8 @@ echo E2E-OK
             cp /var/lib/docker-gc/last-used.json "$s/before"
             systemctl daemon-reload
             start="$(date +%s)"
-            systemctl start {unit} || {{ diag; exit 1; }}
+            # Type=notify: start returns non-zero when the unit exits 65 before READY=1.
+            systemctl start {unit} || true
             sleep 14   # past RestartSec=10: a restart would have happened by now
             [ "$(show ActiveState)" = failed ] || {{ echo "state: $(show ActiveState)" >&2; diag; exit 1; }}
             [ "$(show NRestarts)" = 0 ] || {{ echo "restarted $(show NRestarts) time(s)" >&2; diag; exit 1; }}
@@ -9875,7 +9876,7 @@ echo E2E-OK
             systemctl stop {unit} 2>/dev/null || true
             systemctl reset-failed {unit} 2>/dev/null || true
             systemctl daemon-reload
-            systemctl start {unit}
+            systemctl start {unit} || true
             sleep 14
             n="$(systemctl show -p NRestarts --value {unit})"
             systemctl stop {unit} || true
@@ -16867,3 +16868,124 @@ CONF
         )
         out = exec_bash(c, script).stdout
         self.assertIn("E2E-289-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_292_stall_monitor_oom_and_docker_gc_recorder_notify(self) -> None:
+        """1) btrfs-stall-monitor.service carries OOM protection (OOMScoreAdjust=-500,
+        ManagedOOMPreference=avoid, MemoryLow=32M) alongside MemoryMax=192M;
+        2) docker-gc-recorder.service (Type=notify, NotifyAccess=main, WatchdogSec=3min,
+        LimitCORE=0, MemoryMax=128M, TasksMax=16) with a stub docker CLI stays activating
+        until READY=1, becomes active once READY=1 arrives, and advances WatchdogTimestamp
+        on subsequent flush ticks without restarting."""
+        c = self.SYSTEMD_CONTAINER
+        stall_unit = "e2e-stall-oom.service"
+        stall_path = f"/run/systemd/system/{stall_unit}"
+        gc_unit = "e2e-gc-notify.service"
+        gc_path = f"/run/systemd/system/{gc_unit}"
+        fake_bin = "/usr/local/libexec/e2e-gc-notify-fake"
+        work = "/var/tmp/e2e-292-notify"
+
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            systemctl stop {gc_unit} 2>/dev/null || true
+            systemctl reset-failed {gc_unit} 2>/dev/null || true
+            systemctl stop {stall_unit} 2>/dev/null || true
+            systemctl reset-failed {stall_unit} 2>/dev/null || true
+            rm -f {gc_path} {stall_path}
+            if [[ -e {work}/made-docker ]]; then
+                systemctl stop docker.service 2>/dev/null || true
+                rm -f /run/systemd/system/docker.service
+            fi
+            if [[ -e {work}/made-state ]]; then rm -rf /var/lib/docker-gc; fi
+            if [[ -e {work}/state-aside ]]; then mv {work}/state-aside /var/lib/docker-gc; fi
+            rm -rf {work} {fake_bin}
+            systemctl daemon-reload
+            """,
+            check=False,
+        )
+
+        stall_shipped = docker_exec(c, ["cat", "/opt/cst-rw/btrfs/units/btrfs-stall-monitor.service"]).stdout
+        gc_shipped = docker_exec(c, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]).stdout
+        self.assertEqual(gc_shipped.count("\nExecStart="), 1)
+        gc_derived = "".join(
+            f"ExecStart=/usr/bin/env PATH={fake_bin}:/usr/bin:/bin DOCKER_GC_FLUSH=1 "
+            "/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record\n"
+            if line.startswith("ExecStart=")
+            else line
+            for line in gc_shipped.splitlines(keepends=True)
+        )
+
+        docker_exec(c, ["bash", "-c", f"cat >{stall_path}"], input_text=stall_shipped)
+        docker_exec(c, ["bash", "-c", f"cat >{gc_path}"], input_text=gc_derived)
+        docker_exec(
+            c,
+            ["bash", "-c", f"mkdir -p {fake_bin} && cat >{fake_bin}/docker && chmod 0755 {fake_bin}/docker"],
+            input_text=(
+                "#!/usr/bin/python3 -I\n"
+                "import sys, time\n"
+                "args = sys.argv[1:]\n"
+                "if args[:1] == ['ps']:\n"
+                "    time.sleep(3)\n"
+                "    sys.exit(0)\n"
+                "if args[:1] == ['events']:\n"
+                "    while True:\n"
+                "        time.sleep(1)\n"
+                "sys.stderr.write('e2e fake docker: unexpected ' + ' '.join(args) + '\\n')\n"
+                "sys.exit(1)\n"
+            ),
+        )
+
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_292 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            diag() {{ systemctl status --no-pager {gc_unit} >&2 || true; journalctl -q --no-pager -u {gc_unit} -n 30 >&2 || true; }}
+            rm -rf {work}; mkdir -p {work}
+            if [[ -e /var/lib/docker-gc ]]; then mv /var/lib/docker-gc {work}/state-aside; fi
+            if ! systemctl cat docker.service >/dev/null 2>&1; then
+                printf '[Service]\\nType=oneshot\\nRemainAfterExit=yes\\nExecStart=/bin/true\\n' >/run/systemd/system/docker.service
+                touch {work}/made-docker
+            fi
+            install -d -m 0755 /var/lib/docker-gc
+            touch {work}/made-state
+            systemctl daemon-reload
+
+            # 1. btrfs-stall-monitor.service OOM protection properties parsed by systemd.
+            [[ "$(systemctl show -p OOMScoreAdjust --value {stall_unit})" == "-500" ]]
+            [[ "$(systemctl show -p ManagedOOMPreference --value {stall_unit})" == "avoid" ]]
+            [[ "$(systemctl show -p MemoryLow --value {stall_unit})" == "33554432" ]]
+            [[ "$(systemctl show -p MemoryMax --value {stall_unit})" == "201326592" ]]
+
+            # 2. docker-gc-recorder.service Type=notify, limits, READY=1 gating, and WATCHDOG=1 pings.
+            [[ "$(systemctl show -p Type --value {gc_unit})" == "notify" ]]
+            [[ "$(systemctl show -p NotifyAccess --value {gc_unit})" == "main" ]]
+            [[ "$(systemctl show -p LimitCORE --value {gc_unit})" == "0" ]]
+            [[ "$(systemctl show -p MemoryMax --value {gc_unit})" == "134217728" ]]
+            [[ "$(systemctl show -p TasksMax --value {gc_unit})" == "16" ]]
+
+            systemctl start --no-block {gc_unit}
+            sleep 1
+            [[ "$(systemctl show -p ActiveState --value {gc_unit})" == "activating" ]] || {{ diag; exit 1; }}
+
+            for _ in $(seq 1 40); do
+                [[ "$(systemctl show -p ActiveState --value {gc_unit})" == "active" ]] && break
+                sleep 0.25
+            done
+            [[ "$(systemctl show -p ActiveState --value {gc_unit})" == "active" ]] || {{ diag; exit 1; }}
+            [[ "$(systemctl show -p WatchdogUSec --value {gc_unit})" == "3min" ]] || {{ diag; exit 1; }}
+            [[ "$(systemctl show -p NRestarts --value {gc_unit})" == "0" ]] || {{ diag; exit 1; }}
+
+            w1="$(systemctl show -p WatchdogTimestampMonotonic --value {gc_unit})"
+            sleep 3
+            w2="$(systemctl show -p WatchdogTimestampMonotonic --value {gc_unit})"
+            (( w2 > w1 )) || {{ echo "WatchdogTimestampMonotonic did not advance: $w1 -> $w2" >&2; diag; exit 1; }}
+            [[ "$(systemctl show -p ActiveState --value {gc_unit})" == "active" ]]
+            [[ "$(systemctl show -p NRestarts --value {gc_unit})" == "0" ]]
+            systemctl stop {gc_unit}
+            echo E2E-292-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-292-OK", out)

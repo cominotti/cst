@@ -1265,6 +1265,14 @@ class StallMonitorUnitTest(unittest.TestCase):
         self.assertIn("Restart=on-failure", lines)
         self.assertIn("RuntimeDirectoryPreserve=restart", lines)
 
+    def test_protected_against_oom_and_memory_pressure(self) -> None:
+        # system.slice enables ManagedOOMMemoryPressure=kill; protect the monitor while MemoryMax=192M bounds it.
+        lines = self.service_lines()
+        self.assertIn("MemoryMax=192M", lines)
+        self.assertIn("OOMScoreAdjust=-500", lines)
+        self.assertIn("ManagedOOMPreference=avoid", lines)
+        self.assertIn("MemoryLow=32M", lines)
+
 
 class DockerGcUnitsTest(unittest.TestCase):
     """btrfs/units/docker-gc-recorder.service and docker-gc.service as shipped: sandboxed, with
@@ -1282,12 +1290,35 @@ class DockerGcUnitsTest(unittest.TestCase):
 
     def test_both_have_the_same_sandbox(self) -> None:
         # The block is written out in each unit (systemd has no include): a setting added to
-        # one only shows here. What differs is the job, and the weekly run's lock folder.
+        # one only shows here. What differs is the job, the recorder's notify/watchdog and
+        # daemon limits, and the weekly run's lock folder.
         own = {"Type", "ExecCondition", "ExecStart", "Restart", "RestartSec", "RestartPreventExitStatus", "Nice"}
-        own |= {"IOSchedulingClass", "CPUWeight", "IOWeight"}
+        own |= {
+            "IOSchedulingClass",
+            "CPUWeight",
+            "IOWeight",
+            "NotifyAccess",
+            "WatchdogSec",
+            "LimitCORE",
+            "MemoryMax",
+            "TasksMax",
+        }
         own |= {"TimeoutStartSec", "Environment", "RuntimeDirectory", "RuntimeDirectoryPreserve"}
         recorder, weekly = ({k: v for k, v in self.service(name).items() if k not in own} for name in self.UNITS)
         self.assertEqual(recorder, weekly)
+
+    def test_recorder_notify_watchdog_and_resource_limits(self) -> None:
+        s = self.service("docker-gc-recorder.service")
+        for key, value in (
+            ("Type", "notify"),
+            ("NotifyAccess", "main"),
+            ("WatchdogSec", "3min"),
+            ("LimitCORE", "0"),
+            ("MemoryMax", "128M"),
+            ("TasksMax", "16"),
+        ):
+            self.assertEqual(s.get(key), [value], key)
+        self.assertNotIn("NoNewPrivileges", s)
 
     def test_both_run_sandboxed_with_no_capability(self) -> None:
         for name in self.UNITS:

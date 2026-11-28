@@ -145,3 +145,32 @@ class ConsolePort(Protocol):
     def ask(self, question: str) -> bool:
         """A yes/no question; no answer (end of input) is no."""
         ...
+
+
+class NotifierPort(Protocol):
+    """systemd Type=notify and watchdog messages (sd_notify(3))."""
+
+    def ready(self) -> bool:
+        """Send READY=1; False when there is no socket or the send failed."""
+        ...
+
+    def watchdog(self) -> bool:
+        """Send WATCHDOG=1; False when there is no socket or the send failed."""
+        ...
+
+    def close(self) -> None:
+        """Close the notification socket if open."""
+        ...
+
+
+class NullGcNotifier:
+    """No-op NotifierPort when no systemd socket is wired (unit tests)."""
+
+    def ready(self) -> bool:
+        return False
+
+    def watchdog(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        return None

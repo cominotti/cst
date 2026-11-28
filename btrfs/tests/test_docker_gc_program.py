@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -785,6 +786,32 @@ class RecordTest(unittest.TestCase):
         beat = st["heartbeat"]
         assert isinstance(beat, float)
         self.assertGreaterEqual(beat, start)
+
+    def test_record_sends_ready_and_watchdog_over_notify_socket(self) -> None:
+        sock_path = os.path.join(self.p.tmp, "notify.sock")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(sock.close)
+        sock.bind(sock_path)
+        sock.settimeout(10)
+        st = self.p.docker()
+        st["events"] = {"lines": [], "hang": True}
+        self.p.set_docker(st)
+        env = {**self.p.env(), "NOTIFY_SOCKET": sock_path, "DOCKER_GC_FLUSH": "1"}
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-B", self.p.tool, "record"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            cwd="/",
+        )
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.assertEqual(sock.recv(64), b"READY=1")
+        self.assertEqual(sock.recv(64), b"WATCHDOG=1")
+        proc.send_signal(signal.SIGTERM)
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual((proc.returncode, err), (0, ""), out)
 
 
 if __name__ == "__main__":

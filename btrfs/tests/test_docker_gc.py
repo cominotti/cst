@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -61,6 +62,7 @@ from btrfs.docker_gc.domain import (
 )
 from btrfs.docker_gc.ports import EventSink
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
+from cst_core.adapters.sd_notify import ServiceNotifier
 from cst_core.domain.install import manifest_by_src
 from cst_core.ports import CommandResult, ReplacedNotSynced
 from tests.probes import bytes_program
@@ -124,6 +126,9 @@ class FakeDocker:
         self.container_errors: list[RuntimeError] = []  # raised by the next containers() calls, in order
         self.end = EventsEnd(stopped=False, returncode=0)
         self.events: list[DockerEvent] = []
+        self.follow_error: BaseException | None = None
+        self.on_follow: list[str] | None = None
+        self.tick_count = 0
 
     def is_up(self) -> bool:
         if self.error is not None:
@@ -169,9 +174,15 @@ class FakeDocker:
 
     def follow_events(self, sink: EventSink, *, every: float) -> EventsEnd:
         self.calls.append(("events", str(every)))
+        if self.on_follow is not None:
+            self.on_follow.append("follow_events")
+        if self.follow_error is not None:
+            raise self.follow_error
         sink.started()
         for ev in self.events:
             sink.use(sink.resolve(ev))
+        for _ in range(self.tick_count):
+            sink.tick()
         sink.finish()
         return self.end
 
@@ -288,6 +299,28 @@ class FakeConfig:
         self.text = text
 
 
+class FakeGcNotifier:
+    """NotifierPort double recording ready(), watchdog(), and close() calls."""
+
+    def __init__(self, log: list[str] | None = None) -> None:
+        self.log: list[str] = [] if log is None else log
+        self.ready_results: list[bool] = []
+        self.closes = 0
+
+    def ready(self) -> bool:
+        ok_send = self.ready_results.pop(0) if self.ready_results else True
+        self.log.append("READY=1" if ok_send else "READY=1 failed")
+        return ok_send
+
+    def watchdog(self) -> bool:
+        self.log.append("WATCHDOG=1")
+        return True
+
+    def close(self) -> None:
+        self.closes += 1
+        self.log.append("close")
+
+
 PATHS = GcPaths("/state", "/run/gc", "/etc/cst/docker-gc.conf", "/usr/local/sbin/docker-gc")
 # An invented registry, protected by the settings file of the tests that need one.
 REGISTRY = "registry.example.com"
@@ -303,6 +336,7 @@ class Fixture:
         self.console = FakeConsole()
         self.clock = FakeClock()
         self.config = config or FakeConfig()
+        self.notifier = FakeGcNotifier()
         self.gc = DockerGc(
             settings or GcSettings(),
             docker=self.docker,
@@ -312,6 +346,7 @@ class Fixture:
             clock=self.clock,
             config=self.config,
             paths=PATHS,
+            notifier=self.notifier,
         )
 
 
@@ -664,6 +699,40 @@ class RecordTest(unittest.TestCase):
         rec.resolve(ev)
         self.assertEqual([c[:2] for c in self.f.docker.calls], [("image_id", "a:1")] * 2)
         self.assertEqual(self.f.docker.calls[0][2], "30")
+
+    def test_record_sends_ready_after_begin_watchdog_on_tick_and_closes_on_exit(self) -> None:
+        events = self.f.notifier.log
+        self.f.docker.on_follow = events
+        self.f.docker.tick_count = 2
+        orig_save = self.f.state.save_state
+
+        def save_and_log(st: GcState) -> None:
+            orig_save(st)
+            events.append("save")
+
+        with mock.patch.object(self.f.state, "save_state", side_effect=save_and_log):
+            rc = self.f.gc.execute(GcCommand.RECORD)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.f.notifier.closes, 1)
+        self.assertEqual(
+            events,
+            ["save", "READY=1", "follow_events", "WATCHDOG=1", "WATCHDOG=1", "save", "close"],
+        )
+
+    def test_record_retries_failed_ready_on_tick_and_closes_on_error(self) -> None:
+        self.f.notifier.ready_results = [False, True]
+        self.f.docker.tick_count = 2
+        self.assertEqual(self.f.gc.execute(GcCommand.RECORD), 1)
+        self.assertEqual(
+            self.f.notifier.log,
+            ["READY=1 failed", "READY=1", "WATCHDOG=1", "WATCHDOG=1", "close"],
+        )
+        # Even when follow_events raises, record() still closes the notifier in finally.
+        self.f = Fixture()
+        self.f.docker.follow_error = RuntimeError("docker events crashed")
+        self.assertEqual(self.f.gc.execute(GcCommand.RECORD), 1)
+        self.assertEqual(self.f.notifier.closes, 1)
+        self.assertEqual(self.f.notifier.log, ["READY=1", "close"])
 
 
 class CliTest(unittest.TestCase):
@@ -1027,6 +1096,20 @@ class WiringTest(unittest.TestCase):
 
     def test_the_installed_program_is_the_manifests(self) -> None:
         self.assertEqual(GcPaths().installed, manifest_by_src()["btrfs/docker-gc"].dest)
+
+    def test_build_docker_gc_wires_service_notifier(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="docker-gc-notify-")
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "notify")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(sock.close)
+        sock.bind(path)
+        sock.settimeout(5)
+        gc = gc_wiring.build_docker_gc({"NOTIFY_SOCKET": path})
+        self.assertIsInstance(gc.notifier, ServiceNotifier)
+        self.addCleanup(gc.notifier.close)
+        self.assertTrue(gc.notifier.ready())
+        self.assertEqual(sock.recv(64), b"READY=1")
 
 
 class ContainerRefusalTest(unittest.TestCase):
