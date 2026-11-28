@@ -152,12 +152,17 @@ cst desktop psd recover [--user NAME] [--discard]
 `apply` installs `/usr/local/sbin/cst-desktop` (`desktop:psd`, registered in
 `cst sync`) together with systemd templates:
 
-- `cst-desktop-psd@.service` — mounts idle overlays at boot
-  (`ExecStart=... start --user %i --skip-busy`) and flushes `upper`->`lower`
-  cleanly at shutdown (`ExecStop=... stop --user %i`).
+- `cst-desktop-psd@.service` — requires `/var/home`
+  (`RequiresMountsFor=/var/home`) and orders `After=local-fs.target` and
+  `Before=systemd-user-sessions.service display-manager.service` (while relying
+  on `DefaultDependencies=yes` for `shutdown.target`), so idle overlays mount
+  at boot before user login (`ExecStart=... start --user %i --skip-busy`) and
+  user sessions/display manager stop before `ExecStop` flushes
+  `upper`->`lower` cleanly at shutdown (`ExecStop=... stop --user %i`).
 - `cst-desktop-psd-resync@.service` & `cst-desktop-psd-resync@.timer` — hourly
   (`OnBootSec=15m`, `OnUnitActiveSec=1h`, `RandomizedDelaySec=5m`) idle merge
-  or crash-recovery snapshot.
+  or crash-recovery snapshot, deprioritized with `CPUWeight=20`, `IOWeight=20`,
+  `IOSchedulingClass=idle`, and `Nice=10`.
 
 `revert` closes active overlays (refusing if a browser is still open), disables
 the per-user service and timer, and removes the installed helper and template

@@ -1,3 +1,3 @@
 # SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST): runs after 90-iocost.rules so non-rotational SSDs without hwdb IOCOST_SOLUTIONS get enable=1 ctrl=auto.
-ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="nvme[0-9]*n[0-9]*|sd[a-z]*|vd[a-z]*", ATTR{queue/rotational}=="0", ENV{IOCOST_SOLUTIONS}=="", TEST=="/sys/fs/cgroup/io.cost.qos", RUN+="/usr/local/sbin/btrfs-iocost apply --live-only --device %k"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="nvme[0-9]*n[0-9]*|sd[a-z]*|vd[a-z]*", ATTR{queue/rotational}=="0", ENV{IOCOST_SOLUTIONS}=="", TEST=="/sys/fs/cgroup/io.cost.qos", TAG+="systemd", ENV{SYSTEMD_WANTS}+="cst-btrfs-iocost@%k.service"

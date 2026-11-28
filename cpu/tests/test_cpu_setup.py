@@ -23,6 +23,7 @@ from cpu.setup import cli as setup_cli, wiring as setup_wiring
 from cpu.setup.adapters.setup import CpuSetup, target_user
 from cpu.power.domain import CpuTopology
 from cpu.setup.domain import (
+    CORE_COMPONENT,
     default_settings,
     DROPIN_NAME,
     MANAGED_MARK,
@@ -41,7 +42,7 @@ from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import SYSTEM_PYTHON
 from cst_core.application.install import record_file
-from cst_core.domain.install import Component, Owner
+from cst_core.domain.install import INSTALL_MANIFEST, Component, Owner, select_entries
 from cst_core.domain.record import InstallRecord, RecordedFile
 from cst_core.domain.units import user_unit_dir
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
@@ -1498,6 +1499,41 @@ class StatusDiagnosisTest(CpuSetupCase):
         self.assertIn("== diagnosis", out)
         self.assertIn("Deep idle state C3_ACPI enabled", out)
         self.assertIn("Connected display GPU card0 (amdgpu, DP-1) has power/control=auto", out)
+
+
+class CpuPowerUdevUnitsTest(unittest.TestCase):
+    def test_gpu_pm_rule_offloads_to_hardened_service(self) -> None:
+        with open(os.path.join(REPO, "cpu", "udev", "65-cst-gpu-pm.rules"), encoding="utf-8") as fh:
+            rule_text = fh.read()
+        self.assertIn('TAG+="systemd"', rule_text)
+        self.assertIn('ENV{SYSTEMD_WANTS}+="cst-cpu-power-gpu.service"', rule_text)
+        self.assertNotIn("RUN+=", rule_text)
+
+        with open(os.path.join(REPO, "cpu", "units", "cst-cpu-power.service"), encoding="utf-8") as fh:
+            boot_text = fh.read()
+        with open(os.path.join(REPO, "cpu", "units", "cst-cpu-power-gpu.service"), encoding="utf-8") as fh:
+            gpu_text = fh.read()
+        self.assertIn("ExecStart=/usr/local/sbin/cpu-power apply --gpu-only", gpu_text)
+        self.assertIn("Type=oneshot", gpu_text)
+        self.assertNotIn("[Install]", gpu_text)
+        for text in (boot_text, gpu_text):
+            for directive in (
+                "ProtectSystem=strict",
+                "ReadWritePaths=-/sys/devices",
+                "RuntimeDirectory=cpu-setup",
+                "RuntimeDirectoryPreserve=yes",
+                "NoNewPrivileges=yes",
+                "CapabilityBoundingSet=",
+                "ProtectControlGroups=yes",
+                "RestrictAddressFamilies=none",
+                "SystemCallFilter=@system-service",
+            ):
+                self.assertIn(directive, text)
+            self.assertNotIn("ProtectKernelTunables=", text)
+        self.assertIn(
+            "/etc/systemd/system/cst-cpu-power-gpu.service",
+            [e.dest for e in select_entries(INSTALL_MANIFEST, component=CORE_COMPONENT)],
+        )
 
 
 if __name__ == "__main__":

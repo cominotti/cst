@@ -40,7 +40,7 @@ from cst_core.application.user_units import manager_unit_path
 from cst_core.domain.install import Component, GeneratedKind, Owner, expand_dest, manifest_by_src
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.units import user_unit_dir
-from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode, UnitName, WriteFailed
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode, UnitName, WriteFailed
 
 _RSYNC_TIMEOUT_S: Final = 600
 _OFFLOAD_FINDMNT_TIMEOUT_S: Final = 10
@@ -678,8 +678,16 @@ class OffloadInstallerAdapter:
 class OffloadUserSystemd:
     """`systemctl --user` control for `cst-scratchpad-backup.timer`."""
 
-    def __init__(self, manager_factory: Callable[[], SystemctlAdapter]) -> None:
+    def __init__(
+        self,
+        manager_factory: Callable[[], SystemctlAdapter],
+        *,
+        runner: CommandRunnerPort | None = None,
+        which: Callable[[str], str | None] = shutil.which,
+    ) -> None:
         self._manager_factory = manager_factory
+        self._runner = runner
+        self._which = which
 
     def unit_dir(self, home: str) -> str:
         return user_unit_dir(manager_unit_path(self._manager_factory()), home)
@@ -694,6 +702,22 @@ class OffloadUserSystemd:
         active = active_res.stdout.strip() if active_res.cause is None else ""
         enabled = enabled_res.stdout.strip() if enabled_res.cause is None else ""
         return active, enabled, svc_masked, timer_masked
+
+    def validate_calendar(self, on_calendar: str) -> str | None:
+        if self._runner is None or self._which("systemd-analyze") is None:
+            return None
+        res = self._runner.run(
+            ["systemd-analyze", "calendar", "--", on_calendar],
+            locale_c=True,
+            timeout=15,
+            output=OutputMode.MERGE,
+        )
+        if res.fault == CommandFault.MISSING:
+            return None
+        if res.cause is None and res.returncode == 0:
+            return None
+        detail = res.stdout.strip() or (str(res.cause) if res.cause is not None else f"exit {res.returncode}")
+        return f"invalid backup_on_calendar {on_calendar!r}: {detail}"
 
     def enable_backup_timer(self) -> str | None:
         res = self._manager_factory().enable(UnitName(OFFLOAD_TIMER), now=True)

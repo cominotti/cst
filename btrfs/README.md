@@ -243,6 +243,8 @@ the reclaim state and the state of `below`.
 health check makes sure you hear about it.
 
 **How:** `btrfs-health-check` reads the state of the filesystem and the disks.
+`btrfs-health-check.service` runs at low priority (`Nice=10`,
+`IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`).
 It **never changes the filesystem**. It only writes its own small state files in
 `/var/lib/btrfs-health-check` (and markers of the degraded-boot part, see
 section 8). Every number it reads and computes (counters, sizes, the
@@ -325,10 +327,13 @@ need that file, and by then the other copy may be bad too.
 
 **How:** `btrfs-scrub-weekly.timer` runs `btrfs scrub start -B /var` (and
 `btrfs scrub start -B /var/mnt/cache` when `/var/mnt/cache` is mounted as btrfs)
-every Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
-only works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`,
-so on this PC the scrub reads at the disks' full speed (see
-[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)) unless you set a speed limit (below). If the PC was off, it runs after the
+every Sunday at 02:00, at low priority (`Nice=19`, `IOSchedulingClass=idle`,
+`CPUWeight=20`, `IOWeight=20`; see
+[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
+`IOSchedulingClass=idle` only works with BFQ or Kyber; on NVMe `none`, `IOWeight=20`
+throttles `ExecStartPost` (`btrfs-health-check`) under `blk-iocost`, while the
+kernel's btrfs scrub I/O threads run outside the service cgroup at full speed
+unless you set a per-device speed limit (below). If the PC was off, it runs after the
 next boot, up to 15 minutes later (`RandomizedDelaySec=15min`), so not in
 the first minutes after login. After the scrub, the health check runs at once.
 If the scrub fails, the health check also runs and alerts.
@@ -592,8 +597,11 @@ kernel shows its own state as files) and in the cgroup tree.
   figure only when every sample it spans came from a daemon version 7 or
   later, as the zswap counters it is compared with.
 - It is strongly sandboxed (no network, no writes outside its own folders, limited
-  to 192 MiB of memory and 25% of one CPU) and runs with a higher priority, so it
-  keeps sampling while everything else is stuck.
+  to 192 MiB of memory and 25% of one CPU) and runs with a higher priority and
+  OOM protection (`OOMScoreAdjust=-500`, `ManagedOOMPreference=avoid`,
+  `MemoryLow=32M` while `MemoryMax=192M` bounds the daemon, because `system.slice`
+  enables `ManagedOOMMemoryPressure=kill`), so it keeps sampling while
+  everything else is stuck.
 - **systemd watches it** (a *watchdog*). The service is `Type=notify`: it
   counts as started (`active`) only once the daemon tells systemd it is
   sampling (`READY=1`, sent over the socket systemd names in `NOTIFY_SOCKET`).
@@ -1427,7 +1435,9 @@ when a disk is "ready".) With one NVMe dead, the boot waits forever and ends in
   service and a helper script. It puts them into the initramfs with
   `rpm-ostree initramfs-etc --track`.
 - It also adds `btrfs-degraded-boot-record.service`, which runs in the real
-  system (not in the initramfs) after a degraded boot.
+  system (not in the initramfs) after a degraded boot under a strict systemd
+  sandbox (`StateDirectory=btrfs-degraded-boot`, `ProtectSystem=strict`,
+  read-only access to `/run/btrfs-allow-degraded`).
 - When the first disk of the root filesystem appears, a **45 s** timer starts.
   If the filesystem is still incomplete after that, the helper checks that no
   passphrase prompt is waiting and that the missing disk is really absent or
@@ -1732,9 +1742,16 @@ cst btrfs iocost revert
 What `cst btrfs iocost apply` does (component `btrfs:iocost`):
 
 - installs `/usr/local/sbin/btrfs-iocost`,
-  `/etc/systemd/system/cst-btrfs-iocost.service`, and
+  `/etc/systemd/system/cst-btrfs-iocost.service`,
+  `/etc/systemd/system/cst-btrfs-iocost@.service`, and
   `/etc/udev/rules.d/91-cst-iocost.rules` (which runs after upstream
-  `90-iocost.rules` on non-rotational disks with empty `IOCOST_SOLUTIONS`);
+  `90-iocost.rules` on non-rotational disks with empty `IOCOST_SOLUTIONS` and
+  triggers `cst-btrfs-iocost@%k.service` via `TAG+="systemd"`,
+  `ENV{SYSTEMD_WANTS}+=...` instead of blocking udev with `RUN+=`); both
+  services run under a strict systemd sandbox (`ProtectSystem=strict`,
+  `RuntimeDirectory=btrfs-setup`, `RuntimeDirectoryPreserve=yes`,
+  `ReadWritePaths=-/sys/fs/cgroup/io.cost.qos`, `ProtectControlGroups` left off
+  so `io.cost.qos` remains writable);
 - enables `cst-btrfs-iocost.service` and writes `<MAJ>:<MIN> enable=1 ctrl=auto`
   into `/sys/fs/cgroup/io.cost.qos` for every non-rotational NVMe/SATA/VirtIO
   whole disk whose `enable` is not already `1` (vendor/pre-existing `enable=1`
@@ -2081,8 +2098,11 @@ backup: nothing on the cache drive is in a snapshot or a backup.
     copying files, plus optional selective `nocow_paths` patterns inside a `zstd` entry for SQLite
     WAL databases).
   - When `backup = true` (the default), `apply` installs `~/.local/lib/cst/btrfs-cache-offload`
-    and user units `cst-scratchpad-backup.{service,timer}` (`daily` by default, recorded under
-    component `btrfs:offload` and refreshed by `cst sync`). Each backup run mirrors the tree to
+    and user units `cst-scratchpad-backup.{service,timer}` (`daily` by default, custom
+    `backup_on_calendar` validated with `systemd-analyze calendar` before applying, recorded under
+    component `btrfs:offload` and refreshed by `cst sync`). The service runs in
+    `background.slice` (`Slice=background.slice`) at low priority (`Nice=19`,
+    `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`). Each backup run mirrors the tree to
     `~/.local/share/cst/scratchpad-mirrors/<name>` (`rsync -a --delete` with SQLite files excluded
     first, followed by online `sqlite3 .backup()` snapshots for every matching database so live WAL
     files never mirror half-flushed). `revert` copies files back onto `/home`, replaces symlinks
@@ -2414,6 +2434,12 @@ warning) and counted in the run's failures (`status`: `failures N`).
 So `enable` also starts `docker-gc-recorder.service`. It follows `docker events`
 and saves the time each image was used (container created, started or stopped;
 image pulled, built, tagged, loaded) in `/var/lib/docker-gc`.
+The recorder is `Type=notify` (`NotifyAccess=main`, `WatchdogSec=3min`,
+`LimitCORE=0`): it sends `READY=1` once it has recorded running/stopped
+containers and written its initial state, and `WATCHDOG=1` on every flush tick
+(`DOCKER_GC_FLUSH=30` s; retried `READY=1` if the first send failed). If those
+keep-alives stop for 3 minutes, systemd logs `Watchdog timeout`, kills it with
+no core dump, and restarts it (`Restart=on-failure`).
 
 Because of this:
 
@@ -2496,7 +2522,8 @@ list). It needs a terminal.
 - the settings `/etc/cst/docker-gc.conf` (root, 0644), only when it is
   missing (11.4).
 
-Both services run sandboxed: no capabilities, the whole file system read-only
+Both services run sandboxed (`docker-gc.service` also runs at low priority with
+`Nice=19`, `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`): no capabilities, the whole file system read-only
 except `/var/lib/docker-gc` (`ProtectSystem=strict` with
 `StateDirectory=docker-gc`) and, for the weekly run, `/run/docker-gc`
 (`RuntimeDirectory=docker-gc`, kept after the run so that a `cleanup-now`
@@ -2513,6 +2540,8 @@ They do not set `NoNewPrivileges=`: Fedora's SELinux policy labels
 `/run/docker.sock` only after its exec moves it into that domain, which
 `NoNewPrivileges` forbids (every docker call then fails with "permission
 denied"). `tests/test_unit_contract.py` keeps it out.
+`docker-gc-recorder.service` also bounds the daemon with `MemoryMax=128M`,
+`TasksMax=64`, and `LimitCORE=0` alongside its `Type=notify` watchdog.
 `systemd-analyze security docker-gc-recorder.service` rates them about 2.3
 (it was 9.4). Versions before this one kept the lock in `/run/docker-gc.lock`:
 until `enable` installs the new program, an old installed copy and
@@ -3124,12 +3153,12 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-flushoncommit` | `flushoncommit/` | Checkout-only entry behind `cst btrfs flushoncommit`: removes (`apply`, CST default) or re-enables (`revert`) `flushoncommit` across `/etc/fstab`, `rpm-ostree kargs`, live remount (`noflushoncommit` / `flushoncommit`), and `btrfs:top-mount`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_FLUSH_PROC` / `CST_BTRFS_FLUSH_ROOT`) and compress's shared layer runner. |
 | `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs cache`: provisions the encrypted NVMe cache drive (`/etc/cst/btrfs-cache.conf`, LUKS2 + Btrfs + `crypttab` + base `fstab` mounts), manages per-user `/var/mnt/cache/<user>` -> `~/.cache` (with optional `--migrate`) and `/var/mnt/scratchpad/<user>` -> `~/Scratchpad` bind mounts, manages system hot-path bind mounts under `/var/mnt/cache/system/*` (`system <status|plan|apply|revert>` for `below`, `stall-monitor`, `var-tmp`), `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_CACHE_ROOT`: a test root for every path it reads and writes). `domain/` (`__init__.py` CLI parsing & fstab/attach rules, `system_spec.py` system bind specs & arg parsing, `system.py` system bind validation/rendering, `provision.py` config/device/crypttab/fstab planning, `migrate.py` busy-process & backup checks, `format.py` status/plan text, `health.py`, `systemd_view.py`; no I/O); `ports.py` (nine boundaries including `CacheProvisionPort`, `CacheMigrationPort`, and `CacheSystemBindPort`); `application/` (`__init__.py`, `fstab_ops.py` shared base probing & atomic fstab/reload rollback, `mounts.py` for status/plan/attach/detach/migrate, `system.py` for system bind orchestration, `provision.py` for `provision` and `unprovision` with full rollback; no I/O); `adapters/` (`__init__.py`, `mounts.py`, `provision.py` over lsblk/blkid/cryptsetup/mkfs.btrfs, `migrate.py` over `/proc` and `cp -a`, `system.py` over `O_NOFOLLOW` root dirs, SELinux `chcon --reference`, `cp -a`, bind mounts, and `systemctl`); `wiring.py` (composition root through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
 | `btrfs-cache-offload` | `offload/` | User-installed helper (`~/.local/lib/cst/btrfs-cache-offload`, component `btrfs:offload`) behind `cst btrfs cache offload`: manages user-owned hot-folder symlinks onto `~/Scratchpad`, selective `chattr +C` NOCOW, and daily online `sqlite3 .backup()` + `rsync` cold mirrors onto `/home`. `domain/` (`__init__.py` TOML config validation rejecting `.local/share/containers` & overlapping/forbidden roots, starter presets, CLI args; `units.py` `cst-scratchpad-backup.{service,timer}`; `plan.py` health/plan/backup-record logic; no I/O); `ports.py`; `application.py` (`OffloadService` with `init`, `status`, `plan`, `apply` + rollback, `backup` + lock, `revert`, `refresh`; no I/O); `adapters.py` (`LocalOffloadHost` over `O_NOFOLLOW`/`FS_NOCOW_FL`/online `sqlite3`/`rsync`/`/proc`, `OffloadInstallerAdapter`, `OffloadUserSystemd`); `wiring.py` (composition root enforcing non-root host execution); `cli.py` (argv to `wiring.py`). |
-| `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox (section 9.2). `domain.py` (the command line, the disks and what udev says of them (`BlockDisk`, `UdevProperties`), reading `io.cost.qos`, the apply and revert plans, the status and plan lines; no I/O); `ports.py` (the eight boundaries the use cases go through: `io.cost.qos`, the managed-devices file, sysfs, udev, systemd, the installer, the in-process removal of `btrfs:iocost` and the two locks); `application.py` (`Iocost`: `status`, `plan`, `apply` and `revert`, live-only or not: the order of the steps, the managed devices saved before their lines are written, the component marked done last and pending first, which lock each step holds, and the error line of each failure; no I/O); `adapters.py` (the ports over the files and commands as the host sees them, `/run/host` from a toolbox for `status` and `plan`: `io.cost.qos` and sysfs, the managed-devices file through cst_core's `ensure_dir` and `write_atomic`, `udevadm`, systemctl through `SystemctlAdapter`, the installer, `InstallService` and the lock files through `take_lock`; and where they are, `IocostPaths`); `wiring.py` (the composition root: the use cases built over the real adapters, `status`/`plan`/`apply`/`revert` from the command line, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
+| `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service`, `cst-btrfs-iocost@.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox (section 9.2). `domain.py` (the command line, the disks and what udev says of them (`BlockDisk`, `UdevProperties`), reading `io.cost.qos`, the apply and revert plans, the status and plan lines; no I/O); `ports.py` (the eight boundaries the use cases go through: `io.cost.qos`, the managed-devices file, sysfs, udev, systemd, the installer, the in-process removal of `btrfs:iocost` and the two locks); `application.py` (`Iocost`: `status`, `plan`, `apply` and `revert`, live-only or not: the order of the steps, the managed devices saved before their lines are written, the component marked done last and pending first, which lock each step holds, and the error line of each failure; no I/O); `adapters.py` (the ports over the files and commands as the host sees them, `/run/host` from a toolbox for `status` and `plan`: `io.cost.qos` and sysfs, the managed-devices file through cst_core's `ensure_dir` and `write_atomic`, `udevadm`, systemctl through `SystemctlAdapter`, the installer, `InstallService` and the lock files through `take_lock`; and where they are, `IocostPaths`); `wiring.py` (the composition root: the use cases built over the real adapters, `status`/`plan`/`apply`/`revert` from the command line, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
 | `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `ports.py` (the four boundaries the use cases go through: `snapshots.conf`, the drop-in, systemd, sysfs); `application.py` (`ScrubLimit`: `status`, `plan` and `set`/`off`: `snapshots.conf`, then the drop-in, then `daemon-reload` when this run changed the drop-in or systemd has not loaded it as it is on disk (`NeedDaemonReload`, which `status` and `plan` also ask), and the rollback of both files on a failure; no I/O); `adapters.py` (the ports over the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`: `snapshots.conf` written by cst_core's `ensure_dir` and `write_atomic`, the drop-in through the installer without changing `btrfs:core`'s state in the install record, systemctl through `SystemctlAdapter`, on the host from a toolbox for `NeedDaemonReload`, and sysfs); `wiring.py` (the composition root: the use case built over the real adapters, `status`/`plan`/`set`/`off` from the command line, and its help, container refusal and sudo escalation through `run_managed_cli`); `cli.py` (argv to `wiring.py`, no I/O). |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days) and those this user has not seen (`unseen_alerts`), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |
-| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral, the settings and paths (`GcSettings`, `GcPaths`), the protected registries (the strict reader of the settings file, the built-in list read from an installed docker-gc's source, `resolve_protection`), the typed records of what docker reports, the plan (`plan_gc`) and the lines that show it; no I/O. `ports.py`: docker (with the events stream), the state files and run lock, the settings file and the installed program, the host (uptime, the recorder's unit), the terminal and journal. `application.py`: the use cases (`DockerGc`: record, plan, apply with the last checks before an image is removed, run, cleanup-now, status, settings) and the recorder's state while it follows `docker events` (`Recording`). `adapters.py`: the `docker` commands and their JSON, the last-used state and the last run's summary (each replaced atomically through cst_core's `write_atomic`; a state file docker-gc did not write reads as no state), the run lock (cst_core's `take_lock`), the settings file and the sources of the installed zipapp or script (`GcSettingsFile`), systemctl and `/proc/uptime`, the terminal and the journal lines. `wiring.py`: the environment (`DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `DOCKER_GC_CONF`, `DOCKER_GC_INSTALLED`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), whether it runs inside a toolbox or container (cst_core's `HostExecutionContext`; `CST_DOCKER_GC_CONTAINER` 1/0 for the tests) and the use cases over the real adapters. `domain.py` also holds `container_refusal`, the commands that refuse there. `cli.py`: the arguments and `main()`. |
+| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral, the settings and paths (`GcSettings`, `GcPaths`), the protected registries (the strict reader of the settings file, the built-in list read from an installed docker-gc's source, `resolve_protection`), the typed records of what docker reports, the plan (`plan_gc`) and the lines that show it; no I/O. `ports.py`: docker (with the events stream), the state files and run lock, the settings file and the installed program, the host (uptime, the recorder's unit), the terminal and journal, and `NotifierPort` (`NullGcNotifier` when unwired). `application.py`: the use cases (`DockerGc`: record with `READY=1`/`WATCHDOG=1` and socket cleanup, plan, apply with the last checks before an image is removed, run, cleanup-now, status, settings) and the recorder's state while it follows `docker events` (`Recording`). `adapters.py`: the `docker` commands and their JSON, the last-used state and the last run's summary (each replaced atomically through cst_core's `write_atomic`; a state file docker-gc did not write reads as no state), the run lock (cst_core's `take_lock`), the settings file and the sources of the installed zipapp or script (`GcSettingsFile`), systemctl and `/proc/uptime`, the terminal and the journal lines. `wiring.py`: the environment (`DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `DOCKER_GC_CONF`, `DOCKER_GC_INSTALLED`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`, `NOTIFY_SOCKET` via `ServiceNotifier.from_environ`), whether it runs inside a toolbox or container (cst_core's `HostExecutionContext`; `CST_DOCKER_GC_CONTAINER` 1/0 for the tests) and the use cases over the real adapters. `domain.py` also holds `container_refusal`, the commands that refuse there. `cli.py`: the arguments and `main()`. |
 | `docker-volumes-nocow` | `docker_volumes_nocow/` | `domain.py`: the paths (`NocowPaths`), what a scan of a volume found, whether a copy matches its original (entries, bytes, SELinux labels), how a dockerd names its data root, docker.service's states, the record of postponed boots and the outcome record (why no migration is scheduled: `parse_outcome`, `outcome_line`), what recovery does in one volume of an interrupted migration (`recovery`); no I/O. `ports.py`: the volume trees, the helper's state files, the Docker daemons, its output. `application.py`: one volume's NOCOW copy (`migrate_one`), the recovery of an interrupted migration (`recover`, one volume at a time: `recover_one`), `migrate`, `mark`, `unmark` and `status`. `adapters.py`: their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), the volumes' folders and what an interrupted migration left in each (`volume_folders`, `leftovers`), whether docker.service or another dockerd uses them, the flag, attempts, postponed and outcome files, SELinux labels, the journal lines and btrfs-notify. `wiring.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`, read when the program runs) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. Its Quint spec and the traces the replay test reads are in `btrfs/tests/quint` (the tool that checks it, `cst-quint`, is in `tests/quint`; [docs/dev-tools.md, "Model checking with Quint"](../docs/dev-tools.md#model-checking-with-quint-optional)). |
 | `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and the records it writes, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`, `settle_kinds`), the episode being recorded (`Episode`), and the loop's rules on the values it read: the longest commit of a probe, what opens and closes an episode, when a D-state task is reported and the words of each report, which kernel log lines count, the alert queue text; no I/O. `adapters/`: `proc.py`, reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), a read that may wait for another program (a task's command line) in a helper thread with a time limit (`TimedReader`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines, the log folder and the `Writer` thread of the log files; `monitor.py`, the daemon (`Monitor`: its state across samples and the sampling loop, the PSI trigger, `/dev/kmsg`, the alert hand-off and the helper thread that starts `btrfs-stall-alert.service` (`AlertStarter`), and its READY=1 and WATCHDOG=1 to systemd through cst_core's `ServiceNotifier`, which it closes when it stops). `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-report` | `stall_report/` | `domain/`, no I/O: `records.py`, the record formats and what the analysis returns; `categories.py`, the wait categories and hints and classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift); `window.py`, `summarise()`: one window's coverage, totals, categories, episodes and events, and the open episode; `verdict.py`, the verdict lines and number formats; `report.py`, the text report's lines. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, `analyse()` (the records by kind, `summarise()` with the clock, then below when asked), below and the container names. `cli.py`: printing the text report (with the container names), the arguments and `main()`. |

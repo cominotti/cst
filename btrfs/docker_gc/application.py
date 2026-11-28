@@ -43,7 +43,15 @@ from btrfs.docker_gc.domain import (
     resolve_protection,
     run_log_line,
 )
-from btrfs.docker_gc.ports import ConsolePort, DockerPort, GcHostPort, GcSettingsPort, GcStatePort
+from btrfs.docker_gc.ports import (
+    ConsolePort,
+    DockerPort,
+    GcHostPort,
+    GcSettingsPort,
+    GcStatePort,
+    NotifierPort,
+    NullGcNotifier,
+)
 from cst_core.domain.values import MINUTE
 from cst_core.ports import ClockPort, ReplacedNotSynced
 
@@ -65,6 +73,7 @@ class Recording:
         self.heartbeat = state.heartbeat
         self.dirty = False
         self.last_beat = 0.0
+        self.ready_sent = False
         self._resolved: dict[str, tuple[str, float]] = {}  # image reference -> (image id, resolved at)
 
     def snapshot(self) -> GcState:
@@ -84,6 +93,10 @@ class Recording:
         self.save()  # also fixes "since" on the very first start
         self.dirty = False
         self.last_beat = self._gc.clock.now()
+
+    def notify_ready(self) -> None:
+        """Send READY=1 once initial state is saved; retried on tick() if the send failed."""
+        self.ready_sent = self._gc.notifier.ready()
 
     # ---- EventSink -------------------------------------------------------
     def started(self) -> None:
@@ -109,7 +122,9 @@ class Recording:
         self.note(image_id, self._gc.clock.now())
 
     def tick(self) -> None:
-        """On a clock, not only when an event arrives: what changed, and the heartbeat."""
+        """On a clock, not only when an event arrives: what changed, the heartbeat, and the systemd watchdog."""
+        self.ready_sent = self.ready_sent or self._gc.notifier.ready()
+        self._gc.notifier.watchdog()
         now = self._gc.clock.now()
         if self.dirty or now - self.last_beat >= HEARTBEAT_SECONDS:
             self.heartbeat = self.last_beat = now
@@ -137,6 +152,7 @@ class DockerGc:
         clock: ClockPort,
         config: GcSettingsPort,
         paths: GcPaths,
+        notifier: NotifierPort | None = None,
         protect_env: str | None = None,
         in_container: bool = False,
         named_files: bool = False,
@@ -144,6 +160,7 @@ class DockerGc:
         self.settings = settings
         self.docker, self.state, self.host, self.console, self.clock = docker, state, host, console, clock
         self.config, self.paths, self.protect_env = config, paths, protect_env
+        self.notifier: NotifierPort = NullGcNotifier() if notifier is None else notifier
         # Inside a toolbox or container (container_refusal), and whether the caller named the
         # settings file and the installed program (DOCKER_GC_CONF and DOCKER_GC_INSTALLED).
         self.in_container, self.named_files = in_container, named_files
@@ -206,26 +223,30 @@ class DockerGc:
     # ---- record ----------------------------------------------------------
     def record(self) -> int:
         """Follow docker events and record each image's last use; the exit status for systemd."""
-        st = self.state.load_state()
-        booted = self.clock.now() - self.host.uptime()
-        # Down for a while with Docker running: `--rm` containers of that time
-        # left no trace, so the image clock starts over.
-        if recorder_down_too_long(st, self.clock.now(), booted):
-            st = replace(st, since=self.clock.now())
-            self.console.log(5, "recorder was down for a while: image clock restarted")
-        rec = Recording(self, st)
-        # Whatever happened while no recorder ran: every container counts as a use.
-        for c in self.docker.containers():
-            rec.note(c.image_id, c.last_use(self.clock.now()))
-        rec.begin()
-        end = self.docker.follow_events(rec, every=self.settings.flush_seconds)
-        if end.stopped or end.returncode < 0:
-            return 0
-        # docker events ended by itself (daemon restart): systemd restarts us. Its own 65 or 76
-        # is not one of our refusals, which the unit leaves failed: 1 instead.
-        if end.returncode in RECORDER_FINAL_EXITS:
-            return 1
-        return end.returncode or 1
+        try:
+            st = self.state.load_state()
+            booted = self.clock.now() - self.host.uptime()
+            # Down for a while with Docker running: `--rm` containers of that time
+            # left no trace, so the image clock starts over.
+            if recorder_down_too_long(st, self.clock.now(), booted):
+                st = replace(st, since=self.clock.now())
+                self.console.log(5, "recorder was down for a while: image clock restarted")
+            rec = Recording(self, st)
+            # Whatever happened while no recorder ran: every container counts as a use.
+            for c in self.docker.containers():
+                rec.note(c.image_id, c.last_use(self.clock.now()))
+            rec.begin()
+            rec.notify_ready()
+            end = self.docker.follow_events(rec, every=self.settings.flush_seconds)
+            if end.stopped or end.returncode < 0:
+                return 0
+            # docker events ended by itself (daemon restart): systemd restarts us. Its own 65 or 76
+            # is not one of our refusals, which the unit leaves failed: 1 instead.
+            if end.returncode in RECORDER_FINAL_EXITS:
+                return 1
+            return end.returncode or 1
+        finally:
+            self.notifier.close()
 
     # ---- plan and apply --------------------------------------------------
     def recorder_alive(self, st: GcState) -> bool:

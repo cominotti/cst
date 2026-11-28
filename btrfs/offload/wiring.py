@@ -80,7 +80,7 @@ def build_offload_service(
     home, proc_root = resolve_home_and_proc(env_map, seam_root)
     prog = env_map.get("CST_PROG") or OFFLOAD_PROG_DEFAULT
     host = LocalOffloadHost(home=home, prog=prog, runner=runner, proc_root=proc_root)
-    units = OffloadUserSystemd(lambda: _user_manager_factory(env_map, runner))
+    units = OffloadUserSystemd(lambda: _user_manager_factory(env_map, runner), runner=runner)
     installer = OffloadInstallerAdapter(entry_file)
     return OffloadService(host=host, units=units, installer=installer)
 

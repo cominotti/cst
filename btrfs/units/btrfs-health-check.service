@@ -9,3 +9,5 @@ Type=oneshot
 ExecStart=/usr/local/sbin/btrfs-health-check
 Nice=10
 IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20

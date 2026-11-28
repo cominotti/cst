@@ -14,6 +14,7 @@ from btrfs.docker_gc.domain import GcPaths, GcSettings
 from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import restore_default_signals as _restore_default_signals
+from cst_core.adapters.sd_notify import ServiceNotifier
 
 
 def settings_from(env: Mapping[str, str]) -> GcSettings:
@@ -69,6 +70,7 @@ def build_docker_gc(env: Mapping[str, str] | None = None) -> DockerGc:
         clock=SystemClockAdapter(),
         config=GcSettingsFile(paths),
         paths=paths,
+        notifier=ServiceNotifier.from_environ(values),
         protect_env=values.get("DOCKER_GC_PROTECT"),
         in_container=runs_in_container(values),
         named_files="DOCKER_GC_CONF" in values and "DOCKER_GC_INSTALLED" in values,

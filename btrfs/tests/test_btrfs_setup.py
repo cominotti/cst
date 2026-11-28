@@ -1265,6 +1265,14 @@ class StallMonitorUnitTest(unittest.TestCase):
         self.assertIn("Restart=on-failure", lines)
         self.assertIn("RuntimeDirectoryPreserve=restart", lines)
 
+    def test_protected_against_oom_and_memory_pressure(self) -> None:
+        # system.slice enables ManagedOOMMemoryPressure=kill; protect the monitor while MemoryMax=192M bounds it.
+        lines = self.service_lines()
+        self.assertIn("MemoryMax=192M", lines)
+        self.assertIn("OOMScoreAdjust=-500", lines)
+        self.assertIn("ManagedOOMPreference=avoid", lines)
+        self.assertIn("MemoryLow=32M", lines)
+
 
 class DockerGcUnitsTest(unittest.TestCase):
     """btrfs/units/docker-gc-recorder.service and docker-gc.service as shipped: sandboxed, with
@@ -1282,12 +1290,35 @@ class DockerGcUnitsTest(unittest.TestCase):
 
     def test_both_have_the_same_sandbox(self) -> None:
         # The block is written out in each unit (systemd has no include): a setting added to
-        # one only shows here. What differs is the job, and the weekly run's lock folder.
+        # one only shows here. What differs is the job, the recorder's notify/watchdog and
+        # daemon limits, and the weekly run's lock folder.
         own = {"Type", "ExecCondition", "ExecStart", "Restart", "RestartSec", "RestartPreventExitStatus", "Nice"}
-        own |= {"IOSchedulingClass"}
+        own |= {
+            "IOSchedulingClass",
+            "CPUWeight",
+            "IOWeight",
+            "NotifyAccess",
+            "WatchdogSec",
+            "LimitCORE",
+            "MemoryMax",
+            "TasksMax",
+        }
         own |= {"TimeoutStartSec", "Environment", "RuntimeDirectory", "RuntimeDirectoryPreserve"}
         recorder, weekly = ({k: v for k, v in self.service(name).items() if k not in own} for name in self.UNITS)
         self.assertEqual(recorder, weekly)
+
+    def test_recorder_notify_watchdog_and_resource_limits(self) -> None:
+        s = self.service("docker-gc-recorder.service")
+        for key, value in (
+            ("Type", "notify"),
+            ("NotifyAccess", "main"),
+            ("WatchdogSec", "3min"),
+            ("LimitCORE", "0"),
+            ("MemoryMax", "128M"),
+            ("TasksMax", "64"),
+        ):
+            self.assertEqual(s.get(key), [value], key)
+        self.assertNotIn("NoNewPrivileges", s)
 
     def test_both_run_sandboxed_with_no_capability(self) -> None:
         for name in self.UNITS:
@@ -1328,6 +1359,25 @@ class DockerGcUnitsTest(unittest.TestCase):
         gc = self.service("docker-gc.service")
         self.assertEqual((gc.get("RuntimeDirectory"), gc.get("RuntimeDirectoryPreserve")), (["docker-gc"], ["yes"]))
         self.assertNotIn("RuntimeDirectory", self.service("docker-gc-recorder.service"))
+
+
+class MaintenanceUnitWeightsTest(unittest.TestCase):
+    """System maintenance units run at low cgroup v2 CPU and IO weights."""
+
+    UNITS = (
+        "btrfs-snapshot-nas.service",
+        "btrfs-snapshot.service",
+        "btrfs-scrub-weekly.service",
+        "docker-gc.service",
+        "btrfs-health-check.service",
+    )
+
+    def test_maintenance_units_set_low_cpu_and_io_weights(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                lines = service_lines(name)
+                self.assertIn("CPUWeight=20", lines)
+                self.assertIn("IOWeight=20", lines)
 
 
 SCRUB_CASES: list[tuple[str, str | None]] = [

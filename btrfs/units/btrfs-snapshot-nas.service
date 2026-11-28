@@ -12,6 +12,8 @@ Type=oneshot
 ExecStart=/usr/local/sbin/btrfs-snapshot nas
 Nice=19
 IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20
 # The script bounds restic itself (NAS_TIMEOUT for the backups, then forget,
 # prune and check with what is left); this is a backstop. On stop, the script
 # unmounts and unpins the snapshots it was reading.

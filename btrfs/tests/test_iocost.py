@@ -570,7 +570,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertTrue(out[0].startswith("ERROR: systemctl disable --now cst-btrfs-iocost.service failed"), out)
         self.assertEqual(out[1], "nothing was removed")
         self.assertEqual(self._state(), "done")
-        self.assertEqual(len(self._left()), 3)
+        self.assertEqual(len(self._left()), len(self._component_files()))
 
     def test_a_failed_disable_that_changed_the_service_or_cannot_be_checked_leaves_pending(self) -> None:
         def disabled() -> None:
@@ -595,7 +595,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
                 self.assertEqual(rc, 1, out)
                 self.assertIn("nothing was removed", out)
                 self.assertEqual(self._state(), "pending")
-                self.assertEqual(len(self._left()), 3)
+                self.assertEqual(len(self._left()), len(self._component_files()))
 
     def test_a_failed_disable_leaves_a_pending_component_pending(self) -> None:
         self._seed_component()
@@ -648,7 +648,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
                 self.assertTrue(out[0].startswith(want), out)
                 self.assertFalse(self._ran("systemctl", "disable"))
                 self.assertEqual(self.runner.enabled_state, "enabled")
-                self.assertEqual(len(self._left()), 3)
+                self.assertEqual(len(self._left()), len(self._component_files()))
                 with open(record, encoding="utf-8") as fh:
                     self.assertEqual(fh.read(), text)
 
@@ -694,7 +694,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
                     revert_iocost(self.paths, runner=self.runner)
                 self.assertEqual(self._state(), "pending")
                 self.assertEqual(self.runner.enabled_state, "enabled")
-                self.assertEqual(len(self._left()), 3)
+                self.assertEqual(len(self._left()), len(self._component_files()))
                 self.runner.on_call = None
                 if then == "revert":
                     self._assert_reverted()
@@ -884,6 +884,38 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         with open(os.path.join(REPO, "btrfs", "units", "cst-btrfs-iocost.service"), encoding="utf-8") as fh:
             after = [line.split("=", 1)[1].split() for line in fh if line.startswith("After=")]
         self.assertEqual(after, [["systemd-udev-settle.service", "systemd-udevd.service", "local-fs.target"]])
+
+    def test_udev_rule_offloads_to_hardened_template_service(self) -> None:
+        with open(os.path.join(REPO, "btrfs", "udev", "91-cst-iocost.rules"), encoding="utf-8") as fh:
+            rule_text = fh.read()
+        self.assertIn('TAG+="systemd"', rule_text)
+        self.assertIn('ENV{SYSTEMD_WANTS}+="cst-btrfs-iocost@%k.service"', rule_text)
+        self.assertNotIn("RUN+=", rule_text)
+
+        with open(os.path.join(REPO, "btrfs", "units", "cst-btrfs-iocost.service"), encoding="utf-8") as fh:
+            base_text = fh.read()
+        with open(os.path.join(REPO, "btrfs", "units", "cst-btrfs-iocost@.service"), encoding="utf-8") as fh:
+            tpl_text = fh.read()
+        self.assertIn("ExecStart=/usr/local/sbin/btrfs-iocost apply --live-only --device %i", tpl_text)
+        self.assertIn("Type=oneshot", tpl_text)
+        self.assertNotIn("[Install]", tpl_text)
+        for text in (base_text, tpl_text):
+            for directive in (
+                "ProtectSystem=strict",
+                "ReadWritePaths=-/sys/fs/cgroup/io.cost.qos",
+                "RuntimeDirectory=btrfs-setup",
+                "RuntimeDirectoryPreserve=yes",
+                "NoNewPrivileges=yes",
+                "CapabilityBoundingSet=",
+                "RestrictAddressFamilies=AF_UNIX",
+                "SystemCallFilter=@system-service",
+            ):
+                self.assertIn(directive, text)
+            self.assertNotIn("ProtectControlGroups=", text)
+        self.assertIn(
+            "/etc/systemd/system/cst-btrfs-iocost@.service",
+            [e.dest for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST)],
+        )
 
     def _hold_lock(self) -> int:
         os.makedirs(os.path.dirname(self.paths.lock_path), exist_ok=True)

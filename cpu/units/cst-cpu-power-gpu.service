@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MPL-2.0
+# Managed by cpu-setup.sh (CST). Re-applies connected display GPU runtime PM
+# across monitor hotplug, triggered by udev SYSTEMD_WANTS.
+[Unit]
+Description=CST connected display GPU runtime PM hotplug policy
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cpu-power apply --gpu-only
+ProtectSystem=strict
+ReadWritePaths=-/sys/devices
+RuntimeDirectory=cpu-setup
+RuntimeDirectoryPreserve=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=none
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

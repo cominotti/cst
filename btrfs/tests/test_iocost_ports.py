@@ -687,13 +687,13 @@ class _PortsContract(unittest.TestCase):
         self.assertTrue(i.available())
         rc, lines = i.install()
         self.assertEqual(rc, 0, lines)
-        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(len(lines), len(IOCOST_ENTRIES), lines)
         self.assertEqual(self.side.in_place(), [e.dest for e in IOCOST_ENTRIES])
         self.assertEqual(self.side.state(), "pending")
         self.assertEqual(i.mark_done(), (0, []))
         self.assertEqual(self.side.state(), "done")
         rc, lines = i.install()
-        self.assertEqual((rc, [x.split()[0] for x in lines]), (0, ["unchanged:"] * 3))
+        self.assertEqual((rc, [x.split()[0] for x in lines]), (0, ["unchanged:"] * len(IOCOST_ENTRIES)))
 
     def test_a_failed_installer_answers_exit_1_and_its_error_line(self) -> None:
         record = record_file(Owner.ROOT, None, self.root)
@@ -724,7 +724,7 @@ class _PortsContract(unittest.TestCase):
         self.assertEqual(u.mark(ComponentState.PENDING), "done")
         self.assertEqual(self.side.state(), "pending")
         lines = u.remove()
-        self.assertEqual([x.split()[0] for x in lines], ["removed:"] * 3, lines)
+        self.assertEqual([x.split()[0] for x in lines], ["removed:"] * len(IOCOST_ENTRIES), lines)
         self.assertEqual((self.side.in_place(), self.side.state()), ([], None))
 
     def test_a_removal_that_fails_raises_and_keeps_the_files_after_it(self) -> None:

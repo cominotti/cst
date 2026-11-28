@@ -43,6 +43,10 @@ UMask=0027
 # Must keep sampling while everything else is stalled.
 Nice=-5
 MemoryMax=192M
+# system.slice enables ManagedOOMMemoryPressure=kill; protect the monitor while MemoryMax=192M bounds it.
+OOMScoreAdjust=-500
+ManagedOOMPreference=avoid
+MemoryLow=32M
 CPUQuota=25%
 TasksMax=8
 # Only what reading other tasks' kernel stacks (/proc/PID/stack: SYS_ADMIN +

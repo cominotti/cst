@@ -11,6 +11,8 @@ ExecCondition=/usr/bin/systemctl -q is-active docker.service
 ExecStart=/usr/local/sbin/docker-gc run
 Nice=19
 IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20
 TimeoutStartSec=1h
 # Sandbox: it needs only the docker CLI over /run/docker.sock (owned by root, so
 # no capability), `systemctl is-active` and writes in /var/lib/docker-gc (its

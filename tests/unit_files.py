@@ -7,8 +7,9 @@ Use: python3 -I -B tests/unit_files.py write STAGE   (from anywhere)
 - `manifest_units()`: the INSTALL_MANIFEST rows of kind unit, the `*.in`
   templates rendered with TEMPLATE_VALUES (the values tier 1's test_11 uses);
 - `generated_units()`: the units programs write at run time: cst-vm's
-  backup timer and service, cst-toolchains' prune service and timer, the
-  LDAC watcher's user unit, and the degraded-boot units (the texts
+  backup timer and service, cst-toolchains' prune service and timer and
+  cargo build tmpfs `.mount` unit, cst-scratchpad-backup's user service and
+  timer, the LDAC watcher's user unit, and the degraded-boot units (the texts
   btrfs/tests/test_degraded_boot.py checks the setup script writes);
 - `generated_dropins()`: the drop-ins programs write, rendered by their
   own code: btrfs-setup.sh's scrub limit (its shell function run in bash,
@@ -38,15 +39,16 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from bluetooth.domain import LDAC_UNIT, render_unit as bt_render_unit
+from btrfs.offload.domain import units as offload_units
 from btrfs.tests.test_degraded_boot import EXPECTED_RECORD, EXPECTED_SERVICE, EXPECTED_TIMER
 from cpu.game import domain as game_domain
 from cpu.irq import domain as irq_domain
 from cpu.setup import domain as cpu_domain
 from cst_core.domain.install import INSTALL_MANIFEST, manifest_by_src, render_template
 from cst_core.domain.text import file_lines, parse_shell_assignments
-from toolchains.domain import auto as tcd_auto
+from cst_core.domain.values import GIB
 from tests.shell_source import shell_function
-from toolchains.domain import common as tcd_common
+from toolchains.domain import auto as tcd_auto, common as tcd_common, tmpfs as tcd_tmpfs
 from vm import domain as vm_domain
 
 type Scope = Literal["system", "user"]
@@ -107,6 +109,33 @@ def generated_units() -> list[UnitText]:
         UnitText(vm_domain.TIMER, vm_domain.render_timer(), "system", "vm/cst-vm"),
         UnitText(tcd_common.SERVICE, tcd_auto.render_service(), "user", "toolchains/cst-toolchains"),
         UnitText(tcd_common.TIMER, tcd_auto.render_timer(), "user", "toolchains/cst-toolchains"),
+        UnitText(
+            r"var-home-tester-.cache-cargo\x2dbuild\x2dtmpfs.mount",
+            tcd_tmpfs.render_tmpfs_mount_unit(
+                tcd_tmpfs.TmpfsTargetUser.from_home(
+                    user="tester",
+                    group="tester",
+                    uid=GAME_UID,
+                    gid=GAME_UID,
+                    real_home="/var/home/tester",
+                ),
+                2 * GIB,
+            ),
+            "system",
+            "toolchains/cst-toolchains",
+        ),
+        UnitText(
+            offload_units.OFFLOAD_SERVICE,
+            offload_units.render_offload_service(),
+            "user",
+            "btrfs/btrfs-cache-offload",
+        ),
+        UnitText(
+            offload_units.OFFLOAD_TIMER,
+            offload_units.render_offload_timer(),
+            "user",
+            "btrfs/btrfs-cache-offload",
+        ),
         UnitText(LDAC_UNIT, bt_render_unit("0A:1B:2C:3D:4E:5F", 48000), "user", "bluetooth/bt-helper"),
         UnitText("btrfs-last-resort@.timer", EXPECTED_TIMER, "system", "btrfs/btrfs-degraded-boot-setup.sh"),
         UnitText("btrfs-last-resort@.service", EXPECTED_SERVICE, "system", "btrfs/btrfs-degraded-boot-setup.sh"),

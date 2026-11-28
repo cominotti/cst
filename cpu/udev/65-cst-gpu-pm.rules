@@ -1,3 +1,3 @@
 # SPDX-License-Identifier: MPL-2.0
 # Managed by cpu-setup.sh (CST): keep runtime PM on for connected display GPUs across monitor hotplug.
-ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", RUN+="/usr/local/sbin/cpu-power apply --gpu-only"
+ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="cst-cpu-power-gpu.service"
