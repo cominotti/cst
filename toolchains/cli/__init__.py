@@ -28,7 +28,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2
-    wiring.set_output_mode(a["cmd"], a["action"])
+    wiring.set_output_mode(a["cmd"], a["action"], plan=a["plan"])
     if a["cmd"] == ToolchainsCommand.HELP:
         print(doc)
         return 0
@@ -47,7 +47,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
         assert a["action"] is not None
         match a["cmd"]:
             case ToolchainsCommand.CONFIG:
-                return config.cmd_config(s, a["action"], lean=a["lean"], sccache=a["sccache"])
+                return config.cmd_config(s, a)
             case ToolchainsCommand.PRUNE if a["action"] == ToolchainsAction.PLAN:
                 return prune.cmd_prune(s, ToolchainsAction.PLAN, a["targets"])
             case ToolchainsCommand.PRUNE:

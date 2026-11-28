@@ -60,6 +60,8 @@ caches, instead of one command per cache inside `cst btrfs`.
 
 ```
 cst toolchains status            # what is there, how big, the timer, the settings
+cst toolchains config init --plan # dry run: what starter ~/.config/cst/toolchains.conf would look like
+cst toolchains config init       # create ~/.config/cst/toolchains.conf with defaults and active overrides
 cst toolchains config plan       # the cargo and uv settings: what apply would add
 cst toolchains config apply
 cst toolchains prune plan        # what would be deleted now, and why (deletes nothing)
@@ -81,6 +83,7 @@ because only the host can see the processes of every toolbox.
 | `auto on` | Copies the program to `~/.local/lib/cst/`, writes the timer, and starts it. `--unless-off`: not if you ran `auto off` (that is what `snapshots setup` uses). The copies and the units go through CST's installer and are listed in your install record `~/.local/state/cst/installed.json` (component `toolchains:auto`; the sccache wrapper that `config apply` writes is `toolchains:sccache`); `auto off` takes them out again. |
 | `auto off` | Stops the timer, removes what `auto on` installed, and remembers that you turned it off. Refused, with nothing removed, when the timer cannot be stopped; also stops a timer an earlier `auto off` left running ([section 11](#11-how-to-undo)). |
 | `config plan` / `config apply` | The toolchain settings ([section 6](#6-the-toolchain-settings-config)). `--lean-debuginfo` / `--no-lean-debuginfo` turn the opt-in lean debug info on or off for this one run, whatever the settings say. `--sccache` sets up the opt-in sccache; `--no-sccache` removes CST's `rustc-wrapper` line again ([section 6](#sccache-opt-in)). |
+| `config init [--plan] [--force]` | Create `~/.config/cst/toolchains.conf` pre-filled with all documented defaults commented out and any currently active CST overrides (`RUST_LEAN_DEBUGINFO`, `RUST_INCREMENTAL`, `RUST_SCCACHE`, `RUST_SCCACHE_CACHE_SIZE`, `RUST_SCCACHE_WORKSPACE`) uncommented. `--plan` is a read-only dry run; refuses when `~/.config/cst/toolchains.conf` already exists unless `--force` is passed (which refreshes the comments/layout while keeping valid overrides, or exits `unchanged:` if already up to date). |
 | `tmpfs status \| plan \| apply \| revert` | Opt-in dedicated RAM `tmpfs` mount at `~/.cache/cargo-build-tmpfs` with an adaptive `min(16 GiB, 20% RAM)` cap (`--size SIZE` overrides within 512 MiB..50% RAM; `--user USER` selects the user when running as root). `apply` and `revert` use `sudo` on the host to manage the systemd `.mount` unit and `tmpfiles.d` rule ([section 6](#dedicated-ram-tmpfs-for-build-dir-opt-in)). |
 
 **TARGET** is `LANG:CACHE` (`rust:build`) or just `LANG` (`rust` = every
@@ -133,11 +136,16 @@ they do not know, so a step left out fails at once.
 
 ## 5. Settings
 
-The defaults are in `toolchains/toolchains.conf` in CST. To change one,
-create `~/.config/cst/toolchains.conf` with `KEY=value` lines; yours win
+The defaults are in `toolchains/toolchains.conf` in CST. To change one, run
+`cst toolchains config init` (add `--plan` for a dry run) to generate a
+commented starter `~/.config/cst/toolchains.conf` pre-seeded with any CST
+settings already active on your machine, or create
+`~/.config/cst/toolchains.conf` with `KEY=value` lines yourself; yours win
 (blanks around `=`, quotes and a `# comment` after the value are fine; a
 line that is not an assignment, a `$`, backtick or backslash outside single
-quotes, or an unknown key stops every run, naming the line):
+quotes, or an unknown key stops every run, naming the line). Passing
+`--force` to `cst toolchains config init` refreshes an existing
+`~/.config/cst/toolchains.conf` while preserving its valid overrides:
 
 ```
 # ~/.config/cst/toolchains.conf
@@ -1025,19 +1033,21 @@ toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes` and set
 The opt-in sccache is the exception: `cst toolchains config apply
 --no-sccache` removes CST's `rustc-wrapper` line (set `RUST_SCCACHE=no`
 too); delete `~/.local/libexec/cst/rustc-wrapper` and `~/.cache/sccache` by
-hand if you want them gone.
+hand if you want them gone. If you created `~/.config/cst/toolchains.conf` with
+`cst toolchains config init`, removing that file restores CST's built-in defaults
+(run `cst toolchains config apply` afterwards to update `~/.cargo/config.toml`).
 
 ## 12. Files in this folder
 
 | File | What it is |
 |---|---|
 | `cst-toolchains` | The program (`status`, `prune`, `auto`, `config`): only the bootstrap and a `main()` that runs `cli/`; its docstring is the `help`. `auto on` installs it at `~/.local/lib/cst/cst-toolchains` for the user timer, as a zipapp with the packages it imports (Python standard library only). |
-| `domain/` | The rules, no I/O, one module per area: `common.py` (names and paths, the settings syntax, the command line `parse_args`), `build.py` (rust:build: the build folders, the pruning decision `decide`), `uv.py` (python:uv), `prune.py` (the registry of targets `SPECS`, the checked settings `Settings`, the saved summary of a run, the planned targets, the run's time budget), `auto.py` (the unit files, rendered through `cst_core`), `config.py` (the cargo, uv and sccache texts, and what `config` would change in cargo's config: `lean_state`, `sccache_state`), `tmpfs.py` (dedicated RAM tmpfs sizing, systemd `.mount` / `tmpfiles.d` rendering, and live mount checks). |
+| `domain/` | The rules, no I/O, one module per area: `common.py` (names and paths, the settings syntax, the command line `parse_args`), `build.py` (rust:build: the build folders, the pruning decision `decide`), `uv.py` (python:uv), `prune.py` (the registry of targets `SPECS`, the checked settings `Settings`, the saved summary of a run, the planned targets, the run's time budget), `auto.py` (the unit files, rendered through `cst_core`), `config.py` (the cargo, uv and sccache texts, and what `config` would change in cargo's config: `lean_state`, `sccache_state`), `config_init.py` (starter `toolchains.conf` rendering and active override detection), `tmpfs.py` (dedicated RAM tmpfs sizing, systemd `.mount` / `tmpfiles.d` rendering, and live mount checks). |
 | `ports.py` | The boundaries the use cases reach the machine through: `BuildTreePort` (the build folders and what uses them; a deletion is one call that takes cargo's locks and checks the users and the rule again), `UvPort`, `RunStatePort` (the run summaries), `RunOutputPort` (the lines a run says), `UserUnitsPort` (the user manager: what it says of a timer, the checked calls before files are removed), `HomeFilesPort` (the files CST keeps in the home: auto on's copies and units, the file auto off leaves, what the earlier `cst btrfs cargo-gc` left, the tools' settings files `config` reads and changes, the sccache wrapper), `InstalledToolsPort` (the reports of `status` on the rust toolchains and sccache), `TmpfsHostPort` (system `.mount` / `tmpfiles.d` management). |
-| `application/` | The use cases, typed against `ports.py`: prune (`prune.py`: the targets one after the other under the run's time budget, the `Target` protocol, `BaseTarget`) and its targets `rust_build.py` (`RustBuild`) and `python_uv.py` (`PythonUv`); `auto.py` (`AutoTimer`: `auto on` and `auto off`, the timer's status line); `config.py` (`ToolConfig`: `config plan` and `config apply`); `status.py` (`ToolchainsStatus`: `status`); `tmpfs.py` (`TmpfsManager`: `tmpfs status|plan|apply|revert`). |
+| `application/` | The use cases, typed against `ports.py`: prune (`prune.py`: the targets one after the other under the run's time budget, the `Target` protocol, `BaseTarget`) and its targets `rust_build.py` (`RustBuild`) and `python_uv.py` (`PythonUv`); `auto.py` (`AutoTimer`: `auto on` and `auto off`, the timer's status line); `config.py` (`ToolConfig`: `config plan` and `config apply`); `config_init.py` (`ToolConfigInit`: `config init`); `status.py` (`ToolchainsStatus`: `status`); `tmpfs.py` (`TmpfsManager`: `tmpfs status|plan|apply|revert`). |
 | `adapters/` | The host, one module per tool or concern: `program.py` (`RunOutput`, the lines, journal-aware; where the running program's files are; commands at idle priority), `home_files.py` (the files written in the home folder, `HomeFiles`; the settings files read, the run summaries `RunSummaries`, the run lock `ToolchainsLock`), `build_tree.py` (the build folders on disk, cargo's locks in them, `CargoBuildTree`), `processes.py` (the processes that use them), `cargo.py` (cargo and git: which folder a cargo builds in, which folders the workspaces claim), `uv.py` (`UvTool`), `rustup.py` (also the rust toolchains report and `InstalledTools`), `sccache.py`, `tmpfs.py` (`TmpfsHost`, shared active-mount detection), `units.py` (`systemctl --user` through cst_core's `SystemctlAdapter`: `user_systemctl`; `UserUnits`, the `UserUnitsPort`, over a `SystemdPort` of the user manager, which a test replaces with a fake). |
-| `wiring.py` | The composition root, the only module besides `adapters/` that imports an adapter (the package is in `HEXAGONAL_PACKAGES`): the environment it reads (`CST_PROG`, `JOURNAL_STREAM`, `CST_TOOLCHAINS_NOW`, `CST_TOOLCHAINS_HERE`, a test's systemctl stub `CST_TOOLCHAINS_SYSTEMCTL`), the real user and the output mode, the re-run on the host from a toolbox, the session of a command (`Session`: home, now, adapters; `Parts`: what a test gives instead), the settings, the targets and the use cases built over them (`auto_timer`, `tool_config`, `toolchains_status`). |
-| `cli/` | The commands, one module per command group, with no I/O of their own: `__init__.py` (`main()`: the command line, the session, the run lock), `prune.py`, `status.py` (through `ToolchainsStatus`), `auto.py` (`auto on/off`, through `AutoTimer`), `config.py` (through `ToolConfig`). |
+| `wiring.py` | The composition root, the only module besides `adapters/` that imports an adapter (the package is in `HEXAGONAL_PACKAGES`): the environment it reads (`CST_PROG`, `JOURNAL_STREAM`, `CST_TOOLCHAINS_NOW`, `CST_TOOLCHAINS_HERE`, a test's systemctl stub `CST_TOOLCHAINS_SYSTEMCTL`), the real user and the output mode, the re-run on the host from a toolbox, the session of a command (`Session`: home, now, adapters; `Parts`: what a test gives instead), the settings, the targets and the use cases built over them (`auto_timer`, `tool_config`, `tool_config_init`, `run_config`, `toolchains_status`). |
+| `cli/` | The commands, one module per command group, with no I/O of their own: `__init__.py` (`main()`: the command line, the session, the run lock), `prune.py`, `status.py` (through `ToolchainsStatus`), `auto.py` (`auto on/off`, through `AutoTimer`), `config.py` (`config plan|apply|init`, through `wiring.run_config`). |
 | `toolchains.conf` | The default settings. |
 | `rustc-wrapper` | The opt-in sccache wrapper (POSIX sh) that `config apply` copies to `~/.local/libexec/cst/` ([section 6](#sccache-opt-in)). |
 | `../toolchains-setup.sh` | The module script: its header comment is the help; the rest is a shim that runs `cst_core/route.py toolchains`, which prints the help or a usage error and execs the program, as root first running the script again as `SUDO_USER` through runuser (the routing table: `ROUTING` in `cst_core/domain/dispatch.py`; tests: `tests/test_module_routing.py`). |

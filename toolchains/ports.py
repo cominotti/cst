@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from toolchains.domain.auto import OlderUnitAction, TimerFacts
     from toolchains.domain.build import BuildTreeResult, CargoCache, Folder, Workspaces
     from toolchains.domain.config import SccacheInstallMethod, SettingsRewrite, WrapperValues
+    from toolchains.domain.config_init import UserConfKind
     from toolchains.domain.prune import RunRecord, SavedRun
     from toolchains.domain.tmpfs import TmpfsSnapshot, TmpfsTargetUser
     from toolchains.domain.uv import UvCacheKind
@@ -330,6 +331,22 @@ class HomeFilesPort(Protocol):
 
     def tmpfs_mounted(self) -> bool:
         """True when the dedicated per-user cargo build tmpfs is actively mounted."""
+        ...
+
+    def defaults_conf(self) -> tuple[str, str | None]:
+        """(path, text_or_None) of CST's defaults `toolchains.conf` next to this program."""
+        ...
+
+    def read_installed_wrapper(self) -> str | None:
+        """Installed `~/.local/libexec/cst/rustc-wrapper` text, or None when missing/unreadable."""
+        ...
+
+    def user_conf_state(self) -> tuple[UserConfKind, str]:
+        """(kind, text_or_error) of `~/.config/cst/toolchains.conf` without following symlinks."""
+        ...
+
+    def write_user_conf(self, text: str) -> None:
+        """Atomically write `~/.config/cst/toolchains.conf` (0644); raises WriteFailed on error."""
         ...
 
 

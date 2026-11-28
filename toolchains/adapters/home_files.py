@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 from cst_core.adapters.files import (
     LocalFileSystemAdapter,
+    open_regular_bytes,
+    open_regular_text,
     owned_file_state_at,
     read_bytes,
     read_text,
@@ -38,6 +40,7 @@ from cst_core.domain.shapes import json_object, parse_json, parse_toml
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState
 from cst_core.domain.install import INSTALL_MANIFEST, Component, GeneratedKind, Owner, expand_dest, manifest_by_src
 from cst_core.domain.units import user_unit_dir
+from cst_core.ports import WriteFailed
 from toolchains.adapters.program import program_folder
 from toolchains.adapters.tmpfs import is_active_tmpfs_mount
 from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, OlderUnitAction, render_timer
@@ -68,6 +71,7 @@ from toolchains.domain.config import (
     render_wrapper,
     wrapper_path,
 )
+from toolchains.domain.config_init import UserConfKind
 from toolchains.domain.prune import RunRecord, SavedRun, Settings, checked_settings, is_saved_run, parse_defaults
 
 
@@ -252,9 +256,9 @@ def turned_off(home: str) -> bool:
 
 
 def read_cfg(path: str) -> str | None:
-    """Text of a config file; '' when missing; None when it cannot be read."""
+    """Text of a config file; '' when missing; None when it cannot be read (including non-regular files)."""
     try:
-        with open(path, "rb") as f:
+        with open_regular_bytes(path) as f:
             return f.read().decode("utf-8", "replace")
     except FileNotFoundError:
         return ""
@@ -481,6 +485,52 @@ class HomeFiles:
     def tmpfs_mounted(self) -> bool:
         target = os.path.join(os.path.realpath(self.home), TMPFS_ROOT_REL)
         return is_active_tmpfs_mount(target, require_uid=os.getuid()) is not None
+
+    def defaults_conf(self) -> tuple[str, str | None]:
+        path = defaults_path(self.entry_file)
+        try:
+            with open_regular_text(path, errors="strict") as f:
+                return path, f.read()
+        except FileNotFoundError:
+            return path, None
+        except (OSError, UnicodeDecodeError) as e:
+            msg = e.strerror if isinstance(e, OSError) and e.strerror is not None else str(e)
+            raise ConfigError(f"cannot read defaults {path}: {msg}") from None
+
+    def read_installed_wrapper(self) -> str | None:
+        return LocalFileSystemAdapter().read_text(wrapper_path(self.home), regular_only=True)
+
+    def user_conf_state(self) -> tuple[UserConfKind, str]:
+        path = os.path.join(self.home, CONF_REL)
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return UserConfKind.MISSING, ""
+        except OSError as e:
+            return UserConfKind.UNREADABLE, e.strerror or str(e)
+        if stat.S_ISLNK(st.st_mode):
+            return UserConfKind.SYMLINK, ""
+        if not stat.S_ISREG(st.st_mode):
+            return UserConfKind.OTHER, ""
+        return _read_regular_user_conf(path)
+
+    def write_user_conf(self, text: str) -> None:
+        path = os.path.join(self.home, CONF_REL)
+        try:
+            write_atomic(path, text, mode=0o644, relabel=False)
+        except OSError as e:
+            raise WriteFailed(path, e.strerror or str(e)) from None
+
+
+def _read_regular_user_conf(path: str) -> tuple[UserConfKind, str]:
+    """Read UTF-8 text from regular file PATH without blocking on non-regular files."""
+    try:
+        with open_regular_text(path, errors="strict") as f:
+            return UserConfKind.REGULAR, f.read()
+    except OSError as e:
+        return UserConfKind.UNREADABLE, e.strerror or str(e)
+    except UnicodeDecodeError as e:
+        return UserConfKind.UNREADABLE, f"not valid UTF-8 ({e})"
 
 
 def _timer_wants_link(path: str) -> str | None:

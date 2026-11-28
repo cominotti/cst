@@ -39,12 +39,13 @@ from toolchains.adapters.units import UserUnits, user_systemctl
 from toolchains.adapters.uv import UvTool
 from toolchains.application.auto import AutoTimer
 from toolchains.application.config import ToolConfig
+from toolchains.application.config_init import ToolConfigInit
 from toolchains.application.status import ToolchainsStatus
 from toolchains.application.prune import TargetPorts
 from toolchains.application.python_uv import PythonUv
 from toolchains.application.rust_build import RustBuild
 from toolchains.application.tmpfs import TmpfsManager
-from toolchains.domain.common import NAME, USAGE, ConfigError
+from toolchains.domain.common import NAME, USAGE, ConfigError, ToolchainsAction
 from toolchains.domain.prune import PYTHON_UV, RUST_BUILD, Limits
 from toolchains.domain.tmpfs import TmpfsAction
 
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
 
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
-    from toolchains.domain.common import ParsedArgs, ToolchainsAction, ToolchainsCommand
+    from toolchains.domain.common import ParsedArgs, ToolchainsCommand
     from toolchains.domain.prune import Settings
     from toolchains.ports import (
         BuildTreePort,
@@ -109,9 +110,9 @@ def systemctl_program() -> str | None:
     return os.environ.get("CST_TOOLCHAINS_SYSTEMCTL") or None
 
 
-def set_output_mode(cmd: ToolchainsCommand, action: ToolchainsAction | None) -> None:
+def set_output_mode(cmd: ToolchainsCommand, action: ToolchainsAction | None, *, plan: bool = False) -> None:
     """SIGPIPE at its default for a command that only reads (see adapters.program.output_mode)."""
-    output_mode(cmd, action)
+    output_mode(cmd, action, plan=plan)
 
 
 def run_by_root() -> bool:
@@ -222,6 +223,21 @@ def auto_timer(s: Session) -> AutoTimer:
 def tool_config(s: Session) -> ToolConfig:
     """config plan and apply over the session's adapters."""
     return ToolConfig(s.home, s.prog, s.files, s.out, lambda: settings(s), s.sccache_installer)
+
+
+def tool_config_init(s: Session) -> ToolConfigInit:
+    """config init over the session's adapters."""
+    return ToolConfigInit(s.home, s.prog, s.files, s.out)
+
+
+def run_config(s: Session, target: ParsedArgs | ToolchainsAction) -> int:
+    """Dispatch `config plan|apply` or `config init` from parsed CLI args or a `ToolchainsAction`."""
+    if isinstance(target, ToolchainsAction):
+        return tool_config(s).run(target)
+    if target["action"] == ToolchainsAction.INIT:
+        return tool_config_init(s).run(plan=target["plan"], force=target["force"])
+    assert target["action"] is not None
+    return tool_config(s).run(target["action"], target["lean"], target["sccache"])
 
 
 def toolchains_status(s: Session) -> ToolchainsStatus:
