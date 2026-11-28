@@ -13,17 +13,36 @@ scratch folders, and the unit tests never gain privileges
 (tests/run_unit.py).
 """
 
+import ast
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import difflib
+from enum import StrEnum
+import io
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import time
+from types import FrameType
+from typing import NoReturn, TextIO
 import unittest
+from unittest import mock
 
-from cst_core.ports import CommandResult
+from bluetooth.setup import cli as bt_cli, wiring as bt_wiring
+from cst_core import installer as cst_installer
+from cst_core.adapters.runner import c_locale, on_host_argv
+from cst_core.ports import (
+    CommandFailed,
+    CommandResult,
+    ContainerProbePort,
+    DecodeErrors,
+    OutputMode,
+    StdinMode,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -278,6 +297,15 @@ OBJECTS = {
 }
 
 
+class SubprocessMode(StrEnum):
+    """How Machine.run_subprocess spawns bluetooth-setup.sh for process-boundary tests."""
+
+    PLAIN = "plain"
+    CLOSED_STDOUT = "closed-stdout"
+    IGNORE_HUP = "ignore-hup"
+    ROOT = "root"
+
+
 @dataclass(frozen=True)
 class Run:
     """One run of the program: its exit status, output and the calls the stubs logged."""
@@ -413,14 +441,20 @@ class Machine:
         container: bool = False,
         env: Mapping[str, str] | None = None,
         stdin_text: str | None = None,
-        timeout: float = 120,
-        closed_stdout: bool = False,
-        ignore_hup: bool = False,
-        root: bool = False,
     ) -> Run:
-        """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox; closed_stdout:
-        its stdout a pipe nobody reads, as `| head` leaves it; root: as root in a user namespace,
-        unshare -r, where this user is root with no privilege outside)."""
+        """bluetooth-setup.sh ARGS on this machine in-process via cli.main and SetupModel."""
+        if not container and self.has("objects.json"):
+            raise AssertionError("an adapter listed on the host: the checks would open a real Bluetooth socket")
+        return self._run_in_process(args, container=container, env=env, stdin_text=stdin_text)
+
+    def run_subprocess(
+        self,
+        *args: str,
+        container: bool = False,
+        env: Mapping[str, str] | None = None,
+        mode: SubprocessMode = SubprocessMode.PLAIN,
+    ) -> Run:
+        """bluetooth-setup.sh ARGS as a real subprocess (for shim, signal, closed-stdout, and root tests)."""
         if not container and self.has("objects.json"):
             raise AssertionError("an adapter listed on the host: the checks would open a real Bluetooth socket")
         log = os.path.join(self.state, "log")
@@ -428,17 +462,17 @@ class Machine:
             os.unlink(log)
         read_end, write_end = os.pipe()
         os.close(read_end)
-        start = ["bash", "-c", 'trap "" HUP; exec bash "$0" "$@"'] if ignore_hup else ["bash"]
+        closed_stdout = mode == SubprocessMode.CLOSED_STDOUT
+        start = ["bash", "-c", 'trap "" HUP; exec bash "$0" "$@"'] if mode == SubprocessMode.IGNORE_HUP else ["bash"]
         r = subprocess.run(
-            [*(["/usr/bin/unshare", "-r"] if root else []), *start, SETUP, *args],
+            [*(["/usr/bin/unshare", "-r"] if mode == SubprocessMode.ROOT else []), *start, SETUP, *args],
             check=False,
             stdout=write_end if closed_stdout else subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=self.env(container=container, extra=env),
-            input=stdin_text,
-            stdin=None if stdin_text is not None else subprocess.DEVNULL,
-            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
         )
         os.close(write_end)
         calls: list[str] = []
@@ -446,6 +480,58 @@ class Machine:
             with open(log, encoding="utf-8") as f:
                 calls = f.read().splitlines()
         return Run(r.returncode, r.stdout or "", r.stderr, calls)
+
+    def _run_in_process(
+        self,
+        args: Sequence[str],
+        *,
+        container: bool,
+        env: Mapping[str, str] | None,
+        stdin_text: str | None,
+    ) -> Run:
+        run_env = self.env(container=container, extra=env)
+        run_env["CST_ARG0"] = SETUP
+        lc_ctype = run_env.get("LC_CTYPE")
+        run_env["CST_LC_CTYPE"] = "" if lc_ctype is None else f"={lc_ctype}"
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        in_buf = io.StringIO(stdin_text or "")
+        model = SetupModel(self, lang=run_env.get("LANG", ""), stdout=out_buf, stderr=err_buf)
+        saved_signals = _save_signals()
+        entry = os.path.join(REPO, "bluetooth", "bt-setup")
+        current_args = list(args)
+        rc = 1
+        try:
+            with (
+                mock.patch.dict(os.environ, run_env, clear=True),
+                mock.patch.object(sys, "stdin", in_buf),
+                mock.patch.object(sys, "stdout", out_buf),
+                mock.patch.object(sys, "stderr", err_buf),
+                mock.patch.object(
+                    bt_wiring,
+                    "SubprocessCommandRunner",
+                    side_effect=lambda ctx: _InProcessCommandRunner(model, ctx),
+                ),
+                mock.patch.object(bt_wiring, "SystemClockAdapter", _FastClock),
+                mock.patch.object(bt_wiring, "replace", side_effect=_raise_rerun),
+            ):
+                while True:
+                    try:
+                        rc = bt_cli.main(entry, current_args)
+                        break
+                    except _ReRunExec as exc:
+                        os.environ["CST_ARG0"] = exc.argv[0]
+                        cur_lc = os.environ.get("LC_CTYPE")
+                        os.environ["CST_LC_CTYPE"] = "" if cur_lc is None else f"={cur_lc}"
+                        current_args = list(exc.argv[1:])
+        finally:
+            _restore_signals(saved_signals)
+            stdout_text = out_buf.getvalue()
+            stderr_text = err_buf.getvalue()
+            in_buf.close()
+            out_buf.close()
+            err_buf.close()
+        return Run(rc, stdout_text, stderr_text, model.log_lines)
 
     def env_log(self) -> str:
         """What the stubs saw of the CST_, LC_, LANG and PYTHON variables, one line per call."""
@@ -460,6 +546,113 @@ class Machine:
 
 BLUETOOTH_SERVICE = "bluetooth.service"
 WIREPLUMBER_SERVICE = "wireplumber.service"
+_DIFF_STAMP = "1970-01-01 00:00:00.000000000 +0000"
+_PATCHED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGPIPE, signal.SIGXFSZ, signal.SIGTERM)
+type _Disposition = Callable[[int, FrameType | None], object] | int | signal.Handlers | None
+
+
+def _save_signals() -> list[tuple[int, _Disposition]]:
+    return [(sig, signal.getsignal(sig)) for sig in _PATCHED_SIGNALS]
+
+
+def _restore_signals(saved: Sequence[tuple[int, _Disposition]]) -> None:
+    for sig, disp in saved:
+        if disp is not None and signal.getsignal(sig) != disp:
+            signal.signal(sig, disp)
+
+
+class _ReRunExec(BaseException):
+    """Raised by the mocked wiring.replace when cli.main re-execs itself."""
+
+    def __init__(self, argv: Sequence[str]) -> None:
+        super().__init__(argv)
+        self.argv = tuple(argv)
+
+
+def _raise_rerun(argv: Sequence[str]) -> NoReturn:
+    raise _ReRunExec(argv)
+
+
+class _FastClock:
+    """ClockPort for in-process Machine.run: real timestamps, zero-cost sleeps."""
+
+    def now(self) -> float:
+        return time.time()
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, _seconds: float) -> None:
+        return None
+
+
+class _InProcessCommandRunner:
+    """CommandRunnerPort for Machine.run: wraps host commands and merges env, then runs SetupModel."""
+
+    def __init__(self, model: SetupModel, ctx: ContainerProbePort) -> None:
+        self._model = model
+        self._ctx = ctx
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        check: bool = False,
+        timeout: float | None = None,
+        input_text: str | None = None,
+        env: Mapping[str, str] | None = None,
+        unset: Sequence[str] = (),
+        base_env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        locale_c: bool = False,
+        new_session: bool = False,
+        on_host: bool = False,
+        stdin: StdinMode = "devnull",
+        output: OutputMode = OutputMode.CAPTURE,
+        decode_errors: DecodeErrors = "replace",
+        nice: int | None = None,
+        pass_fds: Sequence[int] = (),
+        on_line: Callable[[str], None] | None = None,
+    ) -> CommandResult:
+        del timeout, cwd, new_session, decode_errors, nice, pass_fds, on_line
+        if input_text is not None and stdin != "devnull":
+            raise ValueError("input_text is the command's stdin: stdin must stay 'devnull'")
+        hosted = on_host and self._ctx.is_container()
+        if hosted and unset:
+            raise ValueError("unset cannot reach a command run on the host from a container")
+        cmd = on_host_argv(argv, {**(c_locale() if locale_c else {}), **(env or {})}) if hosted else list(argv)
+        child_env = dict(os.environ if base_env is None else base_env)
+        if locale_c:
+            child_env["LC_ALL"] = "C"
+        if env is not None:
+            child_env.update(env)
+        for name in unset:
+            child_env.pop(name, None)
+        res = self._model.run(
+            cmd,
+            locale_c=locale_c,
+            child_env=child_env,
+            stdin=stdin,
+            input_text=input_text,
+            output=output,
+        )
+        if check and res.returncode != 0:
+            raise CommandFailed(cmd, res.returncode, res.stdout, res.stderr)
+        return res
+
+
+def _diff_texts(old_label: str, old_lines: Sequence[str], new_label: str, new_lines: Sequence[str]) -> Answer:
+    hunks = "".join(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            old_label,
+            new_label,
+            fromfiledate=_DIFF_STAMP,
+            tofiledate=_DIFF_STAMP,
+        )
+    )
+    return (1 if hunks else 0), hunks, ""
 
 
 def _unified_diff(old: str, new: str) -> Answer:
@@ -468,15 +661,14 @@ def _unified_diff(old: str, new: str) -> Answer:
         a = f.read().splitlines(keepends=True)
     with open(new, encoding="utf-8") as f:
         b = f.read().splitlines(keepends=True)
-    hunks = "".join(difflib.unified_diff(a, b, old, new))
-    return (1 if hunks else 0), hunks, ""
+    return _diff_texts(old, a, new, b)
 
 
 def _text_or_none(path: str) -> str | None:
     try:
         with open(path, encoding="utf-8", errors="surrogateescape") as f:
             return f.read()
-    except FileNotFoundError:
+    except OSError:
         return None
 
 
@@ -490,12 +682,20 @@ class SetupModel:
     restarts lists each restart that worked: (unit, whether it was needed then: the unit read other
     files than are on disk, or, for WirePlumber, bluetoothd restarted after it)."""
 
-    def __init__(self, m: Machine, *, lang: str = "") -> None:
+    def __init__(
+        self,
+        m: Machine,
+        *,
+        lang: str = "",
+        stdout: TextIO | None = None,
+        stderr: TextIO | None = None,
+    ) -> None:
         """lang: the LANG the commands get (FAKE reads it from its environment)."""
         self.m = m
         self.lang = lang
         self.locale_c = False  # the call being answered asked for the C locale (runner's locale_c)
         self.calls: list[list[str]] = []
+        self.log_lines: list[str] = []
         self.restarts: list[tuple[str, bool]] = []
         self.loaded: dict[str, object] = {
             BLUETOOTH_SERVICE: self.disk(BLUETOOTH_SERVICE),
@@ -503,6 +703,12 @@ class SetupModel:
         }
         self.started = {BLUETOOTH_SERVICE: 0, WIREPLUMBER_SERVICE: 0}  # the order of the last starts
         self.clock = 0
+        self._stdout = stdout
+        self._stderr = stderr
+        self._cmd_env: dict[str, str] = {}
+        self._stdin_mode: StdinMode = "devnull"
+        self._input_text: str | None = None
+        self._via = "direct"
 
     # ---- what the services read -----------------------------------------------------------
     def disk(self, unit: str) -> object:
@@ -551,18 +757,45 @@ class SetupModel:
         with open(prefix + ".inv", "w", encoding="utf-8") as f:
             f.write(f"inv-{os.path.basename(prefix)}-{n}\n")
 
+    def log(self, line: str) -> None:
+        self.log_lines.append(line)
+
     # ---- the commands -----------------------------------------------------------------------
     def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
         """CommandRunnerPort.run: each command FAKE answers that apply and revert run."""
         args = list(argv)
         self.calls.append(args)
         self.locale_c = _kw.get("locale_c") is True
+        raw_env = _kw.get("child_env")
+        self._cmd_env = dict(raw_env) if isinstance(raw_env, Mapping) else ({"LANG": self.lang} if self.lang else {})
+        raw_stdin = _kw.get("stdin", "devnull")
+        self._stdin_mode = "inherit" if raw_stdin == "inherit" else "devnull"
+        raw_input = _kw.get("input_text")
+        self._input_text = raw_input if isinstance(raw_input, str) else None
+        self._via = "direct"
         rc, out, err = self.answer(args)
+        output = _kw.get("output", OutputMode.CAPTURE)
+        mode = output if isinstance(output, OutputMode) else OutputMode.CAPTURE
+        return self._format_result(args, rc, out, err, mode)
+
+    def _format_result(self, args: list[str], rc: int, out: str, err: str, mode: OutputMode) -> CommandResult:
+        if mode == OutputMode.MERGE:
+            return CommandResult(rc, out + err, "", argv=tuple(args))
+        if mode == OutputMode.STDOUT:
+            return CommandResult(rc, out, "", argv=tuple(args))
+        if mode == OutputMode.STDOUT_SHOW_STDERR:
+            if self._stderr is not None and err:
+                self._stderr.write(err)
+            return CommandResult(rc, out, "", argv=tuple(args))
+        if mode == OutputMode.INHERIT:
+            if self._stdout is not None and out:
+                self._stdout.write(out)
+            if self._stderr is not None and err:
+                self._stderr.write(err)
+            return CommandResult(rc, "", "", argv=tuple(args))
         return CommandResult(rc, out, err, argv=tuple(args))
 
     def answer(self, args: list[str]) -> Answer:
-        if args[:1] == ["timeout"]:
-            args = args[2:]
         handler = self.handlers().get(args[0] if args else "")
         found = None if handler is None else handler(args)
         if found is None:
@@ -572,25 +805,121 @@ class SetupModel:
     def handlers(self) -> dict[str, Callable[[list[str]], Answer | None]]:
         """Each command by its first word; a handler answers None for a form FAKE does not know."""
         return {
+            "flatpak-spawn": lambda a: self.flatpak_spawn(a[1:]),
+            "timeout": lambda a: self.timeout_cmd(a[1:]),
+            "env": lambda a: self.env_cmd(a[1:]),
             "mktemp": lambda _a: self.mktemp(),
-            "sudo": lambda a: self.sudo(a[1:]),
-            "systemctl": lambda a: self.systemctl(a[1:]),
-            "busctl": lambda a: self.busctl(a[1:]),
+            "sudo": lambda a: self.logged_sudo(a[1:]),
+            "systemctl": lambda a: self.logged_systemctl(a[1:]),
+            "busctl": lambda a: self.logged_busctl(a[1:]),
             "bluetoothctl": lambda a: self.bluetoothctl(a[1:]),
-            "journalctl": self.journalctl,
-            "pw-dump": lambda _a: (*self.cat("pw-dump.json"), ""),
-            "selinuxenabled": lambda _a: ((0 if self.has("selinux") else 1), "", ""),
+            "journalctl": self.logged_journalctl,
+            "pactl": lambda a: self.pactl(a[1:]),
+            "pw-dump": self.pw_dump,
+            "selinuxenabled": self.selinuxenabled,
             "diff": lambda a: _unified_diff(a[-2], a[-1]),
-            "env": lambda a: self.wp_roles() if a[-1:] == ["wp-roles"] else None,
-            "/usr/bin/python3": lambda a: (
-                ((0 if self.has("iso-socket") else 1), "", "") if "socket" in " ".join(a) else None
-            ),
+            "bash": lambda a: self._bash_diff(a[1:]),
+            "python3": lambda a: self.python3(a[1:]),
+            "/usr/bin/python3": lambda a: self.system_python(a[1:]),
         }
 
+    def flatpak_spawn(self, args: list[str]) -> Answer | None:
+        self.log(f"flatpak-spawn {' '.join(args)}")
+        rest = list(args)
+        if rest[:1] == ["--host"]:
+            rest.pop(0)
+        while rest and rest[0].startswith("--env="):
+            key, _, value = rest.pop(0).removeprefix("--env=").partition("=")
+            self._cmd_env[key] = value
+        if rest[:1] == ["/usr/bin/python3"] and "socket" in " ".join(rest):
+            return (0 if self.has("iso-socket") else 1), "", ""
+        return self.answer(rest) if rest else None
+
+    def timeout_cmd(self, args: list[str]) -> Answer | None:
+        if len(args) < 2:
+            return None
+        rest = args[1:]
+        self._via = f"timeout {args[0]} {' '.join(rest)} "
+        return self.answer(rest)
+
+    def env_cmd(self, args: list[str]) -> Answer | None:
+        rest = list(args)
+        while rest and "=" in rest[0]:
+            key, _, value = rest.pop(0).partition("=")
+            self._cmd_env[key] = value
+        return self.answer(rest) if rest else None
+
     def mktemp(self) -> Answer:
-        fd, path = tempfile.mkstemp(prefix="tmp.", dir=self.m.tmp)
+        tmpdir = self._cmd_env.get("TMPDIR") or self.m.tmp
+        if not os.path.isdir(tmpdir):
+            return (
+                1,
+                "",
+                f"mktemp: failed to create file via template '{tmpdir}/tmp.XXXXXXXXXX': No such file or directory\n",
+            )
+        fd, path = tempfile.mkstemp(prefix="tmp.", dir=tmpdir)
         os.close(fd)
         return 0, path + "\n", ""
+
+    def _bash_diff(self, args: list[str]) -> Answer | None:
+        if len(args) >= 4 and args[0] == "-c" and args[1] == 'diff -u "$1" <(cat)':
+            old_path = args[3]
+            with open(old_path, encoding="utf-8") as f:
+                a = f.read().splitlines(keepends=True)
+            b = (self._input_text or "").splitlines(keepends=True)
+            return _diff_texts(old_path, a, "/dev/fd/63", b)
+        return None
+
+    def python3(self, args: list[str]) -> Answer | None:
+        if "wp-roles" in args:
+            self.log(f"python3 {' '.join(args)}")
+            self.log(f"  XDG_CONFIG_HOME={self._cmd_env.get('XDG_CONFIG_HOME', '')}")
+            return self.wp_roles()
+        if len(args) >= 4 and args[:2] == ["-I", "-c"] and "ast.parse" in args[2]:
+            try:
+                with open(args[3], encoding="utf-8") as f:
+                    ast.parse(f.read(), filename=args[3])
+            except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+                return 1, "", f"{exc}\n"
+            return 0, "", ""
+        return None
+
+    def system_python(self, args: list[str]) -> Answer | None:
+        if "socket" in " ".join(args):
+            return (0 if self.has("iso-socket") else 1), "", ""
+        if len(args) >= 3 and args[:2] == ["-I", "-B"] and args[2].endswith("cst_core/installer.py"):
+            return self._run_installer(args[3:])
+        return None
+
+    def _run_installer(self, args: list[str]) -> Answer:
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        raw_in = (self._input_text or "").encode("utf-8")
+        in_buf = io.TextIOWrapper(io.BytesIO(raw_in), encoding="utf-8")
+        saved_signals = _save_signals()
+        try:
+            with (
+                mock.patch.dict(os.environ, self._cmd_env, clear=True),
+                mock.patch.object(sys, "stdin", in_buf),
+                mock.patch.object(sys, "stdout", out_buf),
+                mock.patch.object(sys, "stderr", err_buf),
+            ):
+                try:
+                    rc = cst_installer.main(args)
+                except SystemExit as exc:
+                    rc = exc.code if isinstance(exc.code, int) else 1
+        finally:
+            _restore_signals(saved_signals)
+            stdout_text = out_buf.getvalue()
+            stderr_text = err_buf.getvalue()
+            in_buf.close()
+            out_buf.close()
+            err_buf.close()
+        return rc, stdout_text, stderr_text
+
+    def logged_journalctl(self, args: list[str]) -> Answer | None:
+        self.log(" ".join(args))
+        return self.journalctl(args)
 
     def journalctl(self, args: list[str]) -> Answer | None:
         if any(a.startswith("_SYSTEMD_INVOCATION_ID=") for a in args):
@@ -598,6 +927,14 @@ class SetupModel:
         if "--user" in args:
             return 0, self.cat("lw-journal")[1], ""
         return None
+
+    def pw_dump(self, args: list[str]) -> Answer:
+        self.log(" ".join(args))
+        return (*self.cat("pw-dump.json"), "")
+
+    def selinuxenabled(self, args: list[str]) -> Answer:
+        self.log(" ".join(args))
+        return (0 if self.has("selinux") else 1), "", ""
 
     def wp_roles(self) -> Answer:
         rc, text = self.cat("wp-roles")
@@ -614,6 +951,10 @@ class SetupModel:
                 lc_all = value if key == "LC_ALL" else lc_all
         return lc_all, args
 
+    def logged_sudo(self, args: list[str]) -> Answer:
+        self.log(f"sudo {' '.join(args)}")
+        return self.sudo(args)
+
     def sudo(self, args: list[str]) -> Answer:
         lc_all, args = self.sudo_env(args)
         how = _text_or_none(self.state(f"fail-sudo-{args[0]}"))
@@ -621,9 +962,10 @@ class SetupModel:
             if not how.strip().isdigit():
                 raise AssertionError(f"SetupModel: fail-sudo-{args[0]} {how.strip()} is FAKE's alone")
             return int(how), "", ""
+        lang = self._cmd_env.get("LANG", self.lang)
         if args[0] == "cp" and "--update=none-fail" in args:
             return self.cp_none_fail(
-                [a for a in args[1:] if a != "--update=none-fail"], pt=(lc_all or self.lang).startswith("pt_BR")
+                [a for a in args[1:] if a != "--update=none-fail"], pt=(lc_all or lang).startswith("pt_BR")
             )
         kept: list[str] = []
         skip = False
@@ -646,7 +988,7 @@ class SetupModel:
             case "mv", ["-f", src, dst]:
                 os.replace(src, dst)
             case "systemctl", ["restart", "bluetooth"]:
-                return self.systemctl(["restart", "bluetooth"])
+                return self.logged_systemctl(["restart", "bluetooth"])
             case _:
                 raise AssertionError(f"SetupModel: no such sudo command: {args}")
         return 0, "", ""
@@ -675,6 +1017,10 @@ class SetupModel:
                 raise AssertionError(f"SetupModel: no such sudo cp: {args}")
         return 0, "", ""
 
+    def logged_systemctl(self, args: list[str]) -> Answer:
+        self.log(f"systemctl {' '.join(args)}")
+        return self.systemctl(args)
+
     def systemctl(self, args: list[str]) -> Answer:
         scope = "system"
         if args[:1] == ["--user"]:
@@ -682,20 +1028,32 @@ class SetupModel:
         os.makedirs(self.state("units"), exist_ok=True)
         match args[0]:
             case "is-active":
-                return self.is_active(scope, args)
+                result = self.is_active(scope, args)
             case "is-enabled":
                 enabled = os.path.exists(self.prefix(scope, args[1]) + ".enabled")
-                return (0, "enabled\n", "") if enabled else (1, "disabled\n", "")
+                result = (0, "enabled\n", "") if enabled else (1, "disabled\n", "")
             case "show":
-                return self.show(scope, args)
+                result = self.show(scope, args)
             case "show-environment":
-                return (1, "", "") if self.has("no-session") else (0, self.cat("user-env")[1], "")
+                result = (1, "", "") if self.has("no-session") else (0, self.cat("user-env")[1], "")
             case "daemon-reload":
-                return 0, "", ""
+                result = (0, "", "")
             case "restart" | "start":
-                return self.start_unit(scope, args)
+                result = self.start_unit(scope, args)
+            case "enable":
+                with open(self.prefix(scope, args[1]) + ".enabled", "w", encoding="utf-8"):
+                    pass
+                result = (0, "", f"Created symlink for {args[1]}.\n")
+            case "disable":
+                u = self.prefix(scope, args[-1])
+                for suffix in (".enabled", ".active"):
+                    path = u + suffix
+                    if os.path.exists(path):
+                        os.unlink(path)
+                result = (0, "", f"Removed {u}.\n")
             case _:
                 raise AssertionError(f"SetupModel: no such systemctl command: {args}")
+        return result
 
     def is_active(self, scope: str, args: list[str]) -> Answer:
         if args[1] == "--quiet":
@@ -743,6 +1101,10 @@ class SetupModel:
         self.loaded[unit] = self.disk(unit)
         self.started[unit] = self.clock
 
+    def logged_busctl(self, args: list[str]) -> Answer:
+        self.log(f"busctl {' '.join(args)}")
+        return self.busctl(args)
+
     def busctl(self, args: list[str]) -> Answer:
         joined = " ".join(args)
         if "GetManagedObjects" in joined:
@@ -755,7 +1117,45 @@ class SetupModel:
         raise AssertionError(f"SetupModel: no such busctl command: {args}")
 
     def bluetoothctl(self, args: list[str]) -> Answer:
-        if args[:1] == ["info"]:
-            rc, text = self.cat("bt-info")
-            return (0, text, "") if rc == 0 else (1, f"Device {args[1]} not available\n", "")
-        raise AssertionError(f"SetupModel: no such bluetoothctl command: {args}")
+        self.log(f"bluetoothctl {' '.join(args)}")
+        stdin_name = "/dev/null" if self._stdin_mode == "devnull" and self._input_text is None else "pipe"
+        self.log(f"  stdin={stdin_name} via={self._via}")
+        match args[:1]:
+            case ["info"]:
+                rc, text = self.cat("bt-info")
+                return (0, text, "") if rc == 0 else (1, f"Device {args[1]} not available\n", "")
+            case ["bearer"]:
+                if self.has("bearer-stuck"):
+                    return 1, "Failed to set bearer\n", ""
+                _, existing = self.cat("bt-info")
+                kept = [ln for ln in existing.splitlines(keepends=True) if "PreferredBearer" not in ln]
+                kept.append(f"\tPreferredBearer: {args[2]}\n")
+                self.m.put("bt-info", "".join(kept))
+                return 0, f"Changing PreferredBearer to {args[2]} succeeded\n", ""
+            case ["connect"]:
+                self.m.flag("a2dp-connected")
+                return 0, "", ""
+            case _:
+                raise AssertionError(f"SetupModel: no such bluetoothctl command: {args}")
+
+    def pactl(self, args: list[str]) -> Answer:
+        self.log(f"pactl {' '.join(args)}")
+        match args:
+            case ["-f", "json", "list", "cards"]:
+                if self.has("a2dp-connected") and self.has("pactl-cards-connected"):
+                    delay = int((_text_or_none(self.state("a2dp-delay")) or "0").strip())
+                    if delay > 0:
+                        self.m.put("a2dp-delay", f"{delay - 1}\n")
+                    else:
+                        return 0, self.cat("pactl-cards-connected")[1], ""
+                return (*self.cat("pactl-cards"), "")
+            case ["-f", "json", "list", "short", "sources"]:
+                rc, text = self.cat("pactl-sources")
+                return 0, (text if rc == 0 else "[]\n"), ""
+            case ["-f", "json", "list", "source-outputs"]:
+                rc, text = self.cat("pactl-outputs")
+                return 0, (text if rc == 0 else "[]\n"), ""
+            case ["set-card-profile", *_]:
+                return (1 if self.has("no-profile-switch") else 0), "", ""
+            case _:
+                raise AssertionError(f"SetupModel: no such pactl command: {args}")
