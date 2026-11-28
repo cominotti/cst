@@ -292,7 +292,7 @@ It prints ok/info/WARN/ERROR lines.
 
 ## CI
 
-CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks: the fast-gates job runs `invowk cmd ci audit` (the JSON report and the job summary) and then `invowk cmd check`, the same task people and agents run; the nightly workflow (`.github/workflows/nightly.yml`) runs the same two (job `static-gates`), and in jobs of their own `invowk cmd ci uv-audit` (`uv-audit`), `invowk cmd test coverage` (`coverage`) and both E2E tiers (`clean-e2e-rebuild`, tier 1 with `--rebuild`). A pull request that changes only Markdown still runs the fast gates (the docs gate is in the unit suite); only the E2E tiers are skipped.
+CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks: after `changes` classifies the PR scope, `fast-gates` (`invowk cmd ci audit`, `invowk cmd check`, and `invowk cmd test mbt --profile ci`), the 6 `e2e-tier1` shards, `e2e-tier2`, and `quint` (when a change touches its specs, traces, replays, or modeled modules) run in parallel (pull requests skip `e2e-tier2` only when every changed path is proven outside Tier 2's closure by `tests/test_ci_tier2_paths.py`, while `main` and nightly always run it). The nightly workflow (`.github/workflows/nightly.yml`) runs `static-gates`, `invowk cmd ci uv-audit` (`uv-audit`), `invowk cmd test coverage` (`coverage`), and both E2E tiers (`clean-e2e-rebuild`, tier 1 with `--rebuild`). A pull request that changes only Markdown still runs the fast gates (the docs gate is in the unit suite); only the E2E tiers are skipped.
 
 - `invowk` is pinned by SHA256 and verified with cosign in `.github/actions/setup-invowk`.
 - Change the version with `invowk cmd ci pin-invowk <tag>`, not by editing the hashes.
