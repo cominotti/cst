@@ -58,7 +58,17 @@ selects only the static gates and unit modules statically reachable from your
 changed files, falling back conservatively to the full suite for `cst_core` or
 shared files, and then runs the affected `tests/mbt` modules (see
 [Property and model-based tests](#property-and-model-based-tests)); `invowk cmd test e2e tier1` supports `--match`, `--tag`,
-`--list_tests`, `--shard I/N`, and `--jobs N`.
+`--list_tests`, `--shard I/N`, and `--jobs N`. For interactive selection in a
+terminal, `invowk cmd test pick` filters unit test modules (`invowk tui filter`)
+and `invowk cmd test e2e pick` picks Tier 1 E2E tags (`invowk tui choose --no-limit`).
+`invowk cmd cst perf` and `invowk cmd cst sync plan` expose the read-only
+`./cst perf` and `./cst sync plan` checks alongside `cst doctor` and `cst status`.
+
+From invowk `v0.17.0` onward, usage errors (such as a mistyped task or flag)
+exit `2`, and `INVOWK_NO_CWD=1` / `--ivk-no-cwd` (paired with `INVOWK_CONFIG`
+pointing at a user config that `includes` `cst.invowkmod`) allows invoking the
+module from another directory without discovering `./invowkfile.cue` or
+`./config.cue` from the current directory.
 
 ## Test performance on a workstation
 

@@ -133,6 +133,33 @@ cmds: [
 		}]
 	},
 	{
+		name:        "test pick"
+		category:    "test"
+		description: "Interactively fuzzy-pick a unit test module (invowk tui filter) and run it through tests/run_unit.py"
+		depends_on: {
+			tools: [
+				{alternatives: ["invowk"]},
+				{alternatives: ["git"]},
+			]
+			capabilities: [{alternatives: ["tty"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				modules="$(git ls-files '*test_*.py' | sed 's|[.]py$||; s|/|.|g' | LC_ALL=C sort)"
+				if [[ -z "${modules}" ]]; then
+					echo "test pick: no unit test modules found" >&2
+					exit 1
+				fi
+				chosen="$(invowk tui filter --title "Pick a unit test module" --placeholder "Type to filter..." <<<"${modules}")" || exit 0
+				[[ -z "${chosen}" ]] && exit 0
+				exec invowk cmd test module "${chosen}"
+				"""}
+		}]
+	},
+	{
 		name:        "test docs"
 		category:    "test"
 		description: "Run the docs gate alone (tests/test_docs.py: links and anchors, the AGENTS.md index, skills and rules)"
@@ -495,6 +522,52 @@ cmds: [
 		}]
 	},
 	{
+		name:        "test e2e pick"
+		category:    "test"
+		description: "Interactively pick one or more Tier 1 E2E tags (invowk tui choose --no-limit) and run them"
+		depends_on: {
+			tools: [
+				{alternatives: ["invowk"]},
+				{alternatives: ["docker"]},
+			]
+			capabilities: [
+				{alternatives: ["tty"]},
+				{alternatives: ["containers"]},
+			]
+		}
+		flags: [
+			{name: "keep_logs", type: "bool", default_value: "false", description: "Preserve collected journald/systemd artifacts even on success"},
+			{name: "rebuild", type: "bool", default_value: "false", description: "Force rebuild of E2E Docker images"},
+			{name: "jobs", type: "int", default_value: "0", description: "Parallel Tier 1 containers (0 = auto, 1 = single container)"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			timeout: "20m"
+			script: {content: """
+				set -euo pipefail
+				tags_list="$(
+					python3 -I -B tests/e2e/run.py --tier 1 --list-tests |
+						awk -F'[][]' 'NF >= 2 { n = split($2, a, ","); for (i = 1; i <= n; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[i]); if (a[i] != "") print a[i] } }' |
+						LC_ALL=C sort -u
+				)"
+				if [[ -z "${tags_list}" ]]; then
+					echo "test e2e pick: no Tier 1 E2E tags found" >&2
+					exit 1
+				fi
+				mapfile -t tag_options <<<"${tags_list}"
+				chosen="$(invowk tui choose --no-limit --title "Pick Tier 1 E2E tag(s)" "${tag_options[@]}")" || exit 0
+				[[ -z "${chosen}" ]] && exit 0
+				tags="$(paste -sd, - <<<"${chosen}")"
+				args=(--tag "${tags}")
+				[[ "${INVOWK_FLAG_KEEP_LOGS:-false}" == "true" ]] && args+=(--keep_logs)
+				[[ "${INVOWK_FLAG_REBUILD:-false}" == "true" ]] && args+=(--rebuild)
+				[[ "${INVOWK_FLAG_JOBS:-0}" != "0" ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+				exec invowk cmd test e2e tier1 "${args[@]}"
+				"""}
+		}]
+	},
+	{
 		name:        "test e2e tier2"
 		category:    "test"
 		description: "Run Docker Layer 2 E2E suite (--privileged loopback btrfs RAID1, DinD, cgroups v2, Polkit; needs --allow_privileged or CST_E2E_ALLOW_PRIVILEGED=1)"
@@ -708,6 +781,48 @@ cmds: [
 			platforms: [{name: "linux"}]
 			runtimes: [{name: "native"}]
 			script: {content: "exec ./cst status"}
+		}]
+	},
+	{
+		name:        "cst perf"
+		category:    "cst"
+		description: "Run cst read-only responsiveness snapshot and bottleneck diagnosis (./cst perf)"
+		flags: [
+			{name: "axis", description: "One or more axes: memory, cpu, io, gpu (repeatable or comma-separated)"},
+			{name: "compact", type: "bool", default_value: "false", description: "One-screen verdict + findings summary (no raw metric tables)"},
+			{name: "json", type: "bool", default_value: "false", description: "Emit machine-readable JSON report"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				args=()
+				[[ -n "${INVOWK_FLAG_AXIS:-}" ]] && args+=(--axis "${INVOWK_FLAG_AXIS}")
+				[[ "${INVOWK_FLAG_COMPACT:-false}" == "true" ]] && args+=(--compact)
+				[[ "${INVOWK_FLAG_JSON:-false}" == "true" ]] && args+=(--json)
+				exec ./cst perf "${args[@]}"
+				"""}
+		}]
+	},
+	{
+		name:        "cst sync plan"
+		category:    "cst"
+		description: "Dry-run refresh plan for installed CST components (./cst sync plan; read-only)"
+		flags: [
+			{name: "include_risky", type: "bool", default_value: "false", description: "Also include components marked precautionary"},
+			{name: "overwrite_modified", type: "bool", default_value: "false", description: "Also include components whose installed file differs on disk"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				args=(plan)
+				[[ "${INVOWK_FLAG_INCLUDE_RISKY:-false}" == "true" ]] && args+=(--include-risky)
+				[[ "${INVOWK_FLAG_OVERWRITE_MODIFIED:-false}" == "true" ]] && args+=(--overwrite-modified)
+				exec ./cst sync "${args[@]}"
+				"""}
 		}]
 	},
 ]
