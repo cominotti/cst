@@ -594,6 +594,73 @@ cmds: [
 		}]
 	},
 	{
+		name:        "ci fast-gates"
+		category:    "ci"
+		description: "Run CI's fast-gates (invowk cmd check, and optionally test mbt --profile ci) locally in a Fedora 45 Docker container as the non-root ci user, mounting the checkout read-only"
+		depends_on: {
+			tools: [
+				{alternatives: ["docker"]},
+				{alternatives: ["invowk"]},
+			]
+			capabilities: [{alternatives: ["containers"]}]
+		}
+		flags: [
+			{name: "mbt", type: "bool", default_value: "false", description: "Also run invowk cmd test mbt --profile ci (as CI fast-gates does)"},
+			{name: "rebuild", type: "bool", default_value: "false", description: "Rebuild the local cst-ci-fast-gates:local Docker image"},
+			{name: "jobs", type: "int", default_value: "0", description: "Worker processes for unit/mbt tests inside the container (0 = auto / CST_TEST_JOBS)"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			timeout: "25m"
+			script: {content: """
+				set -euo pipefail
+				image="cst-ci-fast-gates:local"
+				if [[ "${INVOWK_FLAG_REBUILD:-false}" == "true" ]]; then
+					docker build --no-cache -t "${image}" -f tests/ci/fast-gates.Dockerfile .
+				elif ! docker image inspect "${image}" >/dev/null 2>&1; then
+					docker build -t "${image}" -f tests/ci/fast-gates.Dockerfile .
+				fi
+
+				invowk_path="$(command -v invowk)"
+				invowk_bin="$(realpath -- "${invowk_path}")"
+				repo="$(pwd -P)"
+
+				sec_opts=()
+				if [[ -f /sys/fs/selinux/enforce || -f /run/host/sys/fs/selinux/enforce ]]; then
+					sec_opts+=(--security-opt label=disable)
+				fi
+				if [[ -r /sys/module/apparmor/parameters/enabled ]] && [[ "$(cat /sys/module/apparmor/parameters/enabled)" == "Y" ]]; then
+					sec_opts+=(--security-opt apparmor=unconfined)
+				fi
+
+				env_args=()
+				jobs="${INVOWK_FLAG_JOBS:-0}"
+				if [[ "${jobs}" != "0" ]]; then
+					env_args+=(-e "CST_TEST_JOBS=${jobs}")
+				elif [[ -n "${CST_TEST_JOBS:-}" ]]; then
+					env_args+=(-e "CST_TEST_JOBS=${CST_TEST_JOBS}")
+				fi
+
+				run_mbt="${INVOWK_FLAG_MBT:-false}"
+				# Run in bash -c with positional arg $1 so flags are never interpolated into shell code.
+				docker run --rm \
+					"${sec_opts[@]}" \
+					-v "${repo}:/repo:ro" \
+					-v "${invowk_bin}:/usr/local/bin/invowk:ro" \
+					-w /repo \
+					"${env_args[@]}" \
+					"${image}" \
+					bash -euo pipefail -c '
+						runuser -u ci -- env "PATH=/usr/local/bin:/usr/bin:/bin" "HOME=/home/ci" ${CST_TEST_JOBS:+"CST_TEST_JOBS=${CST_TEST_JOBS}"} invowk cmd check
+						if [[ "${1:-false}" == "true" ]]; then
+							runuser -u ci -- env "PATH=/usr/local/bin:/usr/bin:/bin" "HOME=/home/ci" ${CST_TEST_JOBS:+"CST_TEST_JOBS=${CST_TEST_JOBS}"} invowk cmd test mbt --profile ci
+						fi
+					' _ "${run_mbt}"
+				"""}
+		}]
+	},
+	{
 		name:        "ci pin-invowk"
 		category:    "ci"
 		description: "Print the archive and binary SHA256 pins for .github/actions/setup-invowk (downloads to a temp dir; verifies cosign)"

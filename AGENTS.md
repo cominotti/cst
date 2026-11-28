@@ -150,6 +150,7 @@ invowk cmd test lint                          # bash -n + shellcheck -S warning 
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + ruff's annotation rules (ANN) on every Python file (through uv)
 invowk cmd test workflows                     # zizmor (offline) on .github, exceptions in .github/zizmor.yml (through uv)
+invowk cmd ci fast-gates [--mbt] [--rebuild] [--jobs N] # local CI-parity Fedora 45 container run as user ci (/repo mounted read-only)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test coverage                      # unit suite under coverage.py + COVERAGE_FLOORS (slow; the nightly runs it)
 invowk cmd test mbt [--profile dev|ci|nightly] [--examples N] [--seed N] [--jobs N] [--affected [--base REF]] # Hypothesis tests of tests/mbt (through uv; CI: ci profile)

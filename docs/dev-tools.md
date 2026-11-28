@@ -27,6 +27,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 invowk cmd test pylint        # ruff check (the select list of pyproject.toml), ruff format --check, then the ruff budgets: every Python file
 invowk cmd test types         # ty check on the ty gate list (with the mbt group), then ruff check --select ANN on every Python file
 invowk cmd test workflows     # zizmor --offline on .github, with the exceptions in .github/zizmor.yml
+invowk cmd ci fast-gates      # run invowk cmd check inside CI's Fedora 45 container as user ci (read-only mount)
 invowk cmd test coverage      # the unit suite under coverage.py, its reports, then COVERAGE_FLOORS (slow; the nightly runs it)
 invowk cmd test mbt           # the Hypothesis tests of tests/mbt (see "Property and model-based tests")
 tests/uv-dev ruff format      # rewrite the files the format check complains about
@@ -1614,7 +1615,10 @@ One tool per pull request, so that new findings are clearly the new version's:
    change mutation operators; read the new survivors.
 
 For uv itself, change `version` and `checksum` of the `Setup uv` step in
-`.github/workflows/ci.yml` together. The checksum is the content of
+`.github/workflows/ci.yml`, `.github/workflows/nightly.yml` and
+`tests/ci/fast-gates.Dockerfile` (`ARG UV_VERSION` / `ARG UV_SHA256`) together
+(`tests/test_invowk_tasks.py` fails when `fast-gates.Dockerfile` drifts from
+`ci.yml`). The checksum is the content of
 `uv-x86_64-unknown-linux-gnu.tar.gz.sha256` in that uv release. The action
 `astral-sh/setup-uv` is pinned by its full commit SHA, with the tag in a
 comment.
