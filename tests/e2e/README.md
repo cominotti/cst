@@ -218,8 +218,9 @@ also supports filtering and dry listing without starting containers:
 Tier 1 also supports balanced LPT sharding across independent systemd + NAS
 container pairs:
 
-- `--shard I/N` (`invowk cmd test e2e tier1 --shard 1/3`): run only shard `I` of
-  `N` (used by CI's 3-shard `e2e-tier1` matrix).
+- `--shard I/N` (`invowk cmd test e2e tier1 --shard 1/6`): run only shard `I` of
+  `N` (used by CI's 6-shard `e2e-tier1` matrix, running in parallel with
+  `fast-gates`).
 - `--jobs N` (`run.py --jobs N` / `-j N`; `invowk cmd test e2e tier1` defaults
   to `0` = auto up to 4 parallel containers when more than 4 tests are
   selected, half the CPUs this process may run on (its CPU affinity, as in a
@@ -249,6 +250,13 @@ prints the fix, `chcon -R -t container_file_t <checkout>`.
 `invowk cmd test all` runs the fast gates (`invowk cmd check`: validate, audit,
 `test lint`, `test pylint`, `test types`, `test workflows`, `test unit`), then
 both tiers.
+
+In pull requests, CI skips `e2e-tier2` only when **every** changed file matches
+`tier2_irrelevant_path()` in `.github/workflows/ci.yml` (docs, agent files,
+`bluetooth`, or unit/MBT/quint tests outside `tests/e2e`); pushes to `main` and
+the nightly always run full Tier 2, and `tests/test_ci_tier2_paths.py` verifies
+that nothing in Tier 2's transitive import closure or infrastructure can match
+the skip list.
 
 ## The Python that runs these files
 

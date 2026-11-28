@@ -33,6 +33,7 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
       e2e_images: ${{ steps.filter.outputs.e2e_images }}
       quint: ${{ steps.filter.outputs.quint }}
+      tier2: ${{ steps.filter.outputs.tier2 }}
     steps:
       - name: Checkout repository
         if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -59,6 +60,7 @@ jobs:
             echo "code=true" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
             echo "quint=true" >> "${GITHUB_OUTPUT}"
+            echo "tier2=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -73,6 +75,20 @@ jobs:
               vm/application/nas.py|vm/application/nas_torn.py|vm/adapters/restic.py|vm/adapters/backup.py|vm/domain/backup.py|vm/domain/__init__.py|vm/tests/quint/*|vm/tests/test_vm_nas_replay.py) return 0 ;;
               .github/workflows/ci.yml|cst.invowkmod/invowkfile.cue|.github/actions/setup-invowk/*) return 0 ;;
               cst_core/__init__.py|cst_core/domain/__init__.py|cst_core/domain/errors.py|cst_core/domain/values.py|tests/__init__.py|tests/xdg_cache.py) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Paths proven disjoint from E2E Tier 2's execution and transitive
+          # import closure (tests/test_ci_tier2_paths.py verifies every file in
+          # that closure against this function). Default is fail-closed: any
+          # unrecognized or new path runs Tier 2 (return 1).
+          tier2_irrelevant_path() {
+            case "$1" in
+              tests/e2e/*|*/tests/fixtures/*) return 1 ;;
+              *.md|LICENSE|.gitignore|.agents/*|.claude/*) return 0 ;;
+              bluetooth/*|bluetooth-setup.sh) return 0 ;;
+              */tests/*|tests/mbt/*|tests/quint/*|tests/mutation/*|tests/test_*.py) return 0 ;;
               *) return 1 ;;
             esac
           }
@@ -99,6 +115,7 @@ jobs:
             echo "code=${code}" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=${e2e_images}" >> "${GITHUB_OUTPUT}"
             echo "quint=${quint}" >> "${GITHUB_OUTPUT}"
+            echo "tier2=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -106,6 +123,7 @@ jobs:
             echo "code=true" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
             echo "quint=true" >> "${GITHUB_OUTPUT}"
+            echo "tier2=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -114,10 +132,12 @@ jobs:
             echo "code=false" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
             echo "quint=false" >> "${GITHUB_OUTPUT}"
+            echo "tier2=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
           code="false"
+          tier2="false"
           for path in "${changed[@]}"; do
             case "${path}" in
               tests/e2e/images/*|tests/e2e/scripts/*) e2e_images="true" ;;
@@ -130,11 +150,15 @@ jobs:
             if quint_path "${path}"; then
               quint="true"
             fi
+            if ! tier2_irrelevant_path "${path}"; then
+              tier2="true"
+            fi
           done
 
           echo "code=${code}" >> "${GITHUB_OUTPUT}"
           echo "e2e_images=${e2e_images}" >> "${GITHUB_OUTPUT}"
           echo "quint=${quint}" >> "${GITHUB_OUTPUT}"
+          echo "tier2=${tier2}" >> "${GITHUB_OUTPUT}"
 
   fast-gates:
     name: Fast Gates (Fedora 45)
@@ -203,15 +227,15 @@ jobs:
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile ci
 
   e2e-tier1:
-    name: E2E Tier 1 (Fedora 45 systemd + NAS, shard ${{ matrix.shard }}/3)
-    needs: [fast-gates, changes]
+    name: E2E Tier 1 (Fedora 45 systemd + NAS, shard ${{ matrix.shard }}/6)
+    needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     permissions:
       contents: read
       packages: read
@@ -240,7 +264,7 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          flags=(--keep_logs --shard "${SHARD}/3")
+          flags=(--keep_logs --shard "${SHARD}/6")
           if [[ "${REBUILD_IMAGES}" == "true" ]]; then
             flags+=(--rebuild)
           fi
@@ -258,8 +282,8 @@ jobs:
 
   e2e-tier2:
     name: E2E Tier 2 (Fedora 45 btrfs + cgroups)
-    needs: [fast-gates, changes]
-    if: needs.changes.outputs.code == 'true'
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tier2 == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -357,13 +381,14 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
           QUINT_CHANGED: ${{ needs.changes.outputs.quint }}
+          TIER2_NEEDED: ${{ needs.changes.outputs.tier2 }}
           FAST_RESULT: ${{ needs.fast-gates.result }}
           TIER1_RESULT: ${{ needs.e2e-tier1.result }}
           TIER2_RESULT: ${{ needs.e2e-tier2.result }}
           QUINT_RESULT: ${{ needs.quint.result }}
         run: |
           set -euo pipefail
-          echo "changes=${CHANGES_RESULT} (code=${CODE_CHANGED:-<unset>}) fast-gates=${FAST_RESULT} e2e-tier1=${TIER1_RESULT} e2e-tier2=${TIER2_RESULT} quint=${QUINT_RESULT} (quint=${QUINT_CHANGED:-<unset>})"
+          echo "changes=${CHANGES_RESULT} (code=${CODE_CHANGED:-<unset>}, tier2=${TIER2_NEEDED:-<unset>}) fast-gates=${FAST_RESULT} e2e-tier1=${TIER1_RESULT} e2e-tier2=${TIER2_RESULT} quint=${QUINT_RESULT} (quint=${QUINT_CHANGED:-<unset>})"
           # The E2E tiers are skipped when 'changes' did not run cleanly, so a
           # failed or cancelled classification must never pass as "nothing to test".
           if [[ "${CHANGES_RESULT}" != "success" ]]; then
@@ -374,21 +399,22 @@ jobs:
             echo "::error::fast-gates did not succeed (${FAST_RESULT})" >&2
             exit 1
           fi
-          for name_res in "e2e-tier1:${TIER1_RESULT}" "e2e-tier2:${TIER2_RESULT}"; do
-            job="${name_res%%:*}"
-            res="${name_res##*:}"
-            if [[ "${res}" == "success" ]]; then
-              continue
+          if [[ "${TIER1_RESULT}" != "success" ]]; then
+            if [[ "${TIER1_RESULT}" == "skipped" && "${CODE_CHANGED}" == "false" ]]; then
+              echo "e2e-tier1 skipped: no code changes"
+            else
+              echo "::error::e2e-tier1 ended with non-passing result (${TIER1_RESULT}; code=${CODE_CHANGED:-<unset>})" >&2
+              exit 1
             fi
-            # A skipped tier is only fine when the classification said there
-            # was no code to test (for example a docs-only pull request).
-            if [[ "${res}" == "skipped" && "${CODE_CHANGED}" == "false" ]]; then
-              echo "${job} skipped: no code changes"
-              continue
+          fi
+          if [[ "${TIER2_RESULT}" != "success" ]]; then
+            if [[ "${TIER2_RESULT}" == "skipped" && ( "${CODE_CHANGED}" == "false" || "${TIER2_NEEDED}" == "false" ) ]]; then
+              echo "e2e-tier2 skipped (code=${CODE_CHANGED:-<unset>}, tier2=${TIER2_NEEDED:-<unset>})"
+            else
+              echo "::error::e2e-tier2 ended with non-passing result (${TIER2_RESULT}; code=${CODE_CHANGED:-<unset>}; tier2=${TIER2_NEEDED:-<unset>})" >&2
+              exit 1
             fi
-            echo "::error::${job} ended with non-passing result (${res}; code=${CODE_CHANGED:-<unset>})" >&2
-            exit 1
-          done
+          fi
           # The quint job is skipped only when no path it checks changed.
           if [[ "${QUINT_RESULT}" != "success" ]]; then
             if [[ "${QUINT_RESULT}" == "skipped" && "${QUINT_CHANGED}" == "false" ]]; then

@@ -157,6 +157,7 @@ import warnings
 GATE_MODULES: Final = (
     "tests.test_architecture",
     "tests.test_bytecode",
+    "tests.test_ci_tier2_paths",
     "tests.test_distribution",
     "tests.test_docs",
     "tests.test_duplication",
