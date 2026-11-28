@@ -46,6 +46,7 @@ from tests import (
     test_duplication as dup,
     test_magic_values as magic,
     test_module_size as size,
+    test_subprocess_hygiene as subprocess_hygiene,
     test_typing_budget as typing_budget,
 )
 from tests.budgets import lowered
@@ -108,6 +109,13 @@ TABLES: Final[tuple[Table, ...]] = (
     Table("tests/ruff_budget.py", "RUFF_BUDGETS", "budget", ruff_budget.measure),
     Table("tests/test_magic_values.py", "MAGIC_CEILINGS", "budget", magic.measure),
     Table("tests/test_module_size.py", "OVER_CAP", "budget", size.module_sizes, default=size.MODULE_LINE_CAP),
+    Table(
+        "tests/test_subprocess_hygiene.py",
+        "SUBPROCESS_BUDGETS",
+        "budget",
+        subprocess_hygiene.measure_subprocess_calls,
+        default=subprocess_hygiene.SUBPROCESS_CALL_CAP,
+    ),
 )
 
 
