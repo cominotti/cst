@@ -133,6 +133,9 @@ class UnitContractTest(unittest.TestCase):
             self.assertIn(name, names)
         self.assertTrue(any(unit_paths(u.text) for u in units))
         self.assertIn("ExecStartPre=/usr/sbin/btrfs scrub limit -a -l 500M /var\n", generated_dropins()[0].text)
+        below_dropin = next(u.text for u in units if u.label == "below.service.d/10-cst.conf")
+        self.assertIn("--interval-s 15", below_dropin)
+        self.assertNotIn("--interval 15", below_dropin)
 
     def test_paths_are_found_and_checked(self) -> None:
         text = (

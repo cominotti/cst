@@ -656,7 +656,7 @@ every 15 minutes.
 
 ### 4.8 below
 
-**below** is a separate tool (a Fedora package) that records, every **15 s** (`--interval 15`), how much
+**below** is a separate tool (a Fedora package) that records, every **15 s** (`--interval-s 15`), how much
 each process and cgroup read and wrote (reduced from 5 s to cut continuous metadata write amplification by 3x while `btrfs-stall-monitord` keeps sampling every 5 s / 1 s in RAM, and `btrfs-stall-report` integrates `below` samples using actual timestamp deltas). The stall monitor knows *that* the disk
 was busy; below knows *who* did it.
 

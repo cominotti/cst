@@ -169,6 +169,7 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_290`: `desktop:psd` unit ordering and weights (`cst-desktop-psd@tester.service` and `cst-desktop-psd-resync@tester.service`) installed and loaded by PID 1: `systemctl show` proves `RequiresMountsFor=/var/home`, `After=local-fs.target`, `Before=systemd-user-sessions.service display-manager.service` (with `shutdown.target` via `DefaultDependencies=yes`, and no `reboot.target`/`halt.target`), and `CPUWeight=20` / `IOWeight=20` on resync.
 - `test_292`: `btrfs-stall-monitor.service` OOM protection (`OOMScoreAdjust=-500`, `ManagedOOMPreference=avoid`, `MemoryLow=32M`, `MemoryMax=192M`) and `docker-gc-recorder.service` (`Type=notify`, `NotifyAccess=main`, `WatchdogSec=3min`, `LimitCORE=0`, `MemoryMax=128M`, `TasksMax=64`) gating activation on `READY=1` and advancing `WatchdogTimestampMonotonic` via `WATCHDOG=1` pings under a stub `docker` CLI.
 - `test_293`: `91-cst-iocost.rules` and `65-cst-gpu-pm.rules` pass `udevadm verify` with `TAG+="systemd"` / `ENV{SYSTEMD_WANTS}+=...` (no `RUN+=`), and `cst-cpu-power.service`, `cst-cpu-power-gpu.service`, `cst-btrfs-iocost.service`, `cst-btrfs-iocost@nonexistent0.service`, and `btrfs-degraded-boot-record.service` run cleanly inside the systemd container under their sandboxes.
+- `test_294`: `cst doctor` detects a real systemd unit stuck in `activating (auto-restart)` as a `WARN` under `services` without suggesting `reset-failed`, and clears once stopped and removed.
 
 Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 

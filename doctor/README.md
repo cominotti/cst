@@ -42,7 +42,7 @@ cst doctor help
 | `rpm-ostree` | Base packages replaced by another version (`rpm-ostree override replace`) | `WARN`: they stay at that version through every upgrade |
 | `rpm-ostree` | Base packages removed (`rpm-ostree override remove`) | `info`: usually on purpose |
 | `rpm-ostree` | A deployment waiting for a reboot: a staged one (and how old it is), or one left first by `rpm-ostree rollback` | `info` |
-| `services` | Failed systemd units of the system and of your user | `WARN`; transient units of `systemd-run` (`run-*.scope`, `run-*.service`) only `info` (low priority) |
+| `services` | Failed and crash-looping (`auto-restart`, `auto-restart-queued`) systemd units of the system and of your user | `WARN` (failed units get a `reset-failed` `fix:`; crash-looping units get a `journalctl` hint without `reset-failed`); transient units of `systemd-run` (`run-*.scope`, `run-*.service`) only `info` (low priority) |
 | `alerts` | CST desktop alerts kept for the next login in `/var/lib/cst-alerts/pending` (last 7 days) that you have not seen yet | `ERROR` for a critical alert, `WARN` for a normal one, fix: `cst-pending-alerts --list` (or, when `/usr/local/bin/cst-pending-alerts` is missing and no login would show it, `cst btrfs install`); `info` once you have seen it |
 | `alerts` | Installed units whose programs alert through `/usr/local/sbin/btrfs-notify` (`btrfs-bulk-boot`, `btrfs-health-check`, `btrfs-snapshot`, `btrfs-snapshot-nas`, `btrfs-stall-alert`, `docker-volumes-nocow`), while it is missing: their alerts reach no desktop, only the journal (`btrfs-bulk-boot`'s, `btrfs-snapshot-nas`'s and `docker-volumes-nocow`'s are also kept in the pending folder, so the row above shows them; so are `btrfs-snapshot`'s, except those of its conversion step, which is bash) | `WARN`, fix: `cst btrfs install`; nothing when none of them is installed |
 | `alerts` | `/var/lib/f44-alerts` (a link or folder left by the versions named f44-tools) | `WARN`, fix: `cst btrfs install` |
@@ -196,7 +196,7 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
 
 - On the host it runs the queries directly. Inside a toolbox it runs them on
   the host through `flatpak-spawn --host` (`rpm-ostree status --json`,
-  `rpm-ostree db list`, `systemctl [--user] list-units --state=failed`) and
+  `rpm-ostree db list`, `systemctl [--user] list-units --state=failed,auto-restart,auto-restart-queued`) and
   reads host files under `/run/host` (`/run/ostree-booted`,
   `/var/lib/cst-alerts`, `/var/lib/f44-alerts`).
 - The fixes it prints do not work inside the toolbox (there is no
