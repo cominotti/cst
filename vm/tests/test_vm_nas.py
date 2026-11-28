@@ -22,6 +22,7 @@ import contextlib
 import dataclasses
 import datetime
 import fcntl
+import functools
 import io
 import json
 import os
@@ -38,7 +39,7 @@ import tempfile
 import termios
 import threading
 import time
-from typing import Any, override
+from typing import Any, TypedDict, TypeIs, override
 import unittest
 from unittest import mock
 
@@ -47,13 +48,16 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
+from cst_core.adapters import SystemctlAdapter
+from cst_core.adapters.runtime import install_payload
+from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import ExitStatus, Refused, Usage
-from cst_core.domain.shapes import items_of
+from cst_core.domain.shapes import items_of, json_object, parse_json
 from btrfs.tests.snapshot_fakes import RuntimeTest
-from cst_core.ports import ClockPort
-from vm import domain as vm_domain
-from vm.adapters import backup as vm_adapters_backup, restic as vm_adapters_restic
+from cst_core.ports import ClockPort, CommandFailed, CommandResult, SystemctlHost
+from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
+from vm.adapters import backup as vm_adapters_backup, restic as vm_adapters_restic, timer as vm_adapters_timer
 from vm.application import nas as vm_app_nas, nas_torn as vm_app_nas_torn
 from vm.domain import backup as vm_domain_backup
 from vm.ports import ProgressPort
@@ -319,6 +323,102 @@ def read(path: str) -> str:
         return f.read()
 
 
+type _ToolResult = subprocess.CompletedProcess[str]
+
+
+class _DiskSpec(TypedDict, total=False):
+    target: str
+    device: str
+    type: str
+
+
+class _VmStubState(TypedDict, total=False):
+    state: str
+    uuid: str
+    nvram: str
+    fail: list[str]
+    disks: list[_DiskSpec]
+    live: dict[str, str]
+    persistent: dict[str, str]
+    managed: list[str]
+    agent: str | None
+    chain: bool
+    tpm: bool
+
+
+class _ResticStubCfg(TypedDict, total=False):
+    snapshots: list[str]
+    snapshots_json: str
+    snapshots_by_host: dict[str, str]
+    snapshots_rc: int
+    cat_rc: int
+    backup_rc: int
+    backup_lines: list[str]
+    id: object
+    write_index: list[str]
+    break_torn: str
+    forgot: bool
+    forget_rc: int
+    forget_rc_by_id: dict[str, int]
+    forget_err: str
+    freeze_torn_on_forget: str
+    hold_torn_lock: str
+
+
+def _is_vm_stub_state(value: object) -> TypeIs[_VmStubState]:
+    return json_object(value)
+
+
+def _is_restic_stub_cfg(value: object) -> TypeIs[_ResticStubCfg]:
+    return json_object(value)
+
+
+def _read_vm_stub_state(path: str) -> _VmStubState:
+    data = parse_json(read(path))
+    assert _is_vm_stub_state(data)
+    return data
+
+
+def _read_restic_stub_cfg(path: str) -> _ResticStubCfg:
+    data = parse_json(read(path))
+    assert _is_restic_stub_cfg(data)
+    return data
+
+
+@functools.cache
+def _cached_vm_zipapp() -> bytes:
+    return build_python_zipapp(REPO, "vm/cst-vm")
+
+
+def _cached_install_payload(src_rel: str, main_file: str) -> bytes:
+    if src_rel == "vm/cst-vm" and main_file == TOOL:
+        return _cached_vm_zipapp()
+    return install_payload(src_rel, main_file)
+
+
+class _InProcessNasRunner:
+    """CommandRunnerPort backed by Nas's JSON/file state for in-process vm.cli.main runs."""
+
+    def __init__(self, nas: Nas) -> None:
+        self._nas = nas
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        check: bool = False,
+        env: Mapping[str, str] | None = None,
+        base_env: Mapping[str, str] | None = None,
+        **_options: object,
+    ) -> CommandResult:
+        full_env = {**(self._nas.env if base_env is None else base_env), **(env or {})}
+        rc, stdout, stderr = self._nas._dispatch_stub(argv, full_env)
+        res = CommandResult(rc, stdout, stderr, argv=tuple(argv))
+        if check and res.returncode != 0:
+            raise CommandFailed(list(argv), res.returncode, res.stdout, res.stderr)
+        return res
+
+
 class Nas(unittest.TestCase):
     @override
     def setUp(self) -> None:
@@ -415,7 +515,10 @@ class Nas(unittest.TestCase):
         with open(os.path.join(self.fix, "restic.json"), "w") as f:
             json.dump(cfg, f)
 
-    def run_tool(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_tool(self, *args: str, subprocess: bool = False) -> _ToolResult:
+        return self._run_tool_subprocess(*args) if subprocess else self._run_in_process(*args)
+
+    def _run_tool_subprocess(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["python3", "-I", TOOL, *args],
             check=False,
@@ -425,6 +528,327 @@ class Nas(unittest.TestCase):
             timeout=60,
             stdin=subprocess.DEVNULL,
         )
+
+    def _run_in_process(self, *args: str) -> _ToolResult:
+        out, err = io.StringIO(), io.StringIO()
+        runner = _InProcessNasRunner(self)
+        virsh_adapter = SubprocessVirshAdapter(vm_domain.URI, runner, on_host=False)
+
+        def fake_restic_backup(
+            _restic: vm_adapters_restic.Restic,
+            env: Mapping[str, str],
+            backup_args: Sequence[str],
+            timeout: int,
+            progress: ProgressPort,
+            *,
+            answered: Callable[[], None] | None = None,
+        ) -> tuple[int, vm_domain_backup.ResticSummary]:
+            del timeout
+            res = runner.run(["restic", *backup_args], env=vm_adapters_restic.restic_env(env))
+            if res.stderr:
+                sys.stderr.write(res.stderr)
+            summary: vm_domain_backup.ResticSummary = {}
+            shown = 0.0
+            for line in res.stdout.splitlines(keepends=True):
+                summary, shown = vm_adapters_restic._backup_json_line(line, summary, shown, progress)
+            if answered is not None and "snapshot_id" in summary:
+                answered()
+            return res.returncode, summary
+
+        with (
+            mock.patch.dict(os.environ, self.env, clear=True),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+            mock.patch.object(vm_adapters, "restore_default_signals"),
+            mock.patch.object(vm_wiring, "safe_terminal"),
+            mock.patch.object(vm_wiring, "StopSignals", FakeNasSignals),
+            mock.patch.object(vm_adapters.COMMANDS_OF_VM, "runner", runner),
+            mock.patch.object(vm_adapters.COMMANDS_OF_VM, "virsh_adapter", virsh_adapter),
+            mock.patch.object(vm_adapters, "RUNNER", runner),
+            mock.patch.object(vm_adapters_backup, "RUNNER", runner),
+            mock.patch.object(
+                vm_wiring,
+                "systemd",
+                lambda: SystemctlAdapter(runner, timeout=120, locale_c=True, on_host=SystemctlHost.LOCAL),
+            ),
+            mock.patch.object(vm_adapters_restic.Restic, "backup", fake_restic_backup),
+            mock.patch.object(vm_adapters_timer, "install_payload", _cached_install_payload),
+        ):
+            rc = vm_cli.main(list(args), doc="", entry_file=TOOL, settings=vm_wiring.vm_settings(self.env))
+        return subprocess.CompletedProcess(["python3", "-I", TOOL, *args], rc, out.getvalue(), err.getvalue())
+
+    def _dispatch_stub(self, argv: Sequence[str], full_env: Mapping[str, str]) -> tuple[int, str, str]:
+        prog = os.path.basename(argv[0])
+        args = list(argv[1:])
+        if prog == "virsh":
+            return self._stub_virsh(args)
+        if prog == "restic":
+            return self._stub_restic(args, full_env)
+        if prog == "rpm":
+            return self._stub_rpm(args)
+        if prog == "rpm-ostree":
+            return self._stub_rpm_ostree()
+        if prog == "notify":
+            return self._stub_notify(args)
+        if prog == "systemctl":
+            return self._stub_systemctl(args)
+        raise AssertionError(f"unexpected command in in-process Nas.run_tool: {list(argv)!r}")
+
+    def _virsh_xml(self, vm: _VmStubState, sources: Mapping[str, str], *, secret: bool) -> str:
+        disks = "".join(
+            f"<disk type='{d.get('type', 'file')}' device='{d['device']}'><source file='{sources[d['target']]}'/>"
+            + (
+                "<backingStore type='file'><source file='x'/></backingStore>"
+                if bool(vm.get("chain"))
+                else "<backingStore/>"
+            )
+            + f"<target dev='{d['target']}'/></disk>"
+            for d in vm["disks"]
+        )
+        agent = vm.get("agent")
+        chan = (
+            f"<channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0' state='{agent}'/></channel>"
+            if bool(agent)
+            else ""
+        )
+        pw = "<graphics type='spice' passwd='s3cret'/>" if secret else "<graphics type='spice'/>"
+        tpm = "<tpm><backend type='emulator'/></tpm>" if vm.get("tpm", True) else ""
+        return (
+            f"<domain type='kvm'><name>win</name><uuid>{vm['uuid']}</uuid><os><nvram>{vm['nvram']}</nvram></os>"
+            f"<devices>{disks}{chan}{pw}{tpm}</devices></domain>\n"
+        )
+
+    def _virsh_domblklist(self, vm: _VmStubState, args: list[str], fail: Sequence[str]) -> tuple[int, str, str]:
+        if "blklist" in fail or (
+            "--inactive" in args and "blklist-inactive" in fail and vm["live"]["sda"].endswith(".qcow2")
+        ):
+            return 1, "", "error: failed\n"
+        src = vm["persistent"] if "--inactive" in args else vm["live"]
+        lines = [" Type   Device   Target   Source", "-" * 40]
+        lines.extend(f" file   {d['device']}   {d['target']}   {src[d['target']]}" for d in vm["disks"])
+        return 0, "\n".join(lines) + "\n", ""
+
+    def _virsh_snapshot(
+        self, vm: _VmStubState, args: list[str], fail: Sequence[str], save: Callable[[], None]
+    ) -> tuple[int, str, str]:
+        if "--quiesce" in args and "quiesce" in fail:
+            return 1, "", "error: Guest agent is not responding: QEMU guest agent is not connected\n"
+        if "snapshot" in fail:
+            return 1, "", "error: internal error: snapshot failed\n"
+        for i, a in enumerate(args):
+            if a == "--diskspec":
+                spec = dict(kv.split("=", 1) for kv in args[i + 1].split(",")[1:])
+                t = args[i + 1].split(",")[0]
+                if spec.get("snapshot") == "external":
+                    with open(spec["file"], "w") as f:
+                        f.write("overlay")
+                    vm["live"][t] = spec["file"]
+                    vm["persistent"][t] = spec["file"]
+        save()
+        if "snapshot-error-in-place" in fail:
+            return 1, "", "error: internal error: unexpected answer\n"
+        return 0, "", ""
+
+    def _virsh_blockcommit(
+        self, vm: _VmStubState, args: list[str], fail: Sequence[str], save: Callable[[], None]
+    ) -> tuple[int, str, str]:
+        t = args[2]
+        if "commit" in fail:
+            save()
+            return 1, "", "error: block commit failed\n"
+        base = vm["live"][t].split(".cst-overlay-")[0]
+        vm["live"][t] = base
+        if "persistent-stays" not in fail:
+            vm["persistent"][t] = base
+        save()
+        return 0, "", ""
+
+    def _stub_virsh(self, args: list[str]) -> tuple[int, str, str]:
+        with open(self.log, "a") as f:
+            f.write("virsh " + " ".join(args) + "\n")
+        vm_path = os.path.join(self.fix, "vm.json")
+        vm = _read_vm_stub_state(vm_path)
+
+        def save() -> None:
+            with open(vm_path, "w") as f:
+                json.dump(vm, f)
+
+        if args[:2] == ["-c", "qemu:///system"]:
+            args = args[2:]
+        cmd, fail = args[0], vm.get("fail", [])
+        assert not any(
+            w in fail
+            for w in (
+                "term-during-check",
+                "snapshot-hang-none",
+                "snapshot-hang-nothing",
+                "term-after-snapshot",
+                "snapshot-hang",
+                "commit-sigint",
+            )
+        ), f"signal/hang virsh failure {fail!r} requires subprocess=True"
+        match cmd:
+            case "domstate":
+                res = (0, f"{vm['state']}\n\n", "")
+            case "list":
+                res = (0, "\n".join(vm.get("managed", [])) + "\n", "")
+            case "dumpxml":
+                if ("dumpxml-inactive" if "--inactive" in args else "dumpxml-live") in fail:
+                    res = (1, "", "error: failed to get domain 'win'\n")
+                else:
+                    src = vm["persistent"] if "--inactive" in args else vm["live"]
+                    res = (0, self._virsh_xml(vm, src, secret="--security-info" in args) + "\n", "")
+            case "domblklist":
+                res = self._virsh_domblklist(vm, args, fail)
+            case "snapshot-create-as":
+                res = self._virsh_snapshot(vm, args, fail, save)
+            case "blockcommit":
+                res = self._virsh_blockcommit(vm, args, fail, save)
+            case "domfsthaw":
+                res = (0, "", "")
+            case _:
+                res = (1, "", f"error: unsupported in the stub: {cmd}\n")
+        return res
+
+    def _restic_backup_side_effects(
+        self, cfg: _ResticStubCfg, vm: _VmStubState, vm_path: str, staged: list[str], stage: list[str]
+    ) -> None:
+        if staged:
+            with open(os.path.join(self.fix, "staged-domain.xml"), "w") as f:
+                f.write(read(os.path.join(stage[0], "domain.xml")))
+            with open(os.path.join(self.fix, "staged-manifest.json"), "w") as f:
+                f.write(read(os.path.join(stage[0], "manifest.json")))
+        fail = vm.get("fail", [])
+        for word, state in (
+            ("stop-during-backup", "shut off"),
+            ("start-during-backup", "running"),
+            ("pause-during-backup", "paused"),
+        ):
+            if word in fail:
+                vm["state"] = state
+                with open(vm_path, "w") as f:
+                    json.dump(vm, f)
+        if "touch-nvram" in fail:
+            with open(vm["nvram"], "a") as f:
+                f.write("more")
+        if "remove-nvram" in fail:
+            os.unlink(vm["nvram"])
+        if "write_index" in cfg:
+            with open(cfg["write_index"][0], "w") as f:
+                f.write(cfg["write_index"][1])
+        if "break_torn" in cfg:
+            if os.path.isfile(cfg["break_torn"]):
+                os.unlink(cfg["break_torn"])
+            os.makedirs(cfg["break_torn"])
+
+    def _restic_backup(
+        self, cfg: _ResticStubCfg, vm: _VmStubState, vm_path: str, staged: list[str], stage: list[str]
+    ) -> tuple[int, str, str]:
+        self._restic_backup_side_effects(cfg, vm, vm_path, staged, stage)
+        out_lines = list(cfg.get("backup_lines", []))
+        out_lines.append(
+            json.dumps({"message_type": "status", "percent_done": 0.5, "total_bytes": 10, "bytes_done": 5})
+        )
+        rc = int(cfg.get("backup_rc", 0))
+        if rc in (0, 3):
+            out_lines.append(
+                json.dumps(
+                    {
+                        "message_type": "summary",
+                        "snapshot_id": cfg.get("id", SNAP_ID),
+                        "total_bytes_processed": 2048,
+                        "data_added": 1024,
+                    }
+                )
+            )
+        return rc, "\n".join(out_lines) + "\n", ""
+
+    def _restic_forget(self, args: list[str], cfg: _ResticStubCfg) -> tuple[int, str, str]:
+        if "--keep-weekly" not in args and "freeze_torn_on_forget" in cfg:
+            os.chmod(cfg["freeze_torn_on_forget"], 0o555)
+        stdout = ("remove 1 snapshots:" if bool(cfg.get("forgot")) else "keep 2 snapshots:") + "\n"
+        stderr = f"{cfg['forget_err']}\n" if "forget_err" in cfg else ""
+        rc = int(cfg.get("forget_rc_by_id", {}).get(args[-1], cfg.get("forget_rc", 0)))
+        return rc, stdout, stderr
+
+    def _restic_snapshots(self, args: list[str], cfg: _ResticStubCfg) -> tuple[int, str, str]:
+        host = args[args.index("--host") + 1] if "--host" in args else None
+        if "snapshots_by_host" in cfg:
+            stdout = (cfg["snapshots_by_host"].get(host, "[]") if host is not None else "[]") + "\n"
+        elif "snapshots_json" in cfg:
+            stdout = cfg["snapshots_json"] + "\n"
+        else:
+            stdout = json.dumps([{"id": i} for i in cfg.get("snapshots", [])]) + "\n"
+        return int(cfg.get("snapshots_rc", 0)), stdout, ""
+
+    def _stub_restic(self, args: list[str], full_env: Mapping[str, str]) -> tuple[int, str, str]:
+        cfg = _read_restic_stub_cfg(os.path.join(self.fix, "restic.json"))
+        vm_path = os.path.join(self.fix, "vm.json")
+        vm = _read_vm_stub_state(vm_path)
+        fail = vm.get("fail", [])
+        assert not any(
+            w in fail for w in ("slow-backup", "term-during-backup", "term-after-summary", "term-during-forget")
+        ), f"signal/hang restic failure {fail!r} requires subprocess=True"
+        assert "hold_torn_lock" not in cfg, "hold_torn_lock requires subprocess=True"
+        restic_vars = {k: v for k, v in full_env.items() if k.startswith("RESTIC_")}
+        stage = [a for a in args if a.endswith("/vm-nas/win")]
+        staged = sorted(os.listdir(stage[0])) if stage and os.path.isdir(stage[0]) else []
+        with open(os.path.join(self.fix, "restic.log"), "a") as f:
+            f.write(json.dumps({"args": args, "env": restic_vars, "live": vm["live"], "staged": staged}) + "\n")
+        with open(self.log, "a") as f:
+            f.write("restic " + " ".join(args) + "\n")
+        match args[0]:
+            case "cat":
+                return int(cfg.get("cat_rc", 0)), "", ""
+            case "backup":
+                return self._restic_backup(cfg, vm, vm_path, staged, stage)
+            case "forget":
+                return self._restic_forget(args, cfg)
+            case "snapshots":
+                return self._restic_snapshots(args, cfg)
+            case _:
+                return 1, "", ""
+
+    def _stub_rpm(self, args: list[str]) -> tuple[int, str, str]:
+        with open(self.log, "a") as f:
+            f.write("rpm " + " ".join(args) + "\n")
+        return 1, "", ""
+
+    def _stub_rpm_ostree(self) -> tuple[int, str, str]:
+        return (
+            0,
+            '{"deployments": [{"booted": true, "checksum": "bbbb", "version": "45.1", "timestamp": 1794000000}]}\n',
+            "",
+        )
+
+    def _stub_notify(self, args: list[str]) -> tuple[int, str, str]:
+        assert not os.path.exists(os.path.join(self.fix, "notify-term")), "notify-term requires subprocess=True"
+        with open(self.log, "a") as f:
+            f.write("notify " + " ".join(args) + "\n")
+        return 0, "", ""
+
+    def _stub_systemctl(self, args: list[str]) -> tuple[int, str, str]:
+        with open(self.log, "a") as f:
+            f.write("systemctl " + " ".join(args) + "\n")
+        sub = args[0] if args else ""
+        if sub == "clean" and "clean) exit 1 ;;" in read(os.path.join(self.bin, "systemctl")):
+            return 1, "", ""
+        if sub == "enable":
+            wants = os.path.join(self.units, "timers.target.wants")
+            os.makedirs(wants, exist_ok=True)
+            with open(os.path.join(wants, args[2]), "w"):
+                pass
+        elif sub == "disable":
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(os.path.join(self.units, "timers.target.wants", args[2]))
+        elif sub == "show":
+            v = "success" if "-p" in args and "Result" in args else "Sat 2026-11-21 04:41:12 UTC"
+            out = f"{v}\n" if "--value" in args else f"{args[2]}={v}\n"
+            return 0, out, ""
+        elif sub == "clean" and os.path.exists(os.path.join(self.units, "cst-vm-backup@.timer")):
+            with open(self.log, "a") as f:
+                f.write("  (timer file present)\n")
+        return 0, "", ""
 
     def calls(self) -> list[str]:
         try:
@@ -586,7 +1010,7 @@ class LiveBackupTest(Nas):
 
     def test_sigterm_during_restic_still_merges(self) -> None:
         self.vm(fail=["term-during-backup"], agent="connected")
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("stopped by signal SIGTERM", r.stderr)
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
@@ -597,7 +1021,7 @@ class LiveBackupTest(Nas):
     def test_sigterm_during_the_snapshot_call_still_merges(self) -> None:
         # libvirt finished the snapshot, but the stop arrived before virsh returned.
         self.vm(fail=["term-after-snapshot"], agent=None)
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("stopped by signal SIGTERM", r.stderr)
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
@@ -1072,7 +1496,7 @@ class RobustnessTest(Nas):
         # the alert or the refusal with the recovery lines short.
         self.vm(agent="connected", fail=["commit"])
         open(os.path.join(self.fix, "notify-term"), "w").close()
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("DISK NOT MERGED BACK:\n  sda: virsh blockcommit: error: block commit failed", r.stderr)
         self.assertIn("domblklist win --details --inactive", r.stderr)
@@ -1111,7 +1535,7 @@ class RobustnessTest(Nas):
     def test_snapshot_timeout_then_in_place(self) -> None:
         self.short_snapshot_limits()
         self.vm(agent="connected", fail=["snapshot-hang"])
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.virsh_calls("snapshot-create-as")), 1, "no second attempt after a timeout")
         self.assertTrue(self.virsh_calls("domfsthaw"))
@@ -1121,7 +1545,7 @@ class RobustnessTest(Nas):
     def test_snapshot_timeout_unclear_keeps_the_files_and_alerts(self) -> None:
         self.short_snapshot_limits()
         self.vm(agent="connected", fail=["snapshot-hang-nothing"])
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("may still switch to it", r.stderr)
         self.assertEqual(len(self.virsh_calls("snapshot-create-as")), 1)
@@ -1375,7 +1799,7 @@ class NasPreflightAndSourcesTest(Nas):
     def test_an_unclear_snapshot_without_any_overlay_file_alerts_and_names_no_file(self) -> None:
         self.env.update(CST_VM_SNAPSHOT_TIMEOUT="2", CST_VM_SNAPSHOT_SETTLE="3")
         self.vm(agent=None, fail=["snapshot-hang-none"])
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn(
             "cst vm: DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within 2 s and, 3 s later, "
@@ -1392,7 +1816,7 @@ class NasPreflightAndSourcesTest(Nas):
     def test_a_snapshot_timeout_without_quiesce_thaws_nothing(self) -> None:
         self.env.update(CST_VM_SNAPSHOT_TIMEOUT="2", CST_VM_SNAPSHOT_SETTLE="3")
         self.vm(agent=None, fail=["snapshot-hang-nothing"])
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("may still switch to it", r.stderr)
         self.assertIn(f"(kept: {self.overlay})", r.stderr)
@@ -1708,7 +2132,7 @@ class TornRecordTest(Nas):
     def test_a_stop_while_forget_waits_leaves_the_snapshot_recorded(self) -> None:
         self.vm(fail=["term-during-forget"], agent="connected")
         self.restic_cfg(backup_rc=3)
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("stopped by signal SIGTERM", r.stderr)
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1, "merged back as after any stop")
@@ -1720,7 +2144,7 @@ class TornRecordTest(Nas):
         # comes before the forget.
         self.vm(agent="connected")
         self.restic_cfg(backup_rc=3, hold_torn_lock=os.path.join(self.tmp, "run", "torn-record.lock"))
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("stopped by signal SIGTERM", r.stderr)
         self.assertEqual(self.vm_state()["live"]["sda"], self.disk, "merged back as after any stop")
@@ -1730,7 +2154,7 @@ class TornRecordTest(Nas):
     def test_a_stop_after_a_record_that_failed_names_the_snapshot_left(self) -> None:
         self.vm(fail=["term-during-forget"], agent="connected")
         self.restic_cfg(backup_rc=3, break_torn=self.torn)
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn(
             f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup and could NOT be recorded ("
@@ -1747,7 +2171,7 @@ class TornRecordTest(Nas):
         # restic printed its summary (the snapshot is saved) and is ended by the stop before it exits:
         # the snapshot counts as torn, is recorded for the next run to forget, and nothing is forgotten now.
         self.vm(fail=["term-after-summary"], agent="connected")
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn(
             f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup: recorded in {self.torn}, "
@@ -1764,7 +2188,7 @@ class TornRecordTest(Nas):
         # A shut-off VM started during restic's read: the check after it finds the snapshot torn, and a
         # stop that came while the check waited for virsh is raised only once the snapshot is recorded.
         self.vm(state="shut off", fail=["start-during-backup", "term-during-check"])
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertTrue(os.path.exists(os.path.join(self.fix, "term-sent")), "the stub sent its stop")
         self.assertIn(
@@ -1779,7 +2203,7 @@ class TornRecordTest(Nas):
     def test_a_stop_that_ends_restic_after_its_snapshot_names_it_when_the_record_fails(self) -> None:
         self.vm(fail=["term-after-summary"], agent="connected")
         self.restic_cfg(break_torn=self.torn)
-        r = self.run_tool("backup", "win", "--nas")
+        r = self.run_tool("backup", "win", "--nas", subprocess=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn(
             f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup and could NOT be recorded (",
